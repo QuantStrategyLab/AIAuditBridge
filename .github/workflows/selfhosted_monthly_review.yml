@@ -1,0 +1,67 @@
+name: Self-hosted Codex Monthly Review
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_repo:
+        description: "Repository that owns the monthly review issue"
+        required: true
+        default: "QuantStrategyLab/CryptoSnapshotPipelines"
+      issue_number:
+        description: "Monthly review issue number in source_repo"
+        required: true
+      source_ref:
+        description: "Source repository branch to audit"
+        required: false
+        default: "main"
+      mode:
+        description: "Run mode"
+        required: false
+        type: choice
+        default: "review_and_fix"
+        options:
+          - review_only
+          - review_and_fix
+      auto_merge:
+        description: "Enable GitHub auto-merge for generated PRs"
+        required: false
+        type: boolean
+        default: false
+  repository_dispatch:
+    types:
+      - monthly-review-created
+
+permissions:
+  contents: read
+
+concurrency:
+  group: selfhosted-codex-monthly-${{ github.event.client_payload.source_repo || inputs.source_repo }}-${{ github.event.client_payload.issue_number || inputs.issue_number }}
+  cancel-in-progress: false
+
+jobs:
+  codex-monthly-review:
+    runs-on:
+      - self-hosted
+      - codex-vps
+    timeout-minutes: 60
+    env:
+      SOURCE_REPO: ${{ github.event.client_payload.source_repo || inputs.source_repo || 'QuantStrategyLab/CryptoSnapshotPipelines' }}
+      ISSUE_NUMBER: ${{ github.event.client_payload.issue_number || inputs.issue_number }}
+      SOURCE_REF: ${{ github.event.client_payload.source_ref || inputs.source_ref || 'main' }}
+      CODEX_AUDIT_MODE: ${{ github.event.client_payload.mode || inputs.mode || 'review_and_fix' }}
+      CODEX_AUDIT_AUTO_MERGE: ${{ github.event.client_payload.auto_merge || inputs.auto_merge || 'false' }}
+      CODEX_AUDIT_GH_TOKEN: ${{ secrets.CODEX_AUDIT_GH_TOKEN }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout Bridge
+        uses: actions/checkout@v6
+
+      - name: Verify Codex CLI
+        run: |
+          set -euo pipefail
+          command -v codex
+          codex --version
+
+      - name: Run Monthly Codex Audit
+        run: python scripts/run_monthly_codex_audit.py
+
