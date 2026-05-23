@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import base64
 import datetime as dt
 import json
 import os
@@ -122,29 +123,26 @@ def run_checked(
     return result.stdout
 
 
-def git_with_token(repo_dir: Path, token: str, args: list[str]) -> str:
+def git_auth_env(token: str) -> dict[str, str]:
+    encoded = base64.b64encode(f"x-access-token:{token}".encode("utf-8")).decode("ascii")
     env = dict(os.environ)
     env.update(
         {
             "GIT_CONFIG_COUNT": "1",
             "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
-            "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: bearer {token}",
+            "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {encoded}",
         }
     )
-    return run_checked(["git", *args], cwd=repo_dir, env=env)
+    return env
+
+
+def git_with_token(repo_dir: Path, token: str, args: list[str]) -> str:
+    return run_checked(["git", *args], cwd=repo_dir, env=git_auth_env(token))
 
 
 def clone_source_repo(token: str, source_repo: str, source_ref: str, work_root: Path) -> Path:
     repo_dir = work_root / "source"
     clone_url = f"https://github.com/{source_repo}.git"
-    env = dict(os.environ)
-    env.update(
-        {
-            "GIT_CONFIG_COUNT": "1",
-            "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
-            "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: bearer {token}",
-        }
-    )
     run_checked(
         [
             "git",
@@ -156,7 +154,7 @@ def clone_source_repo(token: str, source_repo: str, source_ref: str, work_root: 
             clone_url,
             str(repo_dir),
         ],
-        env=env,
+        env=git_auth_env(token),
     )
     return repo_dir
 
