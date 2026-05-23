@@ -1,6 +1,6 @@
-# SelfHostedCodexAuditBridge
+# CryptoCodexAuditBridge
 
-SelfHostedCodexAuditBridge runs monthly repository audits on a VPS-hosted
+CryptoCodexAuditBridge runs monthly repository audits on a VPS-hosted
 GitHub Actions runner that already has the Codex CLI installed and logged in.
 
 The intended flow is:
@@ -45,7 +45,7 @@ Source repository variables:
 
 - `SELFHOSTED_CODEX_REVIEW_ENABLED`: defaults to `true`.
 - `SELFHOSTED_CODEX_REVIEW_REPOSITORY`: defaults to
-  `QuantStrategyLab/SelfHostedCodexAuditBridge`.
+  `QuantStrategyLab/CryptoCodexAuditBridge`.
 - `SELFHOSTED_CODEX_REVIEW_MODE`: defaults to `review_and_fix`.
 - `LEGACY_AI_REVIEW_ENABLED`: defaults to `false`.
 
@@ -64,7 +64,7 @@ Source repository variables:
 
 ```bash
 gh workflow run selfhosted_monthly_review.yml \
-  --repo QuantStrategyLab/SelfHostedCodexAuditBridge \
+  --repo QuantStrategyLab/CryptoCodexAuditBridge \
   -f source_repo=QuantStrategyLab/CryptoSnapshotPipelines \
   -f issue_number=123 \
   -f source_ref=main \

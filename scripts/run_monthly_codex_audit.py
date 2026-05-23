@@ -304,7 +304,7 @@ def blocked_paths(paths: list[str]) -> list[str]:
 def truncate_markdown(text: str, limit: int = 12000) -> str:
     if len(text) <= limit:
         return text
-    return text[:limit] + "\n\n...[truncated by SelfHostedCodexAuditBridge]"
+    return text[:limit] + "\n\n...[truncated by CryptoCodexAuditBridge]"
 
 
 def strip_selfhosted_audit_heading(text: str) -> str:

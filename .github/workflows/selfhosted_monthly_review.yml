@@ -1,4 +1,4 @@
-name: Self-hosted Codex Monthly Review
+name: Crypto Codex Monthly Review
 
 on:
   workflow_dispatch:
