@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import unittest
 
-from scripts.run_monthly_codex_audit import blocked_paths, parse_bool, safe_branch_component, validate_repo
+from scripts.run_monthly_codex_audit import (
+    blocked_paths,
+    codex_process_env,
+    parse_bool,
+    safe_branch_component,
+    validate_repo,
+)
 
 
 class RunMonthlyCodexAuditTests(unittest.TestCase):
@@ -26,7 +32,15 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         blocked = blocked_paths(["data/output/report.json", "docs/secret-token.md", "scripts/fix.py"])
         self.assertEqual(blocked, ["data/output/report.json", "docs/secret-token.md"])
 
+    def test_codex_process_env_removes_secret_like_variables(self) -> None:
+        env = codex_process_env()
+        for key in env:
+            self.assertNotIn("TOKEN", key.upper())
+            self.assertNotIn("SECRET", key.upper())
+            self.assertNotIn("PASSWORD", key.upper())
+            self.assertNotIn("PRIVATE_KEY", key.upper())
+            self.assertNotIn("CREDENTIAL", key.upper())
+
 
 if __name__ == "__main__":
     unittest.main()
-

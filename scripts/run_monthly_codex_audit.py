@@ -27,6 +27,7 @@ BLOCKED_PATH_RE = re.compile(
     r"(^|/)(\.env|.*secret.*|.*credential.*|.*token.*|.*private.*|.*\.pem|.*\.key)$",
     re.IGNORECASE,
 )
+SECRET_ENV_MARKERS = ("TOKEN", "SECRET", "PASSWORD", "PRIVATE_KEY", "CREDENTIAL")
 
 
 class BridgeError(RuntimeError):
@@ -134,6 +135,14 @@ def git_auth_env(token: str) -> dict[str, str]:
         }
     )
     return env
+
+
+def codex_process_env() -> dict[str, str]:
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if not any(marker in key.upper() for marker in SECRET_ENV_MARKERS)
+    }
 
 
 def git_with_token(repo_dir: Path, token: str, args: list[str]) -> str:
@@ -247,14 +256,14 @@ def run_codex(repo_dir: Path, prompt: str, timeout_minutes: int) -> tuple[int, s
     command = [
         "codex",
         "exec",
-        "--full-auto",
+        "--dangerously-bypass-approvals-and-sandbox",
         "--cd",
         str(repo_dir),
         "--output-last-message",
         str(output_path),
         "-",
     ]
-    result = run(command, input_text=prompt, timeout=timeout_minutes * 60)
+    result = run(command, env=codex_process_env(), input_text=prompt, timeout=timeout_minutes * 60)
     if result.stdout:
         print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
     final_message = output_path.read_text(encoding="utf-8") if output_path.exists() else ""

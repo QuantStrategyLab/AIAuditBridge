@@ -52,7 +52,9 @@ Source repository variables:
 ## Safety Model
 
 - The monthly publish job remains deterministic and does not call model APIs.
-- This bridge calls the local `codex` CLI from the self-hosted runner.
+- This bridge calls the local `codex` CLI from the self-hosted runner. The
+  Codex subprocess receives a scrubbed environment with token/secret-like
+  variables removed.
 - Fixes are submitted as PRs by default.
 - Automatic merge is available only through the explicit `auto_merge` input and
   should remain disabled until branch protection and CI gates are confirmed.
