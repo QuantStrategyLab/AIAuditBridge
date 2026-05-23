@@ -84,6 +84,7 @@ jobs:
           owner: ${{ github.repository_owner }}
           repositories: |
             CryptoSnapshotPipelines
+            UsEquitySnapshotPipelines
           permission-contents: write
           permission-issues: write
           permission-pull-requests: write

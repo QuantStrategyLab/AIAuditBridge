@@ -10,7 +10,8 @@ The intended flow is:
 3. This repository checks out the source repository on the self-hosted runner.
 4. `codex exec` audits the monthly issue and may make low-risk fixes.
 5. The outer runner posts the audit result back to the source issue and opens a
-   pull request when Codex changed files.
+   pull request from `codex/monthly-review-issue-<issue>-<stamp>` when Codex
+   changed files.
 
 Codex itself is kept inside a local clone. It does not receive GitHub tokens in
 the prompt, and it is instructed not to comment, push, merge, or manage secrets.
@@ -27,8 +28,9 @@ Bridge repository credentials, choose one:
 
 - Preferred: `CROSS_REPO_GITHUB_APP_ID` repository variable and
   `CROSS_REPO_GITHUB_APP_PRIVATE_KEY` repository secret. The GitHub App must be
-  installed on `CryptoSnapshotPipelines` and granted contents write, issues
-  write, and pull requests write.
+  installed on the snapshot source repositories, currently
+  `CryptoSnapshotPipelines` and `UsEquitySnapshotPipelines`, and granted
+  contents write, issues write, and pull requests write.
 - Fallback: `CODEX_AUDIT_GH_TOKEN` repository secret with access to the source
   repository. It needs repository metadata read, contents read/write, issues
   read/write, and pull requests read/write.
@@ -53,7 +55,7 @@ Source repository variables:
 
 The runner bootstraps a small cached Python virtualenv before invoking Codex.
 By default it installs `pandas`, which is enough for the monthly release
-contract and status-summary checks in `CryptoSnapshotPipelines`.
+contract and status-summary checks in the snapshot source repositories.
 
 Optional controls:
 
@@ -78,7 +80,7 @@ Optional controls:
 ```bash
 gh workflow run selfhosted_monthly_review.yml \
   --repo QuantStrategyLab/CryptoCodexAuditBridge \
-  -f source_repo=QuantStrategyLab/CryptoSnapshotPipelines \
+  -f source_repo=QuantStrategyLab/UsEquitySnapshotPipelines \
   -f issue_number=123 \
   -f source_ref=main \
   -f mode=review_and_fix \

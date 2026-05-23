@@ -451,13 +451,15 @@ def create_pull_request(
     changed_list = "\n".join(f"- `{path}`" for path in paths) or "- None"
     body = "\n".join(
         [
+            f"<!-- codex-monthly-remediation:issue-{issue_number} -->",
+            "",
             f"Triggered by monthly review issue #{issue_number}: {issue.get('html_url', '')}",
             "",
             "## Changed Files",
             "",
             changed_list,
             "",
-            "## Crypto Codex Result",
+            "## Self-hosted Codex Result",
             "",
             truncate_markdown(strip_audit_heading(final_message), 6000)
             or "Codex edited files but did not return a final message.",
@@ -526,7 +528,7 @@ def main() -> int:
         work_root = Path(tmp)
         repo_dir = clone_source_repo(token, source_repo, source_ref, work_root)
         stamp = dt.datetime.now(dt.UTC).strftime("%Y%m%d%H%M%S")
-        branch_name = f"codex/monthly-audit-{issue_number}-{stamp}"
+        branch_name = f"codex/monthly-review-issue-{issue_number}-{stamp}"
         run_checked(["git", "checkout", "-b", branch_name], cwd=repo_dir)
         run_checked(["git", "config", "user.name", "selfhosted-codex-audit[bot]"], cwd=repo_dir)
         run_checked(
@@ -553,7 +555,7 @@ def main() -> int:
         if return_code != 0:
             body = "\n".join(
                 [
-                    "## Crypto Codex Audit",
+                    "## Self-hosted Codex Audit",
                     "",
                     f"Codex execution failed with exit code `{return_code}`.",
                     "",
@@ -591,7 +593,7 @@ def main() -> int:
             review_message = format_codex_message(final_message, repo_dir, source_repo, source_ref)
             body = "\n".join(
                 [
-                    "## Crypto Codex Audit",
+                    "## Self-hosted Codex Audit",
                     "",
                     "Codex produced edits, but the bridge refused to push them because they touched blocked paths.",
                     "",
@@ -616,7 +618,7 @@ def main() -> int:
         pr = create_pull_request(token, source_repo, issue, branch_name, source_ref, pr_message, paths)
         pr_url = pr.get("html_url", "")
         body_lines = [
-            "## Crypto Codex Audit",
+            "## Self-hosted Codex Audit",
             "",
             truncate_markdown(
                 strip_audit_heading(pr_message)

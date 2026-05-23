@@ -68,7 +68,7 @@ Not allowed without a human follow-up issue:
 6. Finish with a concise Markdown report using exactly these headings:
 
 ```markdown
-## Crypto Codex Audit
+## Self-hosted Codex Audit
 
 ### Verdict
 
