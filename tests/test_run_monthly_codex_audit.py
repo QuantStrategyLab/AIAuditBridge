@@ -42,6 +42,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
             validate_repo("OtherOrg/CryptoSnapshotPipelines")
 
     def test_validate_provider_accepts_supported_values(self) -> None:
+        self.assertEqual(validate_provider(""), "auto")
         self.assertEqual(validate_provider("codex"), "codex")
         self.assertEqual(validate_provider("OPENAI"), "openai")
         self.assertEqual(validate_provider("auto"), "auto")

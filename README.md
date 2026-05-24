@@ -51,10 +51,10 @@ Source repository variables:
   `QuantStrategyLab/CryptoCodexAuditBridge`.
 - `SELFHOSTED_CODEX_REVIEW_MODE`: defaults to `review_and_fix`.
 - `SELFHOSTED_CODEX_REVIEW_PROVIDER`: dispatches the bridge provider. Supported
-  values are `codex`, `openai`, and `auto`. `codex` is the default production
-  path. `openai` posts an API review comment only. `auto` tries Codex first and
-  falls back to OpenAI review when Codex fails and `OPENAI_API_KEY` is
-  configured in this bridge repository.
+  values are `auto`, `codex`, and `openai`. `auto` is the default production
+  path: it tries Codex first, falls back to OpenAI review when Codex fails and
+  `OPENAI_API_KEY` is configured in this bridge repository, and fails loudly
+  when the API fallback is not configured.
 - `LEGACY_AI_REVIEW_ENABLED`: defaults to `false`.
 
 The bridge only accepts the snapshot source repositories listed in the workflow
@@ -67,13 +67,13 @@ This repository owns the AI review execution layer. Source repositories should
 produce a monthly report issue and dispatch this bridge; they do not need to
 implement their own model-provider workflows.
 
+- `auto`: runs `codex` first. If Codex execution fails and `OPENAI_API_KEY` is
+  configured, it posts an OpenAI review comment instead. If the key is missing,
+  the workflow fails loudly.
 - `codex`: runs local `codex exec` on the self-hosted runner. In
-  `review_and_fix` mode it may create a fix PR.
+  `review_and_fix` mode it may create a fix PR and does not use API fallback.
 - `openai`: sends the monthly issue body and recent comments to the OpenAI Chat
   Completions API and posts a review comment. It does not edit files.
-- `auto`: runs `codex` first. If Codex execution fails and `OPENAI_API_KEY` is
-  configured, it posts an OpenAI review comment instead of silently skipping
-  review.
 
 Optional bridge repository configuration for OpenAI-compatible fallback:
 
@@ -115,6 +115,6 @@ gh workflow run selfhosted_monthly_review.yml \
   -f issue_number=123 \
   -f source_ref=main \
   -f mode=review_and_fix \
-  -f provider=codex \
+  -f provider=auto \
   -f auto_merge=false
 ```

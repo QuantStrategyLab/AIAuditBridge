@@ -29,7 +29,7 @@ ALLOWED_SOURCE_REPOS = frozenset(
     }
 )
 DEFAULT_MODE = "review_and_fix"
-DEFAULT_PROVIDER = "codex"
+DEFAULT_PROVIDER = "auto"
 SUPPORTED_PROVIDERS = frozenset({"codex", "openai", "auto"})
 BLOCKED_PATH_RE = re.compile(
     r"(^|/)(\.env|.*secret.*|.*credential.*|.*token.*|.*private.*|.*\.pem|.*\.key)$",
@@ -679,23 +679,37 @@ def main() -> int:
             env_overrides=dependency_env,
         )
         if return_code != 0:
-            if provider == "auto" and env_value("OPENAI_API_KEY"):
-                review_message = run_openai_review(source_repo, source_ref, issue, comments)
-                post_issue_comment(
-                    token,
-                    source_repo,
-                    issue_number,
-                    "\n".join(
-                        [
-                            "## API Monthly Review",
-                            "",
-                            f"Self-hosted Codex failed with exit code `{return_code}`; using the configured OpenAI fallback.",
-                            "",
-                            truncate_markdown(review_message, 10000),
-                        ]
-                    ),
+            if provider == "auto":
+                if env_value("OPENAI_API_KEY"):
+                    review_message = run_openai_review(source_repo, source_ref, issue, comments)
+                    post_issue_comment(
+                        token,
+                        source_repo,
+                        issue_number,
+                        "\n".join(
+                            [
+                                "## API Monthly Review",
+                                "",
+                                f"Self-hosted Codex failed with exit code `{return_code}`; using the configured OpenAI fallback.",
+                                "",
+                                truncate_markdown(review_message, 10000),
+                            ]
+                        ),
+                    )
+                    return 0
+                body = "\n".join(
+                    [
+                        "## Self-hosted Codex Audit",
+                        "",
+                        f"Codex execution failed with exit code `{return_code}`.",
+                        "",
+                        "OpenAI fallback was requested by provider `auto`, but `OPENAI_API_KEY` is not configured in the bridge repository.",
+                        "",
+                        "No files were pushed. Configure `OPENAI_API_KEY` or inspect the bridge workflow logs.",
+                    ]
                 )
-                return 0
+                post_issue_comment(token, source_repo, issue_number, body)
+                return return_code
             body = "\n".join(
                 [
                     "## Self-hosted Codex Audit",
