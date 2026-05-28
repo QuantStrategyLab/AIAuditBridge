@@ -5,7 +5,7 @@ GitHub Actions runner that already has the Codex CLI installed and logged in.
 
 The intended flow is:
 
-1. A source repository publishes a monthly report issue.
+1. A source repository publishes a monthly report or shadow-signal issue.
 2. The source workflow dispatches this repository.
 3. This repository checks out the source repository on the self-hosted runner.
 4. `codex exec` audits the monthly issue and may make low-risk fixes.
@@ -57,9 +57,13 @@ Source repository variables:
   fails loudly when no API fallback key is configured.
 - `LEGACY_AI_REVIEW_ENABLED`: defaults to `false`.
 
-The bridge only accepts the snapshot source repositories listed in the workflow
-and script allowlist: `QuantStrategyLab/CryptoSnapshotPipelines` and
-`QuantStrategyLab/UsEquitySnapshotPipelines`.
+The bridge only accepts source repositories listed in the workflow and script
+allowlist:
+
+- `QuantStrategyLab/CryptoSnapshotPipelines` for `monthly_snapshot_audit`
+- `QuantStrategyLab/UsEquitySnapshotPipelines` for `monthly_snapshot_audit`
+- `QuantStrategyLab/AiLongHorizonSignalPipelines` for
+  `long_horizon_signal_shadow`
 
 ## Provider Model
 
@@ -94,6 +98,16 @@ Optional bridge repository configuration for API fallback:
 - `ANTHROPIC_VERSION`: optional runtime environment override, default
   `2023-06-01`.
 
+## Task Model
+
+- `monthly_snapshot_audit`: the default task for snapshot artifact repositories.
+  It reviews monthly release issues and may open low-risk fix PRs.
+- `long_horizon_signal_shadow`: a research-only task for
+  `AiLongHorizonSignalPipelines`. It may update only shadow signal artifacts
+  under `data/output/latest_signal.*` or `data/output/signal_history/*.json`.
+  It does not access broker credentials, place orders, or change production
+  strategy logic.
+
 ## Python Audit Environment
 
 The runner bootstraps a small cached Python virtualenv before invoking Codex.
@@ -126,6 +140,7 @@ gh workflow run selfhosted_monthly_review.yml \
   -f source_repo=QuantStrategyLab/UsEquitySnapshotPipelines \
   -f issue_number=123 \
   -f source_ref=main \
+  -f task=monthly_snapshot_audit \
   -f mode=review_and_fix \
   -f provider=auto \
   -f auto_merge=false

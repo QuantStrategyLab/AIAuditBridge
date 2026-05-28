@@ -20,17 +20,31 @@ import urllib.request
 
 API_BASE = "https://api.github.com"
 ROOT = Path(__file__).resolve().parents[1]
-PROMPT_TEMPLATE = ROOT / "prompts" / "monthly_crypto_snapshot_audit.md"
+PROMPT_TEMPLATES = {
+    "monthly_snapshot_audit": ROOT / "prompts" / "monthly_crypto_snapshot_audit.md",
+    "long_horizon_signal_shadow": ROOT / "prompts" / "long_horizon_signal_shadow.md",
+}
 DEFAULT_SOURCE_REPO = "QuantStrategyLab/CryptoSnapshotPipelines"
 ALLOWED_SOURCE_REPOS = frozenset(
     {
+        "QuantStrategyLab/AiLongHorizonSignalPipelines",
         "QuantStrategyLab/CryptoSnapshotPipelines",
         "QuantStrategyLab/UsEquitySnapshotPipelines",
     }
 )
+REPO_TASKS = {
+    "QuantStrategyLab/AiLongHorizonSignalPipelines": frozenset({"long_horizon_signal_shadow"}),
+    "QuantStrategyLab/CryptoSnapshotPipelines": frozenset({"monthly_snapshot_audit"}),
+    "QuantStrategyLab/UsEquitySnapshotPipelines": frozenset({"monthly_snapshot_audit"}),
+}
+DEFAULT_TASK = "monthly_snapshot_audit"
 DEFAULT_MODE = "review_and_fix"
 DEFAULT_PROVIDER = "auto"
 SUPPORTED_PROVIDERS = frozenset({"api", "anthropic", "codex", "openai", "auto"})
+LONG_HORIZON_SIGNAL_OUTPUT_PREFIXES = (
+    "data/output/latest_signal.",
+    "data/output/signal_history/",
+)
 BLOCKED_PATH_RE = re.compile(
     r"(^|/)(\.env|.*secret.*|.*credential.*|.*token.*|.*private.*|.*\.pem|.*\.key)$",
     re.IGNORECASE,
@@ -58,6 +72,16 @@ def validate_repo(repo: str) -> str:
     if repo not in ALLOWED_SOURCE_REPOS:
         raise BridgeError(f"Unsupported source repository: {repo!r}")
     return repo
+
+
+def validate_task(task: str, source_repo: str) -> str:
+    normalized = (task or DEFAULT_TASK).strip().lower().replace("-", "_")
+    if normalized not in PROMPT_TEMPLATES:
+        raise BridgeError(f"Unsupported CODEX_AUDIT_TASK: {task!r}")
+    allowed = REPO_TASKS.get(source_repo, frozenset())
+    if normalized not in allowed:
+        raise BridgeError(f"Task {normalized!r} is not allowed for {source_repo}")
+    return normalized
 
 
 def validate_provider(provider: str) -> str:
@@ -318,6 +342,7 @@ def write_codex_context(
 
 def build_prompt(
     *,
+    task: str,
     source_repo: str,
     source_ref: str,
     issue: dict[str, Any],
@@ -325,8 +350,10 @@ def build_prompt(
     context_path: Path,
     mode: str,
 ) -> str:
-    template = Template(PROMPT_TEMPLATE.read_text(encoding="utf-8"))
+    template_path = PROMPT_TEMPLATES[task]
+    template = Template(template_path.read_text(encoding="utf-8"))
     return template.safe_substitute(
+        TASK=task,
         SOURCE_REPO=source_repo,
         SOURCE_REF=source_ref,
         ISSUE_URL=issue.get("html_url", ""),
@@ -365,11 +392,54 @@ def run_codex(
     return result.returncode, result.stdout or "", final_message.strip()
 
 
-def build_api_review_prompt(source_repo: str, source_ref: str, issue: dict[str, Any], comments: list[dict[str, Any]]) -> str:
+def build_api_review_prompt(
+    source_repo: str,
+    source_ref: str,
+    issue: dict[str, Any],
+    comments: list[dict[str, Any]],
+    *,
+    task: str = DEFAULT_TASK,
+) -> str:
     comments_md = "\n\n".join(
         f"### Comment by {comment.get('user', {}).get('login', 'unknown')}\n\n{comment.get('body') or ''}"
         for comment in comments[:20]
     )
+    if task == "long_horizon_signal_shadow":
+        return "\n".join(
+            [
+                "You are reviewing a long-horizon AI shadow signal issue for a QuantStrategyLab research repository.",
+                "Return a concise markdown review plus a draft JSON signal block if the evidence is sufficient.",
+                "Do not claim to have edited files or placed trades.",
+                "The signal must be shadow-only, non-execution, and bounded by deterministic downstream policy.",
+                "",
+                "## Source",
+                "",
+                f"- Repository: {source_repo}",
+                f"- Ref: {source_ref}",
+                f"- Issue: {issue.get('html_url', '')}",
+                "",
+                "## Issue Title",
+                "",
+                issue.get("title") or "",
+                "",
+                "## Issue Body",
+                "",
+                truncate_markdown(issue.get("body") or "", 18000),
+                "",
+                "## Existing Comments",
+                "",
+                truncate_markdown(comments_md or "None", 6000),
+                "",
+                "## Output Format",
+                "",
+                "## API Long-Horizon Shadow Signal Review",
+                "",
+                "### Evidence Quality",
+                "### Draft Shadow Signal JSON",
+                "### Missing Data",
+                "### Operator Action Items",
+            ]
+        )
     return "\n".join(
         [
             "You are reviewing a monthly snapshot report issue for a QuantStrategyLab source repository.",
@@ -456,7 +526,13 @@ def run_openai_review(source_repo: str, source_ref: str, issue: dict[str, Any], 
             },
             {
                 "role": "user",
-                "content": build_api_review_prompt(source_repo, source_ref, issue, comments),
+                "content": build_api_review_prompt(
+                    source_repo,
+                    source_ref,
+                    issue,
+                    comments,
+                    task=env_value("CODEX_AUDIT_TASK", DEFAULT_TASK),
+                ),
             },
         ],
     }
@@ -493,7 +569,13 @@ def run_anthropic_review(source_repo: str, source_ref: str, issue: dict[str, Any
         "messages": [
             {
                 "role": "user",
-                "content": build_api_review_prompt(source_repo, source_ref, issue, comments),
+                "content": build_api_review_prompt(
+                    source_repo,
+                    source_ref,
+                    issue,
+                    comments,
+                    task=env_value("CODEX_AUDIT_TASK", DEFAULT_TASK),
+                ),
             }
         ],
     }
@@ -637,14 +719,19 @@ def changed_paths(status: str) -> list[str]:
     return paths
 
 
-def blocked_paths(paths: list[str]) -> list[str]:
+def long_horizon_signal_data_path_allowed(path: str) -> bool:
+    return any(path.startswith(prefix) for prefix in LONG_HORIZON_SIGNAL_OUTPUT_PREFIXES)
+
+
+def blocked_paths(paths: list[str], *, task: str = DEFAULT_TASK) -> list[str]:
     allow_data = parse_bool(env_value("CODEX_AUDIT_ALLOW_DATA_CHANGES"))
     blocked: list[str] = []
     for path in paths:
         normalized = path.strip()
         if not normalized:
             continue
-        if normalized.startswith("data/") and not allow_data:
+        task_allows_data = task == "long_horizon_signal_shadow" and long_horizon_signal_data_path_allowed(normalized)
+        if normalized.startswith("data/") and not allow_data and not task_allows_data:
             blocked.append(normalized)
             continue
         if BLOCKED_PATH_RE.search(normalized):
@@ -721,15 +808,23 @@ def create_pull_request(
     base_ref: str,
     final_message: str,
     paths: list[str],
+    *,
+    task: str = DEFAULT_TASK,
 ) -> dict[str, Any]:
     issue_number = issue["number"]
-    title = f"codex: monthly audit fixes for issue #{issue_number}"
+    if task == "long_horizon_signal_shadow":
+        title = f"codex: long-horizon shadow signal for issue #{issue_number}"
+        marker = f"codex-long-horizon-signal:issue-{issue_number}"
+    else:
+        title = f"codex: monthly audit fixes for issue #{issue_number}"
+        marker = f"codex-monthly-remediation:issue-{issue_number}"
     changed_list = "\n".join(f"- `{path}`" for path in paths) or "- None"
+    trigger_label = "long-horizon signal issue" if task == "long_horizon_signal_shadow" else "monthly review issue"
     body = "\n".join(
         [
-            f"<!-- codex-monthly-remediation:issue-{issue_number} -->",
+            f"<!-- {marker} -->",
             "",
-            f"Triggered by monthly review issue #{issue_number}: {issue.get('html_url', '')}",
+            f"Triggered by {trigger_label} #{issue_number}: {issue.get('html_url', '')}",
             "",
             "## Changed Files",
             "",
@@ -780,6 +875,7 @@ def enable_auto_merge(token: str, source_repo: str, pr_number: int) -> str:
 
 def main() -> int:
     source_repo = validate_repo(env_value("SOURCE_REPO", DEFAULT_SOURCE_REPO))
+    task = validate_task(env_value("CODEX_AUDIT_TASK", DEFAULT_TASK), source_repo)
     source_ref = env_value("SOURCE_REF", "main")
     mode = env_value("CODEX_AUDIT_MODE", DEFAULT_MODE)
     if mode not in {"review_only", "review_and_fix"}:
@@ -795,7 +891,7 @@ def main() -> int:
     timeout_minutes = int(env_value("CODEX_AUDIT_TIMEOUT_MINUTES", "45"))
     auto_merge = parse_bool(env_value("CODEX_AUDIT_AUTO_MERGE"))
 
-    print(f"Auditing {source_repo} issue #{issue_number} on {source_ref} in {mode} mode.")
+    print(f"Running {task} for {source_repo} issue #{issue_number} on {source_ref} in {mode} mode.")
     issue = github_request(token, "GET", f"/repos/{source_repo}/issues/{issue_number}")
     comments = github_request(token, "GET", f"/repos/{source_repo}/issues/{issue_number}/comments?per_page=20")
     if not isinstance(comments, list):
@@ -825,7 +921,8 @@ def main() -> int:
             work_root = Path(tmp)
             repo_dir = clone_source_repo(token, source_repo, source_ref, work_root)
             stamp = dt.datetime.now(dt.UTC).strftime("%Y%m%d%H%M%S")
-            branch_name = f"codex/monthly-review-issue-{issue_number}-{stamp}"
+            branch_prefix = "long-horizon-signal" if task == "long_horizon_signal_shadow" else "monthly-review"
+            branch_name = f"codex/{branch_prefix}-issue-{issue_number}-{stamp}"
             run_checked(["git", "checkout", "-b", branch_name], cwd=repo_dir)
             run_checked(["git", "config", "user.name", "selfhosted-codex-audit[bot]"], cwd=repo_dir)
             run_checked(
@@ -835,6 +932,7 @@ def main() -> int:
 
             issue_path, context_path = write_codex_context(repo_dir, source_repo, source_ref, issue, comments)
             prompt = build_prompt(
+                task=task,
                 source_repo=source_repo,
                 source_ref=source_ref,
                 issue=issue,
@@ -895,7 +993,7 @@ def main() -> int:
                 )
                 return 0
 
-            denied = blocked_paths(paths)
+            denied = blocked_paths(paths, task=task)
             if denied:
                 denied_list = "\n".join(f"- `{path}`" for path in denied)
                 review_message = format_codex_message(final_message, repo_dir, source_repo, source_ref)
@@ -918,12 +1016,12 @@ def main() -> int:
 
             run_checked(["git", "add", "-A"], cwd=repo_dir)
             run_checked(
-                ["git", "commit", "-m", f"codex: monthly audit fixes for issue #{issue_number}"],
+                ["git", "commit", "-m", f"codex: {task.replace('_', ' ')} for issue #{issue_number}"],
                 cwd=repo_dir,
             )
             git_with_token(repo_dir, token, ["push", "origin", f"HEAD:refs/heads/{branch_name}"])
             pr_message = format_codex_message(final_message, repo_dir, source_repo, branch_name)
-            pr = create_pull_request(token, source_repo, issue, branch_name, source_ref, pr_message, paths)
+            pr = create_pull_request(token, source_repo, issue, branch_name, source_ref, pr_message, paths, task=task)
             pr_url = pr.get("html_url", "")
             body_lines = [
                 "## Self-hosted Codex Audit",

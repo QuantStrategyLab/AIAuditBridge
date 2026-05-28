@@ -33,6 +33,14 @@ on:
           - anthropic
           - codex
           - openai
+      task:
+        description: "Codex bridge task"
+        required: false
+        type: choice
+        default: "monthly_snapshot_audit"
+        options:
+          - monthly_snapshot_audit
+          - long_horizon_signal_shadow
       auto_merge:
         description: "Enable GitHub auto-merge for generated PRs"
         required: false
@@ -62,6 +70,7 @@ jobs:
       SOURCE_REF: ${{ github.event.client_payload.source_ref || inputs.source_ref || 'main' }}
       CODEX_AUDIT_MODE: ${{ github.event.client_payload.mode || inputs.mode || 'review_and_fix' }}
       CODEX_AUDIT_PROVIDER: ${{ github.event.client_payload.provider || inputs.provider || 'auto' }}
+      CODEX_AUDIT_TASK: ${{ github.event.client_payload.task || inputs.task || 'monthly_snapshot_audit' }}
       CODEX_AUDIT_AUTO_MERGE: ${{ github.event.client_payload.auto_merge || inputs.auto_merge || 'false' }}
     steps:
       - name: Checkout Bridge
@@ -97,6 +106,7 @@ jobs:
           private-key: ${{ secrets.CROSS_REPO_GITHUB_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: |
+            AiLongHorizonSignalPipelines
             CryptoSnapshotPipelines
             UsEquitySnapshotPipelines
           permission-contents: write

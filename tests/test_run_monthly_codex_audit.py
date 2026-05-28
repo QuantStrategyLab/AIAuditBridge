@@ -22,6 +22,7 @@ from scripts.run_monthly_codex_audit import (
     strip_audit_heading,
     validate_provider,
     validate_repo,
+    validate_task,
 )
 
 
@@ -38,12 +39,28 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
             validate_repo("QuantStrategyLab/UsEquitySnapshotPipelines"),
             "QuantStrategyLab/UsEquitySnapshotPipelines",
         )
+        self.assertEqual(
+            validate_repo("QuantStrategyLab/AiLongHorizonSignalPipelines"),
+            "QuantStrategyLab/AiLongHorizonSignalPipelines",
+        )
 
     def test_validate_repo_rejects_invalid_values(self) -> None:
         with self.assertRaises(Exception):
             validate_repo("QuantStrategyLab/CryptoSnapshotPipelines/extra")
         with self.assertRaises(Exception):
             validate_repo("OtherOrg/CryptoSnapshotPipelines")
+
+    def test_validate_task_rejects_repo_task_mismatch(self) -> None:
+        self.assertEqual(
+            validate_task("long-horizon-signal-shadow", "QuantStrategyLab/AiLongHorizonSignalPipelines"),
+            "long_horizon_signal_shadow",
+        )
+        self.assertEqual(
+            validate_task("", "QuantStrategyLab/CryptoSnapshotPipelines"),
+            "monthly_snapshot_audit",
+        )
+        with self.assertRaises(Exception):
+            validate_task("monthly_snapshot_audit", "QuantStrategyLab/AiLongHorizonSignalPipelines")
 
     def test_validate_provider_accepts_supported_values(self) -> None:
         self.assertEqual(validate_provider(""), "auto")
@@ -61,6 +78,18 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
     def test_blocked_paths_blocks_data_and_secret_like_files(self) -> None:
         blocked = blocked_paths(["data/output/report.json", "docs/secret-token.md", "scripts/fix.py"])
         self.assertEqual(blocked, ["data/output/report.json", "docs/secret-token.md"])
+
+    def test_blocked_paths_allows_long_horizon_shadow_outputs(self) -> None:
+        blocked = blocked_paths(
+            [
+                "data/output/latest_signal.json",
+                "data/output/latest_signal.manifest.json",
+                "data/output/signal_history/2026-05-28.json",
+                "data/raw/market_history.csv",
+            ],
+            task="long_horizon_signal_shadow",
+        )
+        self.assertEqual(blocked, ["data/raw/market_history.csv"])
 
     def test_codex_process_env_removes_secret_like_variables(self) -> None:
         env = codex_process_env()
@@ -127,6 +156,19 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertIn("QuantStrategyLab/CryptoSnapshotPipelines", prompt)
         self.assertIn("Monthly Report", prompt)
         self.assertIn("API Monthly Review", prompt)
+
+    def test_build_api_review_prompt_supports_long_horizon_task(self) -> None:
+        prompt = build_api_review_prompt(
+            "QuantStrategyLab/AiLongHorizonSignalPipelines",
+            "main",
+            {"title": "Shadow Signal", "body": "Body", "html_url": "https://example.test/issue"},
+            [],
+            task="long_horizon_signal_shadow",
+        )
+
+        self.assertIn("QuantStrategyLab/AiLongHorizonSignalPipelines", prompt)
+        self.assertIn("API Long-Horizon Shadow Signal Review", prompt)
+        self.assertIn("Draft Shadow Signal JSON", prompt)
 
     def test_auto_fallback_missing_api_key_message_mentions_reason(self) -> None:
         message = auto_fallback_missing_api_key_message("Codex setup failed.")
