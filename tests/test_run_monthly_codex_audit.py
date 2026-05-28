@@ -17,6 +17,7 @@ from scripts.run_monthly_codex_audit import (
     format_api_review_comment,
     package_import_name,
     parse_bool,
+    pr_closing_line,
     run_configured_api_reviews,
     safe_branch_component,
     strip_audit_heading,
@@ -219,6 +220,10 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertIn("### OpenAI Review", message)
         self.assertIn("### Anthropic Claude Review", message)
         self.assertIn("Anthropic warning", message)
+
+    def test_pr_closing_line_only_closes_long_horizon_signal_issues(self) -> None:
+        self.assertEqual(pr_closing_line("long_horizon_signal_shadow", 4), "Closes #4")
+        self.assertEqual(pr_closing_line("monthly_snapshot_audit", 4), "")
 
 
 if __name__ == "__main__":

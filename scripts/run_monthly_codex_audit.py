@@ -800,6 +800,12 @@ def post_issue_comment(token: str, source_repo: str, issue_number: int, body: st
     )
 
 
+def pr_closing_line(task: str, issue_number: int) -> str:
+    if task == "long_horizon_signal_shadow":
+        return f"Closes #{issue_number}"
+    return ""
+
+
 def create_pull_request(
     token: str,
     source_repo: str,
@@ -820,11 +826,16 @@ def create_pull_request(
         marker = f"codex-monthly-remediation:issue-{issue_number}"
     changed_list = "\n".join(f"- `{path}`" for path in paths) or "- None"
     trigger_label = "long-horizon signal issue" if task == "long_horizon_signal_shadow" else "monthly review issue"
-    body = "\n".join(
+    body_lines = [
+        f"<!-- {marker} -->",
+        "",
+        f"Triggered by {trigger_label} #{issue_number}: {issue.get('html_url', '')}",
+    ]
+    closing_line = pr_closing_line(task, int(issue_number))
+    if closing_line:
+        body_lines.extend(["", closing_line])
+    body_lines.extend(
         [
-            f"<!-- {marker} -->",
-            "",
-            f"Triggered by {trigger_label} #{issue_number}: {issue.get('html_url', '')}",
             "",
             "## Changed Files",
             "",
@@ -836,6 +847,7 @@ def create_pull_request(
             or "Codex edited files but did not return a final message.",
         ]
     )
+    body = "\n".join(body_lines)
     return github_request(
         token,
         "POST",
