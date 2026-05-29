@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from scripts.run_monthly_codex_audit import (
+    BridgeError,
     blocked_paths,
     bootstrap_packages,
     build_api_review_prompt,
@@ -18,6 +19,7 @@ from scripts.run_monthly_codex_audit import (
     package_import_name,
     parse_bool,
     pr_closing_line,
+    resolve_source_repo_token,
     run_configured_api_reviews,
     safe_branch_component,
     strip_audit_heading,
@@ -138,6 +140,47 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
     def test_bootstrap_packages_uses_default(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(bootstrap_packages(), ["pandas"])
+
+    def test_resolve_source_repo_token_prefers_source_scoped_tokens(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "CODEX_AUDIT_GH_TOKEN": "source-token",
+                "GITHUB_TOKEN": "workflow-token",
+                "GITHUB_REPOSITORY": "QuantStrategyLab/CodexAuditBridge",
+            },
+            clear=True,
+        ):
+            self.assertEqual(
+                resolve_source_repo_token("QuantStrategyLab/UsEquitySnapshotPipelines"),
+                "source-token",
+            )
+
+    def test_resolve_source_repo_token_allows_same_repo_github_token(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "GITHUB_TOKEN": "workflow-token",
+                "GITHUB_REPOSITORY": "QuantStrategyLab/UsEquitySnapshotPipelines",
+            },
+            clear=True,
+        ):
+            self.assertEqual(
+                resolve_source_repo_token("QuantStrategyLab/UsEquitySnapshotPipelines"),
+                "workflow-token",
+            )
+
+    def test_resolve_source_repo_token_rejects_cross_repo_github_token(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "GITHUB_TOKEN": "workflow-token",
+                "GITHUB_REPOSITORY": "QuantStrategyLab/CodexAuditBridge",
+            },
+            clear=True,
+        ):
+            with self.assertRaises(BridgeError):
+                resolve_source_repo_token("QuantStrategyLab/UsEquitySnapshotPipelines")
 
     def test_extract_openai_text_reads_chat_completion_content(self) -> None:
         response = {"choices": [{"message": {"content": "review"}}]}

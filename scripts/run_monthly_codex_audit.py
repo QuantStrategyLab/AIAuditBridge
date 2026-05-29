@@ -161,7 +161,14 @@ def run_checked(
     if result.stdout:
         print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
     if result.returncode != 0:
-        raise BridgeError(f"Command failed with exit code {result.returncode}: {command[0]}")
+        printable = " ".join(shlex.quote(part) for part in command)
+        output = (result.stdout or "").strip()
+        if len(output) > 1200:
+            output = f"...\n{output[-1200:]}"
+        detail = f"Command failed with exit code {result.returncode}: {printable}"
+        if output:
+            detail = f"{detail}\n{output}"
+        raise BridgeError(detail)
     return result.stdout
 
 
@@ -257,6 +264,21 @@ def codex_environment(extra_env: dict[str, str] | None = None) -> dict[str, str]
 
 def git_with_token(repo_dir: Path, token: str, args: list[str]) -> str:
     return run_checked(["git", *args], cwd=repo_dir, env=git_auth_env(token))
+
+
+def resolve_source_repo_token(source_repo: str) -> str:
+    token = env_value("CODEX_AUDIT_GH_TOKEN") or env_value("GH_TOKEN")
+    if token:
+        return token
+
+    github_token = env_value("GITHUB_TOKEN")
+    if github_token and env_value("GITHUB_REPOSITORY") == source_repo:
+        return github_token
+
+    raise BridgeError(
+        "CODEX_AUDIT_GH_TOKEN or GH_TOKEN with access to the source repository is required. "
+        "The workflow GITHUB_TOKEN is only valid when the bridge runs inside the source repository."
+    )
 
 
 def clone_source_repo(token: str, source_repo: str, source_ref: str, work_root: Path) -> Path:
@@ -897,9 +919,7 @@ def main() -> int:
     if not issue_number_raw.isdigit():
         raise BridgeError("ISSUE_NUMBER must be provided as an integer")
     issue_number = int(issue_number_raw)
-    token = env_value("CODEX_AUDIT_GH_TOKEN") or env_value("GH_TOKEN") or env_value("GITHUB_TOKEN")
-    if not token:
-        raise BridgeError("CODEX_AUDIT_GH_TOKEN or GITHUB_TOKEN is required")
+    token = resolve_source_repo_token(source_repo)
     timeout_minutes = int(env_value("CODEX_AUDIT_TIMEOUT_MINUTES", "45"))
     auto_merge = parse_bool(env_value("CODEX_AUDIT_AUTO_MERGE"))
 

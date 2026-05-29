@@ -96,6 +96,17 @@ jobs:
             echo "available=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Resolve Source Repository Name
+        id: source_repo
+        run: |
+          set -euo pipefail
+          repository="${SOURCE_REPO#*/}"
+          if [ -z "${repository}" ] || [ "${repository}" = "${SOURCE_REPO}" ]; then
+            echo "Invalid SOURCE_REPO: ${SOURCE_REPO}" >&2
+            exit 1
+          fi
+          echo "repository=${repository}" >> "$GITHUB_OUTPUT"
+
       - name: Create GitHub App Token For Source Repository
         id: source_app_token
         if: steps.app_credentials.outputs.available == 'true'
@@ -105,10 +116,7 @@ jobs:
           app-id: ${{ vars.CROSS_REPO_GITHUB_APP_ID }}
           private-key: ${{ secrets.CROSS_REPO_GITHUB_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
-          repositories: |
-            AiLongHorizonSignalPipelines
-            CryptoSnapshotPipelines
-            UsEquitySnapshotPipelines
+          repositories: ${{ steps.source_repo.outputs.repository }}
           permission-contents: write
           permission-issues: write
           permission-pull-requests: write
