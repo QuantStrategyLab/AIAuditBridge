@@ -1,5 +1,7 @@
 # CodexAuditBridge
 
+> ⚠️ 投资有风险，不构成投资建议，仅供学习交流用途。
+
 CodexAuditBridge runs monthly repository audits on a VPS-hosted
 GitHub Actions runner that already has the Codex CLI installed and logged in.
 
