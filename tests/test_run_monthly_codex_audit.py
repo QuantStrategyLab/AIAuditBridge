@@ -43,6 +43,10 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
             "QuantStrategyLab/UsEquitySnapshotPipelines",
         )
         self.assertEqual(
+            validate_repo("QuantStrategyLab/HkEquitySnapshotPipelines"),
+            "QuantStrategyLab/HkEquitySnapshotPipelines",
+        )
+        self.assertEqual(
             validate_repo("QuantStrategyLab/AiLongHorizonSignalPipelines"),
             "QuantStrategyLab/AiLongHorizonSignalPipelines",
         )
@@ -60,6 +64,10 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         )
         self.assertEqual(
             validate_task("", "QuantStrategyLab/CryptoSnapshotPipelines"),
+            "monthly_snapshot_audit",
+        )
+        self.assertEqual(
+            validate_task("monthly_snapshot_audit", "QuantStrategyLab/HkEquitySnapshotPipelines"),
             "monthly_snapshot_audit",
         )
         with self.assertRaises(Exception):
@@ -200,6 +208,21 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertIn("QuantStrategyLab/CryptoSnapshotPipelines", prompt)
         self.assertIn("Monthly Report", prompt)
         self.assertIn("API Monthly Review", prompt)
+
+    def test_build_api_review_prompt_includes_hk_snapshot_gates(self) -> None:
+        prompt = build_api_review_prompt(
+            "QuantStrategyLab/HkEquitySnapshotPipelines",
+            "main",
+            {"title": "HK Monthly Snapshot Report", "body": "Body", "html_url": "https://example.test/issue"},
+            [],
+        )
+
+        self.assertIn("QuantStrategyLab/HkEquitySnapshotPipelines", prompt)
+        self.assertIn("hk_low_vol_dividend_quality", prompt)
+        self.assertIn("hk_shareholder_yield_quality", prompt)
+        self.assertIn("hk_free_cash_flow_quality", prompt)
+        self.assertIn("max drawdown <= 30%", prompt)
+        self.assertIn("bilingual notification evidence", prompt)
 
     def test_build_api_review_prompt_supports_long_horizon_task(self) -> None:
         prompt = build_api_review_prompt(

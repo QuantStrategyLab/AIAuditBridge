@@ -29,12 +29,14 @@ ALLOWED_SOURCE_REPOS = frozenset(
     {
         "QuantStrategyLab/AiLongHorizonSignalPipelines",
         "QuantStrategyLab/CryptoSnapshotPipelines",
+        "QuantStrategyLab/HkEquitySnapshotPipelines",
         "QuantStrategyLab/UsEquitySnapshotPipelines",
     }
 )
 REPO_TASKS = {
     "QuantStrategyLab/AiLongHorizonSignalPipelines": frozenset({"long_horizon_signal_shadow"}),
     "QuantStrategyLab/CryptoSnapshotPipelines": frozenset({"monthly_snapshot_audit"}),
+    "QuantStrategyLab/HkEquitySnapshotPipelines": frozenset({"monthly_snapshot_audit"}),
     "QuantStrategyLab/UsEquitySnapshotPipelines": frozenset({"monthly_snapshot_audit"}),
 }
 DEFAULT_TASK = "monthly_snapshot_audit"
@@ -468,6 +470,11 @@ def build_api_review_prompt(
             "Return a concise bilingual markdown review. Do not claim to have changed files.",
             "Focus on release consistency, evidence gaps, downstream impact, and low-risk follow-up actions.",
             "Do not recommend production strategy changes from one monthly snapshot alone.",
+            "If the source repository is QuantStrategyLab/HkEquitySnapshotPipelines, pay special attention to "
+            "HK snapshot promotion gates for hk_low_vol_dividend_quality, hk_shareholder_yield_quality, and "
+            "hk_free_cash_flow_quality: point-in-time inputs, no look-ahead or survivorship bias, at least "
+            "three OOS folds, max drawdown <= 30%, HK costs/slippage/lot-size/capacity, artifact provenance, "
+            "dry-run order preview, bilingual notification evidence, and operator approval.",
             "",
             "## Source",
             "",

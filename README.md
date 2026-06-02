@@ -39,8 +39,9 @@ Bridge repository credentials, choose one:
 - Preferred: `CROSS_REPO_GITHUB_APP_ID` repository variable and
   `CROSS_REPO_GITHUB_APP_PRIVATE_KEY` repository secret. The GitHub App must be
   installed on the snapshot source repositories, currently
-  `CryptoSnapshotPipelines` and `UsEquitySnapshotPipelines`, and granted
-  contents write, issues write, and pull requests write.
+  `CryptoSnapshotPipelines`, `UsEquitySnapshotPipelines`, and
+  `HkEquitySnapshotPipelines`, and granted contents write, issues write, and
+  pull requests write.
 - Fallback: `CODEX_AUDIT_GH_TOKEN` repository secret with access to the source
   repository. It needs repository metadata read, contents read/write, issues
   read/write, and pull requests read/write.
@@ -71,6 +72,7 @@ The bridge only accepts source repositories listed in the workflow and script
 allowlist:
 
 - `QuantStrategyLab/CryptoSnapshotPipelines` for `monthly_snapshot_audit`
+- `QuantStrategyLab/HkEquitySnapshotPipelines` for `monthly_snapshot_audit`
 - `QuantStrategyLab/UsEquitySnapshotPipelines` for `monthly_snapshot_audit`
 - `QuantStrategyLab/AiLongHorizonSignalPipelines` for
   `long_horizon_signal_shadow`
@@ -148,6 +150,20 @@ Optional controls:
 gh workflow run selfhosted_monthly_review.yml \
   --repo QuantStrategyLab/CodexAuditBridge \
   -f source_repo=QuantStrategyLab/UsEquitySnapshotPipelines \
+  -f issue_number=123 \
+  -f source_ref=main \
+  -f task=monthly_snapshot_audit \
+  -f mode=review_and_fix \
+  -f provider=auto \
+  -f auto_merge=false
+```
+
+HK snapshot monthly audit example:
+
+```bash
+gh workflow run selfhosted_monthly_review.yml \
+  --repo QuantStrategyLab/CodexAuditBridge \
+  -f source_repo=QuantStrategyLab/HkEquitySnapshotPipelines \
   -f issue_number=123 \
   -f source_ref=main \
   -f task=monthly_snapshot_audit \

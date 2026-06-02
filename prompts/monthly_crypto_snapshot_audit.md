@@ -10,6 +10,21 @@ clearly justified by the evidence, edit the repository. If the evidence is
 insufficient or the change would alter strategy behavior, do not make code
 changes; report the risk and the next human decision needed.
 
+If `$SOURCE_REPO` is `QuantStrategyLab/HkEquitySnapshotPipelines`, treat the
+monthly issue as an HK snapshot promotion audit. The first promoted candidates
+are expected to stay limited to:
+
+- `hk_low_vol_dividend_quality`
+- `hk_shareholder_yield_quality`
+- `hk_free_cash_flow_quality`
+
+For those HK candidates, focus on point-in-time production data, no look-ahead
+or survivorship bias, at least three independent OOS folds, max drawdown
+`<= 30%`, HK costs / slippage / lot-size / suspension / VCM / CAS / capacity,
+artifact provenance, dry-run order preview, bilingual notification evidence,
+and operator approval. Non-selected HK scaffolds should remain research-only or
+deprioritized unless the issue contains explicit validated evidence.
+
 # Source Context
 
 - Source repository: `$SOURCE_REPO`
