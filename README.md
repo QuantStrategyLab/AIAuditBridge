@@ -1,5 +1,36 @@
 # CodexAuditBridge
 
+<!-- qsl-doc-overview:start -->
+
+> ⚠️ 投资有风险，不构成投资建议，仅供学习交流用途。
+> ⚠️ Investing involves risk. This project does not provide investment advice and is for educational and research purposes only.
+
+## Open-source overview / 开源项目入口
+
+| Item | Description |
+| --- | --- |
+| Project type | automation bridge |
+| What it does | Self-hosted Codex audit bridge for monthly snapshot reviews and low-risk fix PRs. |
+| 中文说明 | 自托管 Codex 审计桥，连接月度 snapshot review、低风险修复 PR 和 GitHub 自动化。 |
+| Current status | Automation bridge. Keep permissions narrow and logs free of secrets. |
+
+### Quick start
+
+- `python -m pip install -e '.[test]'`
+- `python -m pytest -q`
+
+### Deploy / operate safely
+
+Deploy only after verifying GitHub App/token scopes and dry-run behavior.
+
+### Strategy performance / evidence boundary
+
+Success is audit/PR workflow correctness, not strategy performance.
+
+> Detailed runbooks, migration notes, workflow internals, and historical decisions are kept below. Start with this overview before using the lower-level operational sections.
+
+<!-- qsl-doc-overview:end -->
+
 > ⚠️ 投资有风险，不构成投资建议，仅供学习交流用途。
 
 
