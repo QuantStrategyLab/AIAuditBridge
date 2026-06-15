@@ -59,6 +59,10 @@ ssh_service_name() {
   fi
 }
 
+is_ssh_port_listening() {
+  ss -H -ltn "sport = :22" 2>/dev/null | grep -q .
+}
+
 detect_nginx_config() {
   if [ -n "$NGINX_CONFIG" ]; then
     echo "$NGINX_CONFIG"
@@ -430,9 +434,14 @@ repair_ssh() {
     exit 1
   fi
 
+  sudo "$sshd" -t
   sudo systemctl unmask "$service" || true
-  sudo systemctl enable --now "$service"
-  sudo systemctl restart "$service"
+  sudo systemctl enable "$service"
+  if ! systemctl is-active --quiet "$service"; then
+    sudo systemctl start "$service"
+  elif ! is_ssh_port_listening; then
+    sudo systemctl restart "$service"
+  fi
 
   if command -v ufw >/dev/null 2>&1; then
     sudo ufw allow OpenSSH >/dev/null 2>&1 || sudo ufw allow 22/tcp >/dev/null 2>&1 || true
