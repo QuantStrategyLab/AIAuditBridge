@@ -7,7 +7,7 @@ CodexAuditBridge uses an async service contract to avoid keeping a GitHub Action
 1. A source repository creates or updates an audit issue, then dispatches `QuantStrategyLab/CodexAuditBridge`.
 2. CodexAuditBridge clones the source repository with a scoped GitHub App token, builds the audit prompt, and requests a GitHub Actions OIDC token with audience `quant-codex-audit`.
 3. CodexAuditBridge submits `POST /v1/codex-audit/jobs` through the Cloudflare Worker.
-4. The Worker forwards only Quant audit routes to the VPS origin. The VPS service validates OIDC, repository allowlists, source repository allowlists, and payload size.
+4. The Worker forwards only Quant audit routes with bearer tokens to the VPS origin. The VPS service validates OIDC signature, audience, repository, workflow ref, git ref, source repository allowlists, and payload size.
 5. The VPS service returns a random `job_id`, runs Codex in a background thread, and persists job state in a private local directory.
 6. CodexAuditBridge polls `GET /v1/codex-audit/jobs/{job_id}` until the job succeeds, fails, or times out.
 
@@ -30,9 +30,13 @@ The historical self-hosted direct-Codex workflows in `SelfHostedCodexAuditBridge
 - Source repositories should only dispatch the bridge workflow and provide issue/source context. Avoid running Codex directly in public workflows.
 - `QuantStrategyLab/CodexAuditBridge` is public, so it may contain only client/orchestration code. Its service URL, provider fallback keys, GitHub App private key, and Cloudflare origin stay in GitHub or Cloudflare secrets.
 - The VPS service should allow only `QuantStrategyLab/CodexAuditBridge` in `CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES`; this OIDC allowlist is required because the bridge repository is public.
+- The VPS service should require `CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS=QuantStrategyLab/CodexAuditBridge/.github/workflows/codex_audit.yml@refs/heads/main`.
+- The VPS service should require `CODEX_AUDIT_SERVICE_ALLOWED_REFS=refs/heads/main`.
+- Keep `CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORY_VISIBILITIES=public` unless the bridge repository is intentionally private.
 - The VPS service should keep `CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES` limited to the current source repositories.
 - The Cloudflare Worker stores only `CODEX_AUDIT_ORIGIN_URL` as a Worker secret. Do not commit the origin URL if it exposes infrastructure details.
 - Job IDs are random and status reads still require service authentication. Job responses never include the original prompt.
+- Static service bearer tokens are no longer supported; production calls must use GitHub Actions OIDC.
 
 ## Open source repository checklist
 
@@ -52,6 +56,9 @@ After merging the async service code, run the manual `VPS Codex Service Ops` wor
 
 ```bash
 CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES=QuantStrategyLab/CodexAuditBridge \
+CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS='QuantStrategyLab/CodexAuditBridge/.github/workflows/codex_audit.yml@refs/heads/main' \
+CODEX_AUDIT_SERVICE_ALLOWED_REFS='refs/heads/main' \
+CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORY_VISIBILITIES='public' \
 CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES='QuantStrategyLab/CryptoLivePoolPipelines,QuantStrategyLab/HkEquitySnapshotPipelines,QuantStrategyLab/UsEquitySnapshotPipelines,QuantStrategyLab/ResearchSignalContextPipelines' \
 CODEX_AUDIT_SERVICE_AUDIENCE=quant-codex-audit \
 CODEX_AUDIT_SERVICE_JOB_DIR=/var/lib/codex-audit-bridge/jobs \
@@ -79,7 +86,8 @@ curl -sS -o /tmp/codex-audit-probe.json -w '%{http_code}\n' \
   https://quantstrategylab-codex-audit-proxy.<account-subdomain>.workers.dev/v1/codex-audit/jobs
 ```
 
-The unauthenticated submit probe should return `401` from the origin service.
+The unauthenticated submit probe should return `401`. If the request is sent to
+the Worker URL, the Worker may reject it before it reaches the origin service.
 
 ### 3. Point CodexAuditBridge at the Worker
 
@@ -102,7 +110,16 @@ Run a manual `codex_audit.yml` dispatch against a low-risk source issue with pro
 - the submit response creates a job;
 - polling reaches `succeeded` or a clear failure;
 - the source repository receives only the intended comment or PR;
-- no provider keys, origin URL, or job prompt are printed in logs.
+- no provider keys, origin URL, service token, or job prompt are printed in logs.
+
+## Self-deployment for forks
+
+Forks and third-party open-source users should deploy their own Worker, origin
+service, GitHub App credentials, and provider secrets. This repository contains
+the orchestration code, but the production service only trusts OIDC claims for
+the configured bridge repository/workflow/ref. A fork cannot use the
+QuantStrategyLab service unless its repository and workflow ref are deliberately
+added to the Quant service allowlists.
 
 ## Rollback
 

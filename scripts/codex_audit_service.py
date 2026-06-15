@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import fnmatch
 import hashlib
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -48,6 +49,36 @@ def _json_response(handler: BaseHTTPRequestHandler, status: HTTPStatus, payload:
 def _split_csv_env(name: str) -> set[str]:
     raw = os.environ.get(name, "")
     return {item.strip() for item in re.split(r"[\n,]", raw) if item.strip()}
+
+
+def _allowed_claim_patterns(env_name: str) -> set[str]:
+    return _split_csv_env(env_name)
+
+
+def _claim_matches(value: str, patterns: set[str]) -> bool:
+    return any(fnmatch.fnmatchcase(value, pattern) for pattern in patterns)
+
+
+def _require_allowed_claim(payload: dict[str, Any], env_name: str, claim_name: str, label: str) -> None:
+    patterns = _allowed_claim_patterns(env_name)
+    if not patterns:
+        raise PermissionError(f"{env_name} is required")
+    value = str(payload.get(claim_name) or "")
+    if not value:
+        raise PermissionError(f"OIDC {label} is missing")
+    if not _claim_matches(value, patterns):
+        raise PermissionError(f"OIDC {label} is not allowed")
+
+
+def _require_optional_allowed_claim(payload: dict[str, Any], env_name: str, claim_name: str, label: str) -> None:
+    patterns = _allowed_claim_patterns(env_name)
+    if not patterns:
+        return
+    value = str(payload.get(claim_name) or "")
+    if not value:
+        raise PermissionError(f"OIDC {label} is missing")
+    if not _claim_matches(value, patterns):
+        raise PermissionError(f"OIDC {label} is not allowed")
 
 
 def _load_jwks() -> dict[str, Any]:
@@ -145,18 +176,30 @@ def _verify_github_oidc(token: str) -> dict[str, Any]:
     if iat and now + skew < iat:
         raise PermissionError("OIDC token issue time is in the future")
 
-    allowed_repositories = _split_csv_env("CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES")
-    repository = str(payload.get("repository") or "")
-    if not allowed_repositories:
-        raise PermissionError("CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES is required")
-    if repository not in allowed_repositories:
-        raise PermissionError("OIDC repository is not allowed")
+    _require_allowed_claim(payload, "CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES", "repository", "repository")
+    _require_allowed_claim(payload, "CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS", "workflow_ref", "workflow_ref")
+    _require_allowed_claim(payload, "CODEX_AUDIT_SERVICE_ALLOWED_REFS", "ref", "ref")
+    _require_optional_allowed_claim(
+        payload,
+        "CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORY_VISIBILITIES",
+        "repository_visibility",
+        "repository visibility",
+    )
     return payload
 
 
 def _authenticate(headers: Any) -> dict[str, Any]:
     mode = os.environ.get("CODEX_AUDIT_SERVICE_AUTH", "github-oidc").strip().lower()
     if mode == "none":
+        if os.environ.get("CODEX_AUDIT_SERVICE_ALLOW_NO_AUTH_FOR_LOCAL_TESTS", "").strip().lower() not in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }:
+            raise PermissionError(
+                "CODEX_AUDIT_SERVICE_AUTH=none requires CODEX_AUDIT_SERVICE_ALLOW_NO_AUTH_FOR_LOCAL_TESTS=true"
+            )
         return {"repository": "local", "actor": "local", "run_id": "local"}
     authorization = str(headers.get("Authorization") or "")
     prefix = "Bearer "
@@ -167,13 +210,6 @@ def _authenticate(headers: Any) -> dict[str, Any]:
         raise PermissionError("missing bearer token")
     if mode in {"github-oidc", "oidc"}:
         return _verify_github_oidc(token)
-    if mode == "static-token":
-        expected = os.environ.get("CODEX_AUDIT_SERVICE_STATIC_TOKEN", "")
-        if not expected:
-            raise PermissionError("CODEX_AUDIT_SERVICE_STATIC_TOKEN is required")
-        if token != expected:
-            raise PermissionError("static token is not allowed")
-        return {"repository": "static-token", "actor": "static-token", "run_id": "static-token"}
     raise PermissionError(f"unsupported CODEX_AUDIT_SERVICE_AUTH={mode!r}")
 
 

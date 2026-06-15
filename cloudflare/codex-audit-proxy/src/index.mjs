@@ -76,6 +76,11 @@ function forwardedHeaders(request, url) {
   return headers;
 }
 
+function hasBearerToken(request) {
+  const value = request.headers.get("Authorization") || "";
+  return value.startsWith("Bearer ") && value.slice("Bearer ".length).trim().length > 0;
+}
+
 async function proxyRequest(request, env) {
   const url = new URL(request.url);
   const originUrl = buildOriginUrl(env.CODEX_AUDIT_ORIGIN_URL, url.pathname, url.search);
@@ -100,6 +105,9 @@ export default {
     }
     if (url.pathname === HEALTH_ROUTE) {
       return jsonResponse(200, { status: "ok" });
+    }
+    if (!hasBearerToken(request)) {
+      return jsonResponse(401, { status: "error", error: "missing bearer token" });
     }
 
     try {

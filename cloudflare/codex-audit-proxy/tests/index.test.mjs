@@ -65,6 +65,12 @@ test("worker rejects unsupported method before origin lookup", async () => {
   assert.deepEqual(await response.json(), { status: "error", error: "method not allowed" });
 });
 
+test("worker rejects missing bearer token before origin lookup", async () => {
+  const response = await worker.fetch(new Request("https://proxy.example/v1/codex-audit/jobs", { method: "POST" }), {});
+  assert.equal(response.status, 401);
+  assert.deepEqual(await response.json(), { status: "error", error: "missing bearer token" });
+});
+
 test("worker rejects malformed job ids before origin lookup", async () => {
   const response = await worker.fetch(new Request("https://proxy.example/v1/codex-audit/jobs/nope"), {});
   assert.equal(response.status, 404);

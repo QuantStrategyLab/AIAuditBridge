@@ -32,6 +32,7 @@ from scripts.run_monthly_codex_audit import (
     parse_service_patch_response,
     parse_bool,
     pr_closing_line,
+    request_github_oidc_token,
     resolve_source_repo_token,
     run_configured_api_reviews,
     safe_branch_component,
@@ -42,6 +43,7 @@ from scripts.run_monthly_codex_audit import (
     validate_task,
 )
 from scripts.codex_audit_service import CodexAuditServiceRequestHandler, _codex_env
+from scripts import codex_audit_service
 
 
 class RunMonthlyCodexAuditTests(unittest.TestCase):
@@ -153,6 +155,69 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertNotIn("CODEX_AUDIT_SERVICE_STATIC_TOKEN", env)
         self.assertNotIn("CODEX_AUDIT_SERVICE_OPENAI_API_KEY", env)
         self.assertEqual(env["OPENAI_API_KEY"], "service-openai-key")
+
+    def test_request_github_oidc_token_does_not_accept_static_token_fallback(self) -> None:
+        with patch.dict(os.environ, {"CODEX_AUDIT_SERVICE_TOKEN": "legacy-token"}, clear=True):
+            with self.assertRaisesRegex(BridgeError, "GitHub Actions OIDC token request environment is unavailable"):
+                request_github_oidc_token("quant-codex-audit")
+
+    def test_codex_audit_service_oidc_requires_repository_workflow_and_ref_allowlists(self) -> None:
+        payload = {
+            "aud": "quant-codex-audit",
+            "iss": codex_audit_service.GITHUB_OIDC_ISSUER,
+            "exp": int(time.time()) + 300,
+            "repository": "QuantStrategyLab/CodexAuditBridge",
+            "workflow_ref": "QuantStrategyLab/CodexAuditBridge/.github/workflows/codex_audit.yml@refs/heads/main",
+            "ref": "refs/heads/main",
+            "repository_visibility": "public",
+        }
+        env = {
+            "CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES": "QuantStrategyLab/CodexAuditBridge",
+            "CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS": (
+                "QuantStrategyLab/CodexAuditBridge/.github/workflows/codex_audit.yml@refs/heads/main"
+            ),
+            "CODEX_AUDIT_SERVICE_ALLOWED_REFS": "refs/heads/main",
+            "CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORY_VISIBILITIES": "public",
+        }
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch.object(
+                codex_audit_service,
+                "_jwt_parts",
+                return_value=({"alg": "RS256", "kid": "1"}, payload, b"x", b"y"),
+            ),
+            patch.object(codex_audit_service, "_load_jwks", return_value={"keys": [{"kid": "1", "kty": "RSA"}]}),
+            patch.object(codex_audit_service, "_verify_rs256", return_value=None),
+        ):
+            claims = codex_audit_service._verify_github_oidc("header.payload.signature")
+
+        self.assertEqual(claims["repository"], "QuantStrategyLab/CodexAuditBridge")
+
+    def test_codex_audit_service_oidc_rejects_missing_workflow_allowlist(self) -> None:
+        payload = {
+            "aud": "quant-codex-audit",
+            "iss": codex_audit_service.GITHUB_OIDC_ISSUER,
+            "exp": int(time.time()) + 300,
+            "repository": "QuantStrategyLab/CodexAuditBridge",
+            "workflow_ref": "QuantStrategyLab/CodexAuditBridge/.github/workflows/codex_audit.yml@refs/heads/main",
+            "ref": "refs/heads/main",
+        }
+        env = {
+            "CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES": "QuantStrategyLab/CodexAuditBridge",
+            "CODEX_AUDIT_SERVICE_ALLOWED_REFS": "refs/heads/main",
+        }
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch.object(
+                codex_audit_service,
+                "_jwt_parts",
+                return_value=({"alg": "RS256", "kid": "1"}, payload, b"x", b"y"),
+            ),
+            patch.object(codex_audit_service, "_load_jwks", return_value={"keys": [{"kid": "1", "kty": "RSA"}]}),
+            patch.object(codex_audit_service, "_verify_rs256", return_value=None),
+            self.assertRaisesRegex(PermissionError, "CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS is required"),
+        ):
+            codex_audit_service._verify_github_oidc("header.payload.signature")
 
     def test_strip_audit_heading_removes_only_leading_heading(self) -> None:
         for heading in ("## Crypto Codex Audit", "## Codex Audit"):
@@ -364,6 +429,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             env = {
                 "CODEX_AUDIT_SERVICE_AUTH": "none",
+                "CODEX_AUDIT_SERVICE_ALLOW_NO_AUTH_FOR_LOCAL_TESTS": "true",
                 "CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES": "QuantStrategyLab/CryptoLivePoolPipelines",
                 "CODEX_AUDIT_SERVICE_FAKE_OUTPUT": "async review output",
                 "CODEX_AUDIT_SERVICE_JOB_DIR": tmp,

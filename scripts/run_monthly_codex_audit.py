@@ -650,16 +650,12 @@ def codex_service_job_url(service_url: str, job_id: str) -> str:
 
 
 def request_github_oidc_token(audience: str) -> str:
-    static_token = env_value("CODEX_AUDIT_SERVICE_TOKEN")
-    if static_token:
-        return static_token
-
     request_url = env_value("ACTIONS_ID_TOKEN_REQUEST_URL")
     request_token = env_value("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
     if not request_url or not request_token:
         raise BridgeError(
             "GitHub Actions OIDC token request environment is unavailable. "
-            "Set workflow `permissions: id-token: write` or provide CODEX_AUDIT_SERVICE_TOKEN for local testing."
+            "Set workflow `permissions: id-token: write` and run from an allowed workflow/ref."
         )
     separator = "&" if "?" in request_url else "?"
     url = f"{request_url}{separator}audience={urllib.parse.quote(audience)}"
