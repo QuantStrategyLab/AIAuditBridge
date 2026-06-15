@@ -23,10 +23,7 @@ CodexAuditBridge 是 QuantStrategyLab 组织内的 Codex 调用边界。各 sour
 
 这个边界应留在 `QuantStrategyLab` 组织内。不要把 QuantStrategyLab 审计执行或 source repository 写 token 移到其他组织。
 
-Codex 执行和 GitHub 写入权限故意拆开：
-
-- `local` backend：在带有 `self-hosted,codex-vps` label 的 runner 上直接运行 `codex exec`。
-- `service` backend：从 GitHub-hosted runner 调用 QuantStrategyLab 自有的 HTTPS/443 Codex audit service。service 只返回 review 文本或结构化 patch 建议；clone、路径校验、patch apply、commit、push、PR 和 issue comment 仍由 CodexAuditBridge 负责。
+Codex 执行现在只走 service backend：workflow 从 GitHub-hosted runner 调用 QuantStrategyLab 自有的 HTTPS/443 Codex audit service。service 只返回 review 文本或结构化 patch 建议；clone、路径校验、patch apply、commit、push、PR 和 issue comment 仍由 CodexAuditBridge 负责。
 
 这样可以避免每个 source repository 都硬编码 Codex CLI，也不会依赖 `QuantStrategyLab` 组织外的仓库。
 
@@ -43,30 +40,16 @@ Codex 执行和 GitHub 写入权限故意拆开：
 
 新增 dispatcher 时，需要同步更新 `scripts/run_monthly_codex_audit.py` 里的 `SOURCE_REPO_TASKS`，并补充回归测试证明对应 repository/task pair 会被接受。
 
-## Codex backend 配置
+## Codex service 配置
 
-workflow dispatch input `codex_backend` 控制 Codex 的执行方式：
+CodexAuditBridge 只使用 service backend。workflow 运行在 `ubuntu-latest`，并调用 QuantStrategyLab 自有 HTTPS/443 Codex audit service。
 
-| Backend | Runner | 必要配置 |
-| --- | --- | --- |
-| `local` | `self-hosted,codex-vps` | runner 上已安装 Codex CLI，并配置模型凭据 |
-| `service` | `ubuntu-latest` | 在本仓库配置 repository secret 或 variable `CODEX_AUDIT_SERVICE_URL`，指向 QuantStrategyLab 自有 HTTPS service |
+需要在 `QuantStrategyLab/CodexAuditBridge` 配置：
 
-service backend 需要在 `QuantStrategyLab/CodexAuditBridge` 配置：
-
-- 可选 repository variable `CODEX_AUDIT_CODEX_BACKEND`，默认 `local`。只有在 HTTPS service URL 验证通过后再改成 `service`。
 - Repository secret `CODEX_AUDIT_SERVICE_URL`，例如 `https://codex-audit.example.com`。
-  如果 URL 会暴露源站基础设施信息，优先使用 secret，不要放在普通 variable。
-- Repository variable `CODEX_AUDIT_SERVICE_URL` 仍保留兼容；secret 和 variable 同时存在时，workflow 优先使用 secret。
+  URL 可能暴露源站基础设施信息，因此放在 secret，不放在普通 variable。
 - 可选 repository variable `CODEX_AUDIT_SERVICE_AUDIENCE`，默认 `quant-codex-audit`。
 - workflow 已配置 `id-token: write`，用于向 service 提供 GitHub Actions OIDC token。
-
-推荐迁移顺序：
-
-1. 保持 `CODEX_AUDIT_CODEX_BACKEND=local`，或者不配置。
-2. 部署 QuantStrategyLab 自有 service，并配置 `CODEX_AUDIT_SERVICE_URL`。
-3. 手动 dispatch 一次 workflow，选择 `codex_backend=service`。
-4. service 路径验证通过后，再把 `CODEX_AUDIT_CODEX_BACKEND=service` 作为仓库默认 backend。
 
 service host 启动示例：
 
@@ -78,7 +61,7 @@ OPENAI_API_KEY=... \
 python3 scripts/codex_audit_service.py
 ```
 
-443/TLS 建议由平台负载均衡或反向代理负责，再转发到 service 端口。不要把 GitHub 写 token 传给这个 service。
+443/TLS 建议由平台负载均衡或反向代理负责，并把 `/v1/codex-audit` 转发到 service 端口。不要把 GitHub 写 token 传给这个 service。
 
 ### Service patch contract
 
