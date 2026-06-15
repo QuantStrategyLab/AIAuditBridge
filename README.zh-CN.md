@@ -50,12 +50,14 @@ workflow dispatch input `codex_backend` 控制 Codex 的执行方式：
 | Backend | Runner | 必要配置 |
 | --- | --- | --- |
 | `local` | `self-hosted,codex-vps` | runner 上已安装 Codex CLI，并配置模型凭据 |
-| `service` | `ubuntu-latest` | 在本仓库配置 repository variable `CODEX_AUDIT_SERVICE_URL`，指向 QuantStrategyLab 自有 HTTPS service |
+| `service` | `ubuntu-latest` | 在本仓库配置 repository secret 或 variable `CODEX_AUDIT_SERVICE_URL`，指向 QuantStrategyLab 自有 HTTPS service |
 
 service backend 需要在 `QuantStrategyLab/CodexAuditBridge` 配置：
 
 - 可选 repository variable `CODEX_AUDIT_CODEX_BACKEND`，默认 `local`。只有在 HTTPS service URL 验证通过后再改成 `service`。
-- Repository variable `CODEX_AUDIT_SERVICE_URL`，例如 `https://codex-audit.quant.example`。
+- Repository secret `CODEX_AUDIT_SERVICE_URL`，例如 `https://codex-audit.example.com`。
+  如果 URL 会暴露源站基础设施信息，优先使用 secret，不要放在普通 variable。
+- Repository variable `CODEX_AUDIT_SERVICE_URL` 仍保留兼容；secret 和 variable 同时存在时，workflow 优先使用 secret。
 - 可选 repository variable `CODEX_AUDIT_SERVICE_AUDIENCE`，默认 `quant-codex-audit`。
 - workflow 已配置 `id-token: write`，用于向 service 提供 GitHub Actions OIDC token。
 

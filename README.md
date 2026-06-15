@@ -50,12 +50,14 @@ Workflow dispatch input `codex_backend` controls how Codex is executed:
 | Backend | Runner | Required setup |
 | --- | --- | --- |
 | `local` | `self-hosted,codex-vps` | Codex CLI and model credentials available on the runner |
-| `service` | `ubuntu-latest` | `CODEX_AUDIT_SERVICE_URL` repository variable pointing to the QuantStrategyLab HTTPS service |
+| `service` | `ubuntu-latest` | `CODEX_AUDIT_SERVICE_URL` repository secret or variable pointing to the QuantStrategyLab HTTPS service |
 
 For the service backend, configure these values in `QuantStrategyLab/CodexAuditBridge`:
 
 - Optional repository variable `CODEX_AUDIT_CODEX_BACKEND`, default `local`. Set it to `service` only after the HTTPS service URL has been verified.
-- Repository variable `CODEX_AUDIT_SERVICE_URL`, for example `https://codex-audit.quant.example`.
+- Repository secret `CODEX_AUDIT_SERVICE_URL`, for example `https://codex-audit.example.com`.
+  Use a secret instead of a plain variable when the URL exposes origin infrastructure details.
+- Repository variable `CODEX_AUDIT_SERVICE_URL` is still accepted for compatibility, but the workflow prefers the secret when both are configured.
 - Optional repository variable `CODEX_AUDIT_SERVICE_AUDIENCE`, default `quant-codex-audit`.
 - Workflow permission `id-token: write` is already set so GitHub Actions can request an OIDC token for the service.
 

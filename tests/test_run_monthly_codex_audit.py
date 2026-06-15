@@ -400,6 +400,10 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         workflow = Path(".github/workflows/selfhosted_monthly_review.yml").read_text(encoding="utf-8")
 
         self.assertIn("vars.CODEX_AUDIT_CODEX_BACKEND", workflow)
+        self.assertIn(
+            "CODEX_AUDIT_SERVICE_URL: ${{ secrets.CODEX_AUDIT_SERVICE_URL || vars.CODEX_AUDIT_SERVICE_URL }}",
+            workflow,
+        )
         self.assertIn("actions/checkout@v6.0.3", workflow)
         self.assertIn("actions/create-github-app-token@v3.2.0", workflow)
 
