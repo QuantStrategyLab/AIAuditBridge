@@ -13,6 +13,17 @@ CodexAuditBridge uses an async service contract to avoid keeping a GitHub Action
 
 The synchronous `POST /v1/codex-audit` endpoint remains available for local diagnostics, but production workflows should use the async job endpoints.
 
+## Boundary with Pigbibi CodexGateway
+
+`CodexAuditBridge` intentionally stays separate from `Pigbibi/CodexGateway`.
+
+- `CodexGateway` is a generic Codex invocation facade for prompt/context/image/schema calls.
+- `CodexAuditBridge` owns QuantStrategyLab monthly audit semantics: source issue context, bounded repository snapshots, service patch contracts, source repository allowlists, GitHub App writeback, and generated remediation PRs.
+- Do not route Quant monthly audits through the Pigbibi gateway Worker or Pigbibi repository allowlist.
+- Do not move audit-specific issue/PR behavior into `CodexGateway`; share only low-level primitives after the HTTP contracts are stable.
+
+The historical self-hosted direct-Codex workflows in `SelfHostedCodexAuditBridge` and `CryptoCodexAuditBridge` should be treated as compatibility fallback. The preferred production path is the GitHub-hosted `CodexAuditBridge` workflow plus async VPS service. After parity is verified for current monthly sources, the self-hosted direct-Codex workflows can be disabled or deleted.
+
 ## Permission and secret boundary
 
 - Source repositories, including public QuantStrategyLab repositories, must not store provider keys or the Codex service URL.
