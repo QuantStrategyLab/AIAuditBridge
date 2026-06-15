@@ -52,6 +52,15 @@ inspect() {
   ss -ltnp 2>/dev/null | grep -E ':(80|443|8787|8788|8797)\b' || true
   echo
 
+  echo "## Codex process hints"
+  ps -eo pid,ppid,user,comm,args | grep -E '(codex[_-]|codex gateway|codex-audit|codex_service|8787|8788|8797)' | grep -v grep || true
+  echo
+
+  echo "## Codex unit files"
+  systemctl list-units --all --type=service 2>/dev/null | grep -i codex || true
+  systemctl list-unit-files 2>/dev/null | grep -i codex || true
+  echo
+
   echo "## Services"
   systemctl_status_brief "$GATEWAY_SERVICE_NAME"
   systemctl_status_brief "$AUDIT_SERVICE_NAME"
@@ -61,8 +70,14 @@ inspect() {
   echo
 
   echo "## Reverse proxy hints"
+  local nginx_bin=""
   if command -v nginx >/dev/null 2>&1; then
-    sudo nginx -T 2>/dev/null | grep -nE 'server_name|listen|proxy_pass|codex|8787|8788|8797' | head -120 || true
+    nginx_bin="$(command -v nginx)"
+  elif [ -x /usr/sbin/nginx ]; then
+    nginx_bin="/usr/sbin/nginx"
+  fi
+  if [ -n "$nginx_bin" ]; then
+    sudo "$nginx_bin" -T 2>/dev/null | grep -nE 'server_name|listen|proxy_pass|codex|8787|8788|8797|sslip' | head -160 || true
   fi
 }
 
