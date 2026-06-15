@@ -176,7 +176,17 @@ text = re.sub(
 
 route_template = """
 {indent}# CodexAuditBridge route start
-{indent}location /v1/codex-audit {{
+{indent}location = /v1/codex-audit {{
+{indent}    proxy_pass http://127.0.0.1:{port};
+{indent}    proxy_http_version 1.1;
+{indent}    proxy_set_header Host $host;
+{indent}    proxy_set_header X-Real-IP $remote_addr;
+{indent}    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+{indent}    proxy_set_header X-Forwarded-Proto https;
+{indent}    proxy_read_timeout 3600s;
+{indent}    proxy_send_timeout 3600s;
+{indent}}}
+{indent}location ^~ /v1/codex-audit/ {{
 {indent}    proxy_pass http://127.0.0.1:{port};
 {indent}    proxy_http_version 1.1;
 {indent}    proxy_set_header Host $host;
@@ -289,8 +299,27 @@ import re
 import sys
 
 text = Path(sys.argv[1]).read_text(encoding="utf-8")
-for block in re.findall(r"server\s*\{.*?\n\}", text, flags=re.S):
+
+
+def server_blocks(source: str):
+    for match in re.finditer(r"\bserver\s*\{", source):
+        open_brace = source.find("{", match.start())
+        depth = 0
+        for index in range(open_brace, len(source)):
+            char = source[index]
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    yield source[match.start() : index + 1]
+                    break
+
+
+for block in server_blocks(text):
     if not re.search(r"\blisten\s+443\b", block):
+        continue
+    if "# CodexAuditBridge route start" not in block:
         continue
     match = re.search(r"\bserver_name\s+([^;\s]+)", block)
     if match and match.group(1) not in {"_", "localhost"}:
