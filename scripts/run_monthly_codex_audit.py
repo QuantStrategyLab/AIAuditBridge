@@ -101,9 +101,6 @@ BLOCKED_PATH_RE = re.compile(
     r"(^|/)(\.env|.*secret.*|.*credential.*|.*token.*|.*private.*|.*\.pem|.*\.key)$",
     re.IGNORECASE,
 )
-SECRET_ENV_MARKERS = ("TOKEN", "SECRET", "PASSWORD", "PRIVATE_KEY", "CREDENTIAL")
-
-
 class BridgeError(RuntimeError):
     pass
 
@@ -241,83 +238,6 @@ def git_auth_env(token: str) -> dict[str, str]:
             "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {encoded}",
         }
     )
-    return env
-
-
-def codex_process_env() -> dict[str, str]:
-    return {
-        key: value
-        for key, value in os.environ.items()
-        if not any(marker in key.upper() for marker in SECRET_ENV_MARKERS)
-    }
-
-
-def bootstrap_packages() -> list[str]:
-    raw = env_value("CODEX_AUDIT_PYTHON_BOOTSTRAP_PACKAGES", "pandas")
-    return shlex.split(raw)
-
-
-def package_import_name(package_spec: str) -> str:
-    package_name = re.split(r"[<>=!~\[]", package_spec, maxsplit=1)[0].strip()
-    normalized = package_name.replace("-", "_").lower()
-    if normalized == "pyyaml":
-        return "yaml"
-    return normalized
-
-
-def python_path_for_venv(venv_dir: Path) -> Path:
-    return venv_dir / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-
-
-def venv_bin_path(venv_dir: Path) -> Path:
-    return venv_dir / ("Scripts" if os.name == "nt" else "bin")
-
-
-def python_can_import(python: Path, import_name: str) -> bool:
-    result = run([str(python), "-c", f"import {import_name}"], timeout=30)
-    return result.returncode == 0
-
-
-def bootstrap_python_environment() -> dict[str, str]:
-    if not parse_bool(env_value("CODEX_AUDIT_INSTALL_PYTHON_DEPS", "true")):
-        return {}
-
-    packages = bootstrap_packages()
-    if not packages:
-        return {}
-
-    venv_root = Path(env_value("CODEX_AUDIT_PYTHON_VENV", "~/.cache/codex-audit/python-venv")).expanduser()
-    python = python_path_for_venv(venv_root)
-    if not python.exists():
-        venv_root.parent.mkdir(parents=True, exist_ok=True)
-        run_checked([sys.executable, "-m", "venv", str(venv_root)], timeout=180)
-
-    missing = [package for package in packages if not python_can_import(python, package_import_name(package))]
-    if missing:
-        install_timeout = int(env_value("CODEX_AUDIT_PIP_INSTALL_TIMEOUT_SECONDS", "600"))
-        run_checked(
-            [
-                str(python),
-                "-m",
-                "pip",
-                "install",
-                "--disable-pip-version-check",
-                *missing,
-            ],
-            timeout=install_timeout,
-        )
-
-    path = os.environ.get("PATH", "")
-    return {
-        "VIRTUAL_ENV": str(venv_root),
-        "PATH": f"{venv_bin_path(venv_root)}{os.pathsep}{path}" if path else str(venv_bin_path(venv_root)),
-    }
-
-
-def codex_environment(extra_env: dict[str, str] | None = None) -> dict[str, str]:
-    env = codex_process_env()
-    if extra_env:
-        env.update(extra_env)
     return env
 
 
@@ -591,34 +511,6 @@ def build_service_prompt(repo_dir: Path, prompt: str, *, task: str, mode: str) -
     return "\n".join(parts).rstrip() + "\n"
 
 
-def run_codex(
-    repo_dir: Path,
-    prompt: str,
-    timeout_minutes: int,
-    *,
-    env_overrides: dict[str, str] | None = None,
-) -> tuple[int, str, str]:
-    output_path = repo_dir / ".codex-audit" / "codex-final-message.md"
-    command = [
-        "codex",
-        "exec",
-        "--dangerously-bypass-approvals-and-sandbox",
-        "--cd",
-        str(repo_dir),
-        "--output-last-message",
-        str(output_path),
-        "-",
-    ]
-    try:
-        result = run(command, env=codex_environment(env_overrides), input_text=prompt, timeout=timeout_minutes * 60)
-    except FileNotFoundError:
-        return 127, "codex command was not found", ""
-    if result.stdout:
-        print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
-    final_message = output_path.read_text(encoding="utf-8") if output_path.exists() else ""
-    return result.returncode, result.stdout or "", final_message.strip()
-
-
 def normalize_codex_service_url(raw_url: str) -> str:
     raw_url = raw_url.strip().rstrip("/")
     if not raw_url:
@@ -888,7 +780,6 @@ def run_codex_backend(
     source_ref: str,
     task: str,
     mode: str,
-    env_overrides: dict[str, str] | None = None,
 ) -> tuple[int, str, str]:
     if backend == "service":
         return run_codex_service(
@@ -1470,7 +1361,6 @@ def main() -> int:
                 context_path=context_path,
                 mode=mode,
             )
-            dependency_env = bootstrap_python_environment() if codex_backend == "local" else {}
             return_code, _codex_log, final_message = run_codex_backend(
                 repo_dir,
                 prompt,
@@ -1480,7 +1370,6 @@ def main() -> int:
                 source_ref=source_ref,
                 task=task,
                 mode=mode,
-                env_overrides=dependency_env,
             )
             if return_code != 0:
                 if provider == "auto":

@@ -16,19 +16,16 @@ from scripts.run_monthly_codex_audit import (
     SOURCE_REPO_TASKS,
     apply_service_changes,
     blocked_paths,
-    bootstrap_packages,
     build_api_review_prompt,
     build_service_prompt,
     codex_service_job_url,
     codex_service_jobs_url,
-    codex_process_env,
     convert_local_markdown_links,
     extract_anthropic_text,
     extract_openai_text,
     auto_fallback_missing_api_key_message,
     format_api_review_comment,
     normalize_codex_service_url,
-    package_import_name,
     parse_service_patch_response,
     parse_bool,
     pr_closing_line,
@@ -129,15 +126,6 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
             task="long_horizon_signal_shadow",
         )
         self.assertEqual(blocked, ["data/raw/market_history.csv"])
-
-    def test_codex_process_env_removes_secret_like_variables(self) -> None:
-        env = codex_process_env()
-        for key in env:
-            self.assertNotIn("TOKEN", key.upper())
-            self.assertNotIn("SECRET", key.upper())
-            self.assertNotIn("PASSWORD", key.upper())
-            self.assertNotIn("PRIVATE_KEY", key.upper())
-            self.assertNotIn("CREDENTIAL", key.upper())
 
     def test_codex_audit_service_env_removes_service_secrets(self) -> None:
         with patch.dict(
@@ -248,14 +236,6 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
             convert_local_markdown_links(body, repo_dir, "QuantStrategyLab/CryptoLivePoolPipelines", "main"),
             body,
         )
-
-    def test_package_import_name_normalizes_common_specs(self) -> None:
-        self.assertEqual(package_import_name("pandas>=3.0"), "pandas")
-        self.assertEqual(package_import_name("PyYAML==6.0"), "yaml")
-
-    def test_bootstrap_packages_uses_default(self) -> None:
-        with patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(bootstrap_packages(), ["pandas"])
 
     def test_resolve_source_repo_token_prefers_source_scoped_tokens(self) -> None:
         with patch.dict(
