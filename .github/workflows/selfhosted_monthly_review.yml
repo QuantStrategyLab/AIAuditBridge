@@ -82,7 +82,7 @@ jobs:
       CODEX_AUDIT_AUTO_MERGE: ${{ github.event.client_payload.auto_merge || inputs.auto_merge || 'false' }}
     steps:
       - name: Checkout Bridge
-        uses: actions/checkout@v6
+        uses: actions/checkout@v6.0.3
 
       - name: Verify Codex CLI
         if: env.CODEX_AUDIT_PROVIDER == 'codex' && env.CODEX_AUDIT_CODEX_BACKEND == 'local'
@@ -119,7 +119,7 @@ jobs:
         id: source_app_token
         if: steps.app_credentials.outputs.available == 'true'
         continue-on-error: true
-        uses: actions/create-github-app-token@v3
+        uses: actions/create-github-app-token@v3.2.0
         with:
           app-id: ${{ vars.CROSS_REPO_GITHUB_APP_ID }}
           private-key: ${{ secrets.CROSS_REPO_GITHUB_APP_PRIVATE_KEY }}
