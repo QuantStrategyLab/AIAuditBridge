@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from scripts.run_monthly_codex_audit import (
     BridgeError,
+    SOURCE_REPO_TASKS,
     blocked_paths,
     bootstrap_packages,
     build_api_review_prompt,
@@ -37,25 +38,30 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
             self.assertFalse(parse_bool(value))
 
     def test_validate_repo_accepts_owner_repo(self) -> None:
-        self.assertEqual(validate_repo("QuantStrategyLab/CryptoSnapshotPipelines"), "QuantStrategyLab/CryptoSnapshotPipelines")
-        self.assertEqual(
-            validate_repo("QuantStrategyLab/UsEquitySnapshotPipelines"),
-            "QuantStrategyLab/UsEquitySnapshotPipelines",
-        )
-        self.assertEqual(
-            validate_repo("QuantStrategyLab/HkEquitySnapshotPipelines"),
-            "QuantStrategyLab/HkEquitySnapshotPipelines",
-        )
-        self.assertEqual(
-            validate_repo("QuantStrategyLab/AiLongHorizonSignalPipelines"),
-            "QuantStrategyLab/AiLongHorizonSignalPipelines",
-        )
+        for source_repo in SOURCE_REPO_TASKS:
+            with self.subTest(source_repo=source_repo):
+                self.assertEqual(validate_repo(source_repo), source_repo)
 
     def test_validate_repo_rejects_invalid_values(self) -> None:
         with self.assertRaises(Exception):
             validate_repo("QuantStrategyLab/CryptoSnapshotPipelines/extra")
         with self.assertRaises(Exception):
             validate_repo("OtherOrg/CryptoSnapshotPipelines")
+
+    def test_source_repo_task_mapping_matches_known_dispatchers(self) -> None:
+        expected = {
+            "QuantStrategyLab/AiLongHorizonSignalPipelines": "long_horizon_signal_shadow",
+            "QuantStrategyLab/CryptoLivePoolPipelines": "monthly_snapshot_audit",
+            "QuantStrategyLab/CryptoSnapshotPipelines": "monthly_snapshot_audit",
+            "QuantStrategyLab/HkEquitySnapshotPipelines": "monthly_snapshot_audit",
+            "QuantStrategyLab/ResearchSignalContextPipelines": "long_horizon_signal_shadow",
+            "QuantStrategyLab/UsEquitySnapshotPipelines": "monthly_snapshot_audit",
+        }
+
+        self.assertEqual(set(SOURCE_REPO_TASKS), set(expected))
+        for source_repo, task in expected.items():
+            with self.subTest(source_repo=source_repo):
+                self.assertEqual(validate_task(task, source_repo), task)
 
     def test_validate_task_rejects_repo_task_mismatch(self) -> None:
         self.assertEqual(

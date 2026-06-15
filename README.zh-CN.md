@@ -10,6 +10,32 @@ CodexAuditBridge 是 QuantStrategyLab 的审计自动化桥接工具。运行 se
 
 它产出研究、审计或编排类 artifact，不应自行提交券商订单，也不应直接修改 live allocation。
 
+## 架构边界
+
+CodexAuditBridge 是 QuantStrategyLab 组织内的 Codex 调用边界。各 source repository 只负责派发审计请求，不应在自身 workflow 中直接拼接 `codex exec`，也不应依赖某个特定 Codex runner。
+
+当前执行模型：
+
+1. source repository 创建或定位审计 issue。
+2. source repository 派发本仓库的 `.github/workflows/selfhosted_monthly_review.yml`。
+3. CodexAuditBridge 校验 source repository 和 task mapping，使用受限 GitHub token clone source repository，并运行指定 provider。
+4. 评论、分支、PR 等 GitHub 写操作只由 CodexAuditBridge 负责。
+
+这个边界应留在 `QuantStrategyLab` 组织内。不要把 QuantStrategyLab 审计执行或 source repository 写 token 移到其他组织。如果后续替换 self-hosted Codex 依赖，优先采用 QuantStrategyLab 自己拥有的 HTTPS/443 Codex service；该 service 只返回 review 文本或结构化 patch 建议，clone、校验、commit、push 和 PR 仍由 CodexAuditBridge 负责。
+
+## 支持的 source repository
+
+| Source repository | 允许的 task |
+| --- | --- |
+| `QuantStrategyLab/AiLongHorizonSignalPipelines` | `long_horizon_signal_shadow` |
+| `QuantStrategyLab/CryptoLivePoolPipelines` | `monthly_snapshot_audit` |
+| `QuantStrategyLab/CryptoSnapshotPipelines` | `monthly_snapshot_audit` |
+| `QuantStrategyLab/HkEquitySnapshotPipelines` | `monthly_snapshot_audit` |
+| `QuantStrategyLab/ResearchSignalContextPipelines` | `long_horizon_signal_shadow` |
+| `QuantStrategyLab/UsEquitySnapshotPipelines` | `monthly_snapshot_audit` |
+
+新增 dispatcher 时，需要同步更新 `scripts/run_monthly_codex_audit.py` 里的 `SOURCE_REPO_TASKS`，并补充回归测试证明对应 repository/task pair 会被接受。
+
 ## 输出边界
 
 - 生成报告应作为证据或审阅材料，不是自动交易指令。
@@ -25,14 +51,16 @@ CodexAuditBridge 是 QuantStrategyLab 的审计自动化桥接工具。运行 se
 
 ## 快速开始
 
+运行自动化前请先阅读 `.github/workflows/`、`scripts/run_monthly_codex_audit.py` 和 README 文件。
+
 ```bash
 git status --short
-Review .github/workflows/ and docs/ before running automation.
+python3 -m unittest discover -s tests -v
 ```
 
 ## 延伸文档
 
-- 暂无独立 `docs/` 目录；请先阅读本 README 和 workflow 文件。
+- 暂无独立 `docs/` 目录；请先阅读本 README、`README.md` 和 workflow 文件。
 
 ## 社区和安全
 
