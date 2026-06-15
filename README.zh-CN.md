@@ -18,10 +18,17 @@ CodexAuditBridge 是 QuantStrategyLab 组织内的 Codex 调用边界。各 sour
 
 1. source repository 创建或定位审计 issue。
 2. source repository 派发本仓库的 `.github/workflows/selfhosted_monthly_review.yml`。
-3. CodexAuditBridge 校验 source repository 和 task mapping，使用受限 GitHub token clone source repository，并运行指定 provider。
-4. 评论、分支、PR 等 GitHub 写操作只由 CodexAuditBridge 负责。
+3. CodexAuditBridge 校验 source repository 和 task mapping，使用受限 GitHub token clone source repository，并运行指定 provider/backend。
+4. 评论、分支、commit、push、PR 等 GitHub 写操作只由 CodexAuditBridge 负责。
 
-这个边界应留在 `QuantStrategyLab` 组织内。不要把 QuantStrategyLab 审计执行或 source repository 写 token 移到其他组织。如果后续替换 self-hosted Codex 依赖，优先采用 QuantStrategyLab 自己拥有的 HTTPS/443 Codex service；该 service 只返回 review 文本或结构化 patch 建议，clone、校验、commit、push 和 PR 仍由 CodexAuditBridge 负责。
+这个边界应留在 `QuantStrategyLab` 组织内。不要把 QuantStrategyLab 审计执行或 source repository 写 token 移到其他组织。
+
+Codex 执行和 GitHub 写入权限故意拆开：
+
+- `local` backend：在带有 `self-hosted,codex-vps` label 的 runner 上直接运行 `codex exec`。
+- `service` backend：从 GitHub-hosted runner 调用 QuantStrategyLab 自有的 HTTPS/443 Codex audit service。service 只返回 review 文本或结构化 patch 建议；clone、路径校验、patch apply、commit、push、PR 和 issue comment 仍由 CodexAuditBridge 负责。
+
+这样可以避免每个 source repository 都硬编码 Codex CLI，也不会依赖 `QuantStrategyLab` 组织外的仓库。
 
 ## 支持的 source repository
 
@@ -35,6 +42,51 @@ CodexAuditBridge 是 QuantStrategyLab 组织内的 Codex 调用边界。各 sour
 | `QuantStrategyLab/UsEquitySnapshotPipelines` | `monthly_snapshot_audit` |
 
 新增 dispatcher 时，需要同步更新 `scripts/run_monthly_codex_audit.py` 里的 `SOURCE_REPO_TASKS`，并补充回归测试证明对应 repository/task pair 会被接受。
+
+## Codex backend 配置
+
+workflow dispatch input `codex_backend` 控制 Codex 的执行方式：
+
+| Backend | Runner | 必要配置 |
+| --- | --- | --- |
+| `local` | `self-hosted,codex-vps` | runner 上已安装 Codex CLI，并配置模型凭据 |
+| `service` | `ubuntu-latest` | 在本仓库配置 repository variable `CODEX_AUDIT_SERVICE_URL`，指向 QuantStrategyLab 自有 HTTPS service |
+
+service backend 需要在 `QuantStrategyLab/CodexAuditBridge` 配置：
+
+- Repository variable `CODEX_AUDIT_SERVICE_URL`，例如 `https://codex-audit.quant.example`。
+- 可选 repository variable `CODEX_AUDIT_SERVICE_AUDIENCE`，默认 `quant-codex-audit`。
+- workflow 已配置 `id-token: write`，用于向 service 提供 GitHub Actions OIDC token。
+
+service host 启动示例：
+
+```bash
+CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES=QuantStrategyLab/CodexAuditBridge \
+CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES='QuantStrategyLab/CryptoSnapshotPipelines,QuantStrategyLab/CryptoLivePoolPipelines,QuantStrategyLab/HkEquitySnapshotPipelines,QuantStrategyLab/UsEquitySnapshotPipelines,QuantStrategyLab/AiLongHorizonSignalPipelines,QuantStrategyLab/ResearchSignalContextPipelines' \
+CODEX_AUDIT_SERVICE_AUDIENCE=quant-codex-audit \
+OPENAI_API_KEY=... \
+python3 scripts/codex_audit_service.py
+```
+
+443/TLS 建议由平台负载均衡或反向代理负责，再转发到 service 端口。不要把 GitHub 写 token 传给这个 service。
+
+### Service patch contract
+
+`review_and_fix` 模式下，service 必须只返回一个 JSON object：
+
+```json
+{
+  "final_message": "用于 issue comment 或 PR body 的 Markdown 总结。",
+  "changes": [
+    {
+      "path": "relative/file/path.py",
+      "content": "完整 UTF-8 文件内容"
+    }
+  ]
+}
+```
+
+CodexAuditBridge 会在本地写文件前拒绝绝对路径、`.git` 路径、疑似 secret 路径和被禁止的 data 路径。
 
 ## 输出边界
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -8,26 +9,32 @@ from unittest.mock import patch
 from scripts.run_monthly_codex_audit import (
     BridgeError,
     SOURCE_REPO_TASKS,
+    apply_service_changes,
     blocked_paths,
     bootstrap_packages,
     build_api_review_prompt,
+    build_service_prompt,
     codex_process_env,
     convert_local_markdown_links,
     extract_anthropic_text,
     extract_openai_text,
     auto_fallback_missing_api_key_message,
     format_api_review_comment,
+    normalize_codex_service_url,
     package_import_name,
+    parse_service_patch_response,
     parse_bool,
     pr_closing_line,
     resolve_source_repo_token,
     run_configured_api_reviews,
     safe_branch_component,
     strip_audit_heading,
+    validate_codex_backend,
     validate_provider,
     validate_repo,
     validate_task,
 )
+from scripts.codex_audit_service import _codex_env
 
 
 class RunMonthlyCodexAuditTests(unittest.TestCase):
@@ -89,6 +96,13 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         with self.assertRaises(Exception):
             validate_provider("claude")
 
+    def test_validate_codex_backend_accepts_supported_values(self) -> None:
+        self.assertEqual(validate_codex_backend(""), "local")
+        self.assertEqual(validate_codex_backend("LOCAL"), "local")
+        self.assertEqual(validate_codex_backend("service"), "service")
+        with self.assertRaises(Exception):
+            validate_codex_backend("ssh")
+
     def test_safe_branch_component_removes_unsafe_characters(self) -> None:
         self.assertEqual(safe_branch_component("issue #12: monthly review"), "issue-12-monthly-review")
 
@@ -116,6 +130,23 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
             self.assertNotIn("PASSWORD", key.upper())
             self.assertNotIn("PRIVATE_KEY", key.upper())
             self.assertNotIn("CREDENTIAL", key.upper())
+
+    def test_codex_audit_service_env_removes_service_secrets(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "CODEX_AUDIT_SERVICE_STATIC_TOKEN": "service-token",
+                "CODEX_AUDIT_SERVICE_OPENAI_API_KEY": "service-openai-key",
+                "OPENAI_API_KEY": "",
+                "PATH": "/usr/bin",
+            },
+            clear=True,
+        ):
+            env = _codex_env()
+
+        self.assertNotIn("CODEX_AUDIT_SERVICE_STATIC_TOKEN", env)
+        self.assertNotIn("CODEX_AUDIT_SERVICE_OPENAI_API_KEY", env)
+        self.assertEqual(env["OPENAI_API_KEY"], "service-openai-key")
 
     def test_strip_audit_heading_removes_only_leading_heading(self) -> None:
         for heading in ("## Crypto Codex Audit", "## Self-hosted Codex Audit"):
@@ -242,6 +273,74 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertIn("QuantStrategyLab/AiLongHorizonSignalPipelines", prompt)
         self.assertIn("API Long-Horizon Shadow Signal Review", prompt)
         self.assertIn("Draft Shadow Signal JSON", prompt)
+
+    def test_build_service_prompt_adds_filtered_context_and_patch_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            (repo_dir / ".codex-audit").mkdir()
+            (repo_dir / ".codex-audit" / "monthly_issue.md").write_text("Issue body", encoding="utf-8")
+            (repo_dir / "scripts").mkdir()
+            (repo_dir / "scripts" / "check.py").write_text("print('ok')\n", encoding="utf-8")
+            (repo_dir / "docs").mkdir()
+            (repo_dir / "docs" / "api-token.md").write_text("should not be included\n", encoding="utf-8")
+
+            prompt = build_service_prompt(repo_dir, "Base prompt", task="monthly_snapshot_audit", mode="review_and_fix")
+
+        self.assertIn("Base prompt", prompt)
+        self.assertIn('context path=".codex-audit/monthly_issue.md"', prompt)
+        self.assertIn('context path="scripts/check.py"', prompt)
+        self.assertIn("Service patch contract", prompt)
+        self.assertNotIn("api-token.md", prompt)
+        self.assertNotIn("should not be included", prompt)
+
+    def test_parse_service_patch_response_accepts_fenced_json(self) -> None:
+        final_message, changes = parse_service_patch_response(
+            """```json
+{"final_message": "Reviewed.", "changes": [{"path": "README.md", "content": "# Title\\n"}]}
+```"""
+        )
+
+        self.assertEqual(final_message, "Reviewed.")
+        self.assertEqual(changes, [{"path": "README.md", "content": "# Title\n"}])
+
+    def test_apply_service_changes_writes_allowed_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            changed = apply_service_changes(
+                repo_dir,
+                [{"path": "docs/review.md", "content": "review\n"}],
+                task="monthly_snapshot_audit",
+            )
+
+            self.assertEqual(changed, ["docs/review.md"])
+            self.assertEqual((repo_dir / "docs" / "review.md").read_text(encoding="utf-8"), "review\n")
+
+    def test_apply_service_changes_rejects_blocked_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(BridgeError):
+                apply_service_changes(
+                    Path(tmp),
+                    [{"path": "docs/api-token.md", "content": "secret\n"}],
+                    task="monthly_snapshot_audit",
+                )
+
+    def test_normalize_codex_service_url_requires_https_except_local_testing(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(
+                normalize_codex_service_url("https://codex.quant.example"),
+                "https://codex.quant.example/v1/codex-audit",
+            )
+            self.assertEqual(
+                normalize_codex_service_url("https://codex.quant.example/api"),
+                "https://codex.quant.example/api/v1/codex-audit",
+            )
+            with self.assertRaises(BridgeError):
+                normalize_codex_service_url("http://codex.quant.example")
+        with patch.dict(os.environ, {"CODEX_AUDIT_ALLOW_INSECURE_SERVICE_URL": "true"}):
+            self.assertEqual(
+                normalize_codex_service_url("http://127.0.0.1:8797"),
+                "http://127.0.0.1:8797/v1/codex-audit",
+            )
 
     def test_auto_fallback_missing_api_key_message_mentions_reason(self) -> None:
         message = auto_fallback_missing_api_key_message("Codex setup failed.")
