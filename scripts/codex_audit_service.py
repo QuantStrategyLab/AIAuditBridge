@@ -8,10 +8,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -20,11 +22,13 @@ import urllib.request
 
 DEFAULT_AUDIENCE = "quant-codex-audit"
 DEFAULT_MAX_REQUEST_BYTES = 2_000_000
+DEFAULT_JOB_TTL_SECONDS = 86_400
 GITHUB_OIDC_ISSUER = "https://token.actions.githubusercontent.com"
 GITHUB_OIDC_JWKS_URL = GITHUB_OIDC_ISSUER + "/.well-known/jwks"
 SECRET_ENV_MARKERS = ("TOKEN", "SECRET", "PASSWORD", "PRIVATE_KEY", "CREDENTIAL")
 _JWKS_CACHE: dict[str, Any] | None = None
 _JWKS_CACHE_EXPIRES_AT = 0.0
+_JOB_WRITE_LOCK = threading.Lock()
 
 
 def _b64url_decode(value: str) -> bytes:
@@ -247,6 +251,179 @@ def _run_codex(payload: dict[str, Any]) -> str:
         return completed.stdout
 
 
+def _job_dir() -> Path:
+    default = Path(tempfile.gettempdir()) / "codex-audit-service-jobs"
+    path = Path(os.environ.get("CODEX_AUDIT_SERVICE_JOB_DIR", str(default))).expanduser()
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        path.chmod(0o700)
+    except OSError:
+        pass
+    return path
+
+
+def _job_path(job_id: str) -> Path:
+    if not re.fullmatch(r"[A-Za-z0-9_-]{24,96}", job_id):
+        raise ValueError("job_id is invalid")
+    return _job_dir() / f"{job_id}.json"
+
+
+def _now() -> float:
+    return time.time()
+
+
+def _new_job_id() -> str:
+    return secrets.token_urlsafe(24)
+
+
+def _write_job(job: dict[str, Any]) -> None:
+    path = _job_path(str(job["job_id"]))
+    payload = json.dumps(job, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    tmp = path.with_suffix(".json.tmp")
+    with _JOB_WRITE_LOCK:
+        with open(tmp, "wb") as handle:
+            handle.write(payload)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+
+
+def _read_job(job_id: str) -> dict[str, Any]:
+    path = _job_path(job_id)
+    if not path.exists():
+        raise FileNotFoundError(job_id)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("job state is invalid")
+    return payload
+
+
+def _cleanup_expired_jobs() -> None:
+    now = _now()
+    for path in _job_dir().glob("*.json"):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            expires_at = float(payload.get("expires_at") or 0)
+        except Exception:
+            expires_at = 0
+        if expires_at and expires_at < now:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def _job_timeout_seconds(job: dict[str, Any]) -> int:
+    try:
+        return int(job.get("timeout_seconds") or os.environ.get("CODEX_AUDIT_SERVICE_TIMEOUT_SECONDS", "2700"))
+    except (TypeError, ValueError):
+        return 2700
+
+
+def _mark_stale_job_failed(job: dict[str, Any]) -> dict[str, Any]:
+    if job.get("status") not in {"queued", "running"}:
+        return job
+    timeout_seconds = _job_timeout_seconds(job)
+    updated_at = float(job.get("updated_at") or job.get("created_at") or 0)
+    if updated_at and _now() <= updated_at + timeout_seconds + 120:
+        return job
+    job["status"] = "failed"
+    job["updated_at"] = _now()
+    job["error"] = "codex audit job became stale before completion"
+    _write_job(job)
+    return job
+
+
+def _assert_job_access(job: dict[str, Any], claims: dict[str, Any]) -> None:
+    repository = str(claims.get("repository") or "")
+    if repository != str(job.get("repository") or ""):
+        raise PermissionError("job repository is not allowed")
+    request_run_id = str(claims.get("run_id") or "")
+    job_run_id = str(job.get("run_id") or "")
+    if request_run_id and job_run_id and request_run_id != job_run_id:
+        raise PermissionError("job run_id is not allowed")
+
+
+def _public_job_payload(job: dict[str, Any]) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "status": str(job.get("status") or "unknown"),
+        "job_id": str(job.get("job_id") or ""),
+        "created_at": float(job.get("created_at") or 0),
+        "updated_at": float(job.get("updated_at") or 0),
+        "source_repository": str(job.get("source_repository") or ""),
+        "task": str(job.get("task") or ""),
+    }
+    if job.get("status") == "succeeded":
+        payload["output"] = str(job.get("output") or "")
+    if job.get("status") == "failed":
+        payload["error"] = str(job.get("error") or "")
+    return payload
+
+
+def _run_job(job_id: str, payload: dict[str, Any]) -> None:
+    try:
+        job = _read_job(job_id)
+        job["status"] = "running"
+        job["updated_at"] = _now()
+        _write_job(job)
+        output = _run_codex(payload)
+        job = _read_job(job_id)
+        job["status"] = "succeeded"
+        job["updated_at"] = _now()
+        job["output"] = output
+        job.pop("error", None)
+        _write_job(job)
+    except Exception as exc:  # noqa: BLE001 - background job boundary must persist failure.
+        try:
+            job = _read_job(job_id)
+        except Exception:
+            job = {"job_id": job_id, "created_at": _now()}
+        job["status"] = "failed"
+        job["updated_at"] = _now()
+        job["error"] = str(exc)[-4000:]
+        _write_job(job)
+        print(f"[codex-audit-service] async job failed job_id={job_id}: {type(exc).__name__}", file=sys.stderr)
+
+
+def _submit_job(claims: dict[str, Any], payload: dict[str, Any]) -> dict[str, object]:
+    _cleanup_expired_jobs()
+    now = _now()
+    ttl_seconds = int(os.environ.get("CODEX_AUDIT_SERVICE_JOB_TTL_SECONDS", str(DEFAULT_JOB_TTL_SECONDS)))
+    job_id = _new_job_id()
+    job = {
+        "job_id": job_id,
+        "status": "queued",
+        "created_at": now,
+        "updated_at": now,
+        "expires_at": now + ttl_seconds,
+        "repository": str(claims.get("repository") or ""),
+        "run_id": str(claims.get("run_id") or ""),
+        "actor": str(claims.get("actor") or ""),
+        "source_repository": str(payload.get("source_repository") or ""),
+        "source_ref": str(payload.get("source_ref") or ""),
+        "task": str(payload.get("task") or ""),
+        "mode": str(payload.get("mode") or ""),
+        "timeout_seconds": int(payload.get("timeout_seconds") or os.environ.get("CODEX_AUDIT_SERVICE_TIMEOUT_SECONDS", "2700")),
+    }
+    _write_job(job)
+    thread = threading.Thread(target=_run_job, args=(job_id, payload), name=f"codex-audit-job-{job_id}", daemon=True)
+    thread.start()
+    return _public_job_payload(job)
+
+
+def _read_request_payload(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
+    length = int(handler.headers.get("Content-Length") or "0")
+    max_request_bytes = int(os.environ.get("CODEX_AUDIT_SERVICE_MAX_REQUEST_BYTES", str(DEFAULT_MAX_REQUEST_BYTES)))
+    if length <= 0:
+        raise ValueError("request body is empty")
+    if length > max_request_bytes:
+        raise ValueError("request body is too large")
+    payload = json.loads(handler.rfile.read(length).decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("request body must be a JSON object")
+    _validate_payload(payload)
+    return payload
+
+
 class CodexAuditServiceRequestHandler(BaseHTTPRequestHandler):
     server_version = "CodexAuditService/1.0"
 
@@ -254,29 +431,35 @@ class CodexAuditServiceRequestHandler(BaseHTTPRequestHandler):
         print("[codex-audit-service] " + format % args, file=sys.stderr)
 
     def do_GET(self) -> None:
-        if self.path != "/healthz":
-            _json_response(self, HTTPStatus.NOT_FOUND, {"status": "error", "error": "not found"})
+        if self.path == "/healthz":
+            _json_response(self, HTTPStatus.OK, {"status": "ok"})
             return
-        _json_response(self, HTTPStatus.OK, {"status": "ok"})
-
-    def do_POST(self) -> None:
-        if self.path != "/v1/codex-audit":
+        match = re.fullmatch(r"/v1/codex-audit/jobs/([A-Za-z0-9_-]{24,96})", self.path)
+        if not match:
             _json_response(self, HTTPStatus.NOT_FOUND, {"status": "error", "error": "not found"})
             return
         try:
             claims = _authenticate(self.headers)
-            length = int(self.headers.get("Content-Length") or "0")
-            max_request_bytes = int(
-                os.environ.get("CODEX_AUDIT_SERVICE_MAX_REQUEST_BYTES", str(DEFAULT_MAX_REQUEST_BYTES))
-            )
-            if length <= 0:
-                raise ValueError("request body is empty")
-            if length > max_request_bytes:
-                raise ValueError("request body is too large")
-            payload = json.loads(self.rfile.read(length).decode("utf-8"))
-            if not isinstance(payload, dict):
-                raise ValueError("request body must be a JSON object")
-            _validate_payload(payload)
+            job = _mark_stale_job_failed(_read_job(match.group(1)))
+            _assert_job_access(job, claims)
+            _json_response(self, HTTPStatus.OK, _public_job_payload(job))
+        except FileNotFoundError:
+            _json_response(self, HTTPStatus.NOT_FOUND, {"status": "error", "error": "job not found"})
+        except PermissionError as exc:
+            _json_response(self, HTTPStatus.UNAUTHORIZED, {"status": "error", "error": str(exc)})
+        except ValueError as exc:
+            _json_response(self, HTTPStatus.BAD_REQUEST, {"status": "error", "error": str(exc)})
+        except Exception as exc:  # noqa: BLE001 - service boundary must fail closed with context.
+            print(f"[codex-audit-service] {type(exc).__name__}: {exc}", file=sys.stderr)
+            _json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"status": "error", "error": str(exc)})
+
+    def do_POST(self) -> None:
+        if self.path not in {"/v1/codex-audit", "/v1/codex-audit/jobs"}:
+            _json_response(self, HTTPStatus.NOT_FOUND, {"status": "error", "error": "not found"})
+            return
+        try:
+            claims = _authenticate(self.headers)
+            payload = _read_request_payload(self)
             repository = str(claims.get("repository") or "")
             run_id = str(claims.get("run_id") or "")
             source_repository = str(payload.get("source_repository") or "")
@@ -286,6 +469,10 @@ class CodexAuditServiceRequestHandler(BaseHTTPRequestHandler):
                 f"repository={repository} run_id={run_id} source_repository={source_repository} task={task}",
                 file=sys.stderr,
             )
+            if self.path == "/v1/codex-audit/jobs":
+                job = _submit_job(claims, payload)
+                _json_response(self, HTTPStatus.ACCEPTED, job)
+                return
             output = _run_codex(payload)
             _json_response(self, HTTPStatus.OK, {"status": "ok", "output": output})
         except PermissionError as exc:
@@ -298,6 +485,7 @@ class CodexAuditServiceRequestHandler(BaseHTTPRequestHandler):
 
 
 def main() -> int:
+    os.umask(0o077)
     host = os.environ.get("CODEX_AUDIT_SERVICE_HOST", "127.0.0.1").strip() or "127.0.0.1"
     port = int(os.environ.get("CODEX_AUDIT_SERVICE_PORT", "8797"))
     server = ThreadingHTTPServer((host, port), CodexAuditServiceRequestHandler)

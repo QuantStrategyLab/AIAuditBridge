@@ -8,7 +8,8 @@ DEPLOY_DIR="${CODEX_AUDIT_SERVICE_DEPLOY_DIR:-/opt/codex-audit-bridge}"
 AUDIT_PORT="${CODEX_AUDIT_SERVICE_PORT:-8797}"
 AUDIENCE="${CODEX_AUDIT_SERVICE_AUDIENCE:-quant-codex-audit}"
 ALLOWED_REPOSITORIES="${CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES:-QuantStrategyLab/CodexAuditBridge}"
-ALLOWED_SOURCE_REPOSITORIES="${CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES:-QuantStrategyLab/CryptoSnapshotPipelines,QuantStrategyLab/CryptoLivePoolPipelines,QuantStrategyLab/HkEquitySnapshotPipelines,QuantStrategyLab/UsEquitySnapshotPipelines,QuantStrategyLab/AiLongHorizonSignalPipelines,QuantStrategyLab/ResearchSignalContextPipelines}"
+ALLOWED_SOURCE_REPOSITORIES="${CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES:-QuantStrategyLab/CryptoLivePoolPipelines,QuantStrategyLab/HkEquitySnapshotPipelines,QuantStrategyLab/UsEquitySnapshotPipelines,QuantStrategyLab/ResearchSignalContextPipelines}"
+JOB_DIR="${CODEX_AUDIT_SERVICE_JOB_DIR:-/var/lib/codex-audit-bridge/jobs}"
 NGINX_CONFIG="${CODEX_AUDIT_SERVICE_NGINX_CONFIG:-}"
 
 require_sudo() {
@@ -134,6 +135,7 @@ Environment=CODEX_AUDIT_SERVICE_PORT=${AUDIT_PORT}
 Environment=CODEX_AUDIT_SERVICE_AUDIENCE=${AUDIENCE}
 Environment=CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES=${ALLOWED_REPOSITORIES}
 Environment=CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES=${ALLOWED_SOURCE_REPOSITORIES}
+Environment=CODEX_AUDIT_SERVICE_JOB_DIR=${JOB_DIR}
 Environment=CODEX_AUDIT_SERVICE_SANDBOX=read-only
 ExecStart=/usr/bin/env python3 ${DEPLOY_DIR}/scripts/codex_audit_service.py
 Restart=on-failure
@@ -174,7 +176,7 @@ text = re.sub(
 
 route_template = """
 {indent}# CodexAuditBridge route start
-{indent}location = /v1/codex-audit {{
+{indent}location /v1/codex-audit {{
 {indent}    proxy_pass http://127.0.0.1:{port};
 {indent}    proxy_http_version 1.1;
 {indent}    proxy_set_header Host $host;
@@ -256,7 +258,7 @@ else:
 print("audit service health ok")
 
 request = urllib.request.Request(
-    "http://127.0.0.1:${AUDIT_PORT}/v1/codex-audit",
+    "http://127.0.0.1:${AUDIT_PORT}/v1/codex-audit/jobs",
     data=b"{}",
     method="POST",
     headers={"Content-Type": "application/json"},
@@ -267,7 +269,7 @@ except urllib.error.HTTPError as exc:
     if exc.code != 401:
         raise SystemExit(f"expected 401 from unauthenticated audit service, got {exc.code}") from exc
 else:
-    raise SystemExit("expected unauthenticated audit service request to fail")
+    raise SystemExit("expected unauthenticated async audit service request to fail")
 print("audit service auth check ok")
 PY
 }
@@ -306,13 +308,13 @@ PY
     -X POST \
     -H 'Content-Type: application/json' \
     --data '{}' \
-    "https://${public_host}/v1/codex-audit" || true)"
+    "https://${public_host}/v1/codex-audit/jobs" || true)"
   rm -f "$response_file"
   if [ "$status_code" != "401" ]; then
-    echo "expected public /v1/codex-audit to return 401 without bearer token, got ${status_code}" >&2
+    echo "expected public /v1/codex-audit/jobs to return 401 without bearer token, got ${status_code}" >&2
     exit 1
   fi
-  echo "public audit route auth check ok"
+  echo "public async audit route auth check ok"
 }
 
 deploy() {
@@ -324,8 +326,11 @@ deploy() {
     exit 1
   fi
   config="$(detect_nginx_config)"
+  local runner_user
+  runner_user="$(id -un)"
 
   install_file "scripts/codex_audit_service.py" "${DEPLOY_DIR}/scripts/codex_audit_service.py" "0755"
+  sudo install -d -m 0700 -o "$runner_user" -g "$runner_user" "$JOB_DIR"
   write_audit_service_unit
   sudo systemctl daemon-reload
   sudo systemctl enable --now "$AUDIT_SERVICE_NAME"

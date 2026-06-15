@@ -14,7 +14,7 @@ Thanks for contributing to `CodexAuditBridge`.
 
 - Prefer small pull requests with one clear purpose.
 - Keep refactors separate from behavior, contract, workflow, or documentation changes.
-- Preserve this repository's boundary as a self-hosted audit automation bridge; do not move broker execution, live-allocation decisions, private credentials, or unrelated platform logic into it.
+- Preserve this repository's boundary as a service-backed audit automation bridge; do not move broker execution, live-allocation decisions, private credentials, or unrelated platform logic into it.
 - Add or update tests, examples, docs, or reproducible evidence when changing behavior or public contracts.
 
 ## Documentation Standards

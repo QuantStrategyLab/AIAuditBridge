@@ -6,7 +6,7 @@
 
 ## What this repository is
 
-CodexAuditBridge is a QuantStrategyLab audit automation bridge. It runs self-hosted Codex audit workflows for snapshot reviews and low-risk fix pull requests.
+CodexAuditBridge is a QuantStrategyLab audit automation bridge. It runs service-backed Codex audit workflows for snapshot reviews and low-risk fix pull requests.
 
 It produces research, audit, or orchestration artifacts. It should not submit broker orders or mutate live allocations by itself.
 
@@ -17,7 +17,7 @@ CodexAuditBridge is the organization-local Codex boundary for QuantStrategyLab. 
 Current execution model:
 
 1. A source repository creates or identifies an audit issue.
-2. The source repository dispatches `.github/workflows/selfhosted_monthly_review.yml` in this repository.
+2. The source repository dispatches this repository's monthly review workflow. The workflow filename is still `codex_audit.yml` for dispatch compatibility, but Codex execution is service-backed.
 3. CodexAuditBridge validates the source repository and task mapping, clones the source repository with a scoped GitHub token, and runs the selected provider/backend.
 4. Only CodexAuditBridge performs GitHub writes such as comments, branches, commits, pushes, and pull requests.
 
@@ -31,9 +31,7 @@ This avoids hard-coding Codex CLI setup in every source repository and avoids de
 
 | Source repository | Allowed task |
 | --- | --- |
-| `QuantStrategyLab/AiLongHorizonSignalPipelines` | `long_horizon_signal_shadow` |
 | `QuantStrategyLab/CryptoLivePoolPipelines` | `monthly_snapshot_audit` |
-| `QuantStrategyLab/CryptoSnapshotPipelines` | `monthly_snapshot_audit` |
 | `QuantStrategyLab/HkEquitySnapshotPipelines` | `monthly_snapshot_audit` |
 | `QuantStrategyLab/ResearchSignalContextPipelines` | `long_horizon_signal_shadow` |
 | `QuantStrategyLab/UsEquitySnapshotPipelines` | `monthly_snapshot_audit` |
@@ -55,7 +53,7 @@ Run the service host with:
 
 ```bash
 CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES=QuantStrategyLab/CodexAuditBridge \
-CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES='QuantStrategyLab/CryptoSnapshotPipelines,QuantStrategyLab/CryptoLivePoolPipelines,QuantStrategyLab/HkEquitySnapshotPipelines,QuantStrategyLab/UsEquitySnapshotPipelines,QuantStrategyLab/AiLongHorizonSignalPipelines,QuantStrategyLab/ResearchSignalContextPipelines' \
+CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES='QuantStrategyLab/CryptoLivePoolPipelines,QuantStrategyLab/HkEquitySnapshotPipelines,QuantStrategyLab/UsEquitySnapshotPipelines,QuantStrategyLab/ResearchSignalContextPipelines' \
 CODEX_AUDIT_SERVICE_AUDIENCE=quant-codex-audit \
 OPENAI_API_KEY=... \
 python3 scripts/codex_audit_service.py
@@ -63,7 +61,9 @@ python3 scripts/codex_audit_service.py
 
 Terminate TLS on 443 with the platform load balancer or a reverse proxy and forward `/v1/codex-audit` to the service port. Do not pass GitHub write tokens to this service.
 
-The manual `VPS Codex Service Ops` workflow can be used by maintainers to inspect or deploy the VPS-side service through the existing `self-hosted,codex-vps` runner. The deployment keeps the Pigbibi `/v1/codex` gateway unchanged and adds an exact nginx route from `/v1/codex-audit` to this repository's audit service.
+If no custom domain is available, `cloudflare/codex-audit-proxy/` contains a minimal Cloudflare Worker that can publish a free `workers.dev` HTTPS entry point while keeping the VPS origin URL in a Cloudflare secret. The production service path is async: submit `POST /v1/codex-audit/jobs`, then poll `GET /v1/codex-audit/jobs/{job_id}`. See `docs/async_service_deployment.md` for the deployment and open-source repository checklist.
+
+The manual `VPS Codex Service Ops` workflow can be used by maintainers to inspect or deploy the VPS-side service through the existing `self-hosted,codex-vps` runner. The deployment keeps the Pigbibi `/v1/codex` gateway unchanged and adds an nginx route for `/v1/codex-audit` to this repository's audit service.
 
 ### Service patch contract
 

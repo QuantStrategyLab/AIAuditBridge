@@ -1,4 +1,4 @@
-name: Codex Monthly Review
+name: Codex Audit
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
       source_repo:
         description: "Repository that owns the monthly review issue"
         required: true
-        default: "QuantStrategyLab/CryptoSnapshotPipelines"
+        default: "QuantStrategyLab/CryptoLivePoolPipelines"
       issue_number:
         description: "Monthly review issue number in source_repo"
         required: true
@@ -55,16 +55,16 @@ permissions:
   id-token: write
 
 concurrency:
-  group: selfhosted-codex-monthly-${{ github.event.client_payload.source_repo || inputs.source_repo }}-${{ github.event.client_payload.issue_number || inputs.issue_number }}
+  group: codex-audit-${{ github.event.client_payload.source_repo || inputs.source_repo }}-${{ github.event.client_payload.issue_number || inputs.issue_number }}
   cancel-in-progress: false
 
 jobs:
-  codex-monthly-review:
+  codex-audit:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
-      SOURCE_REPO: ${{ github.event.client_payload.source_repo || inputs.source_repo || 'QuantStrategyLab/CryptoSnapshotPipelines' }}
+      SOURCE_REPO: ${{ github.event.client_payload.source_repo || inputs.source_repo || 'QuantStrategyLab/CryptoLivePoolPipelines' }}
       ISSUE_NUMBER: ${{ github.event.client_payload.issue_number || inputs.issue_number }}
       SOURCE_REF: ${{ github.event.client_payload.source_ref || inputs.source_ref || 'main' }}
       CODEX_AUDIT_MODE: ${{ github.event.client_payload.mode || inputs.mode || 'review_and_fix' }}
@@ -114,7 +114,7 @@ jobs:
           permission-issues: write
           permission-pull-requests: write
 
-      - name: Run Monthly Codex Audit
+      - name: Run Codex Audit
         env:
           CODEX_AUDIT_GH_TOKEN: ${{ steps.source_app_token.outputs.token || secrets.CODEX_AUDIT_GH_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

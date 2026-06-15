@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import json
 import os
 import tempfile
+import threading
+import time
 import unittest
+import urllib.request
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
@@ -14,6 +19,8 @@ from scripts.run_monthly_codex_audit import (
     bootstrap_packages,
     build_api_review_prompt,
     build_service_prompt,
+    codex_service_job_url,
+    codex_service_jobs_url,
     codex_process_env,
     convert_local_markdown_links,
     extract_anthropic_text,
@@ -34,7 +41,7 @@ from scripts.run_monthly_codex_audit import (
     validate_repo,
     validate_task,
 )
-from scripts.codex_audit_service import _codex_env
+from scripts.codex_audit_service import CodexAuditServiceRequestHandler, _codex_env
 
 
 class RunMonthlyCodexAuditTests(unittest.TestCase):
@@ -51,15 +58,13 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
 
     def test_validate_repo_rejects_invalid_values(self) -> None:
         with self.assertRaises(Exception):
-            validate_repo("QuantStrategyLab/CryptoSnapshotPipelines/extra")
+            validate_repo("QuantStrategyLab/CryptoLivePoolPipelines/extra")
         with self.assertRaises(Exception):
-            validate_repo("OtherOrg/CryptoSnapshotPipelines")
+            validate_repo("OtherOrg/CryptoLivePoolPipelines")
 
     def test_source_repo_task_mapping_matches_known_dispatchers(self) -> None:
         expected = {
-            "QuantStrategyLab/AiLongHorizonSignalPipelines": "long_horizon_signal_shadow",
             "QuantStrategyLab/CryptoLivePoolPipelines": "monthly_snapshot_audit",
-            "QuantStrategyLab/CryptoSnapshotPipelines": "monthly_snapshot_audit",
             "QuantStrategyLab/HkEquitySnapshotPipelines": "monthly_snapshot_audit",
             "QuantStrategyLab/ResearchSignalContextPipelines": "long_horizon_signal_shadow",
             "QuantStrategyLab/UsEquitySnapshotPipelines": "monthly_snapshot_audit",
@@ -72,11 +77,11 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
 
     def test_validate_task_rejects_repo_task_mismatch(self) -> None:
         self.assertEqual(
-            validate_task("long-horizon-signal-shadow", "QuantStrategyLab/AiLongHorizonSignalPipelines"),
+            validate_task("long-horizon-signal-shadow", "QuantStrategyLab/ResearchSignalContextPipelines"),
             "long_horizon_signal_shadow",
         )
         self.assertEqual(
-            validate_task("", "QuantStrategyLab/CryptoSnapshotPipelines"),
+            validate_task("", "QuantStrategyLab/CryptoLivePoolPipelines"),
             "monthly_snapshot_audit",
         )
         self.assertEqual(
@@ -84,7 +89,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
             "monthly_snapshot_audit",
         )
         with self.assertRaises(Exception):
-            validate_task("monthly_snapshot_audit", "QuantStrategyLab/AiLongHorizonSignalPipelines")
+            validate_task("monthly_snapshot_audit", "QuantStrategyLab/ResearchSignalContextPipelines")
 
     def test_validate_provider_accepts_supported_values(self) -> None:
         self.assertEqual(validate_provider(""), "auto")
@@ -150,32 +155,32 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertEqual(env["OPENAI_API_KEY"], "service-openai-key")
 
     def test_strip_audit_heading_removes_only_leading_heading(self) -> None:
-        for heading in ("## Crypto Codex Audit", "## Self-hosted Codex Audit"):
+        for heading in ("## Crypto Codex Audit", "## Codex Audit"):
             body = f"{heading}\n\n### Verdict\n\nOK"
             self.assertEqual(strip_audit_heading(body), "### Verdict\n\nOK")
 
     def test_convert_local_markdown_links_rewrites_repo_paths(self) -> None:
-        repo_dir = Path("/tmp/selfhosted-codex-audit-abc/source")
-        body = "See [script](/tmp/selfhosted-codex-audit-abc/source/scripts/run.py:42)."
+        repo_dir = Path("/tmp/codex-audit-bridge-abc/source")
+        body = "See [script](/tmp/codex-audit-bridge-abc/source/scripts/run.py:42)."
 
         converted = convert_local_markdown_links(
             body,
             repo_dir,
-            "QuantStrategyLab/CryptoSnapshotPipelines",
+            "QuantStrategyLab/CryptoLivePoolPipelines",
             "codex/monthly-audit-47",
         )
 
         self.assertEqual(
             converted,
-            "See [script](https://github.com/QuantStrategyLab/CryptoSnapshotPipelines/blob/codex/monthly-audit-47/scripts/run.py#L42).",
+            "See [script](https://github.com/QuantStrategyLab/CryptoLivePoolPipelines/blob/codex/monthly-audit-47/scripts/run.py#L42).",
         )
 
     def test_convert_local_markdown_links_leaves_external_paths(self) -> None:
-        repo_dir = Path("/tmp/selfhosted-codex-audit-abc/source")
+        repo_dir = Path("/tmp/codex-audit-bridge-abc/source")
         body = "See [outside](/tmp/other/source/scripts/run.py:42)."
 
         self.assertEqual(
-            convert_local_markdown_links(body, repo_dir, "QuantStrategyLab/CryptoSnapshotPipelines", "main"),
+            convert_local_markdown_links(body, repo_dir, "QuantStrategyLab/CryptoLivePoolPipelines", "main"),
             body,
         )
 
@@ -238,12 +243,12 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
 
     def test_build_api_review_prompt_includes_source_context(self) -> None:
         prompt = build_api_review_prompt(
-            "QuantStrategyLab/CryptoSnapshotPipelines",
+            "QuantStrategyLab/CryptoLivePoolPipelines",
             "main",
             {"title": "Monthly Report", "body": "Body", "html_url": "https://example.test/issue"},
             [],
         )
-        self.assertIn("QuantStrategyLab/CryptoSnapshotPipelines", prompt)
+        self.assertIn("QuantStrategyLab/CryptoLivePoolPipelines", prompt)
         self.assertIn("Monthly Report", prompt)
         self.assertIn("API Monthly Review", prompt)
 
@@ -264,14 +269,14 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
 
     def test_build_api_review_prompt_supports_long_horizon_task(self) -> None:
         prompt = build_api_review_prompt(
-            "QuantStrategyLab/AiLongHorizonSignalPipelines",
+            "QuantStrategyLab/ResearchSignalContextPipelines",
             "main",
             {"title": "Shadow Signal", "body": "Body", "html_url": "https://example.test/issue"},
             [],
             task="long_horizon_signal_shadow",
         )
 
-        self.assertIn("QuantStrategyLab/AiLongHorizonSignalPipelines", prompt)
+        self.assertIn("QuantStrategyLab/ResearchSignalContextPipelines", prompt)
         self.assertIn("API Long-Horizon Shadow Signal Review", prompt)
         self.assertIn("Draft Shadow Signal JSON", prompt)
 
@@ -343,6 +348,64 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
                 "http://127.0.0.1:8797/v1/codex-audit",
             )
 
+    def test_codex_service_async_job_urls_are_derived_from_audit_endpoint(self) -> None:
+        service_url = "https://codex.quant.example/v1/codex-audit"
+        job_id = "abcdefghijklmnopqrstuvwxyzABCD12"
+
+        self.assertEqual(codex_service_jobs_url(service_url), "https://codex.quant.example/v1/codex-audit/jobs")
+        self.assertEqual(
+            codex_service_job_url(service_url, job_id),
+            f"https://codex.quant.example/v1/codex-audit/jobs/{job_id}",
+        )
+        with self.assertRaises(BridgeError):
+            codex_service_job_url(service_url, "short")
+
+    def test_codex_audit_service_async_job_lifecycle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "CODEX_AUDIT_SERVICE_AUTH": "none",
+                "CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES": "QuantStrategyLab/CryptoLivePoolPipelines",
+                "CODEX_AUDIT_SERVICE_FAKE_OUTPUT": "async review output",
+                "CODEX_AUDIT_SERVICE_JOB_DIR": tmp,
+            }
+            with patch.dict(os.environ, env, clear=False):
+                server = ThreadingHTTPServer(("127.0.0.1", 0), CodexAuditServiceRequestHandler)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    base_url = f"http://127.0.0.1:{server.server_port}"
+                    payload = {
+                        "source_repository": "QuantStrategyLab/CryptoLivePoolPipelines",
+                        "source_ref": "main",
+                        "task": "monthly_snapshot_audit",
+                        "mode": "review_only",
+                        "prompt": "Review this snapshot.",
+                        "timeout_seconds": 60,
+                    }
+                    request = urllib.request.Request(
+                        f"{base_url}/v1/codex-audit/jobs",
+                        data=json.dumps(payload).encode("utf-8"),
+                        method="POST",
+                        headers={"Content-Type": "application/json"},
+                    )
+                    with urllib.request.urlopen(request, timeout=5) as response:
+                        self.assertEqual(response.status, 202)
+                        submitted = json.loads(response.read().decode("utf-8"))
+                    job_id = submitted["job_id"]
+
+                    for _ in range(50):
+                        with urllib.request.urlopen(f"{base_url}/v1/codex-audit/jobs/{job_id}", timeout=5) as response:
+                            polled = json.loads(response.read().decode("utf-8"))
+                        if polled["status"] == "succeeded":
+                            break
+                        time.sleep(0.05)
+                    self.assertEqual(polled["status"], "succeeded")
+                    self.assertEqual(polled["output"], "async review output")
+                    self.assertNotIn("prompt", polled)
+                finally:
+                    server.shutdown()
+                    server.server_close()
+
     def test_auto_fallback_missing_api_key_message_mentions_reason(self) -> None:
         message = auto_fallback_missing_api_key_message("Codex setup failed.")
         self.assertIn("Codex setup failed.", message)
@@ -358,7 +421,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
             patch("scripts.run_monthly_codex_audit.run_anthropic_review", return_value="anthropic review"),
         ):
             reviews, warnings = run_configured_api_reviews(
-                "QuantStrategyLab/CryptoSnapshotPipelines",
+                "QuantStrategyLab/CryptoLivePoolPipelines",
                 "main",
                 {"title": "Monthly Report", "body": "Body"},
                 [],
@@ -373,7 +436,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
             patch("scripts.run_monthly_codex_audit.run_openai_review", return_value="openai review"),
         ):
             reviews, warnings = run_configured_api_reviews(
-                "QuantStrategyLab/CryptoSnapshotPipelines",
+                "QuantStrategyLab/CryptoLivePoolPipelines",
                 "main",
                 {"title": "Monthly Report", "body": "Body"},
                 [],
@@ -398,7 +461,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertEqual(pr_closing_line("monthly_snapshot_audit", 4), "")
 
     def test_workflow_uses_service_backend_only(self) -> None:
-        workflow = Path(".github/workflows/selfhosted_monthly_review.yml").read_text(encoding="utf-8")
+        workflow = Path(".github/workflows/codex_audit.yml").read_text(encoding="utf-8")
 
         self.assertIn("runs-on: ubuntu-latest", workflow)
         self.assertIn("CODEX_AUDIT_CODEX_BACKEND: service", workflow)
@@ -421,7 +484,8 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
     def test_vps_deploy_adds_nginx_audit_route_without_router_service(self) -> None:
         deploy_script = Path("scripts/deploy_codex_audit_service.sh").read_text(encoding="utf-8")
 
-        self.assertIn("location = /v1/codex-audit", deploy_script)
+        self.assertIn("location /v1/codex-audit", deploy_script)
+        self.assertIn("CODEX_AUDIT_SERVICE_JOB_DIR", deploy_script)
         self.assertIn("proxy_pass http://127.0.0.1:{port}", deploy_script)
         self.assertIn("audit service did not become healthy", deploy_script)
         self.assertIn("nginx config test failed; restoring previous config", deploy_script)

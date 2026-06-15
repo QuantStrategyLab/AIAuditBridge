@@ -86,7 +86,7 @@ artifact.
 7. Finish with a concise Markdown report using exactly these headings:
 
 ```markdown
-## Self-hosted Codex Audit
+## Codex Audit
 
 ### Verdict
 

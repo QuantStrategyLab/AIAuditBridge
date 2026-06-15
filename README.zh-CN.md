@@ -6,7 +6,7 @@
 
 ## 这个仓库是什么
 
-CodexAuditBridge 是 QuantStrategyLab 的审计自动化桥接工具。运行 self-hosted Codex 审计 workflow，用于 snapshot review 和低风险修复 PR。
+CodexAuditBridge 是 QuantStrategyLab 的审计自动化桥接工具。运行 service-backed Codex 审计 workflow，用于 snapshot review 和低风险修复 PR。
 
 它产出研究、审计或编排类 artifact，不应自行提交券商订单，也不应直接修改 live allocation。
 
@@ -17,7 +17,7 @@ CodexAuditBridge 是 QuantStrategyLab 组织内的 Codex 调用边界。各 sour
 当前执行模型：
 
 1. source repository 创建或定位审计 issue。
-2. source repository 派发本仓库的 `.github/workflows/selfhosted_monthly_review.yml`。
+2. source repository 派发本仓库的 monthly review workflow。workflow 文件名仍为 `codex_audit.yml` 以保持 dispatch 入口稳定，但 Codex 执行已经是 service-backed。
 3. CodexAuditBridge 校验 source repository 和 task mapping，使用受限 GitHub token clone source repository，并运行指定 provider/backend。
 4. 评论、分支、commit、push、PR 等 GitHub 写操作只由 CodexAuditBridge 负责。
 
@@ -31,9 +31,7 @@ Codex 执行现在只走 service backend：workflow 从 GitHub-hosted runner 调
 
 | Source repository | 允许的 task |
 | --- | --- |
-| `QuantStrategyLab/AiLongHorizonSignalPipelines` | `long_horizon_signal_shadow` |
 | `QuantStrategyLab/CryptoLivePoolPipelines` | `monthly_snapshot_audit` |
-| `QuantStrategyLab/CryptoSnapshotPipelines` | `monthly_snapshot_audit` |
 | `QuantStrategyLab/HkEquitySnapshotPipelines` | `monthly_snapshot_audit` |
 | `QuantStrategyLab/ResearchSignalContextPipelines` | `long_horizon_signal_shadow` |
 | `QuantStrategyLab/UsEquitySnapshotPipelines` | `monthly_snapshot_audit` |
@@ -55,7 +53,7 @@ service host 启动示例：
 
 ```bash
 CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES=QuantStrategyLab/CodexAuditBridge \
-CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES='QuantStrategyLab/CryptoSnapshotPipelines,QuantStrategyLab/CryptoLivePoolPipelines,QuantStrategyLab/HkEquitySnapshotPipelines,QuantStrategyLab/UsEquitySnapshotPipelines,QuantStrategyLab/AiLongHorizonSignalPipelines,QuantStrategyLab/ResearchSignalContextPipelines' \
+CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES='QuantStrategyLab/CryptoLivePoolPipelines,QuantStrategyLab/HkEquitySnapshotPipelines,QuantStrategyLab/UsEquitySnapshotPipelines,QuantStrategyLab/ResearchSignalContextPipelines' \
 CODEX_AUDIT_SERVICE_AUDIENCE=quant-codex-audit \
 OPENAI_API_KEY=... \
 python3 scripts/codex_audit_service.py
@@ -63,7 +61,9 @@ python3 scripts/codex_audit_service.py
 
 443/TLS 建议由平台负载均衡或反向代理负责，并把 `/v1/codex-audit` 转发到 service 端口。不要把 GitHub 写 token 传给这个 service。
 
-维护者可以通过手动触发 `VPS Codex Service Ops` workflow，借助现有 `self-hosted,codex-vps` runner 巡检或部署 VPS 侧服务。部署时保持 Pigbibi `/v1/codex` gateway 不变，只在 nginx 上增加 `/v1/codex-audit` 精确路由到本仓库的 audit service。
+如果暂时没有自定义域名，`cloudflare/codex-audit-proxy/` 提供了一个最小 Cloudflare Worker，可用免费的 `workers.dev` HTTPS 入口，并把 VPS origin URL 保存在 Cloudflare secret 中。生产服务路径使用异步模式：先 `POST /v1/codex-audit/jobs`，再轮询 `GET /v1/codex-audit/jobs/{job_id}`。部署步骤和开源仓库注意事项见 `docs/async_service_deployment.md`。
+
+维护者可以通过手动触发 `VPS Codex Service Ops` workflow，借助现有 `self-hosted,codex-vps` runner 巡检或部署 VPS 侧服务。部署时保持 Pigbibi `/v1/codex` gateway 不变，只在 nginx 上增加 `/v1/codex-audit` 路由到本仓库的 audit service。
 
 ### Service patch contract
 

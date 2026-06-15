@@ -12,6 +12,7 @@ import subprocess
 import sys
 from string import Template
 import tempfile
+import time
 from typing import Any
 import urllib.error
 import urllib.parse
@@ -24,11 +25,9 @@ PROMPT_TEMPLATES = {
     "monthly_snapshot_audit": ROOT / "prompts" / "monthly_crypto_snapshot_audit.md",
     "long_horizon_signal_shadow": ROOT / "prompts" / "long_horizon_signal_shadow.md",
 }
-DEFAULT_SOURCE_REPO = "QuantStrategyLab/CryptoSnapshotPipelines"
+DEFAULT_SOURCE_REPO = "QuantStrategyLab/CryptoLivePoolPipelines"
 SOURCE_REPO_TASKS = {
-    "QuantStrategyLab/AiLongHorizonSignalPipelines": frozenset({"long_horizon_signal_shadow"}),
     "QuantStrategyLab/CryptoLivePoolPipelines": frozenset({"monthly_snapshot_audit"}),
-    "QuantStrategyLab/CryptoSnapshotPipelines": frozenset({"monthly_snapshot_audit"}),
     "QuantStrategyLab/HkEquitySnapshotPipelines": frozenset({"monthly_snapshot_audit"}),
     "QuantStrategyLab/ResearchSignalContextPipelines": frozenset({"long_horizon_signal_shadow"}),
     "QuantStrategyLab/UsEquitySnapshotPipelines": frozenset({"monthly_snapshot_audit"}),
@@ -174,7 +173,7 @@ def github_request(
             "Accept": "application/vnd.github+json",
             "Content-Type": "application/json",
             "X-GitHub-Api-Version": "2022-11-28",
-            "User-Agent": "selfhosted-codex-audit-bridge",
+            "User-Agent": "codex-audit-bridge",
         },
     )
     try:
@@ -640,6 +639,16 @@ def normalize_codex_service_url(raw_url: str) -> str:
     return urllib.parse.urlunparse((parsed.scheme, parsed.netloc, path, "", "", ""))
 
 
+def codex_service_jobs_url(service_url: str) -> str:
+    return service_url.rstrip("/") + "/jobs"
+
+
+def codex_service_job_url(service_url: str, job_id: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9_-]{24,96}", job_id):
+        raise BridgeError("Codex audit service returned an invalid job id")
+    return service_url.rstrip("/") + f"/jobs/{job_id}"
+
+
 def request_github_oidc_token(audience: str) -> str:
     static_token = env_value("CODEX_AUDIT_SERVICE_TOKEN")
     if static_token:
@@ -676,6 +685,39 @@ def request_github_oidc_token(audience: str) -> str:
     return token
 
 
+def request_codex_service_json(
+    *,
+    method: str,
+    url: str,
+    audience: str,
+    payload: dict[str, object] | None = None,
+    timeout_seconds: int = 30,
+) -> dict[str, Any]:
+    token = request_github_oidc_token(audience)
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    request = urllib.request.Request(
+        url,
+        data=data,
+        method=method,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "codex-audit-bridge-service-client",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            body = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise BridgeError(f"Codex audit service request failed: {exc.code} {detail[:600]}") from exc
+    response_payload = json.loads(body)
+    if not isinstance(response_payload, dict):
+        raise BridgeError("Codex audit service returned an invalid JSON response")
+    return response_payload
+
+
 def request_codex_service(
     *,
     source_repo: str,
@@ -686,8 +728,7 @@ def request_codex_service(
     timeout_minutes: int,
 ) -> str:
     audience = env_value("CODEX_AUDIT_SERVICE_AUDIENCE", DEFAULT_SERVICE_AUDIENCE)
-    token = request_github_oidc_token(audience)
-    url = normalize_codex_service_url(env_value("CODEX_AUDIT_SERVICE_URL"))
+    service_url = normalize_codex_service_url(env_value("CODEX_AUDIT_SERVICE_URL"))
     payload = {
         "source_repository": source_repo,
         "source_ref": source_ref,
@@ -696,30 +737,42 @@ def request_codex_service(
         "prompt": prompt,
         "timeout_seconds": timeout_minutes * 60,
     }
-    request = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
+    submit_payload = request_codex_service_json(
         method="POST",
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "User-Agent": "codex-audit-bridge-service-client",
-        },
+        url=codex_service_jobs_url(service_url),
+        audience=audience,
+        payload=payload,
+        timeout_seconds=60,
     )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout_minutes * 60 + 30) as response:
-            body = response.read().decode("utf-8")
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise BridgeError(f"Codex audit service request failed: {exc.code} {detail[:600]}") from exc
-    response_payload = json.loads(body)
-    if not isinstance(response_payload, dict) or response_payload.get("status") != "ok":
-        raise BridgeError("Codex audit service returned an invalid response")
-    output = response_payload.get("output")
-    if not isinstance(output, str):
-        raise BridgeError("Codex audit service response did not include text output")
-    return output.strip()
+    if submit_payload.get("status") not in {"queued", "running"}:
+        raise BridgeError("Codex audit service did not accept the async job")
+    job_id = submit_payload.get("job_id")
+    if not isinstance(job_id, str) or not job_id:
+        raise BridgeError("Codex audit service did not return a job id")
+
+    deadline = time.time() + timeout_minutes * 60 + 60
+    poll_interval = max(2, int_env("CODEX_AUDIT_SERVICE_POLL_INTERVAL_SECONDS", 10))
+    job_url = codex_service_job_url(service_url, job_id)
+    while time.time() < deadline:
+        time.sleep(poll_interval)
+        job_payload = request_codex_service_json(
+            method="GET",
+            url=job_url,
+            audience=audience,
+            timeout_seconds=60,
+        )
+        status = job_payload.get("status")
+        if status == "succeeded":
+            output = job_payload.get("output")
+            if not isinstance(output, str):
+                raise BridgeError("Codex audit service job response did not include text output")
+            return output.strip()
+        if status == "failed":
+            error = str(job_payload.get("error") or "unknown service job failure")
+            raise BridgeError(f"Codex audit service job failed: {error[:600]}")
+        if status not in {"queued", "running"}:
+            raise BridgeError(f"Codex audit service job returned unexpected status: {status!r}")
+    raise BridgeError("Codex audit service job timed out before completion")
 
 
 def extract_json_object(text: str) -> dict[str, Any]:
@@ -1069,7 +1122,7 @@ def run_anthropic_review(source_repo: str, source_ref: str, issue: dict[str, Any
 def auto_fallback_missing_api_key_message(reason: str) -> str:
     return "\n".join(
         [
-            "## Self-hosted Codex Audit",
+            "## Codex Audit",
             "",
             reason,
             "",
@@ -1143,7 +1196,7 @@ def run_auto_provider_fallback(
     if not reviews:
         body = "\n".join(
             [
-                "## Self-hosted Codex Audit",
+                "## Codex Audit",
                 "",
                 reason,
                 "",
@@ -1213,7 +1266,7 @@ def truncate_markdown(text: str, limit: int = 12000) -> str:
 
 
 def strip_audit_heading(text: str) -> str:
-    return re.sub(r"^## (?:Crypto|Self-hosted) Codex Audit\s*\n+", "", text.strip(), count=1)
+    return re.sub(r"^## (?:Crypto )?Codex Audit\s*\n+", "", text.strip(), count=1)
 
 
 def github_file_url(source_repo: str, ref: str, rel_path: Path, line: int | None = None) -> str:
@@ -1308,7 +1361,7 @@ def create_pull_request(
             "",
             changed_list,
             "",
-            "## Self-hosted Codex Result",
+            "## Codex Result",
             "",
             truncate_markdown(strip_audit_heading(final_message), 6000)
             or "Codex edited files but did not return a final message.",
@@ -1398,16 +1451,16 @@ def main() -> int:
         )
 
     try:
-        with tempfile.TemporaryDirectory(prefix="selfhosted-codex-audit-") as tmp:
+        with tempfile.TemporaryDirectory(prefix="codex-audit-bridge-") as tmp:
             work_root = Path(tmp)
             repo_dir = clone_source_repo(token, source_repo, source_ref, work_root)
             stamp = dt.datetime.now(dt.UTC).strftime("%Y%m%d%H%M%S")
             branch_prefix = "long-horizon-signal" if task == "long_horizon_signal_shadow" else "monthly-review"
             branch_name = f"codex/{branch_prefix}-issue-{issue_number}-{stamp}"
             run_checked(["git", "checkout", "-b", branch_name], cwd=repo_dir)
-            run_checked(["git", "config", "user.name", "selfhosted-codex-audit[bot]"], cwd=repo_dir)
+            run_checked(["git", "config", "user.name", "codex-audit-bridge[bot]"], cwd=repo_dir)
             run_checked(
-                ["git", "config", "user.email", "selfhosted-codex-audit[bot]@users.noreply.github.com"],
+                ["git", "config", "user.email", "codex-audit-bridge[bot]@users.noreply.github.com"],
                 cwd=repo_dir,
             )
 
@@ -1442,12 +1495,12 @@ def main() -> int:
                         issue=issue,
                         comments=comments,
                         issue_number=issue_number,
-                        reason=f"Self-hosted Codex failed with exit code `{return_code}`.",
+                        reason=f"Codex service failed with exit code `{return_code}`.",
                         exit_code=return_code,
                     )
                 body = "\n".join(
                     [
-                        "## Self-hosted Codex Audit",
+                        "## Codex Audit",
                         "",
                         f"Codex execution failed with exit code `{return_code}`.",
                         "",
@@ -1485,7 +1538,7 @@ def main() -> int:
                 review_message = format_codex_message(final_message, repo_dir, source_repo, source_ref)
                 body = "\n".join(
                     [
-                        "## Self-hosted Codex Audit",
+                        "## Codex Audit",
                         "",
                         "Codex produced edits, but the bridge refused to push them because they touched blocked paths.",
                         "",
@@ -1510,7 +1563,7 @@ def main() -> int:
             pr = create_pull_request(token, source_repo, issue, branch_name, source_ref, pr_message, paths, task=task)
             pr_url = pr.get("html_url", "")
             body_lines = [
-                "## Self-hosted Codex Audit",
+                "## Codex Audit",
                 "",
                 truncate_markdown(
                     strip_audit_heading(pr_message)
@@ -1539,7 +1592,7 @@ def main() -> int:
                 issue=issue,
                 comments=comments,
                 issue_number=issue_number,
-                reason=f"Self-hosted Codex path failed before completion: `{exc}`.",
+                reason=f"Codex service path failed before completion: `{exc}`.",
             )
         raise
 
