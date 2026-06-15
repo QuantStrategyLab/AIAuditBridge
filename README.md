@@ -18,10 +18,17 @@ Current execution model:
 
 1. A source repository creates or identifies an audit issue.
 2. The source repository dispatches `.github/workflows/selfhosted_monthly_review.yml` in this repository.
-3. CodexAuditBridge validates the source repository and task mapping, clones the source repository with a scoped GitHub token, and runs the selected provider.
-4. Only CodexAuditBridge performs GitHub writes such as comments, branches, and pull requests.
+3. CodexAuditBridge validates the source repository and task mapping, clones the source repository with a scoped GitHub token, and runs the selected provider/backend.
+4. Only CodexAuditBridge performs GitHub writes such as comments, branches, commits, pushes, and pull requests.
 
-Keep this boundary inside the `QuantStrategyLab` organization. Do not move QuantStrategyLab audit execution or source-repository write tokens to another organization. If the self-hosted Codex dependency is replaced later, prefer a QuantStrategyLab-owned HTTPS/443 Codex service that returns review text or structured patch suggestions while CodexAuditBridge keeps clone, validation, commit, push, and PR ownership.
+Keep this boundary inside the `QuantStrategyLab` organization. Do not move QuantStrategyLab audit execution or source-repository write tokens to another organization.
+
+Codex execution is intentionally split from GitHub write ownership:
+
+- `local` backend: runs `codex exec` on a self-hosted runner labeled `self-hosted,codex-vps`.
+- `service` backend: calls a QuantStrategyLab-owned HTTPS/443 Codex audit service from a standard GitHub-hosted runner. The service returns review text or structured patch suggestions only. CodexAuditBridge still owns clone, path validation, patch application, commit, push, PR creation, and issue comments.
+
+This avoids hard-coding Codex CLI setup in every source repository and avoids depending on a repository outside the `QuantStrategyLab` organization.
 
 ## Supported source repositories
 
@@ -35,6 +42,51 @@ Keep this boundary inside the `QuantStrategyLab` organization. Do not move Quant
 | `QuantStrategyLab/UsEquitySnapshotPipelines` | `monthly_snapshot_audit` |
 
 When adding a new dispatcher, update `SOURCE_REPO_TASKS` in `scripts/run_monthly_codex_audit.py` and add a regression test that proves the repository/task pair is accepted.
+
+## Codex backend configuration
+
+Workflow dispatch input `codex_backend` controls how Codex is executed:
+
+| Backend | Runner | Required setup |
+| --- | --- | --- |
+| `local` | `self-hosted,codex-vps` | Codex CLI and model credentials available on the runner |
+| `service` | `ubuntu-latest` | `CODEX_AUDIT_SERVICE_URL` repository variable pointing to the QuantStrategyLab HTTPS service |
+
+For the service backend, configure these values in `QuantStrategyLab/CodexAuditBridge`:
+
+- Repository variable `CODEX_AUDIT_SERVICE_URL`, for example `https://codex-audit.quant.example`.
+- Optional repository variable `CODEX_AUDIT_SERVICE_AUDIENCE`, default `quant-codex-audit`.
+- Workflow permission `id-token: write` is already set so GitHub Actions can request an OIDC token for the service.
+
+Run the service host with:
+
+```bash
+CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES=QuantStrategyLab/CodexAuditBridge \
+CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES='QuantStrategyLab/CryptoSnapshotPipelines,QuantStrategyLab/CryptoLivePoolPipelines,QuantStrategyLab/HkEquitySnapshotPipelines,QuantStrategyLab/UsEquitySnapshotPipelines,QuantStrategyLab/AiLongHorizonSignalPipelines,QuantStrategyLab/ResearchSignalContextPipelines' \
+CODEX_AUDIT_SERVICE_AUDIENCE=quant-codex-audit \
+OPENAI_API_KEY=... \
+python3 scripts/codex_audit_service.py
+```
+
+Terminate TLS on 443 with the platform load balancer or a reverse proxy and forward to the service port. Do not pass GitHub write tokens to this service.
+
+### Service patch contract
+
+In `review_and_fix` mode, the service must return exactly one JSON object:
+
+```json
+{
+  "final_message": "Markdown summary for the issue comment or PR body.",
+  "changes": [
+    {
+      "path": "relative/file/path.py",
+      "content": "complete UTF-8 file contents"
+    }
+  ]
+}
+```
+
+CodexAuditBridge rejects absolute paths, `.git` paths, secret-like paths, and blocked data paths before writing files locally.
 
 ## Output boundary
 

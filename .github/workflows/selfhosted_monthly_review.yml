@@ -33,6 +33,14 @@ on:
           - anthropic
           - codex
           - openai
+      codex_backend:
+        description: "Codex execution backend"
+        required: false
+        type: choice
+        default: "local"
+        options:
+          - local
+          - service
       task:
         description: "Codex bridge task"
         required: false
@@ -52,6 +60,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write
 
 concurrency:
   group: selfhosted-codex-monthly-${{ github.event.client_payload.source_repo || inputs.source_repo }}-${{ github.event.client_payload.issue_number || inputs.issue_number }}
@@ -59,9 +68,7 @@ concurrency:
 
 jobs:
   codex-monthly-review:
-    runs-on:
-      - self-hosted
-      - codex-vps
+    runs-on: ${{ fromJSON((github.event.client_payload.codex_backend || inputs.codex_backend || 'local') == 'service' && '["ubuntu-latest"]' || '["self-hosted","codex-vps"]') }}
     timeout-minutes: 60
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
@@ -70,6 +77,7 @@ jobs:
       SOURCE_REF: ${{ github.event.client_payload.source_ref || inputs.source_ref || 'main' }}
       CODEX_AUDIT_MODE: ${{ github.event.client_payload.mode || inputs.mode || 'review_and_fix' }}
       CODEX_AUDIT_PROVIDER: ${{ github.event.client_payload.provider || inputs.provider || 'auto' }}
+      CODEX_AUDIT_CODEX_BACKEND: ${{ github.event.client_payload.codex_backend || inputs.codex_backend || 'local' }}
       CODEX_AUDIT_TASK: ${{ github.event.client_payload.task || inputs.task || 'monthly_snapshot_audit' }}
       CODEX_AUDIT_AUTO_MERGE: ${{ github.event.client_payload.auto_merge || inputs.auto_merge || 'false' }}
     steps:
@@ -77,7 +85,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Verify Codex CLI
-        if: env.CODEX_AUDIT_PROVIDER == 'codex'
+        if: env.CODEX_AUDIT_PROVIDER == 'codex' && env.CODEX_AUDIT_CODEX_BACKEND == 'local'
         run: |
           set -euo pipefail
           command -v codex
@@ -129,4 +137,6 @@ jobs:
           OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-5.4-mini' }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ANTHROPIC_MODEL: ${{ vars.ANTHROPIC_MODEL || 'claude-sonnet-4-6' }}
+          CODEX_AUDIT_SERVICE_URL: ${{ vars.CODEX_AUDIT_SERVICE_URL }}
+          CODEX_AUDIT_SERVICE_AUDIENCE: ${{ vars.CODEX_AUDIT_SERVICE_AUDIENCE || 'quant-codex-audit' }}
         run: python scripts/run_monthly_codex_audit.py

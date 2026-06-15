@@ -5,7 +5,7 @@ import base64
 import datetime as dt
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shlex
 import subprocess
@@ -39,6 +39,61 @@ DEFAULT_TASK = "monthly_snapshot_audit"
 DEFAULT_MODE = "review_and_fix"
 DEFAULT_PROVIDER = "auto"
 SUPPORTED_PROVIDERS = frozenset({"api", "anthropic", "codex", "openai", "auto"})
+DEFAULT_CODEX_BACKEND = "local"
+SUPPORTED_CODEX_BACKENDS = frozenset({"local", "service"})
+DEFAULT_SERVICE_AUDIENCE = "quant-codex-audit"
+DEFAULT_SERVICE_CONTEXT_MAX_BYTES = 700_000
+DEFAULT_SERVICE_CONTEXT_MAX_FILE_BYTES = 80_000
+DEFAULT_SERVICE_MAX_CHANGES = 20
+SERVICE_CONTEXT_TEXT_SUFFIXES = frozenset(
+    {
+        ".cfg",
+        ".css",
+        ".csv",
+        ".gitignore",
+        ".html",
+        ".ini",
+        ".js",
+        ".json",
+        ".jsonl",
+        ".md",
+        ".py",
+        ".rb",
+        ".rs",
+        ".sh",
+        ".sql",
+        ".toml",
+        ".ts",
+        ".tsx",
+        ".txt",
+        ".xml",
+        ".yaml",
+        ".yml",
+    }
+)
+SERVICE_CONTEXT_TEXT_NAMES = frozenset(
+    {
+        ".gitignore",
+        "Dockerfile",
+        "LICENSE",
+        "Makefile",
+        "README",
+        "requirements.txt",
+    }
+)
+SERVICE_CONTEXT_EXCLUDED_DIRS = frozenset(
+    {
+        ".git",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".venv",
+        "__pycache__",
+        "dist",
+        "node_modules",
+        "venv",
+    }
+)
 LONG_HORIZON_SIGNAL_OUTPUT_PREFIXES = (
     "data/output/latest_signal.",
     "data/output/signal_history/",
@@ -86,6 +141,13 @@ def validate_provider(provider: str) -> str:
     normalized = (provider or DEFAULT_PROVIDER).strip().lower()
     if normalized not in SUPPORTED_PROVIDERS:
         raise BridgeError(f"Unsupported CODEX_AUDIT_PROVIDER: {provider!r}")
+    return normalized
+
+
+def validate_codex_backend(backend: str) -> str:
+    normalized = (backend or DEFAULT_CODEX_BACKEND).strip().lower()
+    if normalized not in SUPPORTED_CODEX_BACKENDS:
+        raise BridgeError(f"Unsupported CODEX_AUDIT_CODEX_BACKEND: {backend!r}")
     return normalized
 
 
@@ -384,6 +446,152 @@ def build_prompt(
     )
 
 
+def int_env(name: str, default: int) -> int:
+    raw = env_value(name)
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise BridgeError(f"{name} must be an integer") from exc
+    if value < 1:
+        raise BridgeError(f"{name} must be positive")
+    return value
+
+
+def service_context_path_allowed(path: str, *, task: str) -> bool:
+    if not path or "\\" in path:
+        return False
+    posix_path = PurePosixPath(path)
+    if posix_path.is_absolute() or any(part in {"", ".", ".."} for part in posix_path.parts):
+        return False
+    if any(part in SERVICE_CONTEXT_EXCLUDED_DIRS for part in posix_path.parts):
+        return False
+    if BLOCKED_PATH_RE.search(path):
+        return False
+    if path.startswith("data/") and not (
+        task == "long_horizon_signal_shadow" and long_horizon_signal_data_path_allowed(path)
+    ):
+        return False
+    suffix = posix_path.suffix.lower()
+    name = posix_path.name
+    return suffix in SERVICE_CONTEXT_TEXT_SUFFIXES or name in SERVICE_CONTEXT_TEXT_NAMES
+
+
+def service_context_file_paths(repo_dir: Path, *, task: str) -> list[str]:
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    def add_path(path: Path) -> None:
+        if not path.is_file():
+            return
+        try:
+            rel = path.relative_to(repo_dir).as_posix()
+        except ValueError:
+            return
+        if rel not in seen and service_context_path_allowed(rel, task=task):
+            seen.add(rel)
+            candidates.append(rel)
+
+    for path in sorted((repo_dir / ".codex-audit").glob("*")):
+        add_path(path)
+
+    result = run(["git", "ls-files", "-co", "--exclude-standard"], cwd=repo_dir, timeout=30)
+    if result.returncode == 0:
+        for rel in sorted(line.strip() for line in (result.stdout or "").splitlines() if line.strip()):
+            add_path(repo_dir / rel)
+    else:
+        for path in sorted(item for item in repo_dir.rglob("*") if item.is_file()):
+            add_path(path)
+
+    return candidates
+
+
+def build_service_repository_context(
+    repo_dir: Path,
+    *,
+    task: str,
+    max_bytes: int | None = None,
+    max_file_bytes: int | None = None,
+) -> str:
+    max_bytes = max_bytes or int_env("CODEX_AUDIT_SERVICE_CONTEXT_MAX_BYTES", DEFAULT_SERVICE_CONTEXT_MAX_BYTES)
+    max_file_bytes = max_file_bytes or int_env(
+        "CODEX_AUDIT_SERVICE_CONTEXT_MAX_FILE_BYTES",
+        DEFAULT_SERVICE_CONTEXT_MAX_FILE_BYTES,
+    )
+    parts = [
+        "## Repository context snapshot",
+        "",
+        "The service backend cannot access the source checkout directly. The following bounded text snapshot is provided "
+        "by CodexAuditBridge after path filtering.",
+        "",
+    ]
+    total = len("\n".join(parts).encode("utf-8"))
+    omitted = 0
+    for rel in service_context_file_paths(repo_dir, task=task):
+        path = repo_dir / rel
+        try:
+            content_bytes = path.read_bytes()
+        except OSError:
+            omitted += 1
+            continue
+        if len(content_bytes) > max_file_bytes or b"\x00" in content_bytes:
+            omitted += 1
+            continue
+        content = content_bytes.decode("utf-8", errors="replace").rstrip()
+        block = f'<context path="{rel}">\n{content}\n</context>\n\n'
+        block_bytes = len(block.encode("utf-8"))
+        if total + block_bytes > max_bytes:
+            omitted += 1
+            continue
+        parts.append(block)
+        total += block_bytes
+    if omitted:
+        note = f"\n{omitted} files were omitted by service context size, binary, or path filters.\n"
+        if total + len(note.encode("utf-8")) <= max_bytes:
+            parts.append(note)
+    return "\n".join(parts).rstrip() + "\n"
+
+
+def service_patch_contract_instructions() -> str:
+    return "\n".join(
+        [
+            "## Service patch contract",
+            "",
+            "You are running behind CodexAuditBridge's service backend. You cannot edit the checkout directly.",
+            "For review_and_fix mode, return exactly one JSON object and no surrounding prose:",
+            "",
+            "```json",
+            "{",
+            '  "final_message": "Markdown summary for the issue comment or PR body.",',
+            '  "changes": [',
+            '    {"path": "relative/file/path.py", "content": "complete UTF-8 file contents"}',
+            "  ]",
+            "}",
+            "```",
+            "",
+            "Rules:",
+            "- `path` must be a repository-relative POSIX path.",
+            "- Return complete file contents, not a diff.",
+            "- Do not include secrets, credentials, tokens, private keys, or .env files.",
+            "- Do not write under `.git/`.",
+            "- Avoid data/output edits unless the task explicitly asks for an allowed long-horizon shadow signal output.",
+            "- If no safe edit is needed, return an empty `changes` array and explain why in `final_message`.",
+        ]
+    )
+
+
+def build_service_prompt(repo_dir: Path, prompt: str, *, task: str, mode: str) -> str:
+    parts = [
+        prompt.rstrip(),
+        "",
+        build_service_repository_context(repo_dir, task=task).rstrip(),
+    ]
+    if mode == "review_and_fix":
+        parts.extend(["", service_patch_contract_instructions()])
+    return "\n".join(parts).rstrip() + "\n"
+
+
 def run_codex(
     repo_dir: Path,
     prompt: str,
@@ -410,6 +618,242 @@ def run_codex(
         print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
     final_message = output_path.read_text(encoding="utf-8") if output_path.exists() else ""
     return result.returncode, result.stdout or "", final_message.strip()
+
+
+def normalize_codex_service_url(raw_url: str) -> str:
+    raw_url = raw_url.strip().rstrip("/")
+    if not raw_url:
+        raise BridgeError("CODEX_AUDIT_SERVICE_URL is required when CODEX_AUDIT_CODEX_BACKEND=service")
+    parsed = urllib.parse.urlparse(raw_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise BridgeError("CODEX_AUDIT_SERVICE_URL must be an absolute HTTP(S) URL")
+    if parsed.scheme != "https":
+        host = parsed.hostname or ""
+        local_host = host in {"127.0.0.1", "::1", "localhost"}
+        if not (local_host and parse_bool(env_value("CODEX_AUDIT_ALLOW_INSECURE_SERVICE_URL"))):
+            raise BridgeError("CODEX_AUDIT_SERVICE_URL must use HTTPS outside explicit local testing")
+    path = parsed.path.rstrip("/")
+    if not path:
+        path = "/v1/codex-audit"
+    elif not path.endswith("/v1/codex-audit"):
+        path = f"{path}/v1/codex-audit"
+    return urllib.parse.urlunparse((parsed.scheme, parsed.netloc, path, "", "", ""))
+
+
+def request_github_oidc_token(audience: str) -> str:
+    static_token = env_value("CODEX_AUDIT_SERVICE_TOKEN")
+    if static_token:
+        return static_token
+
+    request_url = env_value("ACTIONS_ID_TOKEN_REQUEST_URL")
+    request_token = env_value("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
+    if not request_url or not request_token:
+        raise BridgeError(
+            "GitHub Actions OIDC token request environment is unavailable. "
+            "Set workflow `permissions: id-token: write` or provide CODEX_AUDIT_SERVICE_TOKEN for local testing."
+        )
+    separator = "&" if "?" in request_url else "?"
+    url = f"{request_url}{separator}audience={urllib.parse.quote(audience)}"
+    request = urllib.request.Request(
+        url,
+        method="GET",
+        headers={
+            "Authorization": f"Bearer {request_token}",
+            "Accept": "application/json",
+            "User-Agent": "codex-audit-bridge-oidc",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            body = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise BridgeError(f"GitHub OIDC token request failed: {exc.code} {detail[:600]}") from exc
+    payload = json.loads(body)
+    token = payload.get("value") if isinstance(payload, dict) else None
+    if not isinstance(token, str) or not token:
+        raise BridgeError("GitHub OIDC token response did not include a token value")
+    return token
+
+
+def request_codex_service(
+    *,
+    source_repo: str,
+    source_ref: str,
+    task: str,
+    mode: str,
+    prompt: str,
+    timeout_minutes: int,
+) -> str:
+    audience = env_value("CODEX_AUDIT_SERVICE_AUDIENCE", DEFAULT_SERVICE_AUDIENCE)
+    token = request_github_oidc_token(audience)
+    url = normalize_codex_service_url(env_value("CODEX_AUDIT_SERVICE_URL"))
+    payload = {
+        "source_repository": source_repo,
+        "source_ref": source_ref,
+        "task": task,
+        "mode": mode,
+        "prompt": prompt,
+        "timeout_seconds": timeout_minutes * 60,
+    }
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "codex-audit-bridge-service-client",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_minutes * 60 + 30) as response:
+            body = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise BridgeError(f"Codex audit service request failed: {exc.code} {detail[:600]}") from exc
+    response_payload = json.loads(body)
+    if not isinstance(response_payload, dict) or response_payload.get("status") != "ok":
+        raise BridgeError("Codex audit service returned an invalid response")
+    output = response_payload.get("output")
+    if not isinstance(output, str):
+        raise BridgeError("Codex audit service response did not include text output")
+    return output.strip()
+
+
+def extract_json_object(text: str) -> dict[str, Any]:
+    stripped = text.strip()
+    fence = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", stripped, flags=re.DOTALL | re.IGNORECASE)
+    if fence:
+        stripped = fence.group(1).strip()
+    if not stripped.startswith("{"):
+        start = stripped.find("{")
+        end = stripped.rfind("}")
+        if start >= 0 and end > start:
+            stripped = stripped[start : end + 1]
+    payload = json.loads(stripped)
+    if not isinstance(payload, dict):
+        raise BridgeError("Service patch response must be a JSON object")
+    return payload
+
+
+def parse_service_patch_response(text: str) -> tuple[str, list[dict[str, str]]]:
+    payload = extract_json_object(text)
+    final_message = payload.get("final_message", "")
+    if final_message is None:
+        final_message = ""
+    if not isinstance(final_message, str):
+        raise BridgeError("Service patch response `final_message` must be a string")
+    changes_raw = payload.get("changes")
+    if not isinstance(changes_raw, list):
+        raise BridgeError("Service patch response `changes` must be a list")
+    changes: list[dict[str, str]] = []
+    for index, item in enumerate(changes_raw):
+        if not isinstance(item, dict):
+            raise BridgeError(f"Service patch response change #{index + 1} must be an object")
+        path = item.get("path")
+        content = item.get("content")
+        if not isinstance(path, str) or not path.strip():
+            raise BridgeError(f"Service patch response change #{index + 1} has an invalid path")
+        if not isinstance(content, str):
+            raise BridgeError(f"Service patch response change #{index + 1} content must be a string")
+        changes.append({"path": path.strip(), "content": content})
+    return final_message.strip(), changes
+
+
+def validate_service_change_path(path: str) -> str:
+    if "\\" in path:
+        raise BridgeError(f"Service patch path must use POSIX separators: {path!r}")
+    posix_path = PurePosixPath(path)
+    if posix_path.is_absolute() or any(part in {"", ".", ".."} for part in posix_path.parts):
+        raise BridgeError(f"Service patch path must be repository-relative: {path!r}")
+    if any(part == ".git" for part in posix_path.parts):
+        raise BridgeError(f"Service patch path may not target .git: {path!r}")
+    return posix_path.as_posix()
+
+
+def apply_service_changes(repo_dir: Path, changes: list[dict[str, str]], *, task: str) -> list[str]:
+    max_changes = int_env("CODEX_AUDIT_SERVICE_MAX_CHANGES", DEFAULT_SERVICE_MAX_CHANGES)
+    if len(changes) > max_changes:
+        raise BridgeError(f"Service patch contains {len(changes)} changes; limit is {max_changes}")
+
+    validated_paths = [validate_service_change_path(change["path"]) for change in changes]
+    denied = blocked_paths(validated_paths, task=task)
+    if denied:
+        denied_list = ", ".join(denied)
+        raise BridgeError(f"Service patch includes blocked paths: {denied_list}")
+
+    repo_root = repo_dir.resolve()
+    for change, rel_path in zip(changes, validated_paths, strict=True):
+        target = (repo_root / rel_path).resolve()
+        try:
+            target.relative_to(repo_root)
+        except ValueError as exc:
+            raise BridgeError(f"Service patch path escapes the repository: {rel_path!r}") from exc
+        if target.exists() and target.is_dir():
+            raise BridgeError(f"Service patch cannot replace a directory: {rel_path!r}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(change["content"], encoding="utf-8")
+    return validated_paths
+
+
+def run_codex_service(
+    repo_dir: Path,
+    prompt: str,
+    timeout_minutes: int,
+    *,
+    source_repo: str,
+    source_ref: str,
+    task: str,
+    mode: str,
+) -> tuple[int, str, str]:
+    try:
+        service_prompt = build_service_prompt(repo_dir, prompt, task=task, mode=mode)
+        output = request_codex_service(
+            source_repo=source_repo,
+            source_ref=source_ref,
+            task=task,
+            mode=mode,
+            prompt=service_prompt,
+            timeout_minutes=timeout_minutes,
+        )
+        final_message = output
+        if mode == "review_and_fix":
+            final_message, changes = parse_service_patch_response(output)
+            apply_service_changes(repo_dir, changes, task=task)
+        output_path = repo_dir / ".codex-audit" / "codex-final-message.md"
+        output_path.write_text(final_message.rstrip() + "\n", encoding="utf-8")
+        return 0, output, final_message.strip()
+    except (BridgeError, OSError, json.JSONDecodeError, urllib.error.URLError) as exc:
+        return 1, str(exc), ""
+
+
+def run_codex_backend(
+    repo_dir: Path,
+    prompt: str,
+    timeout_minutes: int,
+    *,
+    backend: str,
+    source_repo: str,
+    source_ref: str,
+    task: str,
+    mode: str,
+    env_overrides: dict[str, str] | None = None,
+) -> tuple[int, str, str]:
+    if backend == "local":
+        return run_codex(repo_dir, prompt, timeout_minutes, env_overrides=env_overrides)
+    if backend == "service":
+        return run_codex_service(
+            repo_dir,
+            prompt,
+            timeout_minutes,
+            source_repo=source_repo,
+            source_ref=source_ref,
+            task=task,
+            mode=mode,
+        )
+    raise BridgeError(f"Unsupported Codex backend: {backend!r}")
 
 
 def build_api_review_prompt(
@@ -918,6 +1362,7 @@ def main() -> int:
     if mode not in {"review_only", "review_and_fix"}:
         raise BridgeError(f"Unsupported CODEX_AUDIT_MODE: {mode}")
     provider = validate_provider(env_value("CODEX_AUDIT_PROVIDER", DEFAULT_PROVIDER))
+    codex_backend = validate_codex_backend(env_value("CODEX_AUDIT_CODEX_BACKEND", DEFAULT_CODEX_BACKEND))
     issue_number_raw = env_value("ISSUE_NUMBER")
     if not issue_number_raw.isdigit():
         raise BridgeError("ISSUE_NUMBER must be provided as an integer")
@@ -926,7 +1371,10 @@ def main() -> int:
     timeout_minutes = int(env_value("CODEX_AUDIT_TIMEOUT_MINUTES", "45"))
     auto_merge = parse_bool(env_value("CODEX_AUDIT_AUTO_MERGE"))
 
-    print(f"Running {task} for {source_repo} issue #{issue_number} on {source_ref} in {mode} mode.")
+    print(
+        f"Running {task} for {source_repo} issue #{issue_number} on {source_ref} in {mode} mode "
+        f"with provider {provider} and Codex backend {codex_backend}."
+    )
     issue = github_request(token, "GET", f"/repos/{source_repo}/issues/{issue_number}")
     comments = github_request(token, "GET", f"/repos/{source_repo}/issues/{issue_number}/comments?per_page=20")
     if not isinstance(comments, list):
@@ -975,11 +1423,16 @@ def main() -> int:
                 context_path=context_path,
                 mode=mode,
             )
-            dependency_env = bootstrap_python_environment()
-            return_code, _codex_log, final_message = run_codex(
+            dependency_env = bootstrap_python_environment() if codex_backend == "local" else {}
+            return_code, _codex_log, final_message = run_codex_backend(
                 repo_dir,
                 prompt,
                 timeout_minutes,
+                backend=codex_backend,
+                source_repo=source_repo,
+                source_ref=source_ref,
+                task=task,
+                mode=mode,
                 env_overrides=dependency_env,
             )
             if return_code != 0:
