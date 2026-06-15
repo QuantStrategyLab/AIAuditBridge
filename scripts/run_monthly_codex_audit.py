@@ -25,20 +25,16 @@ PROMPT_TEMPLATES = {
     "long_horizon_signal_shadow": ROOT / "prompts" / "long_horizon_signal_shadow.md",
 }
 DEFAULT_SOURCE_REPO = "QuantStrategyLab/CryptoSnapshotPipelines"
-ALLOWED_SOURCE_REPOS = frozenset(
-    {
-        "QuantStrategyLab/AiLongHorizonSignalPipelines",
-        "QuantStrategyLab/CryptoSnapshotPipelines",
-        "QuantStrategyLab/HkEquitySnapshotPipelines",
-        "QuantStrategyLab/UsEquitySnapshotPipelines",
-    }
-)
-REPO_TASKS = {
+SOURCE_REPO_TASKS = {
     "QuantStrategyLab/AiLongHorizonSignalPipelines": frozenset({"long_horizon_signal_shadow"}),
+    "QuantStrategyLab/CryptoLivePoolPipelines": frozenset({"monthly_snapshot_audit"}),
     "QuantStrategyLab/CryptoSnapshotPipelines": frozenset({"monthly_snapshot_audit"}),
     "QuantStrategyLab/HkEquitySnapshotPipelines": frozenset({"monthly_snapshot_audit"}),
+    "QuantStrategyLab/ResearchSignalContextPipelines": frozenset({"long_horizon_signal_shadow"}),
     "QuantStrategyLab/UsEquitySnapshotPipelines": frozenset({"monthly_snapshot_audit"}),
 }
+ALLOWED_SOURCE_REPOS = frozenset(SOURCE_REPO_TASKS)
+REPO_TASKS = SOURCE_REPO_TASKS
 DEFAULT_TASK = "monthly_snapshot_audit"
 DEFAULT_MODE = "review_and_fix"
 DEFAULT_PROVIDER = "auto"
