@@ -11,6 +11,11 @@ on:
         options:
           - inspect
           - deploy
+          - repair-ssh
+      ssh_unban_ip:
+        description: "Optional IP to unban from sshd/fail2ban"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -26,4 +31,6 @@ jobs:
         uses: actions/checkout@v6.0.3
 
       - name: Run VPS service operation
+        env:
+          CODEX_AUDIT_SSH_UNBAN_IP: ${{ inputs.ssh_unban_ip }}
         run: bash scripts/deploy_codex_audit_service.sh "${{ inputs.mode }}"

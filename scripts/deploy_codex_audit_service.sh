@@ -28,7 +28,9 @@ nginx_bin() {
 }
 
 mask_infra() {
-  sed -E 's/[0-9]{1,3}(\.[0-9]{1,3}){3}\.sslip\.io/[public-service-host]/g'
+  sed -E \
+    -e 's/[0-9]{1,3}(\.[0-9]{1,3}){3}\.sslip\.io/[public-service-host]/g' \
+    -e 's/\b[0-9]{1,3}(\.[0-9]{1,3}){3}\b/[ip-address]/g'
 }
 
 systemctl_status_brief() {
@@ -38,6 +40,22 @@ systemctl_status_brief() {
     systemctl is-enabled "$service" 2>/dev/null || true
     systemctl is-active "$service" 2>/dev/null || true
     systemctl status "$service" --no-pager --lines=8 2>/dev/null | mask_infra || true
+  fi
+}
+
+sshd_bin() {
+  if command -v sshd >/dev/null 2>&1; then
+    command -v sshd
+  elif [ -x /usr/sbin/sshd ]; then
+    echo "/usr/sbin/sshd"
+  fi
+}
+
+ssh_service_name() {
+  if systemctl list-unit-files ssh.service >/dev/null 2>&1; then
+    echo "ssh"
+  elif systemctl list-unit-files sshd.service >/dev/null 2>&1; then
+    echo "sshd"
   fi
 }
 
@@ -77,7 +95,7 @@ inspect() {
   echo
 
   echo "## Listening ports"
-  ss -ltnp 2>/dev/null | grep -E ':(80|443|8787|8797)\b' || true
+  ss -ltnp 2>/dev/null | grep -E ':(22|80|443|8787|8797)\b' | mask_infra || true
   echo
 
   echo "## Codex process hints"
@@ -90,10 +108,31 @@ inspect() {
   echo
 
   echo "## Services"
+  systemctl_status_brief ssh
+  systemctl_status_brief sshd
   systemctl_status_brief codex-gateway
   systemctl_status_brief "$AUDIT_SERVICE_NAME"
   systemctl_status_brief nginx
   systemctl_status_brief caddy
+  echo
+
+  echo "## SSH access hints"
+  local sshd
+  sshd="$(sshd_bin || true)"
+  if [ -n "$sshd" ]; then
+    sudo "$sshd" -T 2>/dev/null \
+      | grep -E '^(port|permitrootlogin|passwordauthentication|pubkeyauthentication|authorizedkeysfile) ' \
+      | mask_infra || true
+  else
+    echo "sshd binary not found"
+  fi
+  if command -v ufw >/dev/null 2>&1; then
+    sudo ufw status verbose 2>/dev/null | mask_infra || true
+  fi
+  if command -v fail2ban-client >/dev/null 2>&1; then
+    sudo fail2ban-client status 2>/dev/null | mask_infra || true
+    sudo fail2ban-client status sshd 2>/dev/null | mask_infra || true
+  fi
   echo
 
   echo "## Reverse proxy hints"
@@ -370,6 +409,43 @@ deploy() {
   verify_public_route_if_possible "$config"
 }
 
+repair_ssh() {
+  require_sudo
+
+  local sshd service unban_ip
+  sshd="$(sshd_bin || true)"
+  if [ -z "$sshd" ] && command -v apt-get >/dev/null 2>&1; then
+    sudo apt-get update
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server
+    sshd="$(sshd_bin || true)"
+  fi
+  if [ -z "$sshd" ]; then
+    echo "sshd binary was not found after repair attempt" >&2
+    exit 1
+  fi
+
+  service="$(ssh_service_name || true)"
+  if [ -z "$service" ]; then
+    echo "ssh/sshd systemd service was not found" >&2
+    exit 1
+  fi
+
+  sudo systemctl unmask "$service" || true
+  sudo systemctl enable --now "$service"
+  sudo systemctl restart "$service"
+
+  if command -v ufw >/dev/null 2>&1; then
+    sudo ufw allow OpenSSH >/dev/null 2>&1 || sudo ufw allow 22/tcp >/dev/null 2>&1 || true
+  fi
+
+  unban_ip="${CODEX_AUDIT_SSH_UNBAN_IP:-}"
+  if [ -n "$unban_ip" ] && command -v fail2ban-client >/dev/null 2>&1; then
+    sudo fail2ban-client set sshd unbanip "$unban_ip" >/dev/null 2>&1 || true
+  fi
+
+  inspect
+}
+
 case "$MODE" in
   inspect)
     inspect
@@ -377,8 +453,11 @@ case "$MODE" in
   deploy)
     deploy
     ;;
+  repair-ssh)
+    repair_ssh
+    ;;
   *)
-    echo "usage: $0 [inspect|deploy]" >&2
+    echo "usage: $0 [inspect|deploy|repair-ssh]" >&2
     exit 2
     ;;
 esac
