@@ -1,6 +1,7 @@
 const AUDIT_ROUTE = "/v1/codex-audit";
 const HEALTH_ROUTE = "/healthz";
 const JOB_ID_PATTERN = /^[A-Za-z0-9_-]{24,96}$/;
+const ORG_WORKER_HOST_PREFIX = "quantstrategylab-codex-audit-proxy.";
 
 function jsonResponse(status, payload) {
   return new Response(JSON.stringify(payload), {
@@ -76,8 +77,22 @@ function forwardedHeaders(request, url) {
   return headers;
 }
 
+function shouldUseOriginWorker(env, url) {
+  return Boolean(env.CODEX_AUDIT_ORIGIN_WORKER) && url.hostname.startsWith(ORG_WORKER_HOST_PREFIX);
+}
+
+function serviceBindingRequest(request, url) {
+  return new Request(request, {
+    headers: forwardedHeaders(request, url),
+  });
+}
+
 async function proxyRequest(request, env) {
   const url = new URL(request.url);
+  if (shouldUseOriginWorker(env, url)) {
+    return env.CODEX_AUDIT_ORIGIN_WORKER.fetch(serviceBindingRequest(request, url));
+  }
+
   const originUrl = buildOriginUrl(env.CODEX_AUDIT_ORIGIN_URL, url.pathname, url.search);
   const hasBody = request.method !== "GET" && request.method !== "HEAD";
 

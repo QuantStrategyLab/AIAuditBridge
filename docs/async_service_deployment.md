@@ -59,6 +59,8 @@ npx -y wrangler@latest deploy
 
 Use the direct VPS HTTPS origin as `CODEX_AUDIT_ORIGIN_URL`; do not point the Quant Worker at the Pigbibi Worker.
 
+During the organization-name migration, if the direct VPS origin is not available to the maintainer running Wrangler, the organization-named Worker may temporarily use a Cloudflare service binding to the legacy `quant-codex-audit-proxy` Worker. Keep this as a Quant-only migration bridge, and move the organization-named Worker back to a direct VPS origin when the direct origin can be set safely as a Worker secret.
+
 Smoke test:
 
 ```bash
