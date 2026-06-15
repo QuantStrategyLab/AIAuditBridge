@@ -409,6 +409,15 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertIn("actions/checkout@v6.0.3", workflow)
         self.assertIn("actions/create-github-app-token@v3.2.0", workflow)
 
+    def test_vps_ops_workflow_runs_only_manual_self_hosted_ops(self) -> None:
+        workflow = Path(".github/workflows/vps_codex_service_ops.yml").read_text(encoding="utf-8")
+
+        self.assertIn("workflow_dispatch:", workflow)
+        self.assertIn("- self-hosted", workflow)
+        self.assertIn("- codex-vps", workflow)
+        self.assertIn('bash scripts/deploy_codex_audit_service.sh "${{ inputs.mode }}"', workflow)
+        self.assertIn("actions/checkout@v6.0.3", workflow)
+
 
 if __name__ == "__main__":
     unittest.main()

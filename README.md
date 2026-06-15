@@ -63,6 +63,8 @@ python3 scripts/codex_audit_service.py
 
 Terminate TLS on 443 with the platform load balancer or a reverse proxy and forward `/v1/codex-audit` to the service port. Do not pass GitHub write tokens to this service.
 
+The manual `VPS Codex Service Ops` workflow can be used by maintainers to inspect or deploy the VPS-side services through the existing `self-hosted,codex-vps` runner. The public router keeps `/v1/codex` on the Pigbibi gateway service and routes `/v1/codex-audit` to this repository's audit service.
+
 ### Service patch contract
 
 In `review_and_fix` mode, the service must return exactly one JSON object:
