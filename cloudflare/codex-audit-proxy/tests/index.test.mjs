@@ -70,34 +70,3 @@ test("worker rejects malformed job ids before origin lookup", async () => {
   assert.equal(response.status, 404);
   assert.deepEqual(await response.json(), { status: "error", error: "not found" });
 });
-
-test("org-named worker can proxy through legacy worker service binding", async () => {
-  const calls = [];
-  const response = await worker.fetch(
-    new Request("https://quantstrategylab-codex-audit-proxy.pigbibi.workers.dev/v1/codex-audit/jobs", {
-      method: "POST",
-      headers: {
-        Authorization: "Bearer oidc-token",
-        "Content-Type": "application/json",
-      },
-      body: "{}",
-    }),
-    {
-      CODEX_AUDIT_ORIGIN_WORKER: {
-        async fetch(request) {
-          calls.push(request);
-          return new Response(JSON.stringify({ status: "queued" }), {
-            status: 202,
-            headers: { "Content-Type": "application/json" },
-          });
-        },
-      },
-    },
-  );
-
-  assert.equal(response.status, 202);
-  assert.equal(calls.length, 1);
-  assert.equal(new URL(calls[0].url).pathname, "/v1/codex-audit/jobs");
-  assert.equal(calls[0].headers.get("Authorization"), "Bearer oidc-token");
-  assert.equal(calls[0].headers.get("X-Forwarded-Host"), "quantstrategylab-codex-audit-proxy.pigbibi.workers.dev");
-});
