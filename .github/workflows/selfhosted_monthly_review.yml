@@ -68,7 +68,7 @@ concurrency:
 
 jobs:
   codex-monthly-review:
-    runs-on: ${{ fromJSON((github.event.client_payload.codex_backend || inputs.codex_backend || 'local') == 'service' && '["ubuntu-latest"]' || '["self-hosted","codex-vps"]') }}
+    runs-on: ${{ fromJSON((github.event.client_payload.codex_backend || inputs.codex_backend || vars.CODEX_AUDIT_CODEX_BACKEND || 'local') == 'service' && '["ubuntu-latest"]' || '["self-hosted","codex-vps"]') }}
     timeout-minutes: 60
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
@@ -77,7 +77,7 @@ jobs:
       SOURCE_REF: ${{ github.event.client_payload.source_ref || inputs.source_ref || 'main' }}
       CODEX_AUDIT_MODE: ${{ github.event.client_payload.mode || inputs.mode || 'review_and_fix' }}
       CODEX_AUDIT_PROVIDER: ${{ github.event.client_payload.provider || inputs.provider || 'auto' }}
-      CODEX_AUDIT_CODEX_BACKEND: ${{ github.event.client_payload.codex_backend || inputs.codex_backend || 'local' }}
+      CODEX_AUDIT_CODEX_BACKEND: ${{ github.event.client_payload.codex_backend || inputs.codex_backend || vars.CODEX_AUDIT_CODEX_BACKEND || 'local' }}
       CODEX_AUDIT_TASK: ${{ github.event.client_payload.task || inputs.task || 'monthly_snapshot_audit' }}
       CODEX_AUDIT_AUTO_MERGE: ${{ github.event.client_payload.auto_merge || inputs.auto_merge || 'false' }}
     steps:
