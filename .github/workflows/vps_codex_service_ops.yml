@@ -1,0 +1,29 @@
+name: VPS Codex Service Ops
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Operation mode"
+        required: true
+        type: choice
+        default: inspect
+        options:
+          - inspect
+          - deploy
+
+permissions:
+  contents: read
+
+jobs:
+  vps-codex-service-ops:
+    runs-on:
+      - self-hosted
+      - codex-vps
+    timeout-minutes: 15
+    steps:
+      - name: Checkout Bridge
+        uses: actions/checkout@v6.0.3
+
+      - name: Run VPS service operation
+        run: bash scripts/deploy_codex_audit_service.sh "${{ inputs.mode }}"

@@ -63,6 +63,8 @@ python3 scripts/codex_audit_service.py
 
 443/TLS 建议由平台负载均衡或反向代理负责，并把 `/v1/codex-audit` 转发到 service 端口。不要把 GitHub 写 token 传给这个 service。
 
+维护者可以通过手动触发 `VPS Codex Service Ops` workflow，借助现有 `self-hosted,codex-vps` runner 巡检或部署 VPS 侧服务。公网 router 会保持 `/v1/codex` 走 Pigbibi gateway service，并把 `/v1/codex-audit` 路由到本仓库的 audit service。
+
 ### Service patch contract
 
 `review_and_fix` 模式下，service 必须只返回一个 JSON object：
