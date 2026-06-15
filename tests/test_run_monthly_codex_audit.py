@@ -96,10 +96,11 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         with self.assertRaises(Exception):
             validate_provider("claude")
 
-    def test_validate_codex_backend_accepts_supported_values(self) -> None:
-        self.assertEqual(validate_codex_backend(""), "local")
-        self.assertEqual(validate_codex_backend("LOCAL"), "local")
+    def test_validate_codex_backend_accepts_only_service(self) -> None:
+        self.assertEqual(validate_codex_backend(""), "service")
         self.assertEqual(validate_codex_backend("service"), "service")
+        with self.assertRaises(Exception):
+            validate_codex_backend("local")
         with self.assertRaises(Exception):
             validate_codex_backend("ssh")
 
@@ -396,14 +397,15 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertEqual(pr_closing_line("long_horizon_signal_shadow", 4), "Closes #4")
         self.assertEqual(pr_closing_line("monthly_snapshot_audit", 4), "")
 
-    def test_workflow_supports_repository_variable_backend_default(self) -> None:
+    def test_workflow_uses_service_backend_only(self) -> None:
         workflow = Path(".github/workflows/selfhosted_monthly_review.yml").read_text(encoding="utf-8")
 
-        self.assertIn("vars.CODEX_AUDIT_CODEX_BACKEND", workflow)
-        self.assertIn(
-            "CODEX_AUDIT_SERVICE_URL: ${{ secrets.CODEX_AUDIT_SERVICE_URL || vars.CODEX_AUDIT_SERVICE_URL }}",
-            workflow,
-        )
+        self.assertIn("runs-on: ubuntu-latest", workflow)
+        self.assertIn("CODEX_AUDIT_CODEX_BACKEND: service", workflow)
+        self.assertIn("CODEX_AUDIT_SERVICE_URL: ${{ secrets.CODEX_AUDIT_SERVICE_URL }}", workflow)
+        self.assertNotIn("codex_backend:", workflow)
+        self.assertNotIn("self-hosted", workflow)
+        self.assertNotIn("vars.CODEX_AUDIT_SERVICE_URL", workflow)
         self.assertIn("actions/checkout@v6.0.3", workflow)
         self.assertIn("actions/create-github-app-token@v3.2.0", workflow)
 

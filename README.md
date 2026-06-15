@@ -23,10 +23,7 @@ Current execution model:
 
 Keep this boundary inside the `QuantStrategyLab` organization. Do not move QuantStrategyLab audit execution or source-repository write tokens to another organization.
 
-Codex execution is intentionally split from GitHub write ownership:
-
-- `local` backend: runs `codex exec` on a self-hosted runner labeled `self-hosted,codex-vps`.
-- `service` backend: calls a QuantStrategyLab-owned HTTPS/443 Codex audit service from a standard GitHub-hosted runner. The service returns review text or structured patch suggestions only. CodexAuditBridge still owns clone, path validation, patch application, commit, push, PR creation, and issue comments.
+Codex execution is service-only: the workflow calls a QuantStrategyLab-owned HTTPS/443 Codex audit service from a standard GitHub-hosted runner. The service returns review text or structured patch suggestions only. CodexAuditBridge still owns clone, path validation, patch application, commit, push, PR creation, and issue comments.
 
 This avoids hard-coding Codex CLI setup in every source repository and avoids depending on a repository outside the `QuantStrategyLab` organization.
 
@@ -43,30 +40,16 @@ This avoids hard-coding Codex CLI setup in every source repository and avoids de
 
 When adding a new dispatcher, update `SOURCE_REPO_TASKS` in `scripts/run_monthly_codex_audit.py` and add a regression test that proves the repository/task pair is accepted.
 
-## Codex backend configuration
+## Codex service configuration
 
-Workflow dispatch input `codex_backend` controls how Codex is executed:
+CodexAuditBridge uses the service backend only. The workflow runs on `ubuntu-latest` and requires a QuantStrategyLab-owned HTTPS/443 Codex audit service.
 
-| Backend | Runner | Required setup |
-| --- | --- | --- |
-| `local` | `self-hosted,codex-vps` | Codex CLI and model credentials available on the runner |
-| `service` | `ubuntu-latest` | `CODEX_AUDIT_SERVICE_URL` repository secret or variable pointing to the QuantStrategyLab HTTPS service |
+Configure these values in `QuantStrategyLab/CodexAuditBridge`:
 
-For the service backend, configure these values in `QuantStrategyLab/CodexAuditBridge`:
-
-- Optional repository variable `CODEX_AUDIT_CODEX_BACKEND`, default `local`. Set it to `service` only after the HTTPS service URL has been verified.
 - Repository secret `CODEX_AUDIT_SERVICE_URL`, for example `https://codex-audit.example.com`.
-  Use a secret instead of a plain variable when the URL exposes origin infrastructure details.
-- Repository variable `CODEX_AUDIT_SERVICE_URL` is still accepted for compatibility, but the workflow prefers the secret when both are configured.
+  Use a secret because the URL may expose origin infrastructure details.
 - Optional repository variable `CODEX_AUDIT_SERVICE_AUDIENCE`, default `quant-codex-audit`.
 - Workflow permission `id-token: write` is already set so GitHub Actions can request an OIDC token for the service.
-
-Recommended migration order:
-
-1. Keep `CODEX_AUDIT_CODEX_BACKEND=local` or unset it.
-2. Deploy the QuantStrategyLab-owned service and configure `CODEX_AUDIT_SERVICE_URL`.
-3. Run one manual workflow dispatch with `codex_backend=service`.
-4. After the service path is verified, set `CODEX_AUDIT_CODEX_BACKEND=service` to make the new backend the repository default.
 
 Run the service host with:
 
@@ -78,7 +61,7 @@ OPENAI_API_KEY=... \
 python3 scripts/codex_audit_service.py
 ```
 
-Terminate TLS on 443 with the platform load balancer or a reverse proxy and forward to the service port. Do not pass GitHub write tokens to this service.
+Terminate TLS on 443 with the platform load balancer or a reverse proxy and forward `/v1/codex-audit` to the service port. Do not pass GitHub write tokens to this service.
 
 ### Service patch contract
 

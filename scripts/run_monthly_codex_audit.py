@@ -39,8 +39,8 @@ DEFAULT_TASK = "monthly_snapshot_audit"
 DEFAULT_MODE = "review_and_fix"
 DEFAULT_PROVIDER = "auto"
 SUPPORTED_PROVIDERS = frozenset({"api", "anthropic", "codex", "openai", "auto"})
-DEFAULT_CODEX_BACKEND = "local"
-SUPPORTED_CODEX_BACKENDS = frozenset({"local", "service"})
+DEFAULT_CODEX_BACKEND = "service"
+SUPPORTED_CODEX_BACKENDS = frozenset({"service"})
 DEFAULT_SERVICE_AUDIENCE = "quant-codex-audit"
 DEFAULT_SERVICE_CONTEXT_MAX_BYTES = 700_000
 DEFAULT_SERVICE_CONTEXT_MAX_FILE_BYTES = 80_000
@@ -841,8 +841,6 @@ def run_codex_backend(
     mode: str,
     env_overrides: dict[str, str] | None = None,
 ) -> tuple[int, str, str]:
-    if backend == "local":
-        return run_codex(repo_dir, prompt, timeout_minutes, env_overrides=env_overrides)
     if backend == "service":
         return run_codex_service(
             repo_dir,
