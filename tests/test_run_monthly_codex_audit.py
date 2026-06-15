@@ -418,6 +418,16 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertIn('bash scripts/deploy_codex_audit_service.sh "${{ inputs.mode }}"', workflow)
         self.assertIn("actions/checkout@v6.0.3", workflow)
 
+    def test_vps_deploy_adds_nginx_audit_route_without_router_service(self) -> None:
+        deploy_script = Path("scripts/deploy_codex_audit_service.sh").read_text(encoding="utf-8")
+
+        self.assertIn("location = /v1/codex-audit", deploy_script)
+        self.assertIn("proxy_pass http://127.0.0.1:{port}", deploy_script)
+        self.assertIn("audit service did not become healthy", deploy_script)
+        self.assertIn("nginx config test failed; restoring previous config", deploy_script)
+        self.assertNotIn("CODEX_SERVICE_ROUTER", deploy_script)
+        self.assertNotIn("codex_service_router", deploy_script)
+
 
 if __name__ == "__main__":
     unittest.main()
