@@ -137,6 +137,6 @@ jobs:
           OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-5.4-mini' }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ANTHROPIC_MODEL: ${{ vars.ANTHROPIC_MODEL || 'claude-sonnet-4-6' }}
-          CODEX_AUDIT_SERVICE_URL: ${{ vars.CODEX_AUDIT_SERVICE_URL }}
+          CODEX_AUDIT_SERVICE_URL: ${{ secrets.CODEX_AUDIT_SERVICE_URL || vars.CODEX_AUDIT_SERVICE_URL }}
           CODEX_AUDIT_SERVICE_AUDIENCE: ${{ vars.CODEX_AUDIT_SERVICE_AUDIENCE || 'quant-codex-audit' }}
         run: python scripts/run_monthly_codex_audit.py
