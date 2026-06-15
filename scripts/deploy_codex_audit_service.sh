@@ -236,13 +236,23 @@ PY
 verify_local_service() {
   python3 - <<PY
 import json
+import time
 import urllib.error
 import urllib.request
 
-with urllib.request.urlopen("http://127.0.0.1:${AUDIT_PORT}/healthz", timeout=10) as response:
-    payload = json.loads(response.read().decode("utf-8"))
-if payload.get("status") != "ok":
-    raise SystemExit(f"unexpected health response: {payload}")
+last_error = None
+for _ in range(30):
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:${AUDIT_PORT}/healthz", timeout=3) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        if payload.get("status") == "ok":
+            break
+        last_error = RuntimeError(f"unexpected health response: {payload}")
+    except Exception as exc:  # noqa: BLE001 - deployment readiness probe.
+        last_error = exc
+    time.sleep(1)
+else:
+    raise SystemExit(f"audit service did not become healthy: {last_error}")
 print("audit service health ok")
 
 request = urllib.request.Request(

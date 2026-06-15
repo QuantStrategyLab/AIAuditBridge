@@ -423,6 +423,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
 
         self.assertIn("location = /v1/codex-audit", deploy_script)
         self.assertIn("proxy_pass http://127.0.0.1:{port}", deploy_script)
+        self.assertIn("audit service did not become healthy", deploy_script)
         self.assertIn("nginx config test failed; restoring previous config", deploy_script)
         self.assertNotIn("CODEX_SERVICE_ROUTER", deploy_script)
         self.assertNotIn("codex_service_router", deploy_script)
