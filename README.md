@@ -54,9 +54,17 @@ Workflow dispatch input `codex_backend` controls how Codex is executed:
 
 For the service backend, configure these values in `QuantStrategyLab/CodexAuditBridge`:
 
+- Optional repository variable `CODEX_AUDIT_CODEX_BACKEND`, default `local`. Set it to `service` only after the HTTPS service URL has been verified.
 - Repository variable `CODEX_AUDIT_SERVICE_URL`, for example `https://codex-audit.quant.example`.
 - Optional repository variable `CODEX_AUDIT_SERVICE_AUDIENCE`, default `quant-codex-audit`.
 - Workflow permission `id-token: write` is already set so GitHub Actions can request an OIDC token for the service.
+
+Recommended migration order:
+
+1. Keep `CODEX_AUDIT_CODEX_BACKEND=local` or unset it.
+2. Deploy the QuantStrategyLab-owned service and configure `CODEX_AUDIT_SERVICE_URL`.
+3. Run one manual workflow dispatch with `codex_backend=service`.
+4. After the service path is verified, set `CODEX_AUDIT_CODEX_BACKEND=service` to make the new backend the repository default.
 
 Run the service host with:
 

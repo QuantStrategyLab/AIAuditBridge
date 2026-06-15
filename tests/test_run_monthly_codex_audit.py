@@ -396,6 +396,13 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertEqual(pr_closing_line("long_horizon_signal_shadow", 4), "Closes #4")
         self.assertEqual(pr_closing_line("monthly_snapshot_audit", 4), "")
 
+    def test_workflow_supports_repository_variable_backend_default(self) -> None:
+        workflow = Path(".github/workflows/selfhosted_monthly_review.yml").read_text(encoding="utf-8")
+
+        self.assertIn("vars.CODEX_AUDIT_CODEX_BACKEND", workflow)
+        self.assertIn("actions/checkout@v6.0.3", workflow)
+        self.assertIn("actions/create-github-app-token@v3.2.0", workflow)
+
 
 if __name__ == "__main__":
     unittest.main()
