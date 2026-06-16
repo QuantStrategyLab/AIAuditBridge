@@ -66,6 +66,10 @@ bash scripts/deploy_codex_audit_service.sh deploy
 ```
 
 The job directory should be owned by the service user and mode `0700`.
+The service should rely on an authenticated Codex CLI session. API-key
+environment fallback is disabled by default; enable
+`CODEX_AUDIT_SERVICE_ALLOW_OPENAI_API_KEY_FALLBACK=true` only as an explicit
+temporary fallback with a narrowly scoped key.
 
 ### 2. Deploy the Cloudflare Worker
 

@@ -133,7 +133,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
             {
                 "CODEX_AUDIT_SERVICE_STATIC_TOKEN": "service-token",
                 "CODEX_AUDIT_SERVICE_OPENAI_API_KEY": "service-openai-key",
-                "OPENAI_API_KEY": "",
+                "OPENAI_API_KEY": "openai-key",
                 "PATH": "/usr/bin",
             },
             clear=True,
@@ -141,6 +141,22 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
             env = _codex_env()
 
         self.assertNotIn("CODEX_AUDIT_SERVICE_STATIC_TOKEN", env)
+        self.assertNotIn("CODEX_AUDIT_SERVICE_OPENAI_API_KEY", env)
+        self.assertNotIn("OPENAI_API_KEY", env)
+        self.assertEqual(env["PATH"], "/usr/bin")
+
+    def test_codex_audit_service_openai_key_fallback_requires_explicit_allow(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "CODEX_AUDIT_SERVICE_ALLOW_OPENAI_API_KEY_FALLBACK": "true",
+                "CODEX_AUDIT_SERVICE_OPENAI_API_KEY": "service-openai-key",
+                "PATH": "/usr/bin",
+            },
+            clear=True,
+        ):
+            env = _codex_env()
+
         self.assertNotIn("CODEX_AUDIT_SERVICE_OPENAI_API_KEY", env)
         self.assertEqual(env["OPENAI_API_KEY"], "service-openai-key")
 

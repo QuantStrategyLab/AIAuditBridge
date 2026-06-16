@@ -55,11 +55,15 @@ service host 启动示例：
 CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES=QuantStrategyLab/CodexAuditBridge \
 CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES='QuantStrategyLab/CryptoLivePoolPipelines,QuantStrategyLab/HkEquitySnapshotPipelines,QuantStrategyLab/UsEquitySnapshotPipelines,QuantStrategyLab/ResearchSignalContextPipelines' \
 CODEX_AUDIT_SERVICE_AUDIENCE=quant-codex-audit \
-OPENAI_API_KEY=... \
 python3 scripts/codex_audit_service.py
 ```
 
 443/TLS 建议由平台负载均衡或反向代理负责，并把 `/v1/codex-audit` 转发到 service 端口。不要把 GitHub 写 token 传给这个 service。
+
+service host 应优先使用已登录的 Codex CLI session。服务在启动 Codex
+子进程前会清理 secret/API key 类环境变量。只有明确需要临时 fallback 时，
+才设置 `CODEX_AUDIT_SERVICE_ALLOW_OPENAI_API_KEY_FALLBACK=true`，并通过
+`CODEX_AUDIT_SERVICE_OPENAI_API_KEY` 或 `OPENAI_API_KEY` 传入低权限 key。
 
 如果暂时没有自定义域名，`cloudflare/codex-audit-proxy/` 提供了一个最小 Cloudflare Worker，可用免费的 `workers.dev` HTTPS 入口，并把 VPS origin URL 保存在 Cloudflare secret 中。生产服务路径使用异步模式：先 `POST /v1/codex-audit/jobs`，再轮询 `GET /v1/codex-audit/jobs/{job_id}`。部署步骤和开源仓库注意事项见 `docs/async_service_deployment.md`。
 

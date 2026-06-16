@@ -55,11 +55,16 @@ Run the service host with:
 CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES=QuantStrategyLab/CodexAuditBridge \
 CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES='QuantStrategyLab/CryptoLivePoolPipelines,QuantStrategyLab/HkEquitySnapshotPipelines,QuantStrategyLab/UsEquitySnapshotPipelines,QuantStrategyLab/ResearchSignalContextPipelines' \
 CODEX_AUDIT_SERVICE_AUDIENCE=quant-codex-audit \
-OPENAI_API_KEY=... \
 python3 scripts/codex_audit_service.py
 ```
 
 Terminate TLS on 443 with the platform load balancer or a reverse proxy and forward `/v1/codex-audit` to the service port. Do not pass GitHub write tokens to this service.
+
+The service host should use an authenticated Codex CLI session. It strips
+secret-like environment variables, including API keys, before spawning Codex.
+Set `CODEX_AUDIT_SERVICE_ALLOW_OPENAI_API_KEY_FALLBACK=true` only for an
+explicit, temporary fallback that passes `CODEX_AUDIT_SERVICE_OPENAI_API_KEY` or
+`OPENAI_API_KEY` to the Codex subprocess.
 
 If no custom domain is available, `cloudflare/codex-audit-proxy/` contains a minimal Cloudflare Worker that can publish a free `workers.dev` HTTPS entry point while keeping the VPS origin URL in a Cloudflare secret. The production service path is async: submit `POST /v1/codex-audit/jobs`, then poll `GET /v1/codex-audit/jobs/{job_id}`. See `docs/async_service_deployment.md` for the deployment and open-source repository checklist.
 

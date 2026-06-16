@@ -26,7 +26,7 @@ DEFAULT_MAX_REQUEST_BYTES = 2_000_000
 DEFAULT_JOB_TTL_SECONDS = 86_400
 GITHUB_OIDC_ISSUER = "https://token.actions.githubusercontent.com"
 GITHUB_OIDC_JWKS_URL = GITHUB_OIDC_ISSUER + "/.well-known/jwks"
-SECRET_ENV_MARKERS = ("TOKEN", "SECRET", "PASSWORD", "PRIVATE_KEY", "CREDENTIAL")
+SECRET_ENV_MARKERS = ("TOKEN", "SECRET", "PASSWORD", "PRIVATE_KEY", "CREDENTIAL", "API_KEY")
 _JWKS_CACHE: dict[str, Any] | None = None
 _JWKS_CACHE_EXPIRES_AT = 0.0
 _JOB_WRITE_LOCK = threading.Lock()
@@ -49,6 +49,13 @@ def _json_response(handler: BaseHTTPRequestHandler, status: HTTPStatus, payload:
 def _split_csv_env(name: str) -> set[str]:
     raw = os.environ.get(name, "")
     return {item.strip() for item in re.split(r"[\n,]", raw) if item.strip()}
+
+
+def _bool_env(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name, "")
+    if not raw:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _allowed_claim_patterns(env_name: str) -> set[str]:
@@ -255,9 +262,13 @@ def _codex_env() -> dict[str, str]:
         if not key.startswith("CODEX_AUDIT_SERVICE_")
         and not any(marker in key.upper() for marker in SECRET_ENV_MARKERS)
     }
-    service_api_key = os.environ.get("CODEX_AUDIT_SERVICE_OPENAI_API_KEY", "")
-    if service_api_key and not env.get("OPENAI_API_KEY"):
-        env["OPENAI_API_KEY"] = service_api_key
+    if _bool_env("CODEX_AUDIT_SERVICE_ALLOW_OPENAI_API_KEY_FALLBACK"):
+        service_api_key = (
+            os.environ.get("CODEX_AUDIT_SERVICE_OPENAI_API_KEY", "").strip()
+            or os.environ.get("OPENAI_API_KEY", "").strip()
+        )
+        if service_api_key:
+            env["OPENAI_API_KEY"] = service_api_key
     return env
 
 
