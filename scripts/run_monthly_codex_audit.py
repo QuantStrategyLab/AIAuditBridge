@@ -34,7 +34,6 @@ SOURCE_REPO_TASKS = {
 }
 ALLOWED_SOURCE_REPOS = frozenset(SOURCE_REPO_TASKS)
 REPO_TASKS = SOURCE_REPO_TASKS
-DEFAULT_API_FALLBACK_ALLOWED_SOURCE_REPOS = ALLOWED_SOURCE_REPOS
 DEFAULT_TASK = "monthly_snapshot_audit"
 DEFAULT_MODE = "review_and_fix"
 DEFAULT_PROVIDER = "auto"
@@ -148,7 +147,10 @@ def validate_provider(provider: str) -> str:
 def api_fallback_allowed_source_repos() -> frozenset[str]:
     configured = env_value("CODEX_AUDIT_API_FALLBACK_ALLOWED_SOURCE_REPOSITORIES")
     if not configured:
-        return DEFAULT_API_FALLBACK_ALLOWED_SOURCE_REPOS
+        raise BridgeError(
+            "CODEX_AUDIT_API_FALLBACK_ALLOWED_SOURCE_REPOSITORIES must explicitly list "
+            "source repositories approved for API fallback"
+        )
     repos = frozenset(split_csv_values(configured))
     unsupported = sorted(repos - ALLOWED_SOURCE_REPOS)
     if unsupported:

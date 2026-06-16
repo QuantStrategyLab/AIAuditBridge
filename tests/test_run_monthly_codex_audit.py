@@ -102,13 +102,12 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         with self.assertRaises(Exception):
             validate_provider("claude")
 
-    def test_api_fallback_allowlist_defaults_to_known_source_repositories(self) -> None:
+    def test_api_fallback_allowlist_requires_explicit_configuration(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(api_fallback_allowed_source_repos(), frozenset(SOURCE_REPO_TASKS))
-            self.assertEqual(
-                validate_api_fallback_source_repo("QuantStrategyLab/CryptoLivePoolPipelines"),
-                "QuantStrategyLab/CryptoLivePoolPipelines",
-            )
+            with self.assertRaisesRegex(BridgeError, "must explicitly list"):
+                api_fallback_allowed_source_repos()
+            with self.assertRaisesRegex(BridgeError, "must explicitly list"):
+                validate_api_fallback_source_repo("QuantStrategyLab/CryptoLivePoolPipelines")
 
     def test_api_fallback_allowlist_can_restrict_source_repositories(self) -> None:
         with patch.dict(
