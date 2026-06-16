@@ -14,6 +14,7 @@ from unittest.mock import patch
 from scripts.run_monthly_codex_audit import (
     BridgeError,
     SOURCE_REPO_TASKS,
+    api_fallback_allowed_source_repos,
     apply_service_changes,
     blocked_paths,
     build_api_review_prompt,
@@ -35,6 +36,7 @@ from scripts.run_monthly_codex_audit import (
     safe_branch_component,
     strip_audit_heading,
     validate_codex_backend,
+    validate_api_fallback_source_repo,
     validate_provider,
     validate_repo,
     validate_task,
@@ -99,6 +101,40 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertEqual(validate_provider("auto"), "auto")
         with self.assertRaises(Exception):
             validate_provider("claude")
+
+    def test_api_fallback_allowlist_defaults_to_known_source_repositories(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(api_fallback_allowed_source_repos(), frozenset(SOURCE_REPO_TASKS))
+            self.assertEqual(
+                validate_api_fallback_source_repo("QuantStrategyLab/CryptoLivePoolPipelines"),
+                "QuantStrategyLab/CryptoLivePoolPipelines",
+            )
+
+    def test_api_fallback_allowlist_can_restrict_source_repositories(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "CODEX_AUDIT_API_FALLBACK_ALLOWED_SOURCE_REPOSITORIES": (
+                    "QuantStrategyLab/CryptoLivePoolPipelines"
+                )
+            },
+            clear=True,
+        ):
+            self.assertEqual(
+                api_fallback_allowed_source_repos(),
+                frozenset({"QuantStrategyLab/CryptoLivePoolPipelines"}),
+            )
+            with self.assertRaisesRegex(BridgeError, "API fallback is not allowed"):
+                validate_api_fallback_source_repo("QuantStrategyLab/HkEquitySnapshotPipelines")
+
+    def test_api_fallback_allowlist_rejects_unknown_repositories(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"CODEX_AUDIT_API_FALLBACK_ALLOWED_SOURCE_REPOSITORIES": "OtherOrg/Repo"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(BridgeError, "unsupported repositories"):
+                api_fallback_allowed_source_repos()
 
     def test_validate_codex_backend_accepts_only_service(self) -> None:
         self.assertEqual(validate_codex_backend(""), "service")

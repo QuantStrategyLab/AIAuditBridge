@@ -47,6 +47,10 @@ Configure these values in `QuantStrategyLab/CodexAuditBridge`:
 - Repository secret `CODEX_AUDIT_SERVICE_URL`, for example `https://codex-audit.example.com`.
   Use a secret because the URL may expose origin infrastructure details.
 - Optional repository variable `CODEX_AUDIT_SERVICE_AUDIENCE`, default `quant-codex-audit`.
+- Optional repository variable `CODEX_AUDIT_API_FALLBACK_ALLOWED_SOURCE_REPOSITORIES`,
+  comma or newline separated. When unset, API fallback is limited to the
+  currently registered source repositories in `SOURCE_REPO_TASKS`; when set,
+  only the listed source repositories may use OpenAI/Anthropic fallback.
 - Workflow permission `id-token: write` is already set so GitHub Actions can request an OIDC token for the service.
 
 Run the service host with:

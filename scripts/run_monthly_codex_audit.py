@@ -34,6 +34,7 @@ SOURCE_REPO_TASKS = {
 }
 ALLOWED_SOURCE_REPOS = frozenset(SOURCE_REPO_TASKS)
 REPO_TASKS = SOURCE_REPO_TASKS
+DEFAULT_API_FALLBACK_ALLOWED_SOURCE_REPOS = ALLOWED_SOURCE_REPOS
 DEFAULT_TASK = "monthly_snapshot_audit"
 DEFAULT_MODE = "review_and_fix"
 DEFAULT_PROVIDER = "auto"
@@ -109,6 +110,10 @@ def env_value(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
 
 
+def split_csv_values(value: str) -> list[str]:
+    return [item.strip() for item in re.split(r"[\n,]", value) if item.strip()]
+
+
 def parse_bool(value: str | bool | None) -> bool:
     if isinstance(value, bool):
         return value
@@ -138,6 +143,27 @@ def validate_provider(provider: str) -> str:
     if normalized not in SUPPORTED_PROVIDERS:
         raise BridgeError(f"Unsupported CODEX_AUDIT_PROVIDER: {provider!r}")
     return normalized
+
+
+def api_fallback_allowed_source_repos() -> frozenset[str]:
+    configured = env_value("CODEX_AUDIT_API_FALLBACK_ALLOWED_SOURCE_REPOSITORIES")
+    if not configured:
+        return DEFAULT_API_FALLBACK_ALLOWED_SOURCE_REPOS
+    repos = frozenset(split_csv_values(configured))
+    unsupported = sorted(repos - ALLOWED_SOURCE_REPOS)
+    if unsupported:
+        raise BridgeError(
+            "CODEX_AUDIT_API_FALLBACK_ALLOWED_SOURCE_REPOSITORIES includes unsupported repositories: "
+            + ", ".join(unsupported)
+        )
+    return repos
+
+
+def validate_api_fallback_source_repo(source_repo: str) -> str:
+    allowed = api_fallback_allowed_source_repos()
+    if source_repo not in allowed:
+        raise BridgeError(f"API fallback is not allowed for source repository: {source_repo}")
+    return source_repo
 
 
 def validate_codex_backend(backend: str) -> str:
@@ -1075,6 +1101,23 @@ def run_auto_provider_fallback(
     reason: str,
     exit_code: int = 1,
 ) -> int:
+    try:
+        validate_api_fallback_source_repo(source_repo)
+    except BridgeError as exc:
+        body = "\n".join(
+            [
+                "## Codex Audit",
+                "",
+                reason,
+                "",
+                str(exc),
+                "",
+                "No API fallback review was run. Update `CODEX_AUDIT_API_FALLBACK_ALLOWED_SOURCE_REPOSITORIES` in the bridge repository if this source repo is approved for API fallback.",
+            ]
+        )
+        post_issue_comment(token, source_repo, issue_number, body)
+        return exit_code
+
     if not env_value("OPENAI_API_KEY") and not env_value("ANTHROPIC_API_KEY"):
         post_issue_comment(token, source_repo, issue_number, auto_fallback_missing_api_key_message(reason))
         return exit_code
@@ -1319,10 +1362,12 @@ def main() -> int:
         comments = []
 
     if provider == "openai":
+        validate_api_fallback_source_repo(source_repo)
         review_message = run_openai_review(source_repo, source_ref, issue, comments)
         post_issue_comment(token, source_repo, issue_number, truncate_markdown(review_message))
         return 0
     if provider == "anthropic":
+        validate_api_fallback_source_repo(source_repo)
         review_message = run_anthropic_review(source_repo, source_ref, issue, comments)
         post_issue_comment(token, source_repo, issue_number, truncate_markdown(review_message))
         return 0
