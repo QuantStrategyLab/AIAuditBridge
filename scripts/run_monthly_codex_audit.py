@@ -40,6 +40,56 @@ DEFAULT_PROVIDER = "auto"
 SUPPORTED_PROVIDERS = frozenset({"api", "anthropic", "codex", "openai", "auto"})
 DEFAULT_CODEX_BACKEND = "service"
 SUPPORTED_CODEX_BACKENDS = frozenset({"service"})
+GUARDED_AUTO_MERGE_LABEL = "auto-merge-ok"
+HUMAN_REVIEW_LABEL = "human-review-required"
+GUARDED_AUTO_MERGE_LOW_RISK_PREFIXES = (
+    "docs/",
+    "tests/",
+)
+GUARDED_AUTO_MERGE_LOW_RISK_EXACT = {
+    "README.md",
+    "README.zh-CN.md",
+}
+GUARDED_AUTO_MERGE_MEDIUM_RISK_EXACT = {
+    "scripts/build_monthly_live_strategy_health_reports.py",
+    "scripts/run_monthly_report_bundle.py",
+    "scripts/post_monthly_ai_review_issue.py",
+    "scripts/post_codex_auto_merge_preflight_comment.py",
+    "scripts/plan_codex_auto_merge_enablement.py",
+}
+DEFAULT_GUARDED_AUTO_MERGE_MAX_CHANGED_FILES = 20
+DEFAULT_GUARDED_AUTO_MERGE_MAX_CHANGED_LINES = 1200
+GUARDED_AUTO_MERGE_CONTROL_PLANE_EXACT = (
+    ".github/codex_auto_merge_policy.json",
+    "scripts/check_codex_auto_merge_readiness.py",
+    "scripts/evaluate_codex_pr_merge.py",
+    "scripts/post_codex_auto_merge_decision_comment.py",
+    "scripts/sync_codex_auto_merge_labels.py",
+)
+GUARDED_AUTO_MERGE_CONTROL_PLANE_PREFIXES = (".github/workflows/",)
+DEFAULT_GUARDED_AUTO_MERGE_POLICY = {
+    "version": 1,
+    "auto_merge_label": GUARDED_AUTO_MERGE_LABEL,
+    "human_review_label": HUMAN_REVIEW_LABEL,
+    "monthly_marker_prefix": "<!-- codex-monthly-remediation:issue-",
+    "max_changed_files": DEFAULT_GUARDED_AUTO_MERGE_MAX_CHANGED_FILES,
+    "max_changed_lines": DEFAULT_GUARDED_AUTO_MERGE_MAX_CHANGED_LINES,
+    "blocked_path_patterns": [
+        r"(^|/)(\.env|.*secret.*|.*credential.*|.*token.*|.*private.*|.*\.pem|.*\.key)$",
+    ],
+    "risk_policy": {
+        "low": {
+            "prefixes": list(GUARDED_AUTO_MERGE_LOW_RISK_PREFIXES),
+            "exact": sorted(GUARDED_AUTO_MERGE_LOW_RISK_EXACT),
+            "reason": "docs/tests/readme-only monthly-review surface",
+        },
+        "medium": {
+            "exact": sorted(GUARDED_AUTO_MERGE_MEDIUM_RISK_EXACT),
+            "reason": "monthly-review evidence/reporting helper changed",
+        },
+        "high": {"reason": "blocked/high-risk files require human review"},
+    }
+}
 DEFAULT_SERVICE_AUDIENCE = "quant-codex-audit"
 DEFAULT_SERVICE_CONTEXT_MAX_BYTES = 700_000
 DEFAULT_SERVICE_CONTEXT_MAX_FILE_BYTES = 80_000
@@ -103,6 +153,100 @@ BLOCKED_PATH_RE = re.compile(
 )
 class BridgeError(RuntimeError):
     pass
+
+
+class GitHubRequestError(BridgeError):
+    def __init__(self, method: str, url: str, status_code: int, response_body: str) -> None:
+        self.method = method
+        self.url = url
+        self.status_code = status_code
+        self.response_body = response_body
+        super().__init__(f"GitHub API {method} {url} failed: {status_code} {response_body[:600]}")
+
+
+def fail_closed_guarded_auto_merge_policy(reason: str) -> dict[str, Any]:
+    return {
+        "policy_errors": [reason],
+        "blocked_path_patterns": [r".*"],
+        "risk_policy": {
+            "low": {"prefixes": [], "exact": [], "reason": reason},
+            "medium": {"exact": [], "reason": reason},
+            "high": {"reason": reason},
+        },
+    }
+
+
+def valid_policy_string(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip()) and "\n" not in value and "\r" not in value
+
+
+def valid_policy_string_list(value: Any, *, allow_empty: bool = True) -> bool:
+    return isinstance(value, list) and (allow_empty or bool(value)) and all(isinstance(item, str) for item in value)
+
+
+def guarded_auto_merge_control_plane_matches(payload: dict[str, Any]) -> list[str]:
+    risk_policy = payload["risk_policy"]
+    low_policy = risk_policy["low"]
+    medium_policy = risk_policy["medium"]
+    auto_merge_matches: list[str] = []
+    for raw_path in [*low_policy.get("exact", []), *medium_policy.get("exact", [])]:
+        path = normalize_changed_path(raw_path)
+        if path in GUARDED_AUTO_MERGE_CONTROL_PLANE_EXACT:
+            auto_merge_matches.append(path)
+        for prefix in GUARDED_AUTO_MERGE_CONTROL_PLANE_PREFIXES:
+            if path.startswith(prefix):
+                auto_merge_matches.append(f"{prefix}*")
+    for raw_prefix in low_policy.get("prefixes", []):
+        candidate_prefix = normalize_changed_path(raw_prefix)
+        for path in GUARDED_AUTO_MERGE_CONTROL_PLANE_EXACT:
+            if path.startswith(candidate_prefix):
+                auto_merge_matches.append(path)
+        for prefix in GUARDED_AUTO_MERGE_CONTROL_PLANE_PREFIXES:
+            if prefix.startswith(candidate_prefix) or candidate_prefix.startswith(prefix):
+                auto_merge_matches.append(f"{prefix}*")
+    return sorted(set(auto_merge_matches))
+
+
+def guarded_auto_merge_policy_schema_error(payload: dict[str, Any]) -> str | None:
+    if "version" not in payload:
+        return "invalid auto-merge policy schema requires human review"
+    if payload.get("version") != 1:
+        return "unsupported auto-merge policy version requires human review"
+    if not valid_policy_string(payload.get("auto_merge_label")):
+        return "invalid auto-merge policy schema requires human review"
+    if not valid_policy_string(payload.get("human_review_label")):
+        return "invalid auto-merge policy schema requires human review"
+    if payload["auto_merge_label"].strip() == payload["human_review_label"].strip():
+        return "auto-merge and human-review labels must be distinct requires human review"
+    if not valid_policy_string(payload.get("monthly_marker_prefix")):
+        return "invalid auto-merge policy schema requires human review"
+    if type(payload.get("max_changed_files")) is not int or payload["max_changed_files"] < 1:
+        return "invalid auto-merge policy schema requires human review"
+    if type(payload.get("max_changed_lines")) is not int or payload["max_changed_lines"] < 1:
+        return "invalid auto-merge policy schema requires human review"
+    if not valid_policy_string_list(payload.get("blocked_path_patterns"), allow_empty=False):
+        return "invalid auto-merge policy schema requires human review"
+    risk_policy = payload.get("risk_policy")
+    if not isinstance(risk_policy, dict):
+        return "invalid auto-merge policy schema requires human review"
+    low_policy = risk_policy.get("low")
+    medium_policy = risk_policy.get("medium")
+    high_policy = risk_policy.get("high")
+    if not isinstance(low_policy, dict) or not isinstance(medium_policy, dict) or not isinstance(high_policy, dict):
+        return "invalid auto-merge policy schema requires human review"
+    if not valid_policy_string_list(low_policy.get("prefixes")):
+        return "invalid auto-merge policy schema requires human review"
+    if not valid_policy_string_list(low_policy.get("exact")):
+        return "invalid auto-merge policy schema requires human review"
+    if not valid_policy_string_list(medium_policy.get("exact")):
+        return "invalid auto-merge policy schema requires human review"
+    if not valid_policy_string(high_policy.get("reason")):
+        return "invalid auto-merge policy schema requires human review"
+    control_plane_matches = guarded_auto_merge_control_plane_matches(payload)
+    if control_plane_matches:
+        matches = ", ".join(control_plane_matches)
+        return f"auto-merge policy must keep control-plane paths high-risk: {matches}"
+    return None
 
 
 def env_value(name: str, default: str = "") -> str:
@@ -206,8 +350,31 @@ def github_request(
             body = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
-        raise BridgeError(f"GitHub API {method} {url} failed: {exc.code} {body[:600]}") from exc
+        raise GitHubRequestError(method, url, exc.code, body) from exc
     return json.loads(body) if body else {}
+
+
+def fetch_issue_comments(
+    token: str,
+    source_repo: str,
+    issue_number: int,
+    *,
+    per_page: int = 100,
+    max_pages: int = 5,
+) -> list[dict[str, Any]]:
+    comments: list[dict[str, Any]] = []
+    for page in range(1, max_pages + 1):
+        payload = github_request(
+            token,
+            "GET",
+            f"/repos/{source_repo}/issues/{issue_number}/comments?per_page={per_page}&page={page}",
+        )
+        if not isinstance(payload, list):
+            break
+        comments.extend(comment for comment in payload if isinstance(comment, dict))
+        if len(payload) < per_page:
+            break
+    return comments
 
 
 def run(
@@ -321,9 +488,10 @@ def write_codex_context(
         handle.write("\n.codex-audit/\n")
 
     issue_path = context_dir / "monthly_issue.md"
+    recent_comments = comments[-20:]
     comments_md = "\n\n".join(
         f"### Comment by {comment.get('user', {}).get('login', 'unknown')}\n\n{comment.get('body') or ''}"
-        for comment in comments[:20]
+        for comment in recent_comments
     )
     issue_path.write_text(
         "\n".join(
@@ -830,9 +998,10 @@ def build_api_review_prompt(
     *,
     task: str = DEFAULT_TASK,
 ) -> str:
+    recent_comments = comments[-20:]
     comments_md = "\n\n".join(
         f"### Comment by {comment.get('user', {}).get('login', 'unknown')}\n\n{comment.get('body') or ''}"
-        for comment in comments[:20]
+        for comment in recent_comments
     )
     if task == "long_horizon_signal_shadow":
         return "\n".join(
@@ -1171,6 +1340,357 @@ def changed_paths(status: str) -> list[str]:
     return paths
 
 
+def git_diff_stats(repo_dir: Path, *, cached: bool = False) -> dict[str, int]:
+    args = ["git", "diff", "--numstat"]
+    status_args = ["git", "diff", "--name-status"]
+    if cached:
+        args.append("--cached")
+        status_args.append("--cached")
+    output = run_checked(args, cwd=repo_dir)
+    status_output = run_checked(status_args, cwd=repo_dir)
+    additions = 0
+    deletions = 0
+    binary_files = 0
+    deleted_files = 0
+    renamed_files = 0
+    copied_files = 0
+    for line in output.splitlines():
+        if not line.strip():
+            continue
+        parts = line.split("\t")
+        if len(parts) < 3:
+            binary_files += 1
+            continue
+        raw_additions, raw_deletions = parts[0], parts[1]
+        if raw_additions == "-" or raw_deletions == "-":
+            binary_files += 1
+            continue
+        try:
+            additions += int(raw_additions)
+            deletions += int(raw_deletions)
+        except ValueError:
+            binary_files += 1
+    for line in status_output.splitlines():
+        if not line.strip():
+            continue
+        status = line.split("\t", 1)[0].strip().upper()
+        if status == "D":
+            deleted_files += 1
+        elif status.startswith("R"):
+            renamed_files += 1
+        elif status.startswith("C"):
+            copied_files += 1
+    return {
+        "additions": additions,
+        "deletions": deletions,
+        "binary_files": binary_files,
+        "deleted_files": deleted_files,
+        "renamed_files": renamed_files,
+        "copied_files": copied_files,
+    }
+
+
+def normalize_changed_path(path: str) -> str:
+    normalized = path.strip()
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized
+
+
+def latest_feedback_pr_number(comments: list[dict[str, Any]]) -> int | None:
+    marker_re = re.compile(r"^<!--\s*codex-pr-feedback:(?:ci|review):(\d+)\s*-->")
+    for comment in reversed(comments):
+        body = str(comment.get("body") or "").lstrip() if isinstance(comment, dict) else ""
+        match = marker_re.match(body)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def _valid_retry_branch_name(branch: str) -> bool:
+    return (
+        bool(branch)
+        and not branch.startswith("-")
+        and ".." not in branch
+        and not any(ch in branch for ch in " ~^:?*[")
+    )
+
+
+def resolve_feedback_retry_pr(
+    token: str,
+    source_repo: str,
+    issue_number: int,
+    source_ref: str,
+    comments: list[dict[str, Any]],
+    *,
+    task: str = DEFAULT_TASK,
+) -> dict[str, Any] | None:
+    if task != "monthly_snapshot_audit":
+        return None
+    pr_number = latest_feedback_pr_number(comments)
+    if pr_number is None:
+        return None
+    pr = github_request(token, "GET", f"/repos/{source_repo}/pulls/{pr_number}")
+    if not isinstance(pr, dict) or pr.get("state") != "open":
+        return None
+    head = pr.get("head")
+    base = pr.get("base")
+    head_repo = head.get("repo") if isinstance(head, dict) else {}
+    head_repo_full_name = str(head_repo.get("full_name") or "") if isinstance(head_repo, dict) else ""
+    head_ref = str(head.get("ref") or "") if isinstance(head, dict) else ""
+    base_ref = str(base.get("ref") or "") if isinstance(base, dict) else ""
+    expected_prefix = f"codex/monthly-review-issue-{issue_number}-"
+    expected_marker = f"<!-- codex-monthly-remediation:issue-{issue_number} -->"
+    body = str(pr.get("body") or "")
+    if (
+        head_repo_full_name != source_repo
+        or base_ref != source_ref
+        or not head_ref.startswith(expected_prefix)
+        or not _valid_retry_branch_name(head_ref)
+        or expected_marker not in body
+    ):
+        return None
+    return {
+        "number": int(pr.get("number") or pr_number),
+        "html_url": str(pr.get("html_url") or ""),
+        "head_ref": head_ref,
+        "base_ref": base_ref,
+    }
+
+
+def checkout_feedback_retry_branch(repo_dir: Path, branch_name: str) -> None:
+    run_checked(
+        ["git", "fetch", "origin", f"refs/heads/{branch_name}:refs/remotes/origin/{branch_name}"],
+        cwd=repo_dir,
+    )
+    run_checked(["git", "checkout", "-B", branch_name, f"refs/remotes/origin/{branch_name}"], cwd=repo_dir)
+
+
+def load_guarded_auto_merge_policy(policy_path: Path) -> dict[str, Any]:
+    if not policy_path.exists():
+        return DEFAULT_GUARDED_AUTO_MERGE_POLICY
+    try:
+        payload = json.loads(policy_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return fail_closed_guarded_auto_merge_policy("invalid auto-merge policy requires human review")
+    if not isinstance(payload, dict):
+        return fail_closed_guarded_auto_merge_policy("invalid auto-merge policy requires human review")
+    schema_error = guarded_auto_merge_policy_schema_error(payload)
+    if schema_error:
+        return fail_closed_guarded_auto_merge_policy(schema_error)
+    return payload
+
+
+def guarded_policy_section(policy: dict[str, Any], name: str) -> dict[str, Any]:
+    risk_policy = policy.get("risk_policy")
+    if not isinstance(risk_policy, dict):
+        risk_policy = DEFAULT_GUARDED_AUTO_MERGE_POLICY["risk_policy"]
+    section = risk_policy.get(name)
+    fallback = DEFAULT_GUARDED_AUTO_MERGE_POLICY["risk_policy"][name]
+    return section if isinstance(section, dict) else fallback
+
+
+def guarded_blocked_patterns(policy: dict[str, Any]) -> tuple[list[re.Pattern[str]], list[str]]:
+    errors = [str(item) for item in policy.get("policy_errors", []) if str(item).strip()]
+    raw_patterns = policy.get("blocked_path_patterns")
+    if raw_patterns is None:
+        raw_patterns = DEFAULT_GUARDED_AUTO_MERGE_POLICY["blocked_path_patterns"]
+    elif not isinstance(raw_patterns, list):
+        errors.append("invalid blocked_path_patterns list requires human review")
+        return [re.compile(r".*")], errors
+    patterns: list[re.Pattern[str]] = []
+    for raw_pattern in raw_patterns:
+        if not isinstance(raw_pattern, str):
+            errors.append("invalid blocked_path_patterns list requires human review")
+            return [re.compile(r".*")], errors
+        pattern = str(raw_pattern)
+        if not pattern.strip():
+            continue
+        try:
+            patterns.append(re.compile(pattern, re.IGNORECASE))
+        except re.error:
+            errors.append("invalid blocked_path_patterns regex requires human review")
+            return [re.compile(r".*")], errors
+    return patterns, errors
+
+
+def guarded_string_list(value: Any, field_name: str, errors: list[str]) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        errors.append(f"invalid {field_name} list requires human review")
+        return []
+    items: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            errors.append(f"invalid {field_name} list requires human review")
+            return []
+        if item.strip():
+            items.append(item)
+    return items
+
+
+def guarded_policy_string(policy: dict[str, Any], field_name: str, fallback: str, errors: list[str]) -> str:
+    value = policy.get(field_name, fallback)
+    if not isinstance(value, str) or not value.strip() or "\n" in value or "\r" in value:
+        errors.append(f"invalid {field_name} string requires human review")
+        return fallback
+    return value.strip()
+
+
+def guarded_policy_positive_int(policy: dict[str, Any], field_name: str, fallback: int, errors: list[str]) -> int:
+    value = policy.get(field_name, fallback)
+    if type(value) is not int or value < 1:
+        errors.append(f"invalid {field_name} integer requires human review")
+        return fallback
+    return value
+
+
+def guarded_optional_non_negative_int(value: Any, field_name: str, errors: list[str]) -> int | None:
+    if value is None:
+        return None
+    if type(value) is not int or value < 0:
+        errors.append(f"invalid {field_name} count requires human review")
+        return None
+    return value
+
+
+def classify_guarded_auto_merge_risk(
+    paths: list[str],
+    *,
+    task: str = DEFAULT_TASK,
+    policy: dict[str, Any] | None = None,
+    diff_stats: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    policy = policy or DEFAULT_GUARDED_AUTO_MERGE_POLICY
+    low_policy = guarded_policy_section(policy, "low")
+    medium_policy = guarded_policy_section(policy, "medium")
+    high_policy = guarded_policy_section(policy, "high")
+    blocked_patterns, policy_errors = guarded_blocked_patterns(policy)
+    auto_merge_label = guarded_policy_string(
+        policy,
+        "auto_merge_label",
+        GUARDED_AUTO_MERGE_LABEL,
+        policy_errors,
+    )
+    human_review_label = guarded_policy_string(
+        policy,
+        "human_review_label",
+        HUMAN_REVIEW_LABEL,
+        policy_errors,
+    )
+    monthly_marker_prefix = guarded_policy_string(
+        policy,
+        "monthly_marker_prefix",
+        DEFAULT_GUARDED_AUTO_MERGE_POLICY["monthly_marker_prefix"],
+        policy_errors,
+    )
+    max_changed_files = guarded_policy_positive_int(
+        policy,
+        "max_changed_files",
+        DEFAULT_GUARDED_AUTO_MERGE_MAX_CHANGED_FILES,
+        policy_errors,
+    )
+    max_changed_lines = guarded_policy_positive_int(
+        policy,
+        "max_changed_lines",
+        DEFAULT_GUARDED_AUTO_MERGE_MAX_CHANGED_LINES,
+        policy_errors,
+    )
+    low_exact = set(guarded_string_list(low_policy.get("exact"), "risk_policy.low.exact", policy_errors))
+    low_prefixes = tuple(guarded_string_list(low_policy.get("prefixes"), "risk_policy.low.prefixes", policy_errors))
+    medium_exact = set(guarded_string_list(medium_policy.get("exact"), "risk_policy.medium.exact", policy_errors))
+    high_risk: list[str] = []
+    medium_risk: list[str] = []
+    low_risk_count = 0
+    normalized_paths = [normalize_changed_path(path) for path in paths if normalize_changed_path(path)]
+    if len(normalized_paths) > max_changed_files:
+        policy_errors.append(
+            f"changed file count exceeds auto-merge limit requires human review: {len(normalized_paths)} > {max_changed_files}"
+        )
+    additions: int | None = None
+    deletions: int | None = None
+    changed_lines: int | None = None
+    binary_files = 0
+    deleted_files = 0
+    renamed_files = 0
+    copied_files = 0
+    if diff_stats is not None:
+        additions = guarded_optional_non_negative_int(diff_stats.get("additions"), "additions", policy_errors)
+        deletions = guarded_optional_non_negative_int(diff_stats.get("deletions"), "deletions", policy_errors)
+        binary_files = guarded_optional_non_negative_int(diff_stats.get("binary_files", 0), "binary files", policy_errors) or 0
+        deleted_files = guarded_optional_non_negative_int(diff_stats.get("deleted_files", 0), "deleted files", policy_errors) or 0
+        renamed_files = guarded_optional_non_negative_int(diff_stats.get("renamed_files", 0), "renamed files", policy_errors) or 0
+        copied_files = guarded_optional_non_negative_int(diff_stats.get("copied_files", 0), "copied files", policy_errors) or 0
+        if additions is not None and deletions is not None:
+            changed_lines = additions + deletions
+            if changed_lines > max_changed_lines:
+                policy_errors.append(
+                    f"changed line count exceeds auto-merge limit requires human review: {changed_lines} > {max_changed_lines}"
+                )
+        if binary_files:
+            policy_errors.append("binary file changes require human review")
+        if deleted_files:
+            policy_errors.append("file deletions require human review")
+        if renamed_files:
+            policy_errors.append("file renames require human review")
+        if copied_files:
+            policy_errors.append("file copies require human review")
+    for raw_path in paths:
+        normalized = normalize_changed_path(raw_path)
+        if not normalized:
+            continue
+        if policy_errors:
+            high_risk.append(normalized)
+            continue
+        if any(pattern.search(normalized) for pattern in blocked_patterns):
+            high_risk.append(normalized)
+            continue
+        if normalized in low_exact or any(normalized.startswith(prefix) for prefix in low_prefixes):
+            low_risk_count += 1
+            continue
+        if task == "monthly_snapshot_audit" and normalized in medium_exact:
+            medium_risk.append(normalized)
+            continue
+        high_risk.append(normalized)
+
+    if high_risk:
+        risk_level = "high"
+        risk_reasons = policy_errors or [
+            str(high_policy.get("reason") or DEFAULT_GUARDED_AUTO_MERGE_POLICY["risk_policy"]["high"]["reason"])
+        ]
+    elif medium_risk:
+        risk_level = "medium"
+        risk_reasons = [
+            str(medium_policy.get("reason") or DEFAULT_GUARDED_AUTO_MERGE_POLICY["risk_policy"]["medium"]["reason"])
+        ]
+    else:
+        risk_level = "low"
+        risk_reasons = [
+            str(low_policy.get("reason") or DEFAULT_GUARDED_AUTO_MERGE_POLICY["risk_policy"]["low"]["reason"])
+        ]
+
+    return {
+        "label_allowed": not high_risk,
+        "risk_level": risk_level,
+        "risk_reasons": risk_reasons,
+        "policy_errors": policy_errors,
+        "auto_merge_label": auto_merge_label,
+        "human_review_label": human_review_label,
+        "monthly_marker_prefix": monthly_marker_prefix,
+        "high_risk_files": high_risk,
+        "medium_risk_files": medium_risk,
+        "low_risk_file_count": low_risk_count,
+        "additions": additions,
+        "deletions": deletions,
+        "changed_lines": changed_lines,
+        "binary_files": binary_files,
+        "deleted_files": deleted_files,
+        "renamed_files": renamed_files,
+        "copied_files": copied_files,
+    }
+
+
 def long_horizon_signal_data_path_allowed(path: str) -> bool:
     return any(path.startswith(prefix) for prefix in LONG_HORIZON_SIGNAL_OUTPUT_PREFIXES)
 
@@ -1268,18 +1788,26 @@ def create_pull_request(
     paths: list[str],
     *,
     task: str = DEFAULT_TASK,
+    policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     issue_number = issue["number"]
     if task == "long_horizon_signal_shadow":
         title = f"codex: long-horizon shadow signal for issue #{issue_number}"
-        marker = f"codex-long-horizon-signal:issue-{issue_number}"
+        marker_line = f"<!-- codex-long-horizon-signal:issue-{issue_number} -->"
     else:
         title = f"codex: monthly audit fixes for issue #{issue_number}"
-        marker = f"codex-monthly-remediation:issue-{issue_number}"
+        marker_errors: list[str] = []
+        marker_prefix = guarded_policy_string(
+            policy or DEFAULT_GUARDED_AUTO_MERGE_POLICY,
+            "monthly_marker_prefix",
+            DEFAULT_GUARDED_AUTO_MERGE_POLICY["monthly_marker_prefix"],
+            marker_errors,
+        )
+        marker_line = f"{marker_prefix}{issue_number} -->"
     changed_list = "\n".join(f"- `{path}`" for path in paths) or "- None"
     trigger_label = "long-horizon signal issue" if task == "long_horizon_signal_shadow" else "monthly review issue"
     body_lines = [
-        f"<!-- {marker} -->",
+        marker_line,
         "",
         f"Triggered by {trigger_label} #{issue_number}: {issue.get('html_url', '')}",
     ]
@@ -1314,27 +1842,165 @@ def create_pull_request(
     )
 
 
-def enable_auto_merge(token: str, source_repo: str, pr_number: int) -> str:
-    env = dict(os.environ)
-    env["GH_TOKEN"] = token
-    result = run(
-        [
-            "gh",
-            "pr",
-            "merge",
-            str(pr_number),
-            "--repo",
-            source_repo,
-            "--squash",
-            "--auto",
-        ],
-        env=env,
+def ensure_repo_label(
+    token: str,
+    source_repo: str,
+    label: str,
+    *,
+    color: str = "0E8A16",
+    description: str = "Guarded Codex remediation PR may be auto-merged after source CI and merge guard pass",
+) -> None:
+    encoded_label = urllib.parse.quote(label, safe="")
+    try:
+        github_request(token, "GET", f"/repos/{source_repo}/labels/{encoded_label}")
+    except GitHubRequestError as exc:
+        if exc.status_code != 404:
+            raise
+        github_request(
+            token,
+            "POST",
+            f"/repos/{source_repo}/labels",
+            {"name": label, "color": color, "description": description},
+        )
+
+
+def request_guarded_auto_merge(
+    token: str,
+    source_repo: str,
+    pr_number: int,
+    paths: list[str],
+    *,
+    task: str = DEFAULT_TASK,
+    policy: dict[str, Any] | None = None,
+    diff_stats: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    risk = classify_guarded_auto_merge_risk(paths, task=task, policy=policy, diff_stats=diff_stats)
+    if diff_stats is None and risk["label_allowed"]:
+        raise BridgeError("Guarded auto-merge label refused because diff stats are unavailable")
+    if not risk["label_allowed"]:
+        high_risk_files = ", ".join(risk["high_risk_files"])
+        raise BridgeError(f"Guarded auto-merge label refused for {risk['risk_level']} risk files: {high_risk_files}")
+    label = str(risk["auto_merge_label"])
+    human_review_label = str(risk.get("human_review_label") or HUMAN_REVIEW_LABEL)
+    if issue_has_label(token, source_repo, pr_number, human_review_label):
+        raise BridgeError(
+            f"Guarded auto-merge label refused because `{human_review_label}` is present on the PR"
+        )
+    ensure_repo_label(token, source_repo, label)
+    github_request(
+        token,
+        "POST",
+        f"/repos/{source_repo}/issues/{pr_number}/labels",
+        {"labels": [label]},
     )
-    if result.stdout:
-        print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
-    if result.returncode != 0:
-        raise BridgeError("Unable to enable auto-merge for generated PR")
-    return result.stdout or ""
+    return {"label": label, **risk}
+
+
+def guarded_auto_merge_label(policy: dict[str, Any] | None = None) -> str:
+    errors: list[str] = []
+    return guarded_policy_string(
+        policy or DEFAULT_GUARDED_AUTO_MERGE_POLICY,
+        "auto_merge_label",
+        GUARDED_AUTO_MERGE_LABEL,
+        errors,
+    )
+
+
+def guarded_auto_merge_label_for_mutation(policy: dict[str, Any] | None = None) -> tuple[str, str]:
+    policy = policy or DEFAULT_GUARDED_AUTO_MERGE_POLICY
+    policy_errors = [str(item).strip() for item in policy.get("policy_errors", []) if str(item).strip()]
+    if policy_errors:
+        return "", "; ".join(policy_errors)
+    errors: list[str] = []
+    auto_merge_label = guarded_policy_string(policy, "auto_merge_label", GUARDED_AUTO_MERGE_LABEL, errors)
+    human_review_label = guarded_policy_string(policy, "human_review_label", HUMAN_REVIEW_LABEL, errors)
+    if auto_merge_label == human_review_label:
+        errors.append("auto-merge and human-review labels must be distinct requires human review")
+    if errors:
+        return "", "; ".join(errors)
+    return auto_merge_label, ""
+
+
+def stale_auto_merge_label_skip_message(reason: str) -> str:
+    return (
+        "Skipped stale guarded auto-merge label cleanup because the baseline auto-merge policy labels "
+        f"are not safe for mutation: `{reason}`"
+    )
+
+
+def issue_has_label(token: str, source_repo: str, issue_number: int, label: str) -> bool:
+    label = str(label or "").strip()
+    if not label or "\n" in label or "\r" in label:
+        raise BridgeError("Invalid issue label name")
+    issue = github_request(token, "GET", f"/repos/{source_repo}/issues/{issue_number}")
+    labels = issue.get("labels") if isinstance(issue, dict) else None
+    if not isinstance(labels, list):
+        raise BridgeError("GitHub issue labels response is malformed")
+    for item in labels:
+        name = item.get("name") if isinstance(item, dict) else item
+        if str(name or "").strip() == label:
+            return True
+    return False
+
+
+def remove_issue_label_if_present(token: str, source_repo: str, issue_number: int, label: str) -> bool:
+    label = str(label or "").strip()
+    if not label or "\n" in label or "\r" in label:
+        raise BridgeError("Invalid issue label name")
+    encoded_label = urllib.parse.quote(label, safe="")
+    try:
+        github_request(
+            token,
+            "DELETE",
+            f"/repos/{source_repo}/issues/{issue_number}/labels/{encoded_label}",
+        )
+    except GitHubRequestError as exc:
+        if exc.status_code == 404:
+            return False
+        raise
+    return True
+
+
+def format_guarded_risk_details(risk: dict[str, Any]) -> str:
+    reasons = [str(item).strip() for item in risk.get("risk_reasons", []) if str(item).strip()]
+    high_risk_files = [str(item).strip() for item in risk.get("high_risk_files", []) if str(item).strip()]
+    lines = [
+        f"- Risk level: `{risk.get('risk_level', 'unknown')}`",
+    ]
+    if risk.get("changed_lines") is not None:
+        lines.append(f"- Changed lines: `{risk['changed_lines']}`")
+    if reasons:
+        lines.append("- Reasons:")
+        lines.extend(f"  - {reason}" for reason in reasons)
+    if high_risk_files:
+        lines.append("- High-risk files:")
+        lines.extend(f"  - `{path}`" for path in high_risk_files)
+    return "\n".join(lines)
+
+
+def request_human_review(
+    token: str,
+    source_repo: str,
+    pr_number: int,
+    risk: dict[str, Any],
+    *,
+    label: str | None = None,
+) -> dict[str, Any]:
+    label = str(label or risk.get("human_review_label") or HUMAN_REVIEW_LABEL)
+    ensure_repo_label(
+        token,
+        source_repo,
+        label,
+        color="B60205",
+        description="Codex remediation PR requires human review before merge",
+    )
+    github_request(
+        token,
+        "POST",
+        f"/repos/{source_repo}/issues/{pr_number}/labels",
+        {"labels": [label]},
+    )
+    return {"label": label, **risk}
 
 
 def main() -> int:
@@ -1359,9 +2025,7 @@ def main() -> int:
         f"with provider {provider} and Codex backend {codex_backend}."
     )
     issue = github_request(token, "GET", f"/repos/{source_repo}/issues/{issue_number}")
-    comments = github_request(token, "GET", f"/repos/{source_repo}/issues/{issue_number}/comments?per_page=20")
-    if not isinstance(comments, list):
-        comments = []
+    comments = fetch_issue_comments(token, source_repo, issue_number)
 
     if provider == "openai":
         validate_api_fallback_source_repo(source_repo)
@@ -1388,10 +2052,65 @@ def main() -> int:
         with tempfile.TemporaryDirectory(prefix="codex-audit-bridge-") as tmp:
             work_root = Path(tmp)
             repo_dir = clone_source_repo(token, source_repo, source_ref, work_root)
+            baseline_auto_merge_policy = load_guarded_auto_merge_policy(
+                repo_dir / ".github" / "codex_auto_merge_policy.json"
+            )
+            feedback_retry_pr = resolve_feedback_retry_pr(
+                token,
+                source_repo,
+                issue_number,
+                source_ref,
+                comments,
+                task=task,
+            )
+            stale_auto_merge_label, stale_auto_merge_label_skip_reason = guarded_auto_merge_label_for_mutation(
+                baseline_auto_merge_policy
+            )
+            stale_auto_merge_label_removed = False
             stamp = dt.datetime.now(dt.UTC).strftime("%Y%m%d%H%M%S")
             branch_prefix = "long-horizon-signal" if task == "long_horizon_signal_shadow" else "monthly-review"
-            branch_name = f"codex/{branch_prefix}-issue-{issue_number}-{stamp}"
-            run_checked(["git", "checkout", "-b", branch_name], cwd=repo_dir)
+            if feedback_retry_pr:
+                if stale_auto_merge_label:
+                    try:
+                        stale_auto_merge_label_removed = remove_issue_label_if_present(
+                            token,
+                            source_repo,
+                            int(feedback_retry_pr["number"]),
+                            stale_auto_merge_label,
+                        )
+                    except (BridgeError, GitHubRequestError) as exc:
+                        post_issue_comment(
+                            token,
+                            source_repo,
+                            issue_number,
+                            "\n".join(
+                                [
+                                    "## Codex Audit",
+                                    "",
+                                    "The bridge refused to continue because it could not clear a stale guarded "
+                                    "auto-merge label from the existing fix PR.",
+                                    "",
+                                    f"- PR: #{feedback_retry_pr['number']}",
+                                    f"- Label: `{stale_auto_merge_label}`",
+                                    f"- Error: `{exc}`",
+                                    "",
+                                    "No files were pushed. Please remove the stale label or inspect the PR manually.",
+                                ]
+                            ),
+                        )
+                        return 1
+                else:
+                    print(stale_auto_merge_label_skip_message(stale_auto_merge_label_skip_reason), flush=True)
+                branch_name = str(feedback_retry_pr["head_ref"])
+                checkout_feedback_retry_branch(repo_dir, branch_name)
+                print(
+                    f"Updating existing Codex remediation PR #{feedback_retry_pr['number']} "
+                    f"on branch {branch_name}.",
+                    flush=True,
+                )
+            else:
+                branch_name = f"codex/{branch_prefix}-issue-{issue_number}-{stamp}"
+                run_checked(["git", "checkout", "-b", branch_name], cwd=repo_dir)
             run_checked(["git", "config", "user.name", "codex-audit-bridge[bot]"], cwd=repo_dir)
             run_checked(
                 ["git", "config", "user.email", "codex-audit-bridge[bot]@users.noreply.github.com"],
@@ -1446,21 +2165,39 @@ def main() -> int:
             paths = changed_paths(status)
             if mode == "review_only":
                 review_message = format_codex_message(final_message, repo_dir, source_repo, source_ref)
+                body = truncate_markdown(
+                    review_message or "Codex completed review_only mode without a final message."
+                )
+                if stale_auto_merge_label_removed:
+                    body += (
+                        f"\n\nRemoved stale `{stale_auto_merge_label}` from the existing fix PR before "
+                        "posting this review."
+                    )
+                elif feedback_retry_pr and stale_auto_merge_label_skip_reason:
+                    body += f"\n\n{stale_auto_merge_label_skip_message(stale_auto_merge_label_skip_reason)}."
                 post_issue_comment(
                     token,
                     source_repo,
                     issue_number,
-                    truncate_markdown(review_message or "Codex completed review_only mode without a final message."),
+                    body,
                 )
                 return 0
 
             if not paths:
                 review_message = format_codex_message(final_message, repo_dir, source_repo, source_ref)
+                body = truncate_markdown(review_message or "Codex found no safe code changes to make.")
+                if stale_auto_merge_label_removed:
+                    body += (
+                        f"\n\nRemoved stale `{stale_auto_merge_label}` from the existing fix PR because this "
+                        "retry did not produce a verified replacement commit."
+                    )
+                elif feedback_retry_pr and stale_auto_merge_label_skip_reason:
+                    body += f"\n\n{stale_auto_merge_label_skip_message(stale_auto_merge_label_skip_reason)}."
                 post_issue_comment(
                     token,
                     source_repo,
                     issue_number,
-                    truncate_markdown(review_message or "Codex found no safe code changes to make."),
+                    body,
                 )
                 return 0
 
@@ -1482,18 +2219,61 @@ def main() -> int:
                         truncate_markdown(review_message, 7000),
                     ]
                 )
+                if stale_auto_merge_label_removed:
+                    body += (
+                        f"\n\nRemoved stale `{stale_auto_merge_label}` from the existing fix PR because this "
+                        "retry produced blocked edits."
+                    )
+                elif feedback_retry_pr and stale_auto_merge_label_skip_reason:
+                    body += f"\n\n{stale_auto_merge_label_skip_message(stale_auto_merge_label_skip_reason)}."
                 post_issue_comment(token, source_repo, issue_number, body)
                 return 1
 
             run_checked(["git", "add", "-A"], cwd=repo_dir)
+            diff_stats = git_diff_stats(repo_dir, cached=True)
             run_checked(
                 ["git", "commit", "-m", f"codex: {task.replace('_', ' ')} for issue #{issue_number}"],
                 cwd=repo_dir,
             )
             git_with_token(repo_dir, token, ["push", "origin", f"HEAD:refs/heads/{branch_name}"])
             pr_message = format_codex_message(final_message, repo_dir, source_repo, branch_name)
-            pr = create_pull_request(token, source_repo, issue, branch_name, source_ref, pr_message, paths, task=task)
+            if feedback_retry_pr:
+                pr = feedback_retry_pr
+            else:
+                pr = create_pull_request(
+                    token,
+                    source_repo,
+                    issue,
+                    branch_name,
+                    source_ref,
+                    pr_message,
+                    paths,
+                    task=task,
+                    policy=baseline_auto_merge_policy,
+                )
             pr_url = pr.get("html_url", "")
+            guard_risk = classify_guarded_auto_merge_risk(
+                paths,
+                task=task,
+                policy=baseline_auto_merge_policy,
+                diff_stats=diff_stats,
+            )
+            stale_auto_merge_label_error = ""
+            if (
+                feedback_retry_pr
+                and stale_auto_merge_label
+                and not stale_auto_merge_label_removed
+                and (not auto_merge or not guard_risk["label_allowed"])
+            ):
+                try:
+                    stale_auto_merge_label_removed = remove_issue_label_if_present(
+                        token,
+                        source_repo,
+                        int(pr["number"]),
+                        stale_auto_merge_label,
+                    )
+                except (BridgeError, GitHubRequestError) as exc:
+                    stale_auto_merge_label_error = str(exc)
             body_lines = [
                 "## Codex Audit",
                 "",
@@ -1503,16 +2283,90 @@ def main() -> int:
                     9000,
                 ),
                 "",
-                f"Created fix PR: {pr_url}",
+                f"{'Updated existing fix PR' if feedback_retry_pr else 'Created fix PR'}: {pr_url}",
             ]
-            if auto_merge:
+            if not guard_risk["label_allowed"]:
+                body_lines.extend(
+                    [
+                        "",
+                        "This PR is high-risk for unattended merge and requires human review.",
+                        "",
+                        format_guarded_risk_details(guard_risk),
+                    ]
+                )
+                if stale_auto_merge_label_removed:
+                    body_lines.extend(
+                        [
+                            "",
+                            f"Removed stale `{stale_auto_merge_label}` from the PR before requesting review.",
+                        ]
+                    )
+                if stale_auto_merge_label_error:
+                    body_lines.extend(
+                        [
+                            "",
+                            f"Could not remove stale `{stale_auto_merge_label}` from the PR: "
+                            f"`{stale_auto_merge_label_error}`",
+                        ]
+                    )
+                if feedback_retry_pr and stale_auto_merge_label_skip_reason:
+                    body_lines.extend(["", stale_auto_merge_label_skip_message(stale_auto_merge_label_skip_reason)])
                 try:
-                    enable_auto_merge(token, source_repo, int(pr["number"]))
+                    review = request_human_review(
+                        token,
+                        source_repo,
+                        int(pr["number"]),
+                        guard_risk,
+                    )
                     body_lines.append("")
-                    body_lines.append("Auto-merge was requested and has been enabled for the PR.")
+                    body_lines.append(
+                        f"Added `{review['label']}` to the PR so operators can review it before merge."
+                    )
+                except (BridgeError, GitHubRequestError) as exc:
+                    body_lines.append("")
+                    review_label = str(guard_risk.get("human_review_label") or HUMAN_REVIEW_LABEL)
+                    body_lines.append(f"Could not add `{review_label}` to the PR: `{exc}`")
+                if auto_merge:
+                    body_lines.append("")
+                    body_lines.append(
+                        "Auto-merge was requested, but the bridge refused to add the guarded auto-merge label "
+                        "because this change set is high-risk."
+                    )
+            elif auto_merge:
+                try:
+                    guard = request_guarded_auto_merge(
+                        token,
+                        source_repo,
+                        int(pr["number"]),
+                        paths,
+                        task=task,
+                        policy=baseline_auto_merge_policy,
+                        diff_stats=diff_stats,
+                    )
+                    body_lines.append("")
+                    body_lines.append(
+                        f"Auto-merge was requested; added `{guard['label']}` for the source repository merge guard "
+                        f"after Bridge classified the change set as `{guard['risk_level']}` risk. "
+                        "CI and the source guard own the final merge decision."
+                    )
                 except BridgeError as exc:
                     body_lines.append("")
-                    body_lines.append(f"Auto-merge was requested but could not be enabled: `{exc}`")
+                    body_lines.append(f"Auto-merge was requested but the guarded label could not be added: `{exc}`")
+            elif stale_auto_merge_label_removed:
+                body_lines.append("")
+                body_lines.append(
+                    f"Auto-merge was not requested for this run; removed stale `{stale_auto_merge_label}` "
+                    "from the PR."
+                )
+            elif stale_auto_merge_label_error:
+                body_lines.append("")
+                body_lines.append(
+                    f"Auto-merge was not requested for this run, but the bridge could not remove stale "
+                    f"`{stale_auto_merge_label}` from the PR: `{stale_auto_merge_label_error}`"
+                )
+            elif feedback_retry_pr and stale_auto_merge_label_skip_reason:
+                body_lines.append("")
+                body_lines.append(stale_auto_merge_label_skip_message(stale_auto_merge_label_skip_reason))
             post_issue_comment(token, source_repo, issue_number, "\n".join(body_lines))
             return 0
     except (BridgeError, OSError, subprocess.SubprocessError) as exc:

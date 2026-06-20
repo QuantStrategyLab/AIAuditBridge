@@ -9,28 +9,47 @@ import unittest
 import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 from scripts.run_monthly_codex_audit import (
     BridgeError,
+    DEFAULT_GUARDED_AUTO_MERGE_POLICY,
+    GUARDED_AUTO_MERGE_LABEL,
+    HUMAN_REVIEW_LABEL,
+    GitHubRequestError,
     SOURCE_REPO_TASKS,
     api_fallback_allowed_source_repos,
     apply_service_changes,
     blocked_paths,
     build_api_review_prompt,
     build_service_prompt,
+    classify_guarded_auto_merge_risk,
     codex_service_job_url,
     codex_service_jobs_url,
     convert_local_markdown_links,
+    create_pull_request,
     extract_anthropic_text,
     extract_openai_text,
     auto_fallback_missing_api_key_message,
+    fetch_issue_comments,
     format_api_review_comment,
+    git_diff_stats,
+    format_guarded_risk_details,
+    guarded_auto_merge_label,
+    guarded_auto_merge_label_for_mutation,
+    issue_has_label,
+    load_guarded_auto_merge_policy,
+    latest_feedback_pr_number,
+    main as run_audit_main,
     normalize_codex_service_url,
     parse_service_patch_response,
     parse_bool,
     pr_closing_line,
+    remove_issue_label_if_present,
     request_github_oidc_token,
+    request_guarded_auto_merge,
+    request_human_review,
+    resolve_feedback_retry_pr,
     resolve_source_repo_token,
     run_configured_api_reviews,
     safe_branch_component,
@@ -40,9 +59,25 @@ from scripts.run_monthly_codex_audit import (
     validate_provider,
     validate_repo,
     validate_task,
+    write_codex_context,
 )
 from scripts.codex_audit_service import CodexAuditServiceRequestHandler, _codex_env
 from scripts import codex_audit_service
+
+
+def _normalized_policy(policy: dict[str, object]) -> dict[str, object]:
+    normalized = dict(policy)
+    normalized["blocked_path_patterns"] = sorted(policy.get("blocked_path_patterns", []))
+    risk_policy = dict(policy["risk_policy"])
+    low = dict(risk_policy["low"])
+    medium = dict(risk_policy["medium"])
+    low["prefixes"] = sorted(low.get("prefixes", []))
+    low["exact"] = sorted(low.get("exact", []))
+    medium["exact"] = sorted(medium.get("exact", []))
+    risk_policy["low"] = low
+    risk_policy["medium"] = medium
+    normalized["risk_policy"] = risk_policy
+    return normalized
 
 
 class RunMonthlyCodexAuditTests(unittest.TestCase):
@@ -161,6 +196,31 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
             task="long_horizon_signal_shadow",
         )
         self.assertEqual(blocked, ["data/raw/market_history.csv"])
+
+    def test_git_diff_stats_reads_staged_additions_deletions_and_file_statuses(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            with patch("scripts.run_monthly_codex_audit.run_checked") as run:
+                run.side_effect = [
+                    "3\t1\tdocs/review.md\n2\t0\ttests/test_review.py\n-\t-\tdocs/chart.png\n",
+                    "M\tdocs/review.md\nD\tdocs/old.md\nR100\tdocs/old_name.md\tdocs/new_name.md\nC100\tdocs/template.md\tdocs/copy.md\n",
+                ]
+
+                stats = git_diff_stats(repo_dir, cached=True)
+
+        self.assertEqual(
+            stats,
+            {
+                "additions": 5,
+                "deletions": 1,
+                "binary_files": 1,
+                "deleted_files": 1,
+                "renamed_files": 1,
+                "copied_files": 1,
+            },
+        )
+        run.assert_any_call(["git", "diff", "--numstat", "--cached"], cwd=repo_dir)
+        run.assert_any_call(["git", "diff", "--name-status", "--cached"], cwd=repo_dir)
 
     def test_codex_audit_service_env_removes_service_secrets(self) -> None:
         with patch.dict(
@@ -347,6 +407,24 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertIn("QuantStrategyLab/CryptoLivePoolPipelines", prompt)
         self.assertIn("Monthly Report", prompt)
         self.assertIn("API Monthly Review", prompt)
+
+    def test_build_api_review_prompt_includes_latest_issue_comments(self) -> None:
+        comments = [
+            {"user": {"login": f"user-{index}"}, "body": f"comment-{index}"}
+            for index in range(25)
+        ]
+
+        prompt = build_api_review_prompt(
+            "QuantStrategyLab/UsEquitySnapshotPipelines",
+            "main",
+            {"title": "Monthly Report", "body": "Body", "html_url": "https://example.test/issue"},
+            comments,
+        )
+
+        self.assertNotIn("comment-0", prompt)
+        self.assertNotIn("comment-4", prompt)
+        self.assertIn("comment-5", prompt)
+        self.assertIn("comment-24", prompt)
 
     def test_build_api_review_prompt_includes_hk_snapshot_gates(self) -> None:
         prompt = build_api_review_prompt(
@@ -556,6 +634,1241 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
     def test_pr_closing_line_only_closes_long_horizon_signal_issues(self) -> None:
         self.assertEqual(pr_closing_line("long_horizon_signal_shadow", 4), "Closes #4")
         self.assertEqual(pr_closing_line("monthly_snapshot_audit", 4), "")
+
+    def test_write_codex_context_includes_latest_issue_comments(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            (repo_dir / ".git" / "info").mkdir(parents=True)
+            comments = [
+                {"user": {"login": f"user-{index}"}, "body": f"comment-{index}"}
+                for index in range(25)
+            ]
+
+            issue_path, _context_path = write_codex_context(
+                repo_dir,
+                "QuantStrategyLab/UsEquitySnapshotPipelines",
+                "main",
+                {"number": 7, "title": "Monthly Review", "html_url": "https://example.test/issue/7"},
+                comments,
+            )
+
+            issue_markdown = issue_path.read_text(encoding="utf-8")
+            self.assertNotIn("comment-0", issue_markdown)
+            self.assertNotIn("comment-4", issue_markdown)
+            self.assertIn("comment-5", issue_markdown)
+            self.assertIn("comment-24", issue_markdown)
+
+    def test_latest_feedback_pr_number_uses_newest_ci_or_review_marker(self) -> None:
+        comments = [
+            {"body": "<!-- codex-pr-feedback:ci:12 -->\nold"},
+            {"body": "operator note"},
+            {"body": "<!-- codex-pr-feedback:review:15 -->\nnew"},
+        ]
+
+        self.assertEqual(latest_feedback_pr_number(comments), 15)
+
+    def test_fetch_issue_comments_reads_next_page_for_latest_feedback_marker(self) -> None:
+        first_page = [{"body": f"comment-{index}"} for index in range(100)]
+        second_page = [
+            {"body": "operator note"},
+            {"body": "<!-- codex-pr-feedback:ci:42 -->\nretry latest failed CI"},
+        ]
+
+        with patch(
+            "scripts.run_monthly_codex_audit.github_request",
+            side_effect=[first_page, second_page],
+        ) as request:
+            comments = fetch_issue_comments(
+                "token",
+                "QuantStrategyLab/UsEquitySnapshotPipelines",
+                7,
+            )
+
+        self.assertEqual(len(comments), 102)
+        self.assertEqual(latest_feedback_pr_number(comments), 42)
+        request.assert_has_calls(
+            [
+                call(
+                    "token",
+                    "GET",
+                    "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/7/comments?per_page=100&page=1",
+                ),
+                call(
+                    "token",
+                    "GET",
+                    "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/7/comments?per_page=100&page=2",
+                ),
+            ]
+        )
+
+    def test_fetch_issue_comments_stops_on_non_list_response(self) -> None:
+        with patch("scripts.run_monthly_codex_audit.github_request", return_value={"message": "bad"}) as request:
+            comments = fetch_issue_comments(
+                "token",
+                "QuantStrategyLab/UsEquitySnapshotPipelines",
+                7,
+            )
+
+        self.assertEqual(comments, [])
+        request.assert_called_once_with(
+            "token",
+            "GET",
+            "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/7/comments?per_page=100&page=1",
+        )
+
+    def test_resolve_feedback_retry_pr_accepts_same_repo_open_codex_pr(self) -> None:
+        comments = [{"body": "<!-- codex-pr-feedback:ci:12 -->\nretry"}]
+        pr_payload = {
+            "number": 12,
+            "state": "open",
+            "html_url": "https://github.com/QuantStrategyLab/UsEquitySnapshotPipelines/pull/12",
+            "body": "<!-- codex-monthly-remediation:issue-7 -->\nfix",
+            "head": {
+                "ref": "codex/monthly-review-issue-7-20260620",
+                "repo": {"full_name": "QuantStrategyLab/UsEquitySnapshotPipelines"},
+            },
+            "base": {"ref": "main"},
+        }
+        with patch("scripts.run_monthly_codex_audit.github_request", return_value=pr_payload) as request:
+            retry_pr = resolve_feedback_retry_pr(
+                "token",
+                "QuantStrategyLab/UsEquitySnapshotPipelines",
+                7,
+                "main",
+                comments,
+            )
+
+        request.assert_called_once_with("token", "GET", "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/pulls/12")
+        self.assertEqual(
+            retry_pr,
+            {
+                "number": 12,
+                "html_url": "https://github.com/QuantStrategyLab/UsEquitySnapshotPipelines/pull/12",
+                "head_ref": "codex/monthly-review-issue-7-20260620",
+                "base_ref": "main",
+            },
+        )
+
+    def test_resolve_feedback_retry_pr_rejects_cross_repo_or_wrong_issue_pr(self) -> None:
+        comments = [{"body": "<!-- codex-pr-feedback:review:12 -->\nretry"}]
+        cross_repo_payload = {
+            "number": 12,
+            "state": "open",
+            "head": {
+                "ref": "codex/monthly-review-issue-7-20260620",
+                "repo": {"full_name": "someone/fork"},
+            },
+            "base": {"ref": "main"},
+        }
+        wrong_issue_payload = {
+            "number": 12,
+            "state": "open",
+            "body": "<!-- codex-monthly-remediation:issue-7 -->\nfix",
+            "head": {
+                "ref": "codex/monthly-review-issue-8-20260620",
+                "repo": {"full_name": "QuantStrategyLab/UsEquitySnapshotPipelines"},
+            },
+            "base": {"ref": "main"},
+        }
+
+        with patch("scripts.run_monthly_codex_audit.github_request", return_value=cross_repo_payload):
+            self.assertIsNone(
+                resolve_feedback_retry_pr(
+                    "token",
+                    "QuantStrategyLab/UsEquitySnapshotPipelines",
+                    7,
+                    "main",
+                    comments,
+                )
+            )
+        with patch("scripts.run_monthly_codex_audit.github_request", return_value=wrong_issue_payload):
+            self.assertIsNone(
+                resolve_feedback_retry_pr(
+                    "token",
+                    "QuantStrategyLab/UsEquitySnapshotPipelines",
+                    7,
+                    "main",
+                    comments,
+                )
+            )
+
+    def test_resolve_feedback_retry_pr_rejects_numeric_prefix_collision(self) -> None:
+        comments = [{"body": "<!-- codex-pr-feedback:ci:12 -->\nretry"}]
+        pr_payload = {
+            "number": 12,
+            "state": "open",
+            "body": "<!-- codex-monthly-remediation:issue-7 -->\nfix",
+            "head": {
+                "ref": "codex/monthly-review-issue-77-20260620",
+                "repo": {"full_name": "QuantStrategyLab/UsEquitySnapshotPipelines"},
+            },
+            "base": {"ref": "main"},
+        }
+
+        with patch("scripts.run_monthly_codex_audit.github_request", return_value=pr_payload):
+            self.assertIsNone(
+                resolve_feedback_retry_pr(
+                    "token",
+                    "QuantStrategyLab/UsEquitySnapshotPipelines",
+                    7,
+                    "main",
+                    comments,
+                )
+            )
+
+    def test_resolve_feedback_retry_pr_rejects_missing_pr_body_marker(self) -> None:
+        comments = [{"body": "<!-- codex-pr-feedback:ci:12 -->\nretry"}]
+        pr_payload = {
+            "number": 12,
+            "state": "open",
+            "body": "marker removed",
+            "head": {
+                "ref": "codex/monthly-review-issue-7-20260620",
+                "repo": {"full_name": "QuantStrategyLab/UsEquitySnapshotPipelines"},
+            },
+            "base": {"ref": "main"},
+        }
+
+        with patch("scripts.run_monthly_codex_audit.github_request", return_value=pr_payload):
+            self.assertIsNone(
+                resolve_feedback_retry_pr(
+                    "token",
+                    "QuantStrategyLab/UsEquitySnapshotPipelines",
+                    7,
+                    "main",
+                    comments,
+                )
+            )
+
+    def test_classify_guarded_auto_merge_risk_allows_low_and_medium_surfaces(self) -> None:
+        low = classify_guarded_auto_merge_risk(["./README.zh-CN.md", "docs/runbook.md", "tests/test_report.py"])
+        medium = classify_guarded_auto_merge_risk(
+            [
+                "scripts/build_monthly_live_strategy_health_reports.py",
+                "scripts/run_monthly_report_bundle.py",
+                "scripts/plan_codex_auto_merge_enablement.py",
+            ]
+        )
+        control_plane = classify_guarded_auto_merge_risk(
+            [
+                ".github/workflows/auto_merge_codex_pr.yml",
+                "scripts/evaluate_codex_pr_merge.py",
+                "scripts/check_codex_auto_merge_readiness.py",
+                "scripts/post_codex_auto_merge_decision_comment.py",
+                "scripts/sync_codex_auto_merge_labels.py",
+            ]
+        )
+
+        self.assertTrue(low["label_allowed"])
+        self.assertEqual(low["risk_level"], "low")
+        self.assertEqual(low["high_risk_files"], [])
+        self.assertTrue(medium["label_allowed"])
+        self.assertEqual(medium["risk_level"], "medium")
+        self.assertEqual(
+            medium["medium_risk_files"],
+            [
+                "scripts/build_monthly_live_strategy_health_reports.py",
+                "scripts/run_monthly_report_bundle.py",
+                "scripts/plan_codex_auto_merge_enablement.py",
+            ],
+        )
+        self.assertFalse(control_plane["label_allowed"])
+        self.assertEqual(control_plane["risk_level"], "high")
+        self.assertEqual(
+            control_plane["high_risk_files"],
+            [
+                ".github/workflows/auto_merge_codex_pr.yml",
+                "scripts/evaluate_codex_pr_merge.py",
+                "scripts/check_codex_auto_merge_readiness.py",
+                "scripts/post_codex_auto_merge_decision_comment.py",
+                "scripts/sync_codex_auto_merge_labels.py",
+            ],
+        )
+
+    def test_guarded_auto_merge_default_high_reason_matches_source_policy(self) -> None:
+        self.assertEqual(
+            DEFAULT_GUARDED_AUTO_MERGE_POLICY["risk_policy"]["high"]["reason"],
+            "blocked/high-risk files require human review",
+        )
+
+    def test_guarded_auto_merge_default_policy_matches_local_source_policy_when_available(self) -> None:
+        source_policy_path = (
+            Path(__file__).resolve().parents[2]
+            / "UsEquitySnapshotPipelines"
+            / ".github"
+            / "codex_auto_merge_policy.json"
+        )
+        if not source_policy_path.exists():
+            self.skipTest("local UsEquitySnapshotPipelines checkout is not available")
+
+        source_policy = json.loads(source_policy_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(_normalized_policy(DEFAULT_GUARDED_AUTO_MERGE_POLICY), _normalized_policy(source_policy))
+
+    def test_classify_guarded_auto_merge_risk_can_use_source_policy_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            policy_path = Path(tmp) / ".github" / "codex_auto_merge_policy.json"
+            policy_path.parent.mkdir(parents=True)
+            policy_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "auto_merge_label": "custom-auto-ok",
+                        "human_review_label": "custom-review-required",
+                        "monthly_marker_prefix": "<!-- custom-remediation:issue-",
+                        "max_changed_files": 20,
+                        "max_changed_lines": 1200,
+                        "blocked_path_patterns": [
+                            "(^|/)(\\.env|.*secret.*|.*credential.*|.*token.*|.*private.*|.*\\.pem|.*\\.key)$"
+                        ],
+                        "risk_policy": {
+                            "low": {
+                                "prefixes": ["docs/"],
+                                "exact": ["README.md"],
+                                "reason": "custom low",
+                            },
+                            "medium": {
+                                "exact": ["scripts/custom_monthly_fix.py"],
+                                "reason": "custom medium",
+                            },
+                            "high": {"reason": "custom high"},
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            policy = load_guarded_auto_merge_policy(policy_path)
+
+        risk = classify_guarded_auto_merge_risk(["scripts/custom_monthly_fix.py"], policy=policy)
+        blocked = classify_guarded_auto_merge_risk(["tests/test_report.py"], policy=policy)
+
+        self.assertTrue(risk["label_allowed"])
+        self.assertEqual(risk["risk_level"], "medium")
+        self.assertEqual(risk["risk_reasons"], ["custom medium"])
+        self.assertEqual(risk["human_review_label"], "custom-review-required")
+        self.assertFalse(blocked["label_allowed"])
+        self.assertEqual(blocked["risk_reasons"], ["custom high"])
+        self.assertEqual(blocked["human_review_label"], "custom-review-required")
+
+    def test_guarded_auto_merge_policy_fails_closed_when_invalid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            policy_path = Path(tmp) / ".github" / "codex_auto_merge_policy.json"
+            policy_path.parent.mkdir(parents=True)
+            policy_path.write_text("{not-json", encoding="utf-8")
+            policy = load_guarded_auto_merge_policy(policy_path)
+
+        risk = classify_guarded_auto_merge_risk(["README.md"], policy=policy)
+
+        self.assertFalse(risk["label_allowed"])
+        self.assertEqual(risk["high_risk_files"], ["README.md"])
+        self.assertEqual(risk["policy_errors"], ["invalid auto-merge policy requires human review"])
+        self.assertEqual(risk["risk_reasons"], ["invalid auto-merge policy requires human review"])
+
+    def test_guarded_auto_merge_policy_fails_closed_when_existing_policy_schema_is_incomplete(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            policy_path = Path(tmp) / ".github" / "codex_auto_merge_policy.json"
+            policy_path.parent.mkdir(parents=True)
+            policy_path.write_text("{}", encoding="utf-8")
+            policy = load_guarded_auto_merge_policy(policy_path)
+
+        risk = classify_guarded_auto_merge_risk(["README.md"], policy=policy)
+
+        self.assertFalse(risk["label_allowed"])
+        self.assertEqual(risk["high_risk_files"], ["README.md"])
+        self.assertEqual(risk["risk_reasons"], ["invalid auto-merge policy schema requires human review"])
+
+    def test_guarded_auto_merge_policy_fails_closed_when_policy_labels_match(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            policy_path = Path(tmp) / ".github" / "codex_auto_merge_policy.json"
+            policy_path.parent.mkdir(parents=True)
+            payload = json.loads(json.dumps(DEFAULT_GUARDED_AUTO_MERGE_POLICY))
+            payload["human_review_label"] = payload["auto_merge_label"]
+            policy_path.write_text(json.dumps(payload), encoding="utf-8")
+            policy = load_guarded_auto_merge_policy(policy_path)
+
+        risk = classify_guarded_auto_merge_risk(["README.md"], policy=policy)
+
+        self.assertFalse(risk["label_allowed"])
+        self.assertEqual(risk["high_risk_files"], ["README.md"])
+        self.assertEqual(
+            risk["risk_reasons"],
+            ["auto-merge and human-review labels must be distinct requires human review"],
+        )
+
+    def test_guarded_auto_merge_policy_fails_closed_when_policy_allows_control_plane_exact_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            policy_path = Path(tmp) / ".github" / "codex_auto_merge_policy.json"
+            policy_path.parent.mkdir(parents=True)
+            policy_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "auto_merge_label": "auto-merge-ok",
+                        "human_review_label": "human-review-required",
+                        "monthly_marker_prefix": "<!-- codex-monthly-remediation:issue-",
+                        "max_changed_files": 20,
+                        "max_changed_lines": 1200,
+                        "blocked_path_patterns": [".*secret.*"],
+                        "risk_policy": {
+                            "low": {"prefixes": ["docs/"], "exact": ["README.md"], "reason": "low"},
+                            "medium": {"exact": ["scripts/evaluate_codex_pr_merge.py"], "reason": "medium"},
+                            "high": {"reason": "high"},
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            policy = load_guarded_auto_merge_policy(policy_path)
+
+        risk = classify_guarded_auto_merge_risk(["README.md"], policy=policy)
+
+        self.assertFalse(risk["label_allowed"])
+        self.assertEqual(risk["high_risk_files"], ["README.md"])
+        self.assertEqual(
+            risk["risk_reasons"],
+            ["auto-merge policy must keep control-plane paths high-risk: scripts/evaluate_codex_pr_merge.py"],
+        )
+
+    def test_guarded_auto_merge_policy_fails_closed_when_policy_allows_control_plane_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            policy_path = Path(tmp) / ".github" / "codex_auto_merge_policy.json"
+            policy_path.parent.mkdir(parents=True)
+            policy_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "auto_merge_label": "auto-merge-ok",
+                        "human_review_label": "human-review-required",
+                        "monthly_marker_prefix": "<!-- codex-monthly-remediation:issue-",
+                        "max_changed_files": 20,
+                        "max_changed_lines": 1200,
+                        "blocked_path_patterns": [".*secret.*"],
+                        "risk_policy": {
+                            "low": {"prefixes": [".github/"], "exact": ["README.md"], "reason": "low"},
+                            "medium": {"exact": [], "reason": "medium"},
+                            "high": {"reason": "high"},
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            policy = load_guarded_auto_merge_policy(policy_path)
+
+        risk = classify_guarded_auto_merge_risk(["README.md"], policy=policy)
+
+        self.assertFalse(risk["label_allowed"])
+        self.assertEqual(risk["high_risk_files"], ["README.md"])
+        self.assertEqual(
+            risk["risk_reasons"],
+            [
+                "auto-merge policy must keep control-plane paths high-risk: "
+                ".github/codex_auto_merge_policy.json, .github/workflows/*"
+            ],
+        )
+
+    def test_guarded_auto_merge_policy_fails_closed_on_unsupported_version(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            policy_path = Path(tmp) / ".github" / "codex_auto_merge_policy.json"
+            policy_path.parent.mkdir(parents=True)
+            policy_path.write_text(
+                json.dumps(
+                    {
+                        "version": 2,
+                        "auto_merge_label": "auto-merge-ok",
+                        "human_review_label": "human-review-required",
+                        "monthly_marker_prefix": "<!-- codex-monthly-remediation:issue-",
+                        "blocked_path_patterns": [".*secret.*"],
+                        "risk_policy": {
+                            "low": {"prefixes": ["docs/"], "exact": [], "reason": "low"},
+                            "medium": {"exact": [], "reason": "medium"},
+                            "high": {"reason": "high"},
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            policy = load_guarded_auto_merge_policy(policy_path)
+
+        risk = classify_guarded_auto_merge_risk(["docs/runbook.md"], policy=policy)
+
+        self.assertFalse(risk["label_allowed"])
+        self.assertEqual(risk["high_risk_files"], ["docs/runbook.md"])
+        self.assertEqual(risk["risk_reasons"], ["unsupported auto-merge policy version requires human review"])
+
+    def test_guarded_auto_merge_policy_fails_closed_on_invalid_blocked_regex(self) -> None:
+        risk = classify_guarded_auto_merge_risk(
+            ["docs/runbook.md"],
+            policy={
+                "blocked_path_patterns": ["["],
+                "risk_policy": {
+                    "low": {"prefixes": ["docs/"], "exact": [], "reason": "low"},
+                    "medium": {"exact": [], "reason": "medium"},
+                    "high": {"reason": "high"},
+                },
+            },
+        )
+
+        self.assertFalse(risk["label_allowed"])
+        self.assertEqual(risk["high_risk_files"], ["docs/runbook.md"])
+        self.assertEqual(risk["risk_reasons"], ["invalid blocked_path_patterns regex requires human review"])
+
+    def test_guarded_auto_merge_policy_fails_closed_on_malformed_lists(self) -> None:
+        risk = classify_guarded_auto_merge_risk(
+            ["data/output/report.json"],
+            policy={
+                "risk_policy": {
+                    "low": {"prefixes": "docs/", "exact": [], "reason": "low"},
+                    "medium": {"exact": [], "reason": "medium"},
+                    "high": {"reason": "high"},
+                },
+            },
+        )
+
+        self.assertFalse(risk["label_allowed"])
+        self.assertEqual(risk["high_risk_files"], ["data/output/report.json"])
+        self.assertEqual(risk["risk_reasons"], ["invalid risk_policy.low.prefixes list requires human review"])
+
+    def test_baseline_auto_merge_policy_blocks_policy_self_escalation(self) -> None:
+        baseline_policy = {
+            "risk_policy": {
+                "low": {"prefixes": ["docs/"], "exact": ["README.md"], "reason": "baseline low"},
+                "medium": {"exact": ["scripts/monthly.py"], "reason": "baseline medium"},
+                "high": {"reason": "baseline high"},
+            }
+        }
+        modified_policy = {
+            "risk_policy": {
+                "low": {
+                    "prefixes": ["docs/"],
+                    "exact": [".github/codex_auto_merge_policy.json"],
+                    "reason": "modified low",
+                },
+                "medium": {"exact": [], "reason": "modified medium"},
+                "high": {"reason": "modified high"},
+            }
+        }
+
+        baseline_risk = classify_guarded_auto_merge_risk(
+            [".github/codex_auto_merge_policy.json"],
+            policy=baseline_policy,
+        )
+        modified_risk = classify_guarded_auto_merge_risk(
+            [".github/codex_auto_merge_policy.json"],
+            policy=modified_policy,
+        )
+
+        self.assertFalse(baseline_risk["label_allowed"])
+        self.assertEqual(baseline_risk["risk_reasons"], ["baseline high"])
+        self.assertTrue(modified_risk["label_allowed"])
+        self.assertEqual(modified_risk["risk_reasons"], ["modified low"])
+
+    def test_classify_guarded_auto_merge_risk_blocks_unknown_or_strategy_surfaces(self) -> None:
+        risk = classify_guarded_auto_merge_risk(
+            ["src/us_equity_snapshot_pipelines/contracts.py", "pyproject.toml", "data/output/report.json"]
+        )
+
+        self.assertFalse(risk["label_allowed"])
+        self.assertEqual(risk["risk_level"], "high")
+        self.assertEqual(
+            risk["high_risk_files"],
+            ["src/us_equity_snapshot_pipelines/contracts.py", "pyproject.toml", "data/output/report.json"],
+        )
+
+    def test_classify_guarded_auto_merge_risk_blocks_secret_like_paths_before_low_risk_prefixes(self) -> None:
+        risk = classify_guarded_auto_merge_risk(["docs/operator-token.md", "tests/private.key", "README.md"])
+
+        self.assertFalse(risk["label_allowed"])
+        self.assertEqual(risk["risk_level"], "high")
+        self.assertEqual(risk["high_risk_files"], ["docs/operator-token.md", "tests/private.key"])
+
+    def test_classify_guarded_auto_merge_risk_blocks_oversized_low_risk_surface(self) -> None:
+        paths = [f"docs/review-{index}.md" for index in range(21)]
+
+        risk = classify_guarded_auto_merge_risk(paths)
+
+        self.assertFalse(risk["label_allowed"])
+        self.assertEqual(risk["risk_level"], "high")
+        self.assertEqual(risk["high_risk_files"], paths)
+        self.assertEqual(
+            risk["risk_reasons"],
+            ["changed file count exceeds auto-merge limit requires human review: 21 > 20"],
+        )
+
+    def test_classify_guarded_auto_merge_risk_blocks_large_low_risk_diff(self) -> None:
+        risk = classify_guarded_auto_merge_risk(
+            ["docs/review.md"],
+            diff_stats={"additions": 1000, "deletions": 201, "binary_files": 0},
+        )
+
+        self.assertFalse(risk["label_allowed"])
+        self.assertEqual(risk["risk_level"], "high")
+        self.assertEqual(risk["high_risk_files"], ["docs/review.md"])
+        self.assertEqual(risk["changed_lines"], 1201)
+        self.assertEqual(
+            risk["risk_reasons"],
+            ["changed line count exceeds auto-merge limit requires human review: 1201 > 1200"],
+        )
+
+    def test_classify_guarded_auto_merge_risk_blocks_binary_diff(self) -> None:
+        risk = classify_guarded_auto_merge_risk(
+            ["docs/chart.png"],
+            diff_stats={"additions": 0, "deletions": 0, "binary_files": 1},
+        )
+
+        self.assertFalse(risk["label_allowed"])
+        self.assertEqual(risk["risk_level"], "high")
+        self.assertEqual(risk["risk_reasons"], ["binary file changes require human review"])
+
+    def test_classify_guarded_auto_merge_risk_blocks_file_removals_renames_and_copies(self) -> None:
+        risk = classify_guarded_auto_merge_risk(
+            ["docs/old.md", "docs/new.md", "tests/test_copy.py"],
+            diff_stats={
+                "additions": 4,
+                "deletions": 3,
+                "binary_files": 0,
+                "deleted_files": 1,
+                "renamed_files": 1,
+                "copied_files": 1,
+            },
+        )
+
+        self.assertFalse(risk["label_allowed"])
+        self.assertEqual(risk["risk_level"], "high")
+        self.assertEqual(risk["high_risk_files"], ["docs/old.md", "docs/new.md", "tests/test_copy.py"])
+        self.assertEqual(
+            risk["risk_reasons"],
+            [
+                "file deletions require human review",
+                "file renames require human review",
+                "file copies require human review",
+            ],
+        )
+        self.assertEqual(risk["deleted_files"], 1)
+        self.assertEqual(risk["renamed_files"], 1)
+        self.assertEqual(risk["copied_files"], 1)
+
+    def test_request_guarded_auto_merge_requires_diff_stats_for_low_risk_label(self) -> None:
+        with (
+            patch("scripts.run_monthly_codex_audit.github_request", return_value={}) as request,
+            self.assertRaisesRegex(BridgeError, "diff stats are unavailable"),
+        ):
+            request_guarded_auto_merge(
+                "token",
+                "QuantStrategyLab/UsEquitySnapshotPipelines",
+                12,
+                ["docs/operator_runbook.md"],
+            )
+
+        request.assert_not_called()
+
+    def test_issue_has_label_reads_current_pr_labels(self) -> None:
+        with patch(
+            "scripts.run_monthly_codex_audit.github_request",
+            return_value={"labels": [{"name": HUMAN_REVIEW_LABEL}, {"name": "other"}]},
+        ) as request:
+            has_label = issue_has_label(
+                "token",
+                "QuantStrategyLab/UsEquitySnapshotPipelines",
+                12,
+                HUMAN_REVIEW_LABEL,
+            )
+
+        self.assertTrue(has_label)
+        request.assert_called_once_with(
+            "token",
+            "GET",
+            "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12",
+        )
+
+    def test_request_guarded_auto_merge_refuses_existing_human_review_label(self) -> None:
+        with (
+            patch(
+                "scripts.run_monthly_codex_audit.github_request",
+                return_value={"labels": [{"name": HUMAN_REVIEW_LABEL}]},
+            ) as request,
+            self.assertRaisesRegex(BridgeError, "human-review-required.*present"),
+        ):
+            request_guarded_auto_merge(
+                "token",
+                "QuantStrategyLab/UsEquitySnapshotPipelines",
+                12,
+                ["docs/operator_runbook.md"],
+                diff_stats={"additions": 10, "deletions": 2, "binary_files": 0},
+            )
+
+        request.assert_called_once_with(
+            "token",
+            "GET",
+            "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12",
+        )
+
+    def test_request_guarded_auto_merge_adds_source_guard_label(self) -> None:
+        with patch("scripts.run_monthly_codex_audit.github_request", side_effect=[{"labels": []}, {}, {}]) as request:
+            guard = request_guarded_auto_merge(
+                "token",
+                "QuantStrategyLab/UsEquitySnapshotPipelines",
+                12,
+                ["docs/operator_runbook.md"],
+                diff_stats={"additions": 10, "deletions": 2, "binary_files": 0},
+            )
+
+        self.assertEqual(guard["label"], GUARDED_AUTO_MERGE_LABEL)
+        self.assertEqual(guard["risk_level"], "low")
+        request.assert_has_calls(
+            [
+                call("token", "GET", "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12"),
+                call("token", "GET", "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/labels/auto-merge-ok"),
+                call(
+                    "token",
+                    "POST",
+                    "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12/labels",
+                    {"labels": [GUARDED_AUTO_MERGE_LABEL]},
+                ),
+            ]
+        )
+
+    def test_request_guarded_auto_merge_creates_missing_source_guard_label(self) -> None:
+        not_found = GitHubRequestError(
+            "GET",
+            "https://api.github.com/repos/QuantStrategyLab/UsEquitySnapshotPipelines/labels/auto-merge-ok",
+            404,
+            '{"message":"Not Found"}',
+        )
+        with patch(
+            "scripts.run_monthly_codex_audit.github_request",
+            side_effect=[{"labels": []}, not_found, {}, {}],
+        ) as request:
+            guard = request_guarded_auto_merge(
+                "token",
+                "QuantStrategyLab/UsEquitySnapshotPipelines",
+                12,
+                ["docs/operator_runbook.md"],
+                diff_stats={"additions": 10, "deletions": 2, "binary_files": 0},
+            )
+
+        self.assertEqual(guard["label"], GUARDED_AUTO_MERGE_LABEL)
+        request.assert_has_calls(
+            [
+                call("token", "GET", "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12"),
+                call("token", "GET", "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/labels/auto-merge-ok"),
+                call(
+                    "token",
+                    "POST",
+                    "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/labels",
+                    {
+                        "name": GUARDED_AUTO_MERGE_LABEL,
+                        "color": "0E8A16",
+                        "description": (
+                            "Guarded Codex remediation PR may be auto-merged after source CI and merge guard pass"
+                        ),
+                    },
+                ),
+                call(
+                    "token",
+                    "POST",
+                    "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12/labels",
+                    {"labels": [GUARDED_AUTO_MERGE_LABEL]},
+                ),
+            ]
+        )
+
+    def test_request_guarded_auto_merge_fails_closed_when_label_check_is_forbidden(self) -> None:
+        forbidden = GitHubRequestError(
+            "GET",
+            "https://api.github.com/repos/QuantStrategyLab/UsEquitySnapshotPipelines/labels/auto-merge-ok",
+            403,
+            '{"message":"Forbidden"}',
+        )
+        with (
+            patch("scripts.run_monthly_codex_audit.github_request", side_effect=[{"labels": []}, forbidden]) as request,
+            self.assertRaises(BridgeError),
+        ):
+            request_guarded_auto_merge(
+                "token",
+                "QuantStrategyLab/UsEquitySnapshotPipelines",
+                12,
+                ["docs/operator_runbook.md"],
+                diff_stats={"additions": 10, "deletions": 2, "binary_files": 0},
+            )
+
+        request.assert_has_calls(
+            [
+                call("token", "GET", "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12"),
+                call("token", "GET", "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/labels/auto-merge-ok"),
+            ]
+        )
+
+    def test_request_guarded_auto_merge_fails_closed_when_pr_label_add_is_forbidden(self) -> None:
+        forbidden = GitHubRequestError(
+            "POST",
+            "https://api.github.com/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12/labels",
+            403,
+            '{"message":"Forbidden"}',
+        )
+        with (
+            patch("scripts.run_monthly_codex_audit.github_request", side_effect=[{"labels": []}, {}, forbidden]) as request,
+            self.assertRaises(GitHubRequestError),
+        ):
+            request_guarded_auto_merge(
+                "token",
+                "QuantStrategyLab/UsEquitySnapshotPipelines",
+                12,
+                ["docs/operator_runbook.md"],
+                diff_stats={"additions": 10, "deletions": 2, "binary_files": 0},
+            )
+
+        request.assert_has_calls(
+            [
+                call("token", "GET", "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12"),
+                call("token", "GET", "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/labels/auto-merge-ok"),
+                call(
+                    "token",
+                    "POST",
+                    "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12/labels",
+                    {"labels": [GUARDED_AUTO_MERGE_LABEL]},
+                ),
+            ]
+        )
+
+    def test_request_guarded_auto_merge_uses_policy_label(self) -> None:
+        policy = {
+            "auto_merge_label": "custom-auto-ok",
+            "human_review_label": "custom-review-required",
+            "risk_policy": {
+                "low": {"prefixes": ["docs/"], "exact": [], "reason": "low"},
+                "medium": {"exact": [], "reason": "medium"},
+                "high": {"reason": "high"},
+            },
+        }
+        with patch("scripts.run_monthly_codex_audit.github_request", side_effect=[{"labels": []}, {}, {}]) as request:
+            guard = request_guarded_auto_merge(
+                "token",
+                "QuantStrategyLab/UsEquitySnapshotPipelines",
+                12,
+                ["docs/operator_runbook.md"],
+                policy=policy,
+                diff_stats={"additions": 10, "deletions": 2, "binary_files": 0},
+            )
+
+        self.assertEqual(guard["label"], "custom-auto-ok")
+        request.assert_has_calls(
+            [
+                call("token", "GET", "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12"),
+                call("token", "GET", "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/labels/custom-auto-ok"),
+                call(
+                    "token",
+                    "POST",
+                    "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12/labels",
+                    {"labels": ["custom-auto-ok"]},
+                ),
+            ]
+        )
+
+    def test_request_guarded_auto_merge_rejects_invalid_policy_label(self) -> None:
+        with (
+            patch("scripts.run_monthly_codex_audit.github_request", return_value={}) as request,
+            self.assertRaises(BridgeError),
+        ):
+            request_guarded_auto_merge(
+                "token",
+                "QuantStrategyLab/UsEquitySnapshotPipelines",
+                12,
+                ["docs/operator_runbook.md"],
+                policy={
+                    "auto_merge_label": ["bad"],
+                    "human_review_label": "human-review-required",
+                    "risk_policy": {
+                        "low": {"prefixes": ["docs/"], "exact": [], "reason": "low"},
+                        "medium": {"exact": [], "reason": "medium"},
+                        "high": {"reason": "high"},
+                    },
+                },
+            )
+
+        request.assert_not_called()
+
+    def test_create_pull_request_uses_policy_marker_prefix(self) -> None:
+        with patch(
+            "scripts.run_monthly_codex_audit.github_request",
+            return_value={"number": 12, "html_url": "https://example.test/pr/12"},
+        ) as request:
+            create_pull_request(
+                "token",
+                "QuantStrategyLab/UsEquitySnapshotPipelines",
+                {"number": 7, "html_url": "https://example.test/issues/7"},
+                "codex/monthly-review-issue-7",
+                "main",
+                "review",
+                ["docs/operator_runbook.md"],
+                policy={"monthly_marker_prefix": "<!-- custom-remediation:issue-"},
+            )
+
+        payload = request.call_args.args[3]
+        self.assertTrue(payload["body"].startswith("<!-- custom-remediation:issue-7 -->"))
+
+    def test_request_guarded_auto_merge_rejects_high_risk_paths_before_labeling(self) -> None:
+        with (
+            patch("scripts.run_monthly_codex_audit.github_request", return_value={}) as request,
+            self.assertRaises(BridgeError),
+        ):
+            request_guarded_auto_merge(
+                "token",
+                "QuantStrategyLab/UsEquitySnapshotPipelines",
+                12,
+                ["src/us_equity_snapshot_pipelines/contracts.py"],
+            )
+
+        request.assert_not_called()
+
+    def test_remove_issue_label_if_present_deletes_stale_guard_label(self) -> None:
+        with patch("scripts.run_monthly_codex_audit.github_request", return_value={}) as request:
+            removed = remove_issue_label_if_present(
+                "token",
+                "QuantStrategyLab/UsEquitySnapshotPipelines",
+                12,
+                GUARDED_AUTO_MERGE_LABEL,
+            )
+
+        self.assertTrue(removed)
+        request.assert_called_once_with(
+            "token",
+            "DELETE",
+            "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12/labels/auto-merge-ok",
+        )
+
+    def test_remove_issue_label_if_present_ignores_missing_label(self) -> None:
+        not_found = GitHubRequestError(
+            "DELETE",
+            "https://api.github.com/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12/labels/auto-merge-ok",
+            404,
+            '{"message":"Not Found"}',
+        )
+        with patch("scripts.run_monthly_codex_audit.github_request", side_effect=not_found):
+            removed = remove_issue_label_if_present(
+                "token",
+                "QuantStrategyLab/UsEquitySnapshotPipelines",
+                12,
+                GUARDED_AUTO_MERGE_LABEL,
+            )
+
+        self.assertFalse(removed)
+
+    def test_remove_issue_label_if_present_fails_closed_on_permission_error(self) -> None:
+        forbidden = GitHubRequestError(
+            "DELETE",
+            "https://api.github.com/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12/labels/auto-merge-ok",
+            403,
+            '{"message":"Forbidden"}',
+        )
+        with (
+            patch("scripts.run_monthly_codex_audit.github_request", side_effect=forbidden),
+            self.assertRaises(GitHubRequestError),
+        ):
+            remove_issue_label_if_present(
+                "token",
+                "QuantStrategyLab/UsEquitySnapshotPipelines",
+                12,
+                GUARDED_AUTO_MERGE_LABEL,
+            )
+
+    def test_guarded_auto_merge_label_uses_policy_label(self) -> None:
+        self.assertEqual(
+            guarded_auto_merge_label({"auto_merge_label": "custom-auto-ok"}),
+            "custom-auto-ok",
+        )
+
+    def test_guarded_auto_merge_label_for_mutation_skips_invalid_policy(self) -> None:
+        label, reason = guarded_auto_merge_label_for_mutation(
+            {
+                "policy_errors": ["invalid auto-merge policy requires human review"],
+                "auto_merge_label": "auto-merge-ok",
+                "human_review_label": "human-review-required",
+            }
+        )
+
+        self.assertEqual(label, "")
+        self.assertEqual(reason, "invalid auto-merge policy requires human review")
+
+    def test_guarded_auto_merge_label_for_mutation_rejects_label_collision(self) -> None:
+        label, reason = guarded_auto_merge_label_for_mutation(
+            {
+                "auto_merge_label": "same-label",
+                "human_review_label": "same-label",
+            }
+        )
+
+        self.assertEqual(label, "")
+        self.assertEqual(reason, "auto-merge and human-review labels must be distinct requires human review")
+
+    def test_main_clears_stale_auto_merge_label_before_no_change_feedback_retry_exit(self) -> None:
+        def fake_clone(token: str, source_repo: str, source_ref: str, work_root: Path) -> Path:
+            repo_dir = work_root / "source"
+            (repo_dir / ".git" / "info").mkdir(parents=True)
+            return repo_dir
+
+        issue = {
+            "number": 7,
+            "title": "Monthly Review",
+            "html_url": "https://example.test/issues/7",
+            "body": "review body",
+            "labels": [],
+        }
+        retry_pr = {
+            "number": 12,
+            "html_url": "https://example.test/pull/12",
+            "head_ref": "codex/monthly-review-issue-7-202606",
+            "base_ref": "main",
+        }
+        env = {
+            "SOURCE_REPO": "QuantStrategyLab/UsEquitySnapshotPipelines",
+            "SOURCE_REF": "main",
+            "ISSUE_NUMBER": "7",
+            "CODEX_AUDIT_GH_TOKEN": "token",
+            "CODEX_AUDIT_TASK": "monthly_snapshot_audit",
+            "CODEX_AUDIT_MODE": "review_and_fix",
+            "CODEX_AUDIT_PROVIDER": "auto",
+            "CODEX_AUDIT_CODEX_BACKEND": "service",
+            "CODEX_AUDIT_AUTO_MERGE": "false",
+        }
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch("scripts.run_monthly_codex_audit.github_request", return_value=issue),
+            patch("scripts.run_monthly_codex_audit.fetch_issue_comments", return_value=[]),
+            patch("scripts.run_monthly_codex_audit.clone_source_repo", side_effect=fake_clone),
+            patch("scripts.run_monthly_codex_audit.resolve_feedback_retry_pr", return_value=retry_pr),
+            patch("scripts.run_monthly_codex_audit.remove_issue_label_if_present", return_value=True) as remove,
+            patch("scripts.run_monthly_codex_audit.checkout_feedback_retry_branch"),
+            patch("scripts.run_monthly_codex_audit.run_checked", return_value=""),
+            patch("scripts.run_monthly_codex_audit.run_codex_backend", return_value=(0, "", "No changes.")),
+            patch("scripts.run_monthly_codex_audit.git_status", return_value=""),
+            patch("scripts.run_monthly_codex_audit.post_issue_comment") as comment,
+        ):
+            exit_code = run_audit_main()
+
+        self.assertEqual(exit_code, 0)
+        remove.assert_called_once_with(
+            "token",
+            "QuantStrategyLab/UsEquitySnapshotPipelines",
+            12,
+            GUARDED_AUTO_MERGE_LABEL,
+        )
+        body = comment.call_args.args[3]
+        self.assertIn("No changes.", body)
+        self.assertIn("Removed stale `auto-merge-ok`", body)
+        self.assertIn("did not produce a verified replacement commit", body)
+
+    def test_main_skips_stale_auto_merge_label_cleanup_when_policy_labels_collide(self) -> None:
+        def fake_clone(token: str, source_repo: str, source_ref: str, work_root: Path) -> Path:
+            repo_dir = work_root / "source"
+            (repo_dir / ".git" / "info").mkdir(parents=True)
+            policy = dict(DEFAULT_GUARDED_AUTO_MERGE_POLICY)
+            policy["human_review_label"] = policy["auto_merge_label"]
+            policy_path = repo_dir / ".github" / "codex_auto_merge_policy.json"
+            policy_path.parent.mkdir(parents=True)
+            policy_path.write_text(json.dumps(policy), encoding="utf-8")
+            return repo_dir
+
+        issue = {
+            "number": 7,
+            "title": "Monthly Review",
+            "html_url": "https://example.test/issues/7",
+            "body": "review body",
+            "labels": [],
+        }
+        retry_pr = {
+            "number": 12,
+            "html_url": "https://example.test/pull/12",
+            "head_ref": "codex/monthly-review-issue-7-202606",
+            "base_ref": "main",
+        }
+        env = {
+            "SOURCE_REPO": "QuantStrategyLab/UsEquitySnapshotPipelines",
+            "SOURCE_REF": "main",
+            "ISSUE_NUMBER": "7",
+            "CODEX_AUDIT_GH_TOKEN": "token",
+            "CODEX_AUDIT_TASK": "monthly_snapshot_audit",
+            "CODEX_AUDIT_MODE": "review_and_fix",
+            "CODEX_AUDIT_PROVIDER": "auto",
+            "CODEX_AUDIT_CODEX_BACKEND": "service",
+            "CODEX_AUDIT_AUTO_MERGE": "false",
+        }
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch("scripts.run_monthly_codex_audit.github_request", return_value=issue),
+            patch("scripts.run_monthly_codex_audit.fetch_issue_comments", return_value=[]),
+            patch("scripts.run_monthly_codex_audit.clone_source_repo", side_effect=fake_clone),
+            patch("scripts.run_monthly_codex_audit.resolve_feedback_retry_pr", return_value=retry_pr),
+            patch("scripts.run_monthly_codex_audit.remove_issue_label_if_present") as remove,
+            patch("scripts.run_monthly_codex_audit.checkout_feedback_retry_branch"),
+            patch("scripts.run_monthly_codex_audit.run_checked", return_value=""),
+            patch("scripts.run_monthly_codex_audit.run_codex_backend", return_value=(0, "", "No changes.")),
+            patch("scripts.run_monthly_codex_audit.git_status", return_value=""),
+            patch("scripts.run_monthly_codex_audit.post_issue_comment") as comment,
+        ):
+            exit_code = run_audit_main()
+
+        self.assertEqual(exit_code, 0)
+        remove.assert_not_called()
+        body = comment.call_args.args[3]
+        self.assertIn("No changes.", body)
+        self.assertIn("Skipped stale guarded auto-merge label cleanup", body)
+        self.assertIn("auto-merge and human-review labels must be distinct requires human review", body)
+
+    def test_format_guarded_risk_details_includes_reasons_and_files(self) -> None:
+        risk = classify_guarded_auto_merge_risk(
+            ["src/us_equity_snapshot_pipelines/contracts.py", "pyproject.toml"]
+        )
+
+        details = format_guarded_risk_details(risk)
+
+        self.assertIn("Risk level: `high`", details)
+        self.assertIn("blocked/high-risk files require human review", details)
+        self.assertIn("`src/us_equity_snapshot_pipelines/contracts.py`", details)
+        self.assertIn("`pyproject.toml`", details)
+
+    def test_request_human_review_adds_review_label(self) -> None:
+        risk = classify_guarded_auto_merge_risk(["src/us_equity_snapshot_pipelines/contracts.py"])
+        with patch("scripts.run_monthly_codex_audit.github_request", return_value={}) as request:
+            review = request_human_review(
+                "token",
+                "QuantStrategyLab/UsEquitySnapshotPipelines",
+                12,
+                risk,
+            )
+
+        self.assertEqual(review["label"], HUMAN_REVIEW_LABEL)
+        self.assertEqual(review["risk_level"], "high")
+        request.assert_has_calls(
+            [
+                call(
+                    "token",
+                    "GET",
+                    "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/labels/human-review-required",
+                ),
+                call(
+                    "token",
+                    "POST",
+                    "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12/labels",
+                    {"labels": [HUMAN_REVIEW_LABEL]},
+                ),
+            ]
+        )
+
+    def test_request_human_review_creates_missing_review_label(self) -> None:
+        not_found = GitHubRequestError(
+            "GET",
+            "https://api.github.com/repos/QuantStrategyLab/UsEquitySnapshotPipelines/labels/human-review-required",
+            404,
+            '{"message":"Not Found"}',
+        )
+        risk = classify_guarded_auto_merge_risk(["src/us_equity_snapshot_pipelines/contracts.py"])
+        with patch("scripts.run_monthly_codex_audit.github_request", side_effect=[not_found, {}, {}]) as request:
+            review = request_human_review(
+                "token",
+                "QuantStrategyLab/UsEquitySnapshotPipelines",
+                12,
+                risk,
+            )
+
+        self.assertEqual(review["label"], HUMAN_REVIEW_LABEL)
+        request.assert_has_calls(
+            [
+                call(
+                    "token",
+                    "GET",
+                    "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/labels/human-review-required",
+                ),
+                call(
+                    "token",
+                    "POST",
+                    "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/labels",
+                    {
+                        "name": HUMAN_REVIEW_LABEL,
+                        "color": "B60205",
+                        "description": "Codex remediation PR requires human review before merge",
+                    },
+                ),
+                call(
+                    "token",
+                    "POST",
+                    "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12/labels",
+                    {"labels": [HUMAN_REVIEW_LABEL]},
+                ),
+            ]
+        )
+
+    def test_request_human_review_fails_closed_when_pr_label_add_is_forbidden(self) -> None:
+        forbidden = GitHubRequestError(
+            "POST",
+            "https://api.github.com/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12/labels",
+            403,
+            '{"message":"Forbidden"}',
+        )
+        risk = classify_guarded_auto_merge_risk(["src/us_equity_snapshot_pipelines/contracts.py"])
+        with (
+            patch("scripts.run_monthly_codex_audit.github_request", side_effect=[{}, forbidden]) as request,
+            self.assertRaises(GitHubRequestError),
+        ):
+            request_human_review(
+                "token",
+                "QuantStrategyLab/UsEquitySnapshotPipelines",
+                12,
+                risk,
+            )
+
+        request.assert_has_calls(
+            [
+                call(
+                    "token",
+                    "GET",
+                    "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/labels/human-review-required",
+                ),
+                call(
+                    "token",
+                    "POST",
+                    "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12/labels",
+                    {"labels": [HUMAN_REVIEW_LABEL]},
+                ),
+            ]
+        )
+
+    def test_request_human_review_uses_policy_label(self) -> None:
+        risk = classify_guarded_auto_merge_risk(
+            ["src/us_equity_snapshot_pipelines/contracts.py"],
+            policy={
+                "human_review_label": "custom-review-required",
+                "risk_policy": {
+                    "low": {"prefixes": ["docs/"], "exact": [], "reason": "low"},
+                    "medium": {"exact": [], "reason": "medium"},
+                    "high": {"reason": "high"},
+                },
+            },
+        )
+        with patch("scripts.run_monthly_codex_audit.github_request", return_value={}) as request:
+            review = request_human_review(
+                "token",
+                "QuantStrategyLab/UsEquitySnapshotPipelines",
+                12,
+                risk,
+            )
+
+        self.assertEqual(review["label"], "custom-review-required")
+        request.assert_has_calls(
+            [
+                call(
+                    "token",
+                    "GET",
+                    "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/labels/custom-review-required",
+                ),
+                call(
+                    "token",
+                    "POST",
+                    "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12/labels",
+                    {"labels": ["custom-review-required"]},
+                ),
+            ]
+        )
 
     def test_workflow_uses_service_backend_only(self) -> None:
         workflow = Path(".github/workflows/codex_audit.yml").read_text(encoding="utf-8")

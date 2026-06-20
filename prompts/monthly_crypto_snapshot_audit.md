@@ -64,6 +64,23 @@ Allowed fixes:
 - missing focused tests for the above
 - documentation that prevents incorrect operation of this monthly review flow
 
+Automation risk policy:
+
+- Low-risk docs/tests/monthly-review reporting fixes may be handled unattended
+  when CI and the source repository merge guard pass.
+- Keep low/medium-risk fixes below the source policy's file-count and total
+  changed-line caps; oversized diffs must remain human-reviewed even when they
+  only touch docs or tests.
+- Medium-risk monthly evidence/reporting helper fixes must stay narrowly scoped
+  and explain why they are safe.
+- High-risk changes must remain human-reviewed: strategy logic, ranking/scoring
+  formulas, live profile contracts, dependencies, secrets, broker/runtime
+  settings, live allocation, data artifacts, workflow files, auto-merge policy
+  files, auto-merge/readiness/merge-guard code, file removals/renames/copies,
+  or strategy deletion/disablement.
+- A live strategy health `review_for_retirement` state is evidence for a human
+  follow-up issue, not permission to remove or disable a strategy automatically.
+
 Not allowed without a human follow-up issue:
 
 - changing portfolio logic, trading rules, ranking/scoring formulas, live

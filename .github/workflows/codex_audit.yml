@@ -42,7 +42,7 @@ on:
           - monthly_snapshot_audit
           - long_horizon_signal_shadow
       auto_merge:
-        description: "Enable GitHub auto-merge for generated PRs"
+        description: "Request guarded source-repository auto-merge for generated PRs"
         required: false
         type: boolean
         default: false
