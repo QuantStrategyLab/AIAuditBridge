@@ -123,6 +123,8 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ANTHROPIC_MODEL: ${{ vars.ANTHROPIC_MODEL || 'claude-sonnet-4-6' }}
           CODEX_AUDIT_API_FALLBACK_ALLOWED_SOURCE_REPOSITORIES: ${{ vars.CODEX_AUDIT_API_FALLBACK_ALLOWED_SOURCE_REPOSITORIES }}
+          CODEX_AUDIT_API_FALLBACK_ALLOW_FIX: ${{ vars.CODEX_AUDIT_API_FALLBACK_ALLOW_FIX || 'true' }}
+          CODEX_AUDIT_API_FALLBACK_PROVIDER_ORDER: ${{ vars.CODEX_AUDIT_API_FALLBACK_PROVIDER_ORDER || 'openai,anthropic' }}
           CODEX_AUDIT_SERVICE_URL: ${{ secrets.CODEX_AUDIT_SERVICE_URL }}
           CODEX_AUDIT_SERVICE_AUDIENCE: ${{ vars.CODEX_AUDIT_SERVICE_AUDIENCE || 'quant-codex-audit' }}
         run: python scripts/run_monthly_codex_audit.py

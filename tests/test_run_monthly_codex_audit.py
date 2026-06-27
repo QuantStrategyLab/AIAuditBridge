@@ -19,6 +19,7 @@ from scripts.run_monthly_codex_audit import (
     GitHubRequestError,
     SOURCE_REPO_TASKS,
     api_fallback_allowed_source_repos,
+    api_fallback_allow_fix,
     apply_service_changes,
     blocked_paths,
     build_api_review_prompt,
@@ -49,9 +50,12 @@ from scripts.run_monthly_codex_audit import (
     request_github_oidc_token,
     request_guarded_auto_merge,
     request_human_review,
+    RemediationWorkspace,
     resolve_feedback_retry_pr,
     resolve_source_repo_token,
     run_configured_api_reviews,
+    run_api_patch_provider,
+    run_auto_provider_fallback,
     safe_branch_component,
     strip_audit_heading,
     validate_codex_backend,
@@ -588,6 +592,116 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertIn("ANTHROPIC_API_KEY", message)
         self.assertIn("No files were pushed", message)
         self.assertNotIn("provider `auto`", message)
+
+    def test_api_fallback_allow_fix_defaults_true(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertTrue(api_fallback_allow_fix())
+        with patch.dict(os.environ, {"CODEX_AUDIT_API_FALLBACK_ALLOW_FIX": "false"}, clear=True):
+            self.assertFalse(api_fallback_allow_fix())
+
+    def test_run_api_patch_provider_applies_allowed_changes(self) -> None:
+        patch_json = json.dumps(
+            {
+                "final_message": "Updated shadow signal.",
+                "changes": [
+                    {
+                        "path": "data/output/latest_signal.json",
+                        "content": '{"mode":"shadow"}\n',
+                    }
+                ],
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            (repo_dir / ".codex-audit").mkdir()
+            (repo_dir / ".codex-audit" / "monthly_issue.md").write_text("Issue body", encoding="utf-8")
+            with patch(
+                "scripts.run_monthly_codex_audit.request_openai_completion",
+                return_value=patch_json,
+            ):
+                return_code, _, final_message = run_api_patch_provider(
+                    repo_dir,
+                    "Base prompt",
+                    task="long_horizon_signal_shadow",
+                    mode="review_and_fix",
+                    provider="openai",
+                )
+            self.assertEqual(return_code, 0)
+            self.assertEqual(final_message, "Updated shadow signal.")
+            self.assertTrue((repo_dir / "data/output/latest_signal.json").exists())
+
+    def test_run_auto_provider_fallback_review_and_fix_delegates_to_patch_remediation(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "CODEX_AUDIT_API_FALLBACK_ALLOWED_SOURCE_REPOSITORIES": (
+                    "QuantStrategyLab/ResearchSignalContextPipelines"
+                ),
+                "CODEX_AUDIT_API_FALLBACK_ALLOW_FIX": "true",
+            },
+            clear=True,
+        ):
+            with patch("scripts.run_monthly_codex_audit.run_api_patch_remediation", return_value=0) as patch_remediation:
+                exit_code = run_auto_provider_fallback(
+                    token="token",
+                    source_repo="QuantStrategyLab/ResearchSignalContextPipelines",
+                    source_ref="main",
+                    issue={"number": 19, "title": "Shadow", "body": "Body"},
+                    comments=[],
+                    issue_number=19,
+                    reason="Codex service failed.",
+                    mode="review_and_fix",
+                    task="long_horizon_signal_shadow",
+                )
+        self.assertEqual(exit_code, 0)
+        patch_remediation.assert_called_once()
+
+    def test_main_codex_failure_uses_api_patch_remediation_for_auto_provider(self) -> None:
+        issue = {
+            "number": 19,
+            "title": "Shadow",
+            "html_url": "https://example.test/issues/19",
+            "body": "Body",
+            "labels": [],
+        }
+        env = {
+            "SOURCE_REPO": "QuantStrategyLab/ResearchSignalContextPipelines",
+            "SOURCE_REF": "main",
+            "ISSUE_NUMBER": "19",
+            "CODEX_AUDIT_GH_TOKEN": "token",
+            "CODEX_AUDIT_TASK": "long_horizon_signal_shadow",
+            "CODEX_AUDIT_MODE": "review_and_fix",
+            "CODEX_AUDIT_PROVIDER": "auto",
+            "CODEX_AUDIT_CODEX_BACKEND": "service",
+            "CODEX_AUDIT_API_FALLBACK_ALLOWED_SOURCE_REPOSITORIES": (
+                "QuantStrategyLab/ResearchSignalContextPipelines"
+            ),
+            "CODEX_AUDIT_API_FALLBACK_ALLOW_FIX": "true",
+        }
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch("scripts.run_monthly_codex_audit.github_request", return_value=issue),
+            patch("scripts.run_monthly_codex_audit.fetch_issue_comments", return_value=[]),
+            patch("scripts.run_monthly_codex_audit.prepare_remediation_workspace") as prepare,
+            patch("scripts.run_monthly_codex_audit.run_codex_backend", return_value=(1, "service down", "")),
+            patch("scripts.run_monthly_codex_audit.run_api_patch_remediation", return_value=0) as patch_remediation,
+        ):
+            workspace = RemediationWorkspace(
+                repo_dir=Path("/tmp/source"),
+                branch_name="codex/long-horizon-signal-issue-19-test",
+                baseline_auto_merge_policy=dict(DEFAULT_GUARDED_AUTO_MERGE_POLICY),
+                feedback_retry_pr=None,
+                stale_auto_merge_label=GUARDED_AUTO_MERGE_LABEL,
+                stale_auto_merge_label_skip_reason="",
+                stale_auto_merge_label_removed=False,
+                prompt="prompt",
+            )
+            prepare.return_value = workspace
+            exit_code = run_audit_main()
+
+        self.assertEqual(exit_code, 0)
+        patch_remediation.assert_called_once()
+        self.assertIs(patch_remediation.call_args.kwargs["workspace"], workspace)
 
     def test_run_configured_api_reviews_uses_both_configured_reviewers(self) -> None:
         with (
