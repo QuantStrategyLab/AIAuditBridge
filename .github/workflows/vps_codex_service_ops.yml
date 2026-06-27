@@ -20,8 +20,14 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: vps-codex-service-ops
+  cancel-in-progress: false
+
 jobs:
   vps-codex-service-ops:
+    # Bind to a protected environment when available so deploy/repair-ssh requires approval.
+    environment: codex-vps-ops
     runs-on:
       - self-hosted
       - codex-vps
