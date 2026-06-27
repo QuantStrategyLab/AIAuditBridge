@@ -54,6 +54,12 @@ Configure these values in `QuantStrategyLab/CodexAuditBridge`:
 - Required repository variable `CODEX_AUDIT_API_FALLBACK_ALLOWED_SOURCE_REPOSITORIES`,
   comma or newline separated. Only the listed source repositories may use
   OpenAI/Anthropic fallback.
+- Optional repository variable `CODEX_AUDIT_API_FALLBACK_ALLOW_FIX`, default `true`.
+  When enabled and `CODEX_AUDIT_MODE=review_and_fix`, OpenAI/Anthropic fallback
+  uses the same service patch contract as the Codex backend and can open
+  remediation PRs instead of posting review-only comments.
+- Optional repository variable `CODEX_AUDIT_API_FALLBACK_PROVIDER_ORDER`, default
+  `openai,anthropic`.
 - Workflow permission `id-token: write` is already set so GitHub Actions can request an OIDC token for the service.
 
 Run the service host with:

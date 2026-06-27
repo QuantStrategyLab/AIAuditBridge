@@ -13,6 +13,7 @@ import sys
 from string import Template
 import tempfile
 import time
+from dataclasses import dataclass
 from typing import Any
 import urllib.error
 import urllib.parse
@@ -37,6 +38,11 @@ REPO_TASKS = SOURCE_REPO_TASKS
 DEFAULT_TASK = "monthly_snapshot_audit"
 DEFAULT_MODE = "review_and_fix"
 DEFAULT_PROVIDER = "auto"
+API_PATCH_SYSTEM_PROMPT = (
+    "You are CodexAuditBridge's API fallback patch provider. "
+    "Return exactly one JSON object that matches the service patch contract. "
+    "Do not wrap the JSON in markdown fences or add surrounding prose."
+)
 SUPPORTED_PROVIDERS = frozenset({"api", "anthropic", "codex", "openai", "auto"})
 DEFAULT_CODEX_BACKEND = "service"
 SUPPORTED_CODEX_BACKENDS = frozenset({"service"})
@@ -261,6 +267,16 @@ def parse_bool(value: str | bool | None) -> bool:
     if isinstance(value, bool):
         return value
     return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def api_fallback_allow_fix() -> bool:
+    return parse_bool(env_value("CODEX_AUDIT_API_FALLBACK_ALLOW_FIX", "true"))
+
+
+def api_fallback_provider_order() -> list[str]:
+    configured = env_value("CODEX_AUDIT_API_FALLBACK_PROVIDER_ORDER", "openai,anthropic")
+    order = [item.strip().lower() for item in configured.replace("\n", ",").split(",") if item.strip()]
+    return [provider for provider in order if provider in {"openai", "anthropic"}]
 
 
 def validate_repo(repo: str) -> str:
@@ -1115,7 +1131,7 @@ def extract_anthropic_text(response: dict[str, Any]) -> str:
     raise BridgeError("Anthropic response did not include text content")
 
 
-def run_openai_review(source_repo: str, source_ref: str, issue: dict[str, Any], comments: list[dict[str, Any]]) -> str:
+def request_openai_completion(*, system: str, user: str) -> str:
     api_key = env_value("OPENAI_API_KEY")
     if not api_key:
         raise BridgeError("OPENAI_API_KEY is required for OpenAI API review")
@@ -1124,20 +1140,8 @@ def run_openai_review(source_repo: str, source_ref: str, issue: dict[str, Any], 
     payload = {
         "model": model,
         "messages": [
-            {
-                "role": "system",
-                "content": "You are a careful repository release reviewer. Return only markdown.",
-            },
-            {
-                "role": "user",
-                "content": build_api_review_prompt(
-                    source_repo,
-                    source_ref,
-                    issue,
-                    comments,
-                    task=env_value("CODEX_AUDIT_TASK", DEFAULT_TASK),
-                ),
-            },
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
         ],
     }
     request = urllib.request.Request(
@@ -1159,7 +1163,7 @@ def run_openai_review(source_repo: str, source_ref: str, issue: dict[str, Any], 
     return extract_openai_text(json.loads(body))
 
 
-def run_anthropic_review(source_repo: str, source_ref: str, issue: dict[str, Any], comments: list[dict[str, Any]]) -> str:
+def request_anthropic_completion(*, system: str, user: str) -> str:
     api_key = env_value("ANTHROPIC_API_KEY")
     if not api_key:
         raise BridgeError("ANTHROPIC_API_KEY is required for CODEX_AUDIT_PROVIDER=anthropic or API fallback")
@@ -1169,19 +1173,8 @@ def run_anthropic_review(source_repo: str, source_ref: str, issue: dict[str, Any
     payload = {
         "model": model,
         "max_tokens": int(env_value("ANTHROPIC_MAX_TOKENS", "4000")),
-        "system": "You are a careful repository release reviewer. Return only markdown.",
-        "messages": [
-            {
-                "role": "user",
-                "content": build_api_review_prompt(
-                    source_repo,
-                    source_ref,
-                    issue,
-                    comments,
-                    task=env_value("CODEX_AUDIT_TASK", DEFAULT_TASK),
-                ),
-            }
-        ],
+        "system": system,
+        "messages": [{"role": "user", "content": user}],
     }
     request = urllib.request.Request(
         f"{base_url}/messages",
@@ -1201,6 +1194,32 @@ def run_anthropic_review(source_repo: str, source_ref: str, issue: dict[str, Any
         detail = exc.read().decode("utf-8", errors="replace")
         raise BridgeError(f"Anthropic API request failed: {exc.code} {detail[:600]}") from exc
     return extract_anthropic_text(json.loads(body))
+
+
+def run_openai_review(source_repo: str, source_ref: str, issue: dict[str, Any], comments: list[dict[str, Any]]) -> str:
+    return request_openai_completion(
+        system="You are a careful repository release reviewer. Return only markdown.",
+        user=build_api_review_prompt(
+            source_repo,
+            source_ref,
+            issue,
+            comments,
+            task=env_value("CODEX_AUDIT_TASK", DEFAULT_TASK),
+        ),
+    )
+
+
+def run_anthropic_review(source_repo: str, source_ref: str, issue: dict[str, Any], comments: list[dict[str, Any]]) -> str:
+    return request_anthropic_completion(
+        system="You are a careful repository release reviewer. Return only markdown.",
+        user=build_api_review_prompt(
+            source_repo,
+            source_ref,
+            issue,
+            comments,
+            task=env_value("CODEX_AUDIT_TASK", DEFAULT_TASK),
+        ),
+    )
 
 
 def auto_fallback_missing_api_key_message(reason: str) -> str:
@@ -1261,6 +1280,502 @@ def format_api_review_comment(reason: str, reviews: list[tuple[str, str]], warni
     return "\n".join(lines)
 
 
+def run_api_patch_provider(
+    repo_dir: Path,
+    prompt: str,
+    *,
+    task: str,
+    mode: str,
+    provider: str,
+) -> tuple[int, str, str]:
+    if mode != "review_and_fix":
+        raise BridgeError("API patch provider requires review_and_fix mode")
+    if provider not in {"openai", "anthropic"}:
+        raise BridgeError(f"Unsupported API patch provider: {provider!r}")
+    service_prompt = build_service_prompt(repo_dir, prompt, task=task, mode=mode)
+    try:
+        if provider == "openai":
+            output = request_openai_completion(system=API_PATCH_SYSTEM_PROMPT, user=service_prompt)
+        else:
+            output = request_anthropic_completion(system=API_PATCH_SYSTEM_PROMPT, user=service_prompt)
+        final_message, changes = parse_service_patch_response(output)
+        if changes:
+            apply_service_changes(repo_dir, changes, task=task)
+        output_path = repo_dir / ".codex-audit" / "api-patch-final-message.md"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(final_message.rstrip() + "\n", encoding="utf-8")
+        return 0, output, final_message.strip()
+    except (BridgeError, json.JSONDecodeError, OSError) as exc:
+        return 1, str(exc), ""
+
+
+@dataclass(frozen=True)
+class RemediationWorkspace:
+    repo_dir: Path
+    branch_name: str
+    baseline_auto_merge_policy: dict[str, Any]
+    feedback_retry_pr: dict[str, Any] | None
+    stale_auto_merge_label: str
+    stale_auto_merge_label_skip_reason: str
+    stale_auto_merge_label_removed: bool
+    prompt: str
+
+
+def stale_auto_merge_cleanup_failure_comment(
+    feedback_retry_pr: dict[str, Any],
+    stale_auto_merge_label: str,
+    exc: Exception,
+) -> str:
+    return "\n".join(
+        [
+            "## Codex Audit",
+            "",
+            "The bridge refused to continue because it could not clear a stale guarded "
+            "auto-merge label from the existing fix PR.",
+            "",
+            f"- PR: #{feedback_retry_pr['number']}",
+            f"- Label: `{stale_auto_merge_label}`",
+            f"- Error: `{exc}`",
+            "",
+            "No files were pushed. Please remove the stale label or inspect the PR manually.",
+        ]
+    )
+
+
+def prepare_remediation_workspace(
+    token: str,
+    source_repo: str,
+    source_ref: str,
+    issue: dict[str, Any],
+    comments: list[dict[str, Any]],
+    issue_number: int,
+    task: str,
+    mode: str,
+    work_root: Path,
+) -> RemediationWorkspace:
+    repo_dir = clone_source_repo(token, source_repo, source_ref, work_root)
+    baseline_auto_merge_policy = load_guarded_auto_merge_policy(
+        repo_dir / ".github" / "codex_auto_merge_policy.json"
+    )
+    feedback_retry_pr = resolve_feedback_retry_pr(
+        token,
+        source_repo,
+        issue_number,
+        source_ref,
+        comments,
+        task=task,
+    )
+    stale_auto_merge_label, stale_auto_merge_label_skip_reason = guarded_auto_merge_label_for_mutation(
+        baseline_auto_merge_policy
+    )
+    stale_auto_merge_label_removed = False
+    stamp = dt.datetime.now(dt.UTC).strftime("%Y%m%d%H%M%S")
+    branch_prefix = "long-horizon-signal" if task == "long_horizon_signal_shadow" else "monthly-review"
+    if feedback_retry_pr:
+        if stale_auto_merge_label:
+            try:
+                stale_auto_merge_label_removed = remove_issue_label_if_present(
+                    token,
+                    source_repo,
+                    int(feedback_retry_pr["number"]),
+                    stale_auto_merge_label,
+                )
+            except (BridgeError, GitHubRequestError) as exc:
+                raise BridgeError(
+                    stale_auto_merge_cleanup_failure_comment(feedback_retry_pr, stale_auto_merge_label, exc)
+                ) from exc
+        else:
+            print(stale_auto_merge_label_skip_message(stale_auto_merge_label_skip_reason), flush=True)
+        branch_name = str(feedback_retry_pr["head_ref"])
+        checkout_feedback_retry_branch(repo_dir, branch_name)
+        print(
+            f"Updating existing Codex remediation PR #{feedback_retry_pr['number']} on branch {branch_name}.",
+            flush=True,
+        )
+    else:
+        branch_name = f"codex/{branch_prefix}-issue-{issue_number}-{stamp}"
+        run_checked(["git", "checkout", "-b", branch_name], cwd=repo_dir)
+    run_checked(["git", "config", "user.name", "codex-audit-bridge[bot]"], cwd=repo_dir)
+    run_checked(
+        ["git", "config", "user.email", "codex-audit-bridge[bot]@users.noreply.github.com"],
+        cwd=repo_dir,
+    )
+    issue_path, context_path = write_codex_context(repo_dir, source_repo, source_ref, issue, comments)
+    prompt = build_prompt(
+        task=task,
+        source_repo=source_repo,
+        source_ref=source_ref,
+        issue=issue,
+        issue_path=issue_path,
+        context_path=context_path,
+        mode=mode,
+    )
+    return RemediationWorkspace(
+        repo_dir=repo_dir,
+        branch_name=branch_name,
+        baseline_auto_merge_policy=baseline_auto_merge_policy,
+        feedback_retry_pr=feedback_retry_pr,
+        stale_auto_merge_label=stale_auto_merge_label,
+        stale_auto_merge_label_skip_reason=stale_auto_merge_label_skip_reason,
+        stale_auto_merge_label_removed=stale_auto_merge_label_removed,
+        prompt=prompt,
+    )
+
+
+def publish_review_only_comment(
+    token: str,
+    source_repo: str,
+    issue_number: int,
+    workspace: RemediationWorkspace,
+    final_message: str,
+    *,
+    source_ref: str,
+) -> int:
+    review_message = format_codex_message(final_message, workspace.repo_dir, source_repo, source_ref)
+    body = truncate_markdown(review_message or "Codex completed review_only mode without a final message.")
+    if workspace.stale_auto_merge_label_removed:
+        body += (
+            f"\n\nRemoved stale `{workspace.stale_auto_merge_label}` from the existing fix PR before posting this review."
+        )
+    elif workspace.feedback_retry_pr and workspace.stale_auto_merge_label_skip_reason:
+        body += f"\n\n{stale_auto_merge_label_skip_message(workspace.stale_auto_merge_label_skip_reason)}."
+    post_issue_comment(token, source_repo, issue_number, body)
+    return 0
+
+
+def publish_remediation(
+    token: str,
+    source_repo: str,
+    source_ref: str,
+    issue: dict[str, Any],
+    issue_number: int,
+    workspace: RemediationWorkspace,
+    final_message: str,
+    *,
+    task: str,
+    auto_merge: bool,
+    commit_prefix: str = "codex",
+    remediation_note: str = "",
+) -> int:
+    status = git_status(workspace.repo_dir)
+    paths = changed_paths(status)
+    if not paths:
+        review_message = format_codex_message(final_message, workspace.repo_dir, source_repo, source_ref)
+        body = truncate_markdown(review_message or "Codex found no safe code changes to make.")
+        if workspace.stale_auto_merge_label_removed:
+            body += (
+                f"\n\nRemoved stale `{workspace.stale_auto_merge_label}` from the existing fix PR because this "
+                "retry did not produce a verified replacement commit."
+            )
+        elif workspace.feedback_retry_pr and workspace.stale_auto_merge_label_skip_reason:
+            body += f"\n\n{stale_auto_merge_label_skip_message(workspace.stale_auto_merge_label_skip_reason)}."
+        post_issue_comment(token, source_repo, issue_number, body)
+        return 0
+
+    denied = blocked_paths(paths, task=task)
+    if denied:
+        denied_list = "\n".join(f"- `{path}`" for path in denied)
+        review_message = format_codex_message(final_message, workspace.repo_dir, source_repo, source_ref)
+        body = "\n".join(
+            [
+                "## Codex Audit",
+                "",
+                "Codex produced edits, but the bridge refused to push them because they touched blocked paths.",
+                "",
+                "Blocked paths:",
+                denied_list,
+                "",
+                "Codex result:",
+                "",
+                truncate_markdown(review_message, 7000),
+            ]
+        )
+        if workspace.stale_auto_merge_label_removed:
+            body += (
+                f"\n\nRemoved stale `{workspace.stale_auto_merge_label}` from the existing fix PR because this "
+                "retry produced blocked edits."
+            )
+        elif workspace.feedback_retry_pr and workspace.stale_auto_merge_label_skip_reason:
+            body += f"\n\n{stale_auto_merge_label_skip_message(workspace.stale_auto_merge_label_skip_reason)}."
+        post_issue_comment(token, source_repo, issue_number, body)
+        return 1
+
+    run_checked(["git", "add", "-A"], cwd=workspace.repo_dir)
+    diff_stats = git_diff_stats(workspace.repo_dir, cached=True)
+    run_checked(
+        ["git", "commit", "-m", f"{commit_prefix}: {task.replace('_', ' ')} for issue #{issue_number}"],
+        cwd=workspace.repo_dir,
+    )
+    git_with_token(workspace.repo_dir, token, ["push", "origin", f"HEAD:refs/heads/{workspace.branch_name}"])
+    pr_message = format_codex_message(final_message, workspace.repo_dir, source_repo, workspace.branch_name)
+    if workspace.feedback_retry_pr:
+        pr = workspace.feedback_retry_pr
+    else:
+        pr = create_pull_request(
+            token,
+            source_repo,
+            issue,
+            workspace.branch_name,
+            source_ref,
+            pr_message,
+            paths,
+            task=task,
+            policy=workspace.baseline_auto_merge_policy,
+        )
+    pr_url = pr.get("html_url", "")
+    guard_risk = classify_guarded_auto_merge_risk(
+        paths,
+        task=task,
+        policy=workspace.baseline_auto_merge_policy,
+        diff_stats=diff_stats,
+    )
+    stale_auto_merge_label_removed = workspace.stale_auto_merge_label_removed
+    stale_auto_merge_label_error = ""
+    if (
+        workspace.feedback_retry_pr
+        and workspace.stale_auto_merge_label
+        and not stale_auto_merge_label_removed
+        and (not auto_merge or not guard_risk["label_allowed"])
+    ):
+        try:
+            stale_auto_merge_label_removed = remove_issue_label_if_present(
+                token,
+                source_repo,
+                int(pr["number"]),
+                workspace.stale_auto_merge_label,
+            )
+        except (BridgeError, GitHubRequestError) as exc:
+            stale_auto_merge_label_error = str(exc)
+    body_lines = [
+        "## Codex Audit",
+        "",
+    ]
+    if remediation_note:
+        body_lines.extend([remediation_note, ""])
+    body_lines.append(
+        truncate_markdown(
+            strip_audit_heading(pr_message) or "Codex completed and produced a fix branch.",
+            9000,
+        )
+    )
+    body_lines.extend(
+        [
+            "",
+            f"{'Updated existing fix PR' if workspace.feedback_retry_pr else 'Created fix PR'}: {pr_url}",
+        ]
+    )
+    if not guard_risk["label_allowed"]:
+        body_lines.extend(
+            [
+                "",
+                "This PR is high-risk for unattended merge and requires human review.",
+                "",
+                format_guarded_risk_details(guard_risk),
+            ]
+        )
+        if stale_auto_merge_label_removed:
+            body_lines.extend(
+                [
+                    "",
+                    f"Removed stale `{workspace.stale_auto_merge_label}` from the PR before requesting review.",
+                ]
+            )
+        if stale_auto_merge_label_error:
+            body_lines.extend(
+                [
+                    "",
+                    f"Could not remove stale `{workspace.stale_auto_merge_label}` from the PR: "
+                    f"`{stale_auto_merge_label_error}`",
+                ]
+            )
+        if workspace.feedback_retry_pr and workspace.stale_auto_merge_label_skip_reason:
+            body_lines.extend(["", stale_auto_merge_label_skip_message(workspace.stale_auto_merge_label_skip_reason)])
+        try:
+            review = request_human_review(
+                token,
+                source_repo,
+                int(pr["number"]),
+                guard_risk,
+            )
+            body_lines.append("")
+            body_lines.append(f"Added `{review['label']}` to the PR so operators can review it before merge.")
+        except (BridgeError, GitHubRequestError) as exc:
+            body_lines.append("")
+            review_label = str(guard_risk.get("human_review_label") or HUMAN_REVIEW_LABEL)
+            body_lines.append(f"Could not add `{review_label}` to the PR: `{exc}`")
+        if auto_merge:
+            body_lines.append("")
+            body_lines.append(
+                "Auto-merge was requested, but the bridge refused to add the guarded auto-merge label "
+                "because this change set is high-risk."
+            )
+    elif auto_merge:
+        try:
+            guard = request_guarded_auto_merge(
+                token,
+                source_repo,
+                int(pr["number"]),
+                paths,
+                task=task,
+                policy=workspace.baseline_auto_merge_policy,
+                diff_stats=diff_stats,
+            )
+            body_lines.append("")
+            body_lines.append(
+                f"Auto-merge was requested; added `{guard['label']}` for the source repository merge guard "
+                f"after Bridge classified the change set as `{guard['risk_level']}` risk. "
+                "CI and the source guard own the final merge decision."
+            )
+        except BridgeError as exc:
+            body_lines.append("")
+            body_lines.append(f"Auto-merge was requested but the guarded label could not be added: `{exc}`")
+    elif stale_auto_merge_label_removed:
+        body_lines.append("")
+        body_lines.append(
+            f"Auto-merge was not requested for this run; removed stale `{workspace.stale_auto_merge_label}` "
+            "from the PR."
+        )
+    elif stale_auto_merge_label_error:
+        body_lines.append("")
+        body_lines.append(
+            f"Auto-merge was not requested for this run, but the bridge could not remove stale "
+            f"`{workspace.stale_auto_merge_label}` from the PR: `{stale_auto_merge_label_error}`"
+        )
+    elif workspace.feedback_retry_pr and workspace.stale_auto_merge_label_skip_reason:
+        body_lines.append("")
+        body_lines.append(stale_auto_merge_label_skip_message(workspace.stale_auto_merge_label_skip_reason))
+    post_issue_comment(token, source_repo, issue_number, "\n".join(body_lines))
+    return 0
+
+
+def run_api_patch_remediation(
+    token: str,
+    source_repo: str,
+    source_ref: str,
+    issue: dict[str, Any],
+    comments: list[dict[str, Any]],
+    issue_number: int,
+    *,
+    task: str,
+    mode: str,
+    auto_merge: bool,
+    provider_order: list[str],
+    workspace: RemediationWorkspace | None = None,
+    reason: str = "",
+    exit_code: int = 1,
+) -> int:
+    warnings: list[str] = []
+
+    def attempt(workspace_obj: RemediationWorkspace) -> int:
+        for provider_name in provider_order:
+            secret_name = "OPENAI_API_KEY" if provider_name == "openai" else "ANTHROPIC_API_KEY"
+            if not env_value(secret_name):
+                warnings.append(f"{provider_name} patch fallback skipped because `{secret_name}` is not configured.")
+                continue
+            return_code, log_text, final_message = run_api_patch_provider(
+                workspace_obj.repo_dir,
+                workspace_obj.prompt,
+                task=task,
+                mode=mode,
+                provider=provider_name,
+            )
+            if return_code != 0:
+                warnings.append(f"{provider_name} patch fallback failed: `{log_text}`")
+                continue
+            note = f"{reason} Applied via API fallback provider `{provider_name}`.".strip()
+            return publish_remediation(
+                token,
+                source_repo,
+                source_ref,
+                issue,
+                issue_number,
+                workspace_obj,
+                final_message,
+                task=task,
+                auto_merge=auto_merge,
+                commit_prefix="api-fallback",
+                remediation_note=note,
+            )
+        return -1
+
+    if workspace is not None:
+        result = attempt(workspace)
+        if result >= 0:
+            return result
+    else:
+        with tempfile.TemporaryDirectory(prefix="codex-audit-bridge-api-") as tmp:
+            try:
+                workspace_obj = prepare_remediation_workspace(
+                    token,
+                    source_repo,
+                    source_ref,
+                    issue,
+                    comments,
+                    issue_number,
+                    task,
+                    mode,
+                    Path(tmp),
+                )
+            except BridgeError as exc:
+                body = str(exc)
+                if body.startswith("## Codex Audit"):
+                    post_issue_comment(token, source_repo, issue_number, body)
+                else:
+                    post_issue_comment(
+                        token,
+                        source_repo,
+                        issue_number,
+                        "\n".join(
+                            [
+                                "## Codex Audit",
+                                "",
+                                reason or "API patch remediation failed before workspace preparation.",
+                                "",
+                                str(exc),
+                            ]
+                        ),
+                    )
+                return exit_code
+            result = attempt(workspace_obj)
+            if result >= 0:
+                return result
+
+    if not env_value("OPENAI_API_KEY") and not env_value("ANTHROPIC_API_KEY"):
+        post_issue_comment(token, source_repo, issue_number, auto_fallback_missing_api_key_message(reason))
+        return exit_code
+
+    reviews, review_warnings = run_configured_api_reviews(source_repo, source_ref, issue, comments)
+    warnings.extend(review_warnings)
+    if not reviews:
+        body = "\n".join(
+            [
+                "## Codex Audit",
+                "",
+                reason,
+                "",
+                "API patch fallback was configured but all patch providers failed.",
+                "",
+                *[f"- {warning}" for warning in warnings],
+                "",
+                "No files were pushed. Check the bridge workflow logs for details.",
+            ]
+        )
+        post_issue_comment(token, source_repo, issue_number, body)
+        return exit_code
+
+    post_issue_comment(
+        token,
+        source_repo,
+        issue_number,
+        format_api_review_comment(
+            f"{reason} Patch fallback failed; posting review-only API fallback comments instead.",
+            reviews,
+            warnings,
+        ),
+    )
+    return 0
+
+
 def run_auto_provider_fallback(
     *,
     token: str,
@@ -1270,7 +1785,11 @@ def run_auto_provider_fallback(
     comments: list[dict[str, Any]],
     issue_number: int,
     reason: str,
+    mode: str = DEFAULT_MODE,
+    task: str = DEFAULT_TASK,
+    auto_merge: bool = False,
     exit_code: int = 1,
+    workspace: RemediationWorkspace | None = None,
 ) -> int:
     try:
         validate_api_fallback_source_repo(source_repo)
@@ -1288,6 +1807,23 @@ def run_auto_provider_fallback(
         )
         post_issue_comment(token, source_repo, issue_number, body)
         return exit_code
+
+    if mode == "review_and_fix" and api_fallback_allow_fix():
+        return run_api_patch_remediation(
+            token,
+            source_repo,
+            source_ref,
+            issue,
+            comments,
+            issue_number,
+            task=task,
+            mode=mode,
+            auto_merge=auto_merge,
+            provider_order=api_fallback_provider_order(),
+            workspace=workspace,
+            reason=reason,
+            exit_code=exit_code,
+        )
 
     if not env_value("OPENAI_API_KEY") and not env_value("ANTHROPIC_API_KEY"):
         post_issue_comment(token, source_repo, issue_number, auto_fallback_missing_api_key_message(reason))
@@ -1322,6 +1858,44 @@ def run_auto_provider_fallback(
         ),
     )
     return 0
+
+
+def run_direct_api_provider(
+    token: str,
+    source_repo: str,
+    source_ref: str,
+    issue: dict[str, Any],
+    comments: list[dict[str, Any]],
+    issue_number: int,
+    *,
+    task: str,
+    mode: str,
+    auto_merge: bool,
+    provider: str,
+) -> int:
+    validate_api_fallback_source_repo(source_repo)
+    if mode == "review_only":
+        review_message = (
+            run_openai_review(source_repo, source_ref, issue, comments)
+            if provider == "openai"
+            else run_anthropic_review(source_repo, source_ref, issue, comments)
+        )
+        post_issue_comment(token, source_repo, issue_number, truncate_markdown(review_message))
+        return 0
+    return run_api_patch_remediation(
+        token,
+        source_repo,
+        source_ref,
+        issue,
+        comments,
+        issue_number,
+        task=task,
+        mode=mode,
+        auto_merge=auto_merge,
+        provider_order=[provider],
+        reason=f"{provider} provider was requested directly.",
+        exit_code=1,
+    )
 
 
 def git_status(repo_dir: Path) -> str:
@@ -2028,15 +2602,31 @@ def main() -> int:
     comments = fetch_issue_comments(token, source_repo, issue_number)
 
     if provider == "openai":
-        validate_api_fallback_source_repo(source_repo)
-        review_message = run_openai_review(source_repo, source_ref, issue, comments)
-        post_issue_comment(token, source_repo, issue_number, truncate_markdown(review_message))
-        return 0
+        return run_direct_api_provider(
+            token,
+            source_repo,
+            source_ref,
+            issue,
+            comments,
+            issue_number,
+            task=task,
+            mode=mode,
+            auto_merge=auto_merge,
+            provider="openai",
+        )
     if provider == "anthropic":
-        validate_api_fallback_source_repo(source_repo)
-        review_message = run_anthropic_review(source_repo, source_ref, issue, comments)
-        post_issue_comment(token, source_repo, issue_number, truncate_markdown(review_message))
-        return 0
+        return run_direct_api_provider(
+            token,
+            source_repo,
+            source_ref,
+            issue,
+            comments,
+            issue_number,
+            task=task,
+            mode=mode,
+            auto_merge=auto_merge,
+            provider="anthropic",
+        )
     if provider == "api":
         return run_auto_provider_fallback(
             token=token,
@@ -2046,90 +2636,27 @@ def main() -> int:
             comments=comments,
             issue_number=issue_number,
             reason="API provider was requested directly.",
+            mode=mode,
+            task=task,
+            auto_merge=auto_merge,
         )
 
     try:
         with tempfile.TemporaryDirectory(prefix="codex-audit-bridge-") as tmp:
-            work_root = Path(tmp)
-            repo_dir = clone_source_repo(token, source_repo, source_ref, work_root)
-            baseline_auto_merge_policy = load_guarded_auto_merge_policy(
-                repo_dir / ".github" / "codex_auto_merge_policy.json"
-            )
-            feedback_retry_pr = resolve_feedback_retry_pr(
+            workspace = prepare_remediation_workspace(
                 token,
                 source_repo,
-                issue_number,
                 source_ref,
+                issue,
                 comments,
-                task=task,
-            )
-            stale_auto_merge_label, stale_auto_merge_label_skip_reason = guarded_auto_merge_label_for_mutation(
-                baseline_auto_merge_policy
-            )
-            stale_auto_merge_label_removed = False
-            stamp = dt.datetime.now(dt.UTC).strftime("%Y%m%d%H%M%S")
-            branch_prefix = "long-horizon-signal" if task == "long_horizon_signal_shadow" else "monthly-review"
-            if feedback_retry_pr:
-                if stale_auto_merge_label:
-                    try:
-                        stale_auto_merge_label_removed = remove_issue_label_if_present(
-                            token,
-                            source_repo,
-                            int(feedback_retry_pr["number"]),
-                            stale_auto_merge_label,
-                        )
-                    except (BridgeError, GitHubRequestError) as exc:
-                        post_issue_comment(
-                            token,
-                            source_repo,
-                            issue_number,
-                            "\n".join(
-                                [
-                                    "## Codex Audit",
-                                    "",
-                                    "The bridge refused to continue because it could not clear a stale guarded "
-                                    "auto-merge label from the existing fix PR.",
-                                    "",
-                                    f"- PR: #{feedback_retry_pr['number']}",
-                                    f"- Label: `{stale_auto_merge_label}`",
-                                    f"- Error: `{exc}`",
-                                    "",
-                                    "No files were pushed. Please remove the stale label or inspect the PR manually.",
-                                ]
-                            ),
-                        )
-                        return 1
-                else:
-                    print(stale_auto_merge_label_skip_message(stale_auto_merge_label_skip_reason), flush=True)
-                branch_name = str(feedback_retry_pr["head_ref"])
-                checkout_feedback_retry_branch(repo_dir, branch_name)
-                print(
-                    f"Updating existing Codex remediation PR #{feedback_retry_pr['number']} "
-                    f"on branch {branch_name}.",
-                    flush=True,
-                )
-            else:
-                branch_name = f"codex/{branch_prefix}-issue-{issue_number}-{stamp}"
-                run_checked(["git", "checkout", "-b", branch_name], cwd=repo_dir)
-            run_checked(["git", "config", "user.name", "codex-audit-bridge[bot]"], cwd=repo_dir)
-            run_checked(
-                ["git", "config", "user.email", "codex-audit-bridge[bot]@users.noreply.github.com"],
-                cwd=repo_dir,
-            )
-
-            issue_path, context_path = write_codex_context(repo_dir, source_repo, source_ref, issue, comments)
-            prompt = build_prompt(
-                task=task,
-                source_repo=source_repo,
-                source_ref=source_ref,
-                issue=issue,
-                issue_path=issue_path,
-                context_path=context_path,
-                mode=mode,
+                issue_number,
+                task,
+                mode,
+                Path(tmp),
             )
             return_code, _codex_log, final_message = run_codex_backend(
-                repo_dir,
-                prompt,
+                workspace.repo_dir,
+                workspace.prompt,
                 timeout_minutes,
                 backend=codex_backend,
                 source_repo=source_repo,
@@ -2147,7 +2674,11 @@ def main() -> int:
                         comments=comments,
                         issue_number=issue_number,
                         reason=f"Codex service failed with exit code `{return_code}`.",
+                        mode=mode,
+                        task=task,
+                        auto_merge=auto_merge,
                         exit_code=return_code,
+                        workspace=workspace,
                     )
                 body = "\n".join(
                     [
@@ -2161,215 +2692,31 @@ def main() -> int:
                 post_issue_comment(token, source_repo, issue_number, body)
                 return return_code
 
-            status = git_status(repo_dir)
-            paths = changed_paths(status)
             if mode == "review_only":
-                review_message = format_codex_message(final_message, repo_dir, source_repo, source_ref)
-                body = truncate_markdown(
-                    review_message or "Codex completed review_only mode without a final message."
-                )
-                if stale_auto_merge_label_removed:
-                    body += (
-                        f"\n\nRemoved stale `{stale_auto_merge_label}` from the existing fix PR before "
-                        "posting this review."
-                    )
-                elif feedback_retry_pr and stale_auto_merge_label_skip_reason:
-                    body += f"\n\n{stale_auto_merge_label_skip_message(stale_auto_merge_label_skip_reason)}."
-                post_issue_comment(
+                return publish_review_only_comment(
                     token,
                     source_repo,
                     issue_number,
-                    body,
+                    workspace,
+                    final_message,
+                    source_ref=source_ref,
                 )
-                return 0
 
-            if not paths:
-                review_message = format_codex_message(final_message, repo_dir, source_repo, source_ref)
-                body = truncate_markdown(review_message or "Codex found no safe code changes to make.")
-                if stale_auto_merge_label_removed:
-                    body += (
-                        f"\n\nRemoved stale `{stale_auto_merge_label}` from the existing fix PR because this "
-                        "retry did not produce a verified replacement commit."
-                    )
-                elif feedback_retry_pr and stale_auto_merge_label_skip_reason:
-                    body += f"\n\n{stale_auto_merge_label_skip_message(stale_auto_merge_label_skip_reason)}."
-                post_issue_comment(
-                    token,
-                    source_repo,
-                    issue_number,
-                    body,
-                )
-                return 0
-
-            denied = blocked_paths(paths, task=task)
-            if denied:
-                denied_list = "\n".join(f"- `{path}`" for path in denied)
-                review_message = format_codex_message(final_message, repo_dir, source_repo, source_ref)
-                body = "\n".join(
-                    [
-                        "## Codex Audit",
-                        "",
-                        "Codex produced edits, but the bridge refused to push them because they touched blocked paths.",
-                        "",
-                        "Blocked paths:",
-                        denied_list,
-                        "",
-                        "Codex result:",
-                        "",
-                        truncate_markdown(review_message, 7000),
-                    ]
-                )
-                if stale_auto_merge_label_removed:
-                    body += (
-                        f"\n\nRemoved stale `{stale_auto_merge_label}` from the existing fix PR because this "
-                        "retry produced blocked edits."
-                    )
-                elif feedback_retry_pr and stale_auto_merge_label_skip_reason:
-                    body += f"\n\n{stale_auto_merge_label_skip_message(stale_auto_merge_label_skip_reason)}."
-                post_issue_comment(token, source_repo, issue_number, body)
-                return 1
-
-            run_checked(["git", "add", "-A"], cwd=repo_dir)
-            diff_stats = git_diff_stats(repo_dir, cached=True)
-            run_checked(
-                ["git", "commit", "-m", f"codex: {task.replace('_', ' ')} for issue #{issue_number}"],
-                cwd=repo_dir,
-            )
-            git_with_token(repo_dir, token, ["push", "origin", f"HEAD:refs/heads/{branch_name}"])
-            pr_message = format_codex_message(final_message, repo_dir, source_repo, branch_name)
-            if feedback_retry_pr:
-                pr = feedback_retry_pr
-            else:
-                pr = create_pull_request(
-                    token,
-                    source_repo,
-                    issue,
-                    branch_name,
-                    source_ref,
-                    pr_message,
-                    paths,
-                    task=task,
-                    policy=baseline_auto_merge_policy,
-                )
-            pr_url = pr.get("html_url", "")
-            guard_risk = classify_guarded_auto_merge_risk(
-                paths,
+            return publish_remediation(
+                token,
+                source_repo,
+                source_ref,
+                issue,
+                issue_number,
+                workspace,
+                final_message,
                 task=task,
-                policy=baseline_auto_merge_policy,
-                diff_stats=diff_stats,
+                auto_merge=auto_merge,
             )
-            stale_auto_merge_label_error = ""
-            if (
-                feedback_retry_pr
-                and stale_auto_merge_label
-                and not stale_auto_merge_label_removed
-                and (not auto_merge or not guard_risk["label_allowed"])
-            ):
-                try:
-                    stale_auto_merge_label_removed = remove_issue_label_if_present(
-                        token,
-                        source_repo,
-                        int(pr["number"]),
-                        stale_auto_merge_label,
-                    )
-                except (BridgeError, GitHubRequestError) as exc:
-                    stale_auto_merge_label_error = str(exc)
-            body_lines = [
-                "## Codex Audit",
-                "",
-                truncate_markdown(
-                    strip_audit_heading(pr_message)
-                    or "Codex completed and produced a fix branch.",
-                    9000,
-                ),
-                "",
-                f"{'Updated existing fix PR' if feedback_retry_pr else 'Created fix PR'}: {pr_url}",
-            ]
-            if not guard_risk["label_allowed"]:
-                body_lines.extend(
-                    [
-                        "",
-                        "This PR is high-risk for unattended merge and requires human review.",
-                        "",
-                        format_guarded_risk_details(guard_risk),
-                    ]
-                )
-                if stale_auto_merge_label_removed:
-                    body_lines.extend(
-                        [
-                            "",
-                            f"Removed stale `{stale_auto_merge_label}` from the PR before requesting review.",
-                        ]
-                    )
-                if stale_auto_merge_label_error:
-                    body_lines.extend(
-                        [
-                            "",
-                            f"Could not remove stale `{stale_auto_merge_label}` from the PR: "
-                            f"`{stale_auto_merge_label_error}`",
-                        ]
-                    )
-                if feedback_retry_pr and stale_auto_merge_label_skip_reason:
-                    body_lines.extend(["", stale_auto_merge_label_skip_message(stale_auto_merge_label_skip_reason)])
-                try:
-                    review = request_human_review(
-                        token,
-                        source_repo,
-                        int(pr["number"]),
-                        guard_risk,
-                    )
-                    body_lines.append("")
-                    body_lines.append(
-                        f"Added `{review['label']}` to the PR so operators can review it before merge."
-                    )
-                except (BridgeError, GitHubRequestError) as exc:
-                    body_lines.append("")
-                    review_label = str(guard_risk.get("human_review_label") or HUMAN_REVIEW_LABEL)
-                    body_lines.append(f"Could not add `{review_label}` to the PR: `{exc}`")
-                if auto_merge:
-                    body_lines.append("")
-                    body_lines.append(
-                        "Auto-merge was requested, but the bridge refused to add the guarded auto-merge label "
-                        "because this change set is high-risk."
-                    )
-            elif auto_merge:
-                try:
-                    guard = request_guarded_auto_merge(
-                        token,
-                        source_repo,
-                        int(pr["number"]),
-                        paths,
-                        task=task,
-                        policy=baseline_auto_merge_policy,
-                        diff_stats=diff_stats,
-                    )
-                    body_lines.append("")
-                    body_lines.append(
-                        f"Auto-merge was requested; added `{guard['label']}` for the source repository merge guard "
-                        f"after Bridge classified the change set as `{guard['risk_level']}` risk. "
-                        "CI and the source guard own the final merge decision."
-                    )
-                except BridgeError as exc:
-                    body_lines.append("")
-                    body_lines.append(f"Auto-merge was requested but the guarded label could not be added: `{exc}`")
-            elif stale_auto_merge_label_removed:
-                body_lines.append("")
-                body_lines.append(
-                    f"Auto-merge was not requested for this run; removed stale `{stale_auto_merge_label}` "
-                    "from the PR."
-                )
-            elif stale_auto_merge_label_error:
-                body_lines.append("")
-                body_lines.append(
-                    f"Auto-merge was not requested for this run, but the bridge could not remove stale "
-                    f"`{stale_auto_merge_label}` from the PR: `{stale_auto_merge_label_error}`"
-                )
-            elif feedback_retry_pr and stale_auto_merge_label_skip_reason:
-                body_lines.append("")
-                body_lines.append(stale_auto_merge_label_skip_message(stale_auto_merge_label_skip_reason))
-            post_issue_comment(token, source_repo, issue_number, "\n".join(body_lines))
-            return 0
-    except (BridgeError, OSError, subprocess.SubprocessError) as exc:
+    except BridgeError as exc:
+        if str(exc).startswith("## Codex Audit"):
+            post_issue_comment(token, source_repo, issue_number, str(exc))
+            return 1
         if provider == "auto":
             return run_auto_provider_fallback(
                 token=token,
@@ -2379,6 +2726,24 @@ def main() -> int:
                 comments=comments,
                 issue_number=issue_number,
                 reason=f"Codex service path failed before completion: `{exc}`.",
+                mode=mode,
+                task=task,
+                auto_merge=auto_merge,
+            )
+        raise
+    except (OSError, subprocess.SubprocessError) as exc:
+        if provider == "auto":
+            return run_auto_provider_fallback(
+                token=token,
+                source_repo=source_repo,
+                source_ref=source_ref,
+                issue=issue,
+                comments=comments,
+                issue_number=issue_number,
+                reason=f"Codex service path failed before completion: `{exc}`.",
+                mode=mode,
+                task=task,
+                auto_merge=auto_merge,
             )
         raise
 
