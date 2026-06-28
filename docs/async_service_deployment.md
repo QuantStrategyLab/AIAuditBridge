@@ -61,15 +61,14 @@ CODEX_AUDIT_SERVICE_ALLOWED_REFS='refs/heads/main' \
 CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORY_VISIBILITIES='public' \
 CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES='QuantStrategyLab/CryptoLivePoolPipelines,QuantStrategyLab/HkEquitySnapshotPipelines,QuantStrategyLab/UsEquitySnapshotPipelines,QuantStrategyLab/ResearchSignalContextPipelines' \
 CODEX_AUDIT_SERVICE_AUDIENCE=quant-codex-audit \
+CODEX_AUDIT_SERVICE_MODEL=gpt-5.4 \
 CODEX_AUDIT_SERVICE_JOB_DIR=/var/lib/codex-audit-bridge/jobs \
 bash scripts/deploy_codex_audit_service.sh deploy
 ```
 
 The job directory should be owned by the service user and mode `0700`.
-The service should rely on an authenticated Codex CLI session. API-key
-environment fallback is disabled by default; enable
-`CODEX_AUDIT_SERVICE_ALLOW_OPENAI_API_KEY_FALLBACK=true` only as an explicit
-temporary fallback with a narrowly scoped key.
+The service should rely on an authenticated Codex CLI session and must not
+inject OpenAI/Codex API keys into the Codex subprocess.
 
 ### 2. Deploy the Cloudflare Worker
 

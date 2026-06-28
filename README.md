@@ -60,6 +60,10 @@ Configure these values in `QuantStrategyLab/CodexAuditBridge`:
   remediation PRs instead of posting review-only comments.
 - Optional repository variable `CODEX_AUDIT_API_FALLBACK_PROVIDER_ORDER`, default
   `openai,anthropic`.
+- Repository variable `OPENAI_MODEL` for OpenAI API fallback.
+- Repository variable `ANTHROPIC_MODEL` for Anthropic API fallback.
+- Repository variable `CODEX_AUDIT_SERVICE_MODEL` for the VPS Codex service primary
+  path; `VPS Codex Service Ops` deploy writes it into the systemd unit.
 - Workflow permission `id-token: write` is already set so GitHub Actions can request an OIDC token for the service.
 
 Run the service host with:
@@ -68,6 +72,7 @@ Run the service host with:
 CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES=QuantStrategyLab/CodexAuditBridge \
 CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES='QuantStrategyLab/CryptoLivePoolPipelines,QuantStrategyLab/HkEquitySnapshotPipelines,QuantStrategyLab/UsEquitySnapshotPipelines,QuantStrategyLab/ResearchSignalContextPipelines' \
 CODEX_AUDIT_SERVICE_AUDIENCE=quant-codex-audit \
+CODEX_AUDIT_SERVICE_MODEL=gpt-5.4 \
 python3 scripts/codex_audit_service.py
 ```
 
@@ -75,9 +80,7 @@ Terminate TLS on 443 with the platform load balancer or a reverse proxy and forw
 
 The service host should use an authenticated Codex CLI session. It strips
 secret-like environment variables, including API keys, before spawning Codex.
-Set `CODEX_AUDIT_SERVICE_ALLOW_OPENAI_API_KEY_FALLBACK=true` only for an
-explicit, temporary fallback that passes `CODEX_AUDIT_SERVICE_OPENAI_API_KEY` or
-`OPENAI_API_KEY` to the Codex subprocess.
+It does not inject API keys into the Codex subprocess.
 
 If no custom domain is available, `cloudflare/codex-audit-proxy/` contains a minimal Cloudflare Worker that can publish a free `workers.dev` HTTPS entry point while keeping the VPS origin URL in a Cloudflare secret. The production service path is async: submit `POST /v1/codex-audit/jobs`, then poll `GET /v1/codex-audit/jobs/{job_id}`. See `docs/async_service_deployment.md` for the deployment and open-source repository checklist.
 

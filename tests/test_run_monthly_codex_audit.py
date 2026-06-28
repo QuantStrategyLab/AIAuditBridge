@@ -244,21 +244,6 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertNotIn("OPENAI_API_KEY", env)
         self.assertEqual(env["PATH"], "/usr/bin")
 
-    def test_codex_audit_service_openai_key_fallback_requires_explicit_allow(self) -> None:
-        with patch.dict(
-            os.environ,
-            {
-                "CODEX_AUDIT_SERVICE_ALLOW_OPENAI_API_KEY_FALLBACK": "true",
-                "CODEX_AUDIT_SERVICE_OPENAI_API_KEY": "service-openai-key",
-                "PATH": "/usr/bin",
-            },
-            clear=True,
-        ):
-            env = _codex_env()
-
-        self.assertNotIn("CODEX_AUDIT_SERVICE_OPENAI_API_KEY", env)
-        self.assertEqual(env["OPENAI_API_KEY"], "service-openai-key")
-
     def test_request_github_oidc_token_does_not_accept_static_token_fallback(self) -> None:
         with patch.dict(os.environ, {"CODEX_AUDIT_SERVICE_TOKEN": "legacy-token"}, clear=True):
             with self.assertRaisesRegex(BridgeError, "GitHub Actions OIDC token request environment is unavailable"):

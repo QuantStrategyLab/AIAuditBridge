@@ -13,6 +13,7 @@ ALLOWED_REFS="${CODEX_AUDIT_SERVICE_ALLOWED_REFS:-refs/heads/main}"
 ALLOWED_REPOSITORY_VISIBILITIES="${CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORY_VISIBILITIES:-public}"
 ALLOWED_SOURCE_REPOSITORIES="${CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES:-QuantStrategyLab/CryptoLivePoolPipelines,QuantStrategyLab/HkEquitySnapshotPipelines,QuantStrategyLab/UsEquitySnapshotPipelines,QuantStrategyLab/ResearchSignalContextPipelines}"
 JOB_DIR="${CODEX_AUDIT_SERVICE_JOB_DIR:-/var/lib/codex-audit-bridge/jobs}"
+AUDIT_MODEL="${CODEX_AUDIT_SERVICE_MODEL:-}"
 NGINX_CONFIG="${CODEX_AUDIT_SERVICE_NGINX_CONFIG:-}"
 
 require_sudo() {
@@ -164,6 +165,10 @@ write_audit_service_unit() {
   local runner_user runner_home
   runner_user="$(id -un)"
   runner_home="$(getent passwd "$runner_user" | cut -d: -f6)"
+  audit_model_line=""
+  if [ -n "$AUDIT_MODEL" ]; then
+    audit_model_line="Environment=CODEX_AUDIT_SERVICE_MODEL=${AUDIT_MODEL}"
+  fi
   sudo tee "/etc/systemd/system/${AUDIT_SERVICE_NAME}.service" >/dev/null <<EOF_UNIT
 [Unit]
 Description=QuantStrategyLab Codex audit service
@@ -186,6 +191,7 @@ Environment=CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORY_VISIBILITIES=${ALLOWED_REPOSI
 Environment=CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES=${ALLOWED_SOURCE_REPOSITORIES}
 Environment=CODEX_AUDIT_SERVICE_JOB_DIR=${JOB_DIR}
 Environment=CODEX_AUDIT_SERVICE_SANDBOX=read-only
+${audit_model_line}
 ExecStart=/usr/bin/env python3 ${DEPLOY_DIR}/scripts/codex_audit_service.py
 Restart=on-failure
 RestartSec=5

@@ -256,20 +256,12 @@ def _codex_command(output_last_message: Path) -> list[str]:
 
 
 def _codex_env() -> dict[str, str]:
-    env = {
+    return {
         key: value
         for key, value in os.environ.items()
         if not key.startswith("CODEX_AUDIT_SERVICE_")
         and not any(marker in key.upper() for marker in SECRET_ENV_MARKERS)
     }
-    if _bool_env("CODEX_AUDIT_SERVICE_ALLOW_OPENAI_API_KEY_FALLBACK"):
-        service_api_key = (
-            os.environ.get("CODEX_AUDIT_SERVICE_OPENAI_API_KEY", "").strip()
-            or os.environ.get("OPENAI_API_KEY", "").strip()
-        )
-        if service_api_key:
-            env["OPENAI_API_KEY"] = service_api_key
-    return env
 
 
 def _run_codex(payload: dict[str, Any]) -> str:
