@@ -233,9 +233,10 @@ def _validate_payload(payload: dict[str, Any]) -> None:
     mode = payload.get("mode")
     if mode not in {"review_only", "review_and_fix"}:
         raise ValueError("mode must be review_only or review_and_fix")
+    # model is optional — defaults to CODEX_AUDIT_SERVICE_MODEL env var
 
 
-def _codex_command(output_last_message: Path) -> list[str]:
+def _codex_command(output_last_message: Path, *, model_override: str | None = None) -> list[str]:
     codex = shutil.which(os.environ.get("CODEX_AUDIT_SERVICE_CODEX_BIN", "codex"))
     if not codex:
         raise RuntimeError("codex CLI was not found on the service host")
@@ -248,7 +249,7 @@ def _codex_command(output_last_message: Path) -> list[str]:
         "--output-last-message",
         str(output_last_message),
     ]
-    model = os.environ.get("CODEX_AUDIT_SERVICE_MODEL", "").strip()
+    model = model_override or os.environ.get("CODEX_AUDIT_SERVICE_MODEL", "").strip()
     if model:
         command.extend(["--model", model])
     command.append("-")
@@ -269,11 +270,12 @@ def _run_codex(payload: dict[str, Any]) -> str:
     if fake_output is not None:
         return fake_output
     prompt = str(payload["prompt"])
+    model = str(payload.get("model") or "").strip() or None
     timeout_seconds = int(payload.get("timeout_seconds") or os.environ.get("CODEX_AUDIT_SERVICE_TIMEOUT_SECONDS", "2700"))
     with tempfile.TemporaryDirectory() as tmp:
         output_last_message = Path(tmp) / "codex-final-message.md"
         completed = subprocess.run(
-            _codex_command(output_last_message),
+            _codex_command(output_last_message, model_override=model),
             input=prompt,
             text=True,
             stdout=subprocess.PIPE,
