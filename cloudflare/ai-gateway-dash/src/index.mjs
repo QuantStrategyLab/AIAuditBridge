@@ -313,13 +313,72 @@ refreshTimer=setInterval(refresh,30000);
 </body>
 </html>`;
 
+// ── Login page ────────────────────────────────────────────────────────
+
+const LOGIN_HTML = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>AiGateway · 登录</title>
+<style>
+  :root{--bg:#0a0e14;--surface:#131820;--border:#253040;--text:#c8d6e5;--blue:#3b82f6;--purple:#8b5cf6;--radius:12px}
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{font-family:'Inter',-apple-system,sans-serif;background:var(--bg);color:var(--text);display:flex;align-items:center;justify-content:center;min-height:100vh;-webkit-font-smoothing:antialiased}
+  .login-box{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:40px;width:380px;max-width:90vw;box-shadow:0 4px 24px rgba(0,0,0,.5)}
+  .logo{width:48px;height:48px;border-radius:12px;background:linear-gradient(135deg,var(--blue),var(--purple));display:flex;align-items:center;justify-content:center;font-size:24px;margin:0 auto 16px}
+  h1{font-size:20px;font-weight:700;text-align:center;margin-bottom:4px;color:#fff}
+  .sub{font-size:13px;color:#6b7d95;text-align:center;margin-bottom:24px}
+  input{width:100%;padding:10px 14px;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:14px;outline:none;transition:border-color .3s}
+  input:focus{border-color:var(--blue)}
+  button{width:100%;padding:10px;margin-top:12px;background:linear-gradient(135deg,var(--blue),var(--purple));border:none;border-radius:8px;color:#fff;font-size:14px;font-weight:600;cursor:pointer;transition:opacity .3s}
+  button:hover{opacity:.9}
+  .err{color:#ef4444;font-size:12px;text-align:center;margin-top:8px;display:none}
+</style></head>
+<body>
+<div class="login-box">
+  <div class="logo">⚡</div>
+  <h1>AiGateway</h1>
+  <div class="sub">QuantStrategyLab · 运维面板</div>
+  <input type="password" id="key" placeholder="输入访问密钥" autofocus>
+  <button onclick="login()">登录</button>
+  <div class="err" id="err">密钥错误</div>
+</div>
+<script>
+async function login(){
+  const key = document.getElementById("key").value;
+  if(!key) return;
+  const resp = await fetch("/api/v1/ai/health",{headers:{"Authorization":"Bearer "+key}});
+  if(resp.ok){
+    document.cookie = "dash_key="+key+";path=/;max-age=86400;SameSite=Strict";
+    location.href = "/";
+  } else {
+    document.getElementById("err").style.display = "block";
+  }
+}
+document.getElementById("key").addEventListener("keydown",e=>{if(e.key==="Enter")login()});
+</script>
+</body></html>`;
+
+// ── Auth helper ────────────────────────────────────────────────────────
+
+function getAuthToken(request) {
+  // Cookie-based auth (after login)
+  const cookie = request.headers.get("Cookie") || "";
+  const match = cookie.match(/dash_key=([^;]+)/);
+  if (match) return match[1];
+  // URL-based auth (?key=xxx)
+  const url = new URL(request.url);
+  return url.searchParams.get("key") || "";
+}
+
 // ── API proxy ──────────────────────────────────────────────────────────
 
-async function proxyAPI(path, env) {
+async function proxyAPI(path, env, request) {
   const origin = (env.AI_GATEWAY_ORIGIN_URL || "").trim();
   if (!origin) throw new Error("AI_GATEWAY_ORIGIN_URL not configured");
 
-  const token = (env.DASHBOARD_API_TOKEN || "").trim();
+  // Use user-provided token (login) or Worker's own static token (server-side)
+  const userToken = getAuthToken(request);
+  const token = userToken || (env.DASHBOARD_API_TOKEN || "").trim();
   const url = origin.replace(/\/+$/, "") + path;
 
   const resp = await fetch(url, {
@@ -346,12 +405,19 @@ async function proxyAPI(path, env) {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    const userToken = getAuthToken(request);
 
-    // API proxy: /api/* → origin
+    // API proxy: /api/* → VPS (requires auth)
     if (url.pathname.startsWith("/api/")) {
-      const apiPath = url.pathname.slice(4); // strip /api prefix
+      if (!userToken) {
+        return new Response(JSON.stringify({status:"error",error:"unauthorized"}), {
+          status: 401,
+          headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+        });
+      }
+      const apiPath = url.pathname.slice(4);
       try {
-        return await proxyAPI(apiPath, env);
+        return await proxyAPI(apiPath, env, request);
       } catch (e) {
         return new Response(JSON.stringify({ status: "error", error: e.message }), {
           status: 502,
@@ -360,10 +426,13 @@ export default {
       }
     }
 
-    // Dashboard HTML
+    // Dashboard HTML — requires auth
     if (url.pathname === "/" || url.pathname === "") {
+      if (!userToken) return new Response(LOGIN_HTML, {
+        headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
+      });
       return new Response(HTML, {
-        headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "public, max-age=300" },
+        headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
       });
     }
 

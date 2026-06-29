@@ -434,6 +434,11 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             })
             return
         if self.path == "/v1/ai/health":
+            try:
+                claims = authenticate(self.headers, audience=DEFAULT_AUDIENCE)
+            except PermissionError as exc:
+                _json_response(self, HTTPStatus.UNAUTHORIZED, {"status": "error", "error": str(exc)})
+                return
             health = get_health_monitor()
             _json_response(self, HTTPStatus.OK, {"status": "ok", **health.snapshot()})
             return

@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from client.config import GatewayConfig
-from client.errors import AiGatewayError, AuthenticationError, ServiceUnavailableError, TimeoutError
+from client.errors import AiGatewayError, AuthenticationError, ServiceUnavailableError, TimeoutError, CircuitBreaker, CircuitBreakerOpenError
 
 
 @dataclass(frozen=True)
@@ -68,6 +68,10 @@ class AiGatewayClient:
 
     def __init__(self, config: GatewayConfig):
         self.config = config
+        self._breaker = CircuitBreaker(
+            failure_threshold=int(os.environ.get("AI_GATEWAY_CB_FAILURES", "5")),
+            recovery_timeout=float(os.environ.get("AI_GATEWAY_CB_TIMEOUT", "60")),
+        )
 
     # ── analyze ────────────────────────────────────────────────────
 
@@ -80,16 +84,13 @@ class AiGatewayClient:
         max_tokens: int = 4000,
         timeout: float | None = None,
     ) -> AiResult:
-        """Sync LLM completion via ``POST /v1/ai/analyze``.
-
-        Uses LlmAdapter on the service side — Claude or GPT API.
-        Best for: optimization decisions, shadow audits, text classification.
-        """
+        """Sync LLM completion via ``POST /v1/ai/analyze``."""
         selected_model = model or self.config.default_analyze_model
         timeout = timeout or self.config.timeout_analyze
         started = time.time()
 
         try:
+            self._breaker.before_call()
             token = _fetch_oidc_token(self.config.audience)
             payload = json.dumps({
                 "task": "analyze",
@@ -110,6 +111,7 @@ class AiGatewayClient:
                 data = json.loads(resp.read().decode("utf-8"))
 
             if data.get("status") == "ok":
+                self._breaker.on_success()
                 return AiResult(
                     provider=data.get("provider", ""),
                     model=data.get("model", selected_model),
@@ -118,14 +120,19 @@ class AiGatewayClient:
                     latency_seconds=time.time() - started,
                     raw=data,
                 )
+            self._breaker.on_failure()
             return AiResult(
                 provider="", model=selected_model, success=False,
                 error=str(data.get("error", "unknown")), raw=data,
             )
+        except CircuitBreakerOpenError:
+            return AiResult.unavailable("circuit", "Circuit breaker open — service unavailable")
         except urllib.error.HTTPError as exc:
+            self._breaker.on_failure()
             body = exc.read().decode("utf-8", errors="replace")[:500]
             return AiResult.unavailable("", f"HTTP {exc.code}: {body}")
         except Exception as exc:
+            self._breaker.on_failure()
             return AiResult.unavailable("", str(exc))
 
     # ── execute ────────────────────────────────────────────────────
@@ -141,11 +148,8 @@ class AiGatewayClient:
         timeout: float | None = None,
         poll_interval: float | None = None,
     ) -> AiResult:
-        """Async Codex execution via ``POST /v1/ai/execute/jobs`` + polling.
-
-        Uses CodexAdapter on the service side — ``codex exec`` subprocess.
-        Best for: monthly audits, auto-fix, backtest verification.
-        """
+        """Async Codex execution via ``POST /v1/ai/execute/jobs`` + polling."""
+        self._breaker.before_call()
         timeout = timeout or self.config.timeout_execute
         poll_interval = poll_interval or self.config.poll_interval
         started = time.time()
@@ -193,6 +197,7 @@ class AiGatewayClient:
 
                 status = status_data.get("status")
                 if status == "succeeded":
+                    self._breaker.on_success()
                     return AiResult(
                         provider="codex", model="codex-cli", success=True,
                         output=str(status_data.get("output", "")),
@@ -200,17 +205,23 @@ class AiGatewayClient:
                         raw=status_data,
                     )
                 if status == "failed":
+                    self._breaker.on_failure()
                     return AiResult(
                         provider="codex", model="codex-cli", success=False,
                         error=str(status_data.get("error", "")), raw=status_data,
                     )
 
+            self._breaker.on_failure()
             return AiResult.unavailable("codex", "Job polling timed out")
 
+        except CircuitBreakerOpenError:
+            return AiResult.unavailable("codex", "Circuit breaker open — service unavailable")
         except urllib.error.HTTPError as exc:
+            self._breaker.on_failure()
             body = exc.read().decode("utf-8", errors="replace")[:500]
             return AiResult.unavailable("codex", f"HTTP {exc.code}: {body}")
         except Exception as exc:
+            self._breaker.on_failure()
             return AiResult.unavailable("codex", str(exc))
 
     # ── review ─────────────────────────────────────────────────────
@@ -237,6 +248,7 @@ class AiGatewayClient:
             reviewers = [r.label for r in self.config.reviewers]
 
         try:
+            self._breaker.before_call()
             token = _fetch_oidc_token(self.config.audience)
             req_payload: dict[str, Any] = {
                 "task": "review",
@@ -269,25 +281,35 @@ class AiGatewayClient:
                     latency_seconds=float(r.get("latency_seconds", 0)),
                 ))
 
+            all_ok = bool(data.get("status") == "ok")
+            if all_ok:
+                self._breaker.on_success()
+            else:
+                self._breaker.on_failure()
             return ReviewResult(
                 results=results,
                 consensus=str(data.get("consensus", "unknown")),
-                all_success=bool(data.get("status") == "ok"),
+                all_success=all_ok,
                 recommended_action=data.get("recommended_action", {}),
             )
 
+        except CircuitBreakerOpenError:
+            return ReviewResult(
+                results=[AiResult.unavailable("circuit", "Circuit breaker open — service unavailable")],
+                consensus="unknown", all_success=False,
+            )
         except urllib.error.HTTPError as exc:
+            self._breaker.on_failure()
             body = exc.read().decode("utf-8", errors="replace")[:500]
             return ReviewResult(
                 results=[AiResult.unavailable("gateway", f"HTTP {exc.code}: {body}")],
-                consensus="unknown",
-                all_success=False,
+                consensus="unknown", all_success=False,
             )
         except Exception as exc:
+            self._breaker.on_failure()
             return ReviewResult(
                 results=[AiResult.unavailable("gateway", str(exc))],
-                consensus="unknown",
-                all_success=False,
+                consensus="unknown", all_success=False,
             )
 
     # ── feedback (Phase 3: closed-loop change tracking) ──────────────

@@ -1,10 +1,13 @@
 name: Codex PR Review
 
-# Always run on PRs to guarantee a check run exists for branch protection.
-# The Python script handles skip logic internally for trivial changes.
+# Runs on PRs AND can be called as a reusable workflow from other repos.
+# Consumer repos use:
+#   uses: QuantStrategyLab/CodexAuditBridge/.github/workflows/codex_pr_review.yml@main
+#   secrets: inherit
 on:
   pull_request:
     types: [opened, synchronize, reopened]
+  workflow_call:
 
 permissions:
   contents: read
