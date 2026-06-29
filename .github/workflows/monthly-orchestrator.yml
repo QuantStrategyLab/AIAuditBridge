@@ -1,0 +1,153 @@
+name: Monthly Audit Orchestrator
+
+on:
+  schedule:
+    - cron: "0 3 1 * *"
+  workflow_dispatch:
+    inputs:
+      month:
+        description: "Optional month override in YYYY-MM format"
+        required: false
+        default: ""
+      dry_run:
+        description: "Render the payload without creating or updating the issue"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  publish-monthly-issue:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Validate configuration
+        env:
+          AUDIT_TARGET_REPOS: ${{ vars.AUDIT_TARGET_REPOS }}
+          AUDIT_MONTHLY_LABEL: ${{ vars.AUDIT_MONTHLY_LABEL }}
+          AUDIT_AUTO_MERGE_LABEL: ${{ vars.AUDIT_AUTO_MERGE_LABEL }}
+          AUDIT_REVIEW_TITLE_PREFIX: ${{ vars.AUDIT_REVIEW_TITLE_PREFIX }}
+        run: |
+          set -euo pipefail
+          test -n "${AUDIT_TARGET_REPOS:-}"
+          test -n "${AUDIT_MONTHLY_LABEL:-}"
+          test -n "${AUDIT_AUTO_MERGE_LABEL:-}"
+          test -n "${AUDIT_REVIEW_TITLE_PREFIX:-}"
+          node <<'NODE'
+          const targets = (process.env.AUDIT_TARGET_REPOS || '')
+            .split(/[\n,]/)
+            .map(s => s.trim())
+            .filter(Boolean);
+          const invalid = targets.filter(target => !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]*SnapshotPipelines$/.test(target));
+          if (invalid.length > 0) {
+            throw new Error(`Monthly report audits are only for snapshot repositories; invalid targets: ${invalid.join(', ')}`);
+          }
+          NODE
+
+      - name: Publish monthly audit issue
+        uses: actions/github-script@v8
+        env:
+          AUDIT_TARGET_REPOS: ${{ vars.AUDIT_TARGET_REPOS }}
+          AUDIT_MONTHLY_LABEL: ${{ vars.AUDIT_MONTHLY_LABEL }}
+          AUDIT_AUTO_MERGE_LABEL: ${{ vars.AUDIT_AUTO_MERGE_LABEL }}
+          AUDIT_REVIEW_TITLE_PREFIX: ${{ vars.AUDIT_REVIEW_TITLE_PREFIX }}
+          MONTH_OVERRIDE: ${{ github.event.inputs.month }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const titlePrefix = process.env.AUDIT_REVIEW_TITLE_PREFIX || 'Monthly Audit Review';
+            const label = process.env.AUDIT_MONTHLY_LABEL || 'monthly-review';
+            const autoMergeLabel = process.env.AUDIT_AUTO_MERGE_LABEL || 'auto-merge-ok';
+            const targets = (process.env.AUDIT_TARGET_REPOS || '')
+              .split(/[\n,]/)
+              .map(s => s.trim())
+              .filter(Boolean);
+            if (targets.length === 0) {
+              throw new Error('AUDIT_TARGET_REPOS is empty');
+            }
+            const invalidTargets = targets.filter(target => !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]*SnapshotPipelines$/.test(target));
+            if (invalidTargets.length > 0) {
+              throw new Error(`Monthly report audits are only for snapshot repositories; invalid targets: ${invalidTargets.join(', ')}`);
+            }
+            const dryRun = String(process.env.DRY_RUN || '').toLowerCase() === 'true';
+            const monthOverride = (process.env.MONTH_OVERRIDE || '').trim();
+            const now = new Date();
+            const stamp = monthOverride || now.toISOString().slice(0, 7);
+            const title = `${titlePrefix}: ${stamp}`;
+            const payload = {
+              month: stamp,
+              title,
+              monthly_label: label,
+              auto_merge_label: autoMergeLabel,
+              targets,
+            };
+            const body = [
+              'This issue tracks the monthly audit orchestration run.',
+              '',
+              'Targets:',
+              ...targets.map(t => `- ${t}`),
+              '',
+              'Only snapshot artifact repositories are in scope for monthly report audits.',
+              '',
+              'Source of truth for policy and scheduling stays in GitHub Actions.',
+              '',
+              'Payload:',
+              '```json',
+              JSON.stringify(payload, null, 2),
+              '```',
+            ].join('\n');
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `# Monthly audit orchestration\n\n- Month: ${stamp}\n- Targets: ${targets.length}\n- Dry run: ${dryRun}\n- Issue title: ${title}\n`);
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `\n## Payload\n\n\`\`\`json\n${JSON.stringify(payload, null, 2)}\n\`\`\`\n`);
+            if (dryRun) {
+              console.log(`Dry run requested for ${title}`);
+              console.log(body);
+              return;
+            }
+
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: label,
+              per_page: 100,
+            });
+            const hit = existing.data.find(item => item.title === title);
+            if (hit) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: hit.number,
+                body: `Monthly audit orchestrator already exists for ${stamp}.`
+              });
+              return;
+            }
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body,
+              labels: [label],
+            });
+
+      - name: Trigger CodexAuditBridge
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.CODEX_AUDIT_DISPATCH_TOKEN || secrets.GITHUB_TOKEN }}
+          repository: QuantStrategyLab/CodexAuditBridge
+          event-type: monthly-audit
+          client-payload: |
+            {
+              "month": "${{ steps.resolve-month.outputs.month || github.event.inputs.month }}",
+              "orchestrator_run_id": "${{ github.run_id }}"
+            }
