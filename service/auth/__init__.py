@@ -179,7 +179,13 @@ def verify_github_oidc(
 
 
 def authenticate(headers: Any, *, audience: str = "quant-codex-audit") -> dict[str, Any]:
-    """Authenticate an incoming HTTP request. Returns OIDC claims on success."""
+    """Authenticate an incoming HTTP request. Returns claims on success.
+
+    Supports three auth modes:
+    1. github-oidc — validates RS256 JWT from GitHub Actions (default, production)
+    2. static-token — compares against CODEX_AUDIT_SERVICE_TOKEN (dashboard)
+    3. none — no auth, requires CODEX_AUDIT_SERVICE_ALLOW_NO_AUTH_FOR_LOCAL_TESTS=true
+    """
     mode = os.environ.get("CODEX_AUDIT_SERVICE_AUTH", "github-oidc").strip().lower()
     if mode == "none":
         if os.environ.get("CODEX_AUDIT_SERVICE_ALLOW_NO_AUTH_FOR_LOCAL_TESTS", "").strip().lower() not in {
@@ -188,7 +194,7 @@ def authenticate(headers: Any, *, audience: str = "quant-codex-audit") -> dict[s
             raise PermissionError(
                 "CODEX_AUDIT_SERVICE_AUTH=none requires CODEX_AUDIT_SERVICE_ALLOW_NO_AUTH_FOR_LOCAL_TESTS=true"
             )
-        return {"repository": "local", "actor": "local", "run_id": "local"}
+        return {"repository": "local", "actor": "local", "run_id": "local", "auth_method": "none"}
     authorization = str(headers.get("Authorization") or "")
     prefix = "Bearer "
     if not authorization.startswith(prefix):
@@ -196,6 +202,14 @@ def authenticate(headers: Any, *, audience: str = "quant-codex-audit") -> dict[s
     token = authorization[len(prefix):].strip()
     if not token:
         raise PermissionError("missing bearer token")
+
+    # Static token check — allows dashboard read-only access
+    static_token = os.environ.get("CODEX_AUDIT_SERVICE_TOKEN", "").strip()
+    if static_token and token == static_token:
+        return {"repository": "dashboard", "actor": "dashboard", "run_id": "dashboard", "auth_method": "static_token"}
+
     if mode in {"github-oidc", "oidc"}:
-        return verify_github_oidc(token, audience=audience)
+        claims = verify_github_oidc(token, audience=audience)
+        claims["auth_method"] = "github_oidc"
+        return claims
     raise PermissionError(f"unsupported CODEX_AUDIT_SERVICE_AUTH={mode!r}")

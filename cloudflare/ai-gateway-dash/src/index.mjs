@@ -13,82 +13,220 @@ const HTML = `<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AiGateway Dashboard</title>
+<title>AiGateway · QuantStrategyLab</title>
 <style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#0d1117;color:#c9d1d9;padding:20px}
-h1{font-size:20px;margin-bottom:4px}
-.sub{color:#8b949e;font-size:13px;margin-bottom:20px}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px}
-.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px}
-.card h2{font-size:14px;color:#8b949e;margin-bottom:10px;text-transform:uppercase;letter-spacing:.5px}
-.stat{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #21262d;font-size:13px}
-.stat:last-child{border-bottom:none}
-.stat .label{color:#8b949e}
-.stat .value{font-weight:600;font-variant-numeric:tabular-nums}
-.ok{color:#3fb950} .warn{color:#d29922} .err{color:#f85149} .info{color:#58a6ff}
-.badge{display:inline-block;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:600}
-.badge-ok{background:#1b3a1b;color:#3fb950}
-.badge-warn{background:#3a2f1b;color:#d29922}
-.badge-err{background:#3a1b1b;color:#f85149}
-.bar{height:6px;border-radius:3px;background:#21262d;margin-top:4px}
-.bar-fill{height:100%;border-radius:3px;transition:width .5s}
-.bar-ok{background:#3fb950} .bar-warn{background:#d29922} .bar-err{background:#f85149}
-table{width:100%;font-size:12px;border-collapse:collapse}
-th,td{padding:6px 8px;text-align:left;border-bottom:1px solid #21262d}
-th{color:#8b949e;font-weight:500}
-.refresh{color:#8b949e;font-size:11px;text-align:right;margin-top:8px}
-.error-msg{background:#3a1b1b;color:#f85149;padding:10px;border-radius:6px;margin-bottom:16px;display:none}
+  :root {
+    --bg: #0a0e14;
+    --surface: #131820;
+    --surface2: #1a212c;
+    --border: #253040;
+    --text: #c8d6e5;
+    --text2: #6b7d95;
+    --text3: #455368;
+    --green: #10b981;
+    --green-bg: rgba(16,185,129,0.10);
+    --amber: #f59e0b;
+    --amber-bg: rgba(245,158,11,0.10);
+    --red: #ef4444;
+    --red-bg: rgba(239,68,68,0.10);
+    --blue: #3b82f6;
+    --blue-bg: rgba(59,130,246,0.10);
+    --purple: #8b5cf6;
+    --radius: 12px;
+    --shadow: 0 1px 3px rgba(0,0,0,.4), 0 0 0 1px rgba(255,255,255,.03);
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{
+    font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+    background:var(--bg);
+    color:var(--text);
+    padding:24px 32px;
+    min-height:100vh;
+    -webkit-font-smoothing:antialiased;
+  }
+  /* Header */
+  .header{display:flex;align-items:center;gap:16px;margin-bottom:6px}
+  .header .logo{
+    width:40px;height:40px;border-radius:10px;
+    background:linear-gradient(135deg,var(--blue),var(--purple));
+    display:flex;align-items:center;justify-content:center;font-size:20px;
+  }
+  .header h1{font-size:22px;font-weight:700;letter-spacing:-.3px;color:#fff}
+  .status-bar{
+    display:flex;align-items:center;gap:20px;margin-bottom:24px;
+    font-size:13px;color:var(--text2);
+  }
+  .status-pill{
+    display:inline-flex;align-items:center;gap:6px;
+    padding:4px 12px;border-radius:20px;font-size:12px;font-weight:600;
+  }
+  .status-pill.ok{background:var(--green-bg);color:var(--green)}
+  .status-pill.warn{background:var(--amber-bg);color:var(--amber)}
+  .status-pill.err{background:var(--red-bg);color:var(--red)}
+  .pulse{width:8px;height:8px;border-radius:50%;display:inline-block}
+  .pulse.ok{background:var(--green);box-shadow:0 0 8px var(--green)}
+  .pulse.warn{background:var(--amber);box-shadow:0 0 8px var(--amber)}
+  .pulse.err{background:var(--red);box-shadow:0 0 8px var(--red)}
+
+  /* Grid */
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:16px;margin-bottom:16px}
+
+  /* Card */
+  .card{
+    background:var(--surface);border:1px solid var(--border);
+    border-radius:var(--radius);padding:20px;
+    box-shadow:var(--shadow);
+    transition:border-color .3s;
+  }
+  .card:hover{border-color:var(--text3)}
+  .card-header{display:flex;align-items:center;gap:8px;margin-bottom:16px}
+  .card-header .icon{font-size:16px;line-height:1}
+  .card-header h2{font-size:13px;font-weight:600;text-transform:uppercase;letter-spacing:.6px;color:var(--text2)}
+
+  /* Stats */
+  .stat-row{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid rgba(255,255,255,.04)}
+  .stat-row:last-child{border-bottom:none}
+  .stat-label{font-size:13px;color:var(--text2)}
+  .stat-value{font-size:13px;font-weight:600;font-variant-numeric:tabular-nums}
+  .stat-value.ok{color:var(--green)} .stat-value.warn{color:var(--amber)} .stat-value.err{color:var(--red)} .stat-value.info{color:var(--blue)}
+
+  /* Big number */
+  .big-number{font-size:32px;font-weight:800;letter-spacing:-1px;color:#fff;line-height:1}
+  .big-label{font-size:12px;color:var(--text2);margin-top:2px}
+
+  /* Progress bar */
+  .quota-item{margin-bottom:14px}
+  .quota-item:last-child{margin-bottom:0}
+  .quota-header{display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px}
+  .quota-repo{color:var(--text);font-weight:500}
+  .quota-amount{color:var(--text2);font-variant-numeric:tabular-nums}
+  .bar-track{height:6px;border-radius:6px;background:var(--surface2);overflow:hidden}
+  .bar-fill{height:100%;border-radius:6px;transition:width .6s cubic-bezier(.4,0,.2,1)}
+  .bar-fill.ok{background:linear-gradient(90deg,var(--green),#34d399)}
+  .bar-fill.warn{background:linear-gradient(90deg,var(--amber),#fbbf24)}
+  .bar-fill.err{background:linear-gradient(90deg,var(--red),#f87171)}
+
+  /* Badge */
+  .badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;letter-spacing:.3px}
+  .badge-ok{background:var(--green-bg);color:var(--green)}
+  .badge-warn{background:var(--amber-bg);color:var(--amber)}
+  .badge-err{background:var(--red-bg);color:var(--red)}
+  .badge-info{background:var(--blue-bg);color:var(--blue)}
+
+  /* Table */
+  table{width:100%;font-size:12px;border-collapse:collapse}
+  thead th{color:var(--text3);font-weight:500;font-size:11px;text-transform:uppercase;letter-spacing:.5px;padding:0 0 8px;text-align:left}
+  tbody td{padding:8px 0;border-bottom:1px solid rgba(255,255,255,.03);vertical-align:middle}
+  tbody tr:last-child td{border-bottom:none}
+  .mono{font-family:'JetBrains Mono','SF Mono',monospace;font-size:11px}
+
+  /* Empty */
+  .empty{text-align:center;padding:20px;color:var(--text3);font-size:13px}
+  .empty .icon{font-size:28px;margin-bottom:6px;opacity:.5}
+
+  /* Skeleton */
+  @keyframes shimmer{0%{background-position:-200px 0}100%{background-position:calc(200px + 100%) 0}}
+  .skeleton{background:linear-gradient(90deg,var(--surface2) 25%,var(--border) 50%,var(--surface2) 75%);background-size:200px 100%;animation:shimmer 1.5s infinite;border-radius:4px}
+  .sk-row{height:14px;margin-bottom:8px}
+  .sk-row:last-child{margin-bottom:0}
+
+  /* Footer */
+  .footer{text-align:right;font-size:11px;color:var(--text3);margin-top:8px}
+
+  /* Error toast */
+  .toast{
+    position:fixed;top:16px;right:16px;max-width:400px;
+    background:var(--red-bg);border:1px solid var(--red);color:var(--red);
+    padding:12px 16px;border-radius:var(--radius);font-size:13px;
+    display:none;z-index:100;animation:slideIn .3s ease;
+    box-shadow:0 4px 20px rgba(239,68,68,.15);
+  }
+  @keyframes slideIn{from{transform:translateX(20px);opacity:0}to{transform:translateX(0);opacity:1}}
+
+  /* Responsive */
+  @media(max-width:768px){body{padding:16px}.grid{grid-template-columns:1fr}.big-number{font-size:24px}}
 </style>
 </head>
 <body>
-<h1>🤖 AiGateway Operations</h1>
-<div class="sub">QuantStrategyLab · <span id="time"></span> · <span id="status-dot" class="ok">●</span> <span id="status-text">loading</span></div>
-<div class="error-msg" id="error"></div>
 
-<div class="grid">
-  <div class="card">
-    <h2>📊 Health</h2>
-    <div id="health"></div>
-  </div>
-  <div class="card">
-    <h2>💰 Quota</h2>
-    <div id="quota"></div>
-  </div>
-  <div class="card">
-    <h2>📈 Effectiveness (90d)</h2>
-    <div id="effectiveness"></div>
-  </div>
-  <div class="card">
-    <h2>🔍 Shadow Disagreements</h2>
-    <div id="shadow"></div>
-  </div>
-  <div class="card">
-    <h2>⚡ Recent Changes (7d)</h2>
-    <div id="changes"></div>
+<div class="toast" id="toast"></div>
+
+<!-- Header -->
+<div class="header">
+  <div class="logo">⚡</div>
+  <div>
+    <h1>AiGateway</h1>
   </div>
 </div>
-<div class="refresh">Auto-refresh: 30s · Last: <span id="last-refresh">—</span></div>
+<div class="status-bar">
+  QuantStrategyLab · <span id="time"></span>
+  <span class="status-pill ok" id="status-pill"><span class="pulse ok" id="pulse"></span><span id="status-text">连接中…</span></span>
+</div>
+
+<!-- Grid -->
+<div class="grid">
+  <!-- Health -->
+  <div class="card">
+    <div class="card-header"><span class="icon">📊</span><h2>服务健康</h2></div>
+    <div id="health"><div class="skeleton sk-row"></div><div class="skeleton sk-row"></div><div class="skeleton sk-row"></div></div>
+  </div>
+
+  <!-- Quota -->
+  <div class="card">
+    <div class="card-header"><span class="icon">💰</span><h2>配额消耗</h2></div>
+    <div id="quota"><div class="skeleton sk-row"></div><div class="skeleton sk-row"></div></div>
+  </div>
+
+  <!-- Effectiveness -->
+  <div class="card">
+    <div class="card-header"><span class="icon">📈</span><h2>有效性 · 90 天</h2></div>
+    <div id="effectiveness"><div class="skeleton sk-row"></div></div>
+  </div>
+
+  <!-- Shadow -->
+  <div class="card">
+    <div class="card-header"><span class="icon">🔍</span><h2>影子审计分歧</h2></div>
+    <div id="shadow"><div class="skeleton sk-row"></div></div>
+  </div>
+
+  <!-- Changes -->
+  <div class="card" style="grid-column:1/-1">
+    <div class="card-header"><span class="icon">⚡</span><h2>最近变更 · 7 天</h2></div>
+    <div id="changes"><div class="skeleton sk-row"></div></div>
+  </div>
+</div>
+
+<div class="footer">自动刷新 · 30s · 上次: <span id="last-refresh">—</span></div>
 
 <script>
 const API = "/api";
 let refreshTimer;
 
-async function fetchJSON(path) {
-  const resp = await fetch(API + path);
-  if (!resp.ok) throw new Error(path + ": " + resp.status);
-  return resp.json();
+function fmtUSD(n){return"$"+(n||0).toFixed(2)}
+function fmtPct(n){return((n||0)*100).toFixed(0)+"%"}
+function fmtNum(n){return(n||0).toLocaleString()}
+function t(tag,attrs,children){const el=document.createElement(tag);if(attrs)Object.entries(attrs).forEach(([k,v])=>{if(k==="cls")el.className=v;else if(k==="txt")el.textContent=v;else el.setAttribute(k,v)});if(children)el.innerHTML=children;return el}
+
+function showToast(msg){const e=document.getElementById("toast");e.textContent=msg;e.style.display="block";setTimeout(()=>e.style.display="none",5000)}
+
+function setStatus(st){
+  const pill=document.getElementById("status-pill");
+  const pulse=document.getElementById("pulse");
+  const txt=document.getElementById("status-text");
+  pill.className="status-pill "+(st==="healthy"?"ok":st==="degraded"?"warn":"err");
+  pulse.className="pulse "+(st==="healthy"?"ok":st==="degraded"?"warn":"err");
+  txt.textContent=st;
 }
 
-function fmtUSD(n) { return "$" + (n||0).toFixed(2); }
-function fmtPct(n) { return ((n||0)*100).toFixed(0) + "%"; }
-function fmtNum(n) { return (n||0).toLocaleString(); }
-function fmtTime(ts) { return new Date(ts*1000).toLocaleTimeString(); }
+async function fetchJSON(path){
+  const resp=await fetch(API+path);
+  if(!resp.ok)throw new Error(path+": "+resp.status);
+  return resp.json()
+}
 
-async function refresh() {
-  document.getElementById("error").style.display = "none";
-  try {
-    const [health, quota, eff, shadow, changes] = await Promise.all([
+async function refresh(){
+  try{
+    const[health,quota,eff,shadow,changes]=await Promise.all([
       fetchJSON("/v1/ai/health"),
       fetchJSON("/v1/ai/quota"),
       fetchJSON("/v1/ai/changes/effectiveness?days=90"),
@@ -96,95 +234,81 @@ async function refresh() {
       fetchJSON("/v1/ai/changes?days=7"),
     ]);
     renderHealth(health);
-    renderQuota(quota.quota || quota);
-    renderEffectiveness(eff.report || eff);
-    renderShadow(shadow.disagreements || []);
-    renderChanges((changes.changes || []).slice(0, 10));
-    document.getElementById("last-refresh").textContent = new Date().toLocaleTimeString();
-  } catch(e) {
-    document.getElementById("error").style.display = "block";
-    document.getElementById("error").textContent = "API error: " + e.message;
-  }
+    renderQuota(quota.quota||quota);
+    renderEffectiveness(eff.report||eff);
+    renderShadow(shadow.disagreements||[]);
+    renderChanges((changes.changes||[]).slice(0,15));
+    document.getElementById("last-refresh").textContent=new Date().toLocaleTimeString();
+    document.getElementById("time").textContent=new Date().toLocaleString();
+  }catch(e){showToast("API 错误: "+e.message)}
 }
 
-function renderHealth(h) {
-  const st = h.status || "unknown";
-  const dot = document.getElementById("status-dot");
-  const txt = document.getElementById("status-text");
-  dot.className = st === "healthy" ? "ok" : st === "degraded" ? "warn" : "err";
-  txt.textContent = st + " · uptime " + Math.round((h.uptime_seconds||0)/3600) + "h";
-  txt.className = st === "healthy" ? "ok" : st === "degraded" ? "warn" : "err";
-
-  let html = "";
-  for (const ep of (h.endpoints||[])) {
-    const cls = ep.error_rate > 0.1 ? "err" : ep.error_rate > 0.02 ? "warn" : "ok";
-    html += '<div class="stat"><span class="label">' + ep.path + '</span><span class="value ' + cls + '">'
-      + fmtNum(ep.total) + ' req · p95=' + ep.p95_ms + 'ms · err=' + fmtPct(ep.error_rate) + '</span></div>';
+function renderHealth(h){
+  setStatus(h.status||"unknown");
+  const st=h.status||"unknown";
+  let html='<div class="big-number">'+Math.round((h.uptime_seconds||0)/3600)+'<span style="font-size:16px;font-weight:400;color:var(--text2)"> h</span></div><div class="big-label">运行时间</div>';
+  html+='<div style="margin-top:14px">';
+  if(!(h.endpoints||[]).length){html+='<div class="empty"><div class="icon">📡</div>暂无流量</div>'}
+  else for(const ep of(h.endpoints||[])){
+    const cls=ep.error_rate>0.1?"err":ep.error_rate>0.02?"warn":"ok";
+    const shortPath=ep.path.replace("/v1/ai/","/").replace("/v1/codex-audit","/codex");
+    html+='<div class="stat-row"><span class="stat-label">'+shortPath+'</span><span class="stat-value '+cls+'">'+fmtNum(ep.total)+' req · p95 '+ep.p95_ms+'ms · err '+fmtPct(ep.error_rate)+'</span></div>';
   }
-  if (!(h.endpoints||[]).length) html = '<div class="stat"><span class="label">No traffic yet</span></div>';
-  document.getElementById("health").innerHTML = html;
+  html+='</div>';
+  document.getElementById("health").innerHTML=html
 }
 
-function renderQuota(q) {
-  const repos = q.repos || {};
-  if (Object.keys(repos).length === 0) {
-    document.getElementById("quota").innerHTML = '<div class="stat"><span class="label">No usage yet</span></div>';
-    return;
+function renderQuota(q){
+  const repos=q.repos||{};
+  if(Object.keys(repos).length===0){document.getElementById("quota").innerHTML='<div class="empty"><div class="icon">💳</div>暂无用量</div>';return}
+  let html='';
+  for(const[repo,r]of Object.entries(repos)){
+    const pct=r.daily_budget?(r.total_cost_usd||0)/r.daily_budget*100:0;
+    const cls=pct>80?"err":pct>50?"warn":"ok";
+    html+='<div class="quota-item"><div class="quota-header"><span class="quota-repo">'+(repo.split("/")[1]||repo)+'</span><span class="quota-amount">'+fmtUSD(r.total_cost_usd)+' / '+fmtUSD(r.daily_budget)+'</span></div><div class="bar-track"><div class="bar-fill '+cls+'" style="width:'+Math.min(pct,100)+'%"></div></div></div>';
   }
-  let html = "";
-  for (const [repo, r] of Object.entries(repos)) {
-    const pct = r.daily_budget ? (r.total_cost_usd||0) / r.daily_budget * 100 : 0;
-    const cls = pct > 80 ? "err" : pct > 50 ? "warn" : "ok";
-    html += '<div class="stat"><span class="label">' + repo.split("/")[1] + '</span>'
-      + '<span class="value ' + cls + '">' + fmtUSD(r.total_cost_usd) + ' / ' + fmtUSD(r.daily_budget) + '</span></div>';
-    html += '<div class="bar"><div class="bar-fill bar-' + cls + '" style="width:' + Math.min(pct,100) + '%"></div></div>';
-  }
-  document.getElementById("quota").innerHTML = html;
+  document.getElementById("quota").innerHTML=html
 }
 
-function renderEffectiveness(e) {
-  const rate = e.improvement_rate || 0;
-  let html = '<div class="stat"><span class="label">Changes evaluated</span><span class="value">' + e.evaluated + ' / ' + e.total_changes + '</span></div>';
-  html += '<div class="stat"><span class="label">Improved</span><span class="value ok">' + (e.improved||0) + '</span></div>';
-  html += '<div class="stat"><span class="label">Degraded</span><span class="value err">' + (e.degraded||0) + '</span></div>';
-  html += '<div class="stat"><span class="label">Neutral</span><span class="value">' + (e.neutral||0) + '</span></div>';
-  html += '<div class="stat"><span class="label">Success rate</span><span class="value ' + (rate>0.7?"ok":"warn") + '">' + fmtPct(rate) + '</span></div>';
-  document.getElementById("effectiveness").innerHTML = html;
+function renderEffectiveness(e){
+  const rate=e.improvement_rate||0;
+  let html='<div style="display:flex;gap:24px;margin-bottom:16px">';
+  html+='<div><div class="big-number" style="color:'+(rate>0.7?'var(--green)':'var(--amber)')+'">'+fmtPct(rate)+'</div><div class="big-label">成功率</div></div>';
+  html+='<div><div class="big-number">'+(e.evaluated||0)+'</div><div class="big-label">已评估</div></div>';
+  html+='</div>';
+  html+='<div class="stat-row"><span class="stat-label">📈 改善</span><span class="stat-value ok">'+(e.improved||0)+'</span></div>';
+  html+='<div class="stat-row"><span class="stat-label">📉 退化</span><span class="stat-value err">'+(e.degraded||0)+'</span></div>';
+  html+='<div class="stat-row"><span class="stat-label">➖ 持平</span><span class="stat-value">'+(e.neutral||0)+'</span></div>';
+  html+='<div class="stat-row"><span class="stat-label">⏳ 待评估</span><span class="stat-value info">'+(e.pending||0)+'</span></div>';
+  document.getElementById("effectiveness").innerHTML=html
 }
 
-function renderShadow(items) {
-  if (!items.length) {
-    document.getElementById("shadow").innerHTML = '<div class="stat"><span class="label ok">No active disagreements ✓</span></div>';
-    return;
+function renderShadow(items){
+  if(!items.length){document.getElementById("shadow").innerHTML='<div class="empty"><div class="icon">✅</div>无活跃分歧</div>';return}
+  let html='';
+  for(const d of items){
+    html+='<div class="stat-row"><span class="stat-label">'+d.plugin+'</span><span class="stat-value err"><span class="badge badge-err">'+d.disagreement_count+'x</span> '+(d.ai_verdict||"")+'</span></div>';
   }
-  let html = "";
-  for (const d of items) {
-    html += '<div class="stat"><span class="label">' + d.plugin + '</span><span class="value err">'
-      + d.disagreement_count + 'x · ' + (d.ai_verdict||"") + '</span></div>';
-  }
-  document.getElementById("shadow").innerHTML = html;
+  document.getElementById("shadow").innerHTML=html
 }
 
-function renderChanges(items) {
-  if (!items.length) {
-    document.getElementById("changes").innerHTML = '<div class="stat"><span class="label">No changes in window</span></div>';
-    return;
+function renderChanges(items){
+  if(!items.length){document.getElementById("changes").innerHTML='<div class="empty"><div class="icon">📋</div>窗口内无变更</div>';return}
+  let html='<table><thead><tr><th>仓库</th><th>操作</th><th>效果</th><th>置信度</th><th>时间</th></tr></thead><tbody>';
+  for(const c of items){
+    const eff=c.effect||"pending";
+    const effCls=eff==="improved"?"ok":eff==="degraded"?"err":"info";
+    const actionCls=c.action==="auto_merge"?"ok":c.action==="auto_pr"?"info":"warn";
+    const dt=c.created_at?new Date(c.created_at*1000).toLocaleDateString():"—";
+    html+='<tr><td><span class="mono">'+(c.repo||"").split("/")[1]+'</span></td><td><span class="badge badge-'+actionCls+'">'+c.action+'</span></td><td class="stat-value '+effCls+'">'+eff+'</td><td class="mono">'+fmtPct(c.confidence||0)+'</td><td class="mono" style="color:var(--text3)">'+dt+'</td></tr>';
   }
-  let html = '<table><tr><th>Repo</th><th>Action</th><th>Effect</th><th>Conf</th></tr>';
-  for (const c of items) {
-    const effCls = c.effect==="improved"?"ok":c.effect==="degraded"?"err":"";
-    html += '<tr><td>' + (c.repo||"").split("/")[1] + '</td>'
-      + '<td><span class="badge badge-' + (c.action==="auto_merge"?"ok":"warn") + '">' + c.action + '</span></td>'
-      + '<td class="' + effCls + '">' + (c.effect||"pending") + '</td>'
-      + '<td>' + fmtPct(c.confidence||0) + '</td></tr>';
-  }
-  html += '</table>';
-  document.getElementById("changes").innerHTML = html;
+  html+='</tbody></table>';
+  document.getElementById("changes").innerHTML=html
 }
 
-document.getElementById("time").textContent = new Date().toLocaleString();
+document.getElementById("time").textContent=new Date().toLocaleString();
 refresh();
-refreshTimer = setInterval(refresh, 30000);
+refreshTimer=setInterval(refresh,30000);
 </script>
 </body>
 </html>`;
