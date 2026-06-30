@@ -28,7 +28,6 @@ import re
 import secrets
 import shutil
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -37,7 +36,7 @@ from abc import ABC, abstractmethod
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 
 # ── Constants ────────────────────────────────────────────────────────

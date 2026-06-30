@@ -32,11 +32,9 @@ from typing import Any
 
 from service.auth import authenticate
 from service.contracts import (
-    MODE_REVIEW_AND_FIX,
     MODE_REVIEW_ONLY,
     TASK_ANALYZE,
     TASK_EXECUTE,
-    TASK_REVIEW,
     parse_analyze_request,
     parse_execute_request,
     parse_review_request,
@@ -44,9 +42,6 @@ from service.contracts import (
 from service.adapters.llm_adapter import LlmAdapter
 from service.adapters.codex_adapter import CodexAdapter
 from service.autonomy import (
-    AutonomyConfig,
-    extract_confidence,
-    classify_changes_risk,
     recommended_action as compute_recommended_action,
 )
 from service.feedback import (
@@ -764,7 +759,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
 
     def _handle_get_change(self, change_id: str) -> None:
         try:
-            claims = authenticate(self.headers, audience=DEFAULT_AUDIENCE)
+            authenticate(self.headers, audience=DEFAULT_AUDIENCE)
             record = read_change(change_id)
             _json_response(self, HTTPStatus.OK, {"status": "ok", "change": record.to_dict()})
         except FileNotFoundError:
@@ -775,7 +770,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
     def _handle_list_changes(self) -> None:
         from urllib.parse import urlparse, parse_qs
         try:
-            claims = authenticate(self.headers, audience=DEFAULT_AUDIENCE)
+            authenticate(self.headers, audience=DEFAULT_AUDIENCE)
         except PermissionError as exc:
             _json_response(self, HTTPStatus.UNAUTHORIZED, {"status": "error", "error": str(exc)})
             return
@@ -792,7 +787,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
     def _handle_effectiveness(self) -> None:
         from urllib.parse import urlparse, parse_qs
         try:
-            claims = authenticate(self.headers, audience=DEFAULT_AUDIENCE)
+            authenticate(self.headers, audience=DEFAULT_AUDIENCE)
         except PermissionError as exc:
             _json_response(self, HTTPStatus.UNAUTHORIZED, {"status": "error", "error": str(exc)})
             return
@@ -805,7 +800,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
 
     def _handle_get_shadow(self) -> None:
         try:
-            claims = authenticate(self.headers, audience=DEFAULT_AUDIENCE)
+            authenticate(self.headers, audience=DEFAULT_AUDIENCE)
             _json_response(self, HTTPStatus.OK, {
                 "status": "ok",
                 "disagreements": get_shadow_disagreements(),
@@ -816,7 +811,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
     def _handle_quota_status(self) -> None:
         from urllib.parse import urlparse, parse_qs
         try:
-            claims = authenticate(self.headers, audience=DEFAULT_AUDIENCE)
+            authenticate(self.headers, audience=DEFAULT_AUDIENCE)
         except PermissionError as exc:
             _json_response(self, HTTPStatus.UNAUTHORIZED, {"status": "error", "error": str(exc)})
             return

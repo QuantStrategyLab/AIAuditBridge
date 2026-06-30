@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from client.config import GatewayConfig
-from client.errors import AiGatewayError, AuthenticationError, ServiceUnavailableError, TimeoutError, CircuitBreaker, CircuitBreakerOpenError
+from client.errors import AuthenticationError, CircuitBreaker, CircuitBreakerOpenError
 
 
 @dataclass(frozen=True)
@@ -393,7 +393,7 @@ class AiGatewayClient:
 
     def get_quota(self, repo: str = "") -> dict[str, Any]:
         """Get quota status for a repo or all repos."""
-        path = f"/v1/ai/quota" if not repo else f"/v1/ai/quota?repo={repo}"
+        path = "/v1/ai/quota" if not repo else f"/v1/ai/quota?repo={repo}"
         return self._get_json(path).get("quota", {})
 
     def get_health(self) -> dict[str, Any]:

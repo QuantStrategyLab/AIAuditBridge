@@ -145,7 +145,7 @@ def classify_file_risk(
     file_path: str, policy: dict[str, Any]
 ) -> tuple[str, str]:
     """Return (risk_level, reason) for a single file path."""
-    policy_errors = policy.get("policy_errors", [])
+    policy.get("policy_errors", [])
 
     # Blocked patterns (secrets, credentials, etc.)
     blocked_patterns = policy.get("blocked_path_patterns", [])
@@ -685,7 +685,7 @@ def _format_finding(index: int, finding: dict[str, Any]) -> list[str]:
 
     lines = [
         f"#### {index}. {emoji} [{severity.upper()}] {category.title()} in `{file_path}`",
-        f"",
+        "",
         f"> {description}",
     ]
     if line:

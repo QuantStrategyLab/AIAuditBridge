@@ -50,10 +50,6 @@ class EndpointMetrics:
             self.error_count += 1
             self.error_samples.append((now, error_type))
         self.latency_samples.append(latency)
-        # Prune old samples
-        cutoff = now - WINDOW_SECONDS
-        while self.latency_samples and self.latency_samples[0] < cutoff:
-            self.latency_samples.popleft()
 
     @property
     def error_rate(self) -> float:
@@ -68,9 +64,12 @@ class EndpointMetrics:
 
     @property
     def recent_total(self) -> int:
-        """Total requests in the current window."""
-        cutoff = time.time() - WINDOW_SECONDS
-        lat = sum(1 for l in self.latency_samples if l >= cutoff)  # rough estimate
+        """Total requests in the recent window.
+
+        Uses the count of latency samples (bounded by MAX_WINDOW_SAMPLES)
+        and the count of recent errors as a conservative estimate.
+        """
+        lat = len(self.latency_samples)
         err = self.recent_errors
         return max(lat, err)  # conservative
 

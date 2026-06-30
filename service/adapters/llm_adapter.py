@@ -17,7 +17,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from typing import Any, Sequence
+from typing import Sequence
 
 _logger = logging.getLogger(__name__)
 

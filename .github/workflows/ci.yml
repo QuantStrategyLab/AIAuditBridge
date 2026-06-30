@@ -19,11 +19,12 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Run Python tests
+      - name: Run Python lint and tests
         run: |
           set -euo pipefail
           python3 -m pip install --upgrade pip
-          python3 -m pip install pytest
+          python3 -m pip install pytest ruff
+          python3 -m ruff check .
           python3 -m pytest tests -q
 
       - uses: actions/setup-node@v6

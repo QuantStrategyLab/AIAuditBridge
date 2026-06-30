@@ -135,7 +135,7 @@ class QuotaManager:
 
     def __init__(self):
         self._records: dict[str, QuotaRecord] = {}
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._model_costs = dict(DEFAULT_MODEL_COSTS)
         self._daily_budget = DEFAULT_DAILY_BUDGET_USD
         self._weekly_budget = DEFAULT_WEEKLY_BUDGET_USD
