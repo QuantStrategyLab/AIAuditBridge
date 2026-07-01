@@ -30,10 +30,10 @@ jobs:
     steps:
       - name: Validate configuration
         env:
-          AUDIT_TARGET_REPOS: ${{ vars.AUDIT_TARGET_REPOS }}
-          AUDIT_MONTHLY_LABEL: ${{ vars.AUDIT_MONTHLY_LABEL }}
-          AUDIT_AUTO_MERGE_LABEL: ${{ vars.AUDIT_AUTO_MERGE_LABEL }}
-          AUDIT_REVIEW_TITLE_PREFIX: ${{ vars.AUDIT_REVIEW_TITLE_PREFIX }}
+          AUDIT_TARGET_REPOS: ${{ vars.AUDIT_TARGET_REPOS || 'QuantStrategyLab/HkEquitySnapshotPipelines,QuantStrategyLab/UsEquitySnapshotPipelines' }}
+          AUDIT_MONTHLY_LABEL: ${{ vars.AUDIT_MONTHLY_LABEL || 'monthly-review' }}
+          AUDIT_AUTO_MERGE_LABEL: ${{ vars.AUDIT_AUTO_MERGE_LABEL || 'auto-merge-ok' }}
+          AUDIT_REVIEW_TITLE_PREFIX: ${{ vars.AUDIT_REVIEW_TITLE_PREFIX || 'Monthly Audit Review' }}
         run: |
           set -euo pipefail
           test -n "${AUDIT_TARGET_REPOS:-}"
@@ -51,14 +51,32 @@ jobs:
           }
           NODE
 
+      - name: Resolve month
+        id: resolve-month
+        env:
+          MONTH_OVERRIDE: ${{ github.event.inputs.month }}
+        run: |
+          set -euo pipefail
+          if [ -n "${MONTH_OVERRIDE:-}" ]; then
+            month="${MONTH_OVERRIDE}"
+          else
+            month="$(date -u +%Y-%m)"
+          fi
+          if ! printf '%s' "${month}" | grep -Eq '^[0-9]{4}-[0-9]{2}$'; then
+            echo "Invalid month: ${month}" >&2
+            exit 1
+          fi
+          echo "month=${month}" >> "$GITHUB_OUTPUT"
+
       - name: Publish monthly audit issue
+        id: publish-monthly-issue
         uses: actions/github-script@v8
         env:
-          AUDIT_TARGET_REPOS: ${{ vars.AUDIT_TARGET_REPOS }}
-          AUDIT_MONTHLY_LABEL: ${{ vars.AUDIT_MONTHLY_LABEL }}
-          AUDIT_AUTO_MERGE_LABEL: ${{ vars.AUDIT_AUTO_MERGE_LABEL }}
-          AUDIT_REVIEW_TITLE_PREFIX: ${{ vars.AUDIT_REVIEW_TITLE_PREFIX }}
-          MONTH_OVERRIDE: ${{ github.event.inputs.month }}
+          AUDIT_TARGET_REPOS: ${{ vars.AUDIT_TARGET_REPOS || 'QuantStrategyLab/HkEquitySnapshotPipelines,QuantStrategyLab/UsEquitySnapshotPipelines' }}
+          AUDIT_MONTHLY_LABEL: ${{ vars.AUDIT_MONTHLY_LABEL || 'monthly-review' }}
+          AUDIT_AUTO_MERGE_LABEL: ${{ vars.AUDIT_AUTO_MERGE_LABEL || 'auto-merge-ok' }}
+          AUDIT_REVIEW_TITLE_PREFIX: ${{ vars.AUDIT_REVIEW_TITLE_PREFIX || 'Monthly Audit Review' }}
+          MONTH_OVERRIDE: ${{ steps.resolve-month.outputs.month }}
           DRY_RUN: ${{ github.event.inputs.dry_run }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -90,6 +108,8 @@ jobs:
               auto_merge_label: autoMergeLabel,
               targets,
             };
+            core.setOutput('month', stamp);
+            core.setOutput('title', title);
             const body = [
               'This issue tracks the monthly audit orchestration run.',
               '',
@@ -97,6 +117,7 @@ jobs:
               ...targets.map(t => `- ${t}`),
               '',
               'Only snapshot artifact repositories are in scope for monthly report audits.',
+              'Each source repository owns its monthly review issue and dispatches CodexAuditBridge with source_repo and issue_number.',
               '',
               'Source of truth for policy and scheduling stays in GitHub Actions.',
               '',
@@ -128,26 +149,32 @@ jobs:
                 issue_number: hit.number,
                 body: `Monthly audit orchestrator already exists for ${stamp}.`
               });
+              core.setOutput('issue_number', String(hit.number));
+              core.setOutput('issue_url', hit.html_url);
               return;
             }
 
-            await github.rest.issues.create({
+            const created = await github.rest.issues.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
               title,
               body,
               labels: [label],
             });
+            core.setOutput('issue_number', String(created.data.number));
+            core.setOutput('issue_url', created.data.html_url);
 
-      - name: Trigger CodexAuditBridge
+      - name: Record source-owned audit dispatch
         if: ${{ github.event.inputs.dry_run != 'true' }}
-        uses: peter-evans/repository-dispatch@v3
-        with:
-          token: ${{ secrets.CODEX_AUDIT_DISPATCH_TOKEN || secrets.GITHUB_TOKEN }}
-          repository: QuantStrategyLab/CodexAuditBridge
-          event-type: monthly-audit
-          client-payload: |
-            {
-              "month": "${{ steps.resolve-month.outputs.month || github.event.inputs.month }}",
-              "orchestrator_run_id": "${{ github.run_id }}"
-            }
+        run: |
+          set -euo pipefail
+          {
+            echo
+            echo "## Source-owned audit dispatch"
+            echo
+            echo "- Month: ${{ steps.resolve-month.outputs.month }}"
+            echo "- Tracking issue: ${{ steps.publish-monthly-issue.outputs.issue_url }}"
+            echo
+            echo "CodexAuditBridge execution requires a source repository issue number."
+            echo "The source repositories create those issues in their own monthly workflows, then dispatch codex_audit.yml with source_repo and issue_number."
+          } >> "$GITHUB_STEP_SUMMARY"
