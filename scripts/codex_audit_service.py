@@ -599,21 +599,68 @@ def _find_existing_job(dedupe_key: str) -> tuple[str, dict[str, Any]] | None:
     return None
 
 
+def _service_git_token() -> str:
+    for env_name in ("CROSS_REPO_GIT_TOKEN", "GH_TOKEN"):
+        raw = os.environ.get(env_name, "").strip()
+        if raw:
+            return raw
+    return ""
+
+
+def _git_auth_env(token: str) -> dict[str, str] | None:
+    if not token:
+        return None
+    encoded = base64.b64encode(f"x-access-token:{token}".encode("utf-8")).decode("ascii")
+    env = dict(os.environ)
+    env.update(
+        {
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
+            "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {encoded}",
+        }
+    )
+    return env
+
+
+def _redact_clone_error(text: str, token: str) -> str:
+    redacted = text
+    if token:
+        redacted = redacted.replace(token, "[REDACTED]")
+        redacted = redacted.replace(
+            base64.b64encode(f"x-access-token:{token}".encode("utf-8")).decode("ascii"),
+            "[REDACTED]",
+        )
+    redacted = re.sub(
+        r"https://x-access-token:[^\s@]+@github\.com/",
+        "https://x-access-token:[REDACTED]@github.com/",
+        redacted,
+    )
+    return redacted
+
+
 def _prepare_repo(repo: str, ref: str, tmp: Path) -> Path:
     """Clone a repository and return the checkout path."""
     repo_dir = tmp / "repo"
-    token = ""
-    for env_name in ("CROSS_REPO_GITHUB_APP_PRIVATE_KEY", "CROSS_REPO_GIT_TOKEN", "GH_TOKEN"):
-        raw = os.environ.get(env_name, "").strip()
-        if raw:
-            token = raw
-            break
-    url = f"https://x-access-token:{token}@github.com/{repo}" if token else f"https://github.com/{repo}"
+    token = _service_git_token()
+    url = f"https://github.com/{repo}.git"
     shutil.rmtree(repo_dir, ignore_errors=True)
-    subprocess.run(
-        ["git", "clone", "--depth=1", "--branch", ref, url, str(repo_dir)],
-        capture_output=True, text=True, check=True, timeout=120,
-    )
+    try:
+        subprocess.run(
+            ["git", "clone", "--depth=1", "--branch", ref, url, str(repo_dir)],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=120,
+            env=_git_auth_env(token),
+        )
+    except subprocess.CalledProcessError as exc:
+        output = "\n".join(part.strip() for part in (exc.stdout, exc.stderr) if part and part.strip())
+        if len(output) > 1200:
+            output = f"...\n{output[-1200:]}"
+        detail = f"git clone failed for {repo}@{ref} with exit code {exc.returncode}"
+        if output:
+            detail = f"{detail}:\n{_redact_clone_error(output, token)}"
+        raise RuntimeError(detail) from exc
     return repo_dir
 
 
@@ -718,15 +765,18 @@ def _run_job_background(job_id: str, payload: dict[str, Any]) -> None:
     """Background thread for execute tasks (repo clone + codex exec)."""
     _update_job(job_id, "running")
     try:
-        with tempfile.TemporaryDirectory(prefix="ai-gateway-") as tmp:
-            repo_dir = _prepare_repo(
-                payload["source_repository"],
-                payload.get("source_ref", "main"),
-                Path(tmp),
-            )
-            output = _run_task(payload, repo_dir=repo_dir)
-            _update_job(job_id, "succeeded", output=output)
-    except (RuntimeError, subprocess.TimeoutExpired, OSError) as exc:
+        if os.environ.get("CODEX_AUDIT_SERVICE_FAKE_OUTPUT") is not None:
+            output = _run_task(payload, repo_dir=None)
+        else:
+            with tempfile.TemporaryDirectory(prefix="ai-gateway-") as tmp:
+                repo_dir = _prepare_repo(
+                    payload["source_repository"],
+                    payload.get("source_ref", "main"),
+                    Path(tmp),
+                )
+                output = _run_task(payload, repo_dir=repo_dir)
+        _update_job(job_id, "succeeded", output=output)
+    except (RuntimeError, subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
         _update_job(job_id, "failed", error=str(exc))
 
 

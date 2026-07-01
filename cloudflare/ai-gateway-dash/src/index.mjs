@@ -18,6 +18,13 @@ const COOKIE_NAME = "dash_session";
 const STATE_COOKIE_NAME = "dash_oauth_state";
 const COOKIE_MAX_AGE = 86400; // 24h
 const SESSION_SECRET_LENGTH = 32;
+const DASHBOARD_API_ROUTES = new Set([
+  "/v1/ai/health",
+  "/v1/ai/quota",
+  "/v1/ai/changes",
+  "/v1/ai/changes/effectiveness",
+  "/v1/ai/feedback/shadow",
+]);
 
 // ── HTML templates ─────────────────────────────────────────────────────
 
@@ -258,11 +265,31 @@ function getSession(token) {
 
 // ── API proxy ──────────────────────────────────────────────────────────
 
-async function proxyAPI(path, env) {
-  const origin = (env.AI_GATEWAY_ORIGIN_URL || "").trim();
-  if (!origin) throw new Error("AI_GATEWAY_ORIGIN_URL not configured");
+function withoutTrailingSlash(pathname) {
+  return pathname.replace(/\/+$/, "");
+}
+
+function allowedDashboardApiPath(pathname) {
+  const clean = withoutTrailingSlash(pathname);
+  return DASHBOARD_API_ROUTES.has(clean) ? clean : "";
+}
+
+export function buildDashboardApiUrl(rawOrigin, pathname, search = "") {
+  if (!rawOrigin || !rawOrigin.trim()) throw new Error("AI_GATEWAY_ORIGIN_URL not configured");
+  const clean = allowedDashboardApiPath(pathname);
+  if (!clean) throw new Error("dashboard API route is not allowed");
+  const origin = new URL(rawOrigin.trim());
+  if (origin.protocol !== "https:") throw new Error("AI_GATEWAY_ORIGIN_URL must use HTTPS");
+  const basePath = withoutTrailingSlash(origin.pathname);
+  origin.pathname = !basePath || basePath === "/" ? clean : basePath + clean;
+  origin.search = search;
+  origin.hash = "";
+  return origin.toString();
+}
+
+async function proxyAPI(path, search, env) {
   const token = (env.DASHBOARD_API_TOKEN || "").trim();
-  const url = origin.replace(/\/+$/, "") + path;
+  const url = buildDashboardApiUrl(env.AI_GATEWAY_ORIGIN_URL || "", path, search);
   const resp = await fetch(url, {
     headers: { Authorization: token ? "Bearer " + token : "", Accept: "application/json", "User-Agent": "AiGatewayDashboard/1.0" },
   });
@@ -373,7 +400,7 @@ export default {
 
       const apiPath = path.slice(4);
       try {
-        return await proxyAPI(apiPath, env);
+        return await proxyAPI(apiPath, url.search, env);
       } catch (e) {
         return json({ status: "error", error: e.message }, 502);
       }

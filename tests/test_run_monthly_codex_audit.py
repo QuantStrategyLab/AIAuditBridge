@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import tempfile
 import threading
 import time
@@ -578,6 +579,55 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
                 finally:
                     server.shutdown()
                     server.server_close()
+
+    def test_codex_audit_service_background_job_marks_clone_failure_failed_without_secret(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            token = "test-token-value"
+            captured: dict[str, object] = {}
+            payload = {
+                "source_repository": "QuantStrategyLab/CryptoLivePoolPipelines",
+                "source_ref": "main",
+                "task": "monthly_snapshot_audit",
+                "mode": "review_only",
+                "prompt": "Review this snapshot.",
+                "timeout_seconds": 60,
+            }
+
+            def fail_clone(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+                captured["command"] = command
+                captured["env"] = kwargs.get("env")
+                raise subprocess.CalledProcessError(
+                    128,
+                    command,
+                    stderr=f"fatal: authentication failed for {token}",
+                )
+
+            env = {
+                "CODEX_AUDIT_SERVICE_JOB_DIR": tmp,
+                "CROSS_REPO_GIT_TOKEN": token,
+            }
+            with (
+                patch.dict(os.environ, env, clear=False),
+                patch.object(codex_audit_service.subprocess, "run", side_effect=fail_clone),
+            ):
+                job_id = "a" * 24
+                codex_audit_service._write_job(job_id, payload, "dedupe-key")
+                codex_audit_service._run_job_background(job_id, payload)
+                job = codex_audit_service._read_job(job_id)
+
+            self.assertIsNotNone(job)
+            self.assertEqual(job["status"], "failed")
+            self.assertIn("git clone failed", job["error"])
+            self.assertNotIn(token, job["error"])
+            self.assertIn("[REDACTED]", job["error"])
+            command = captured.get("command")
+            self.assertIsInstance(command, list)
+            command_text = " ".join(command)
+            self.assertNotIn(token, command_text)
+            self.assertIn("https://github.com/QuantStrategyLab/CryptoLivePoolPipelines.git", command_text)
+            env_value = captured["env"]
+            self.assertIsInstance(env_value, dict)
+            self.assertEqual(env_value.get("GIT_CONFIG_KEY_0"), "http.https://github.com/.extraheader")
 
     def test_codex_audit_service_deduplicates_active_audit_jobs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

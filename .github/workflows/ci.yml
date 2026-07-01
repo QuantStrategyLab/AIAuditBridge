@@ -31,8 +31,8 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Run Cloudflare proxy tests
-        working-directory: cloudflare/codex-audit-proxy
+      - name: Run Cloudflare Worker tests
         run: |
           set -euo pipefail
-          node --experimental-default-type=module --test tests/index.test.mjs
+          node --experimental-default-type=module --test cloudflare/codex-audit-proxy/tests/index.test.mjs
+          node --experimental-default-type=module --test cloudflare/ai-gateway-dash/tests/index.test.mjs
