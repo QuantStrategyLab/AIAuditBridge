@@ -100,6 +100,14 @@ DEFAULT_SERVICE_AUDIENCE = "quant-codex-audit"
 DEFAULT_SERVICE_CONTEXT_MAX_BYTES = 700_000
 DEFAULT_SERVICE_CONTEXT_MAX_FILE_BYTES = 80_000
 DEFAULT_SERVICE_MAX_CHANGES = 20
+SERVICE_INFRA_FAILURE_EXIT_CODE = 75
+SERVICE_INFRA_FAILURE_CATEGORIES = frozenset(
+    {
+        "auth_or_config_failure",
+        "quota_or_capacity_failure",
+        "transient_service_failure",
+    }
+)
 SERVICE_CONTEXT_TEXT_SUFFIXES = frozenset(
     {
         ".cfg",
@@ -159,6 +167,46 @@ BLOCKED_PATH_RE = re.compile(
 )
 class BridgeError(RuntimeError):
     pass
+
+
+def classify_service_failure(error: str) -> str:
+    text = error.lower()
+    if any(word in text for word in ("permission", "unauth", "forbidden", "oidc", "token", "allow", "secret")):
+        return "auth_or_config_failure"
+    if any(word in text for word in ("quota", "rate limit", "too many active", "budget")):
+        return "quota_or_capacity_failure"
+    if any(word in text for word in ("timeout", "timed out", "temporarily", "unavailable", "connection", "network")):
+        return "transient_service_failure"
+    if any(word in text for word in ("json", "contract", "parse", "patch")):
+        return "patch_contract_failure"
+    return "unknown_failure"
+
+
+def service_failure_category(message: str) -> str:
+    match = re.search(r"\[([a-z_]+_failure)\]", message)
+    if match:
+        return match.group(1)
+    return classify_service_failure(message)
+
+
+def is_service_infrastructure_failure(message: str) -> bool:
+    return service_failure_category(message) in SERVICE_INFRA_FAILURE_CATEGORIES
+
+
+def service_infrastructure_failure_comment(reason: str) -> str:
+    category = service_failure_category(reason)
+    return "\n".join(
+        [
+            "## Codex Audit",
+            "",
+            "CodexAuditBridge stopped before making repository changes because the service backend failed outside the source PR/test surface.",
+            "",
+            f"- Failure category: `{category}`",
+            f"- Detail: `{reason[:600]}`",
+            "",
+            "No files were pushed and no PR feedback retry is needed for this run.",
+        ]
+    )
 
 
 class GitHubRequestError(BridgeError):
@@ -826,6 +874,7 @@ def request_codex_service(
     mode: str,
     prompt: str,
     timeout_minutes: int,
+    issue_number: int | None = None,
 ) -> str:
     audience = env_value("CODEX_AUDIT_SERVICE_AUDIENCE", DEFAULT_SERVICE_AUDIENCE)
     service_url = normalize_codex_service_url(env_value("CODEX_AUDIT_SERVICE_URL"))
@@ -837,6 +886,8 @@ def request_codex_service(
         "prompt": prompt,
         "timeout_seconds": timeout_minutes * 60,
     }
+    if issue_number is not None:
+        payload["issue_number"] = issue_number
     submit_payload = request_codex_service_json(
         method="POST",
         url=codex_service_jobs_url(service_url),
@@ -869,7 +920,8 @@ def request_codex_service(
             return output.strip()
         if status == "failed":
             error = str(job_payload.get("error") or "unknown service job failure")
-            raise BridgeError(f"Codex audit service job failed: {error[:600]}")
+            category = str(job_payload.get("failure_category") or classify_service_failure(error))
+            raise BridgeError(f"Codex audit service job failed [{category}]: {error[:600]}")
         if status not in {"queued", "running"}:
             raise BridgeError(f"Codex audit service job returned unexpected status: {status!r}")
     raise BridgeError("Codex audit service job timed out before completion")
@@ -960,6 +1012,7 @@ def run_codex_service(
     source_ref: str,
     task: str,
     mode: str,
+    issue_number: int | None = None,
 ) -> tuple[int, str, str]:
     try:
         service_prompt = build_service_prompt(repo_dir, prompt, task=task, mode=mode)
@@ -970,6 +1023,7 @@ def run_codex_service(
             mode=mode,
             prompt=service_prompt,
             timeout_minutes=timeout_minutes,
+            issue_number=issue_number,
         )
         final_message = output
         if mode == "review_and_fix":
@@ -979,7 +1033,9 @@ def run_codex_service(
         output_path.write_text(final_message.rstrip() + "\n", encoding="utf-8")
         return 0, output, final_message.strip()
     except (BridgeError, OSError, json.JSONDecodeError, urllib.error.URLError) as exc:
-        return 1, str(exc), ""
+        message = str(exc)
+        code = SERVICE_INFRA_FAILURE_EXIT_CODE if is_service_infrastructure_failure(message) else 1
+        return code, message, ""
 
 
 def run_codex_backend(
@@ -992,6 +1048,7 @@ def run_codex_backend(
     source_ref: str,
     task: str,
     mode: str,
+    issue_number: int | None = None,
 ) -> tuple[int, str, str]:
     if backend == "service":
         return run_codex_service(
@@ -1002,6 +1059,7 @@ def run_codex_backend(
             source_ref=source_ref,
             task=task,
             mode=mode,
+            issue_number=issue_number,
         )
     raise BridgeError(f"Unsupported Codex backend: {backend!r}")
 
@@ -2663,8 +2721,12 @@ def main() -> int:
                 source_ref=source_ref,
                 task=task,
                 mode=mode,
+                issue_number=issue_number,
             )
             if return_code != 0:
+                if return_code == SERVICE_INFRA_FAILURE_EXIT_CODE or is_service_infrastructure_failure(_codex_log):
+                    post_issue_comment(token, source_repo, issue_number, service_infrastructure_failure_comment(_codex_log))
+                    return 0
                 if provider == "auto":
                     return run_auto_provider_fallback(
                         token=token,

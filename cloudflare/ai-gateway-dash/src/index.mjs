@@ -15,6 +15,7 @@ const GITHUB_API_USER = "https://api.github.com/user";
 const GITHUB_API_ORGS = "https://api.github.com/user/orgs";
 const REQUIRED_ORG = "QuantStrategyLab";
 const COOKIE_NAME = "dash_session";
+const STATE_COOKIE_NAME = "dash_oauth_state";
 const COOKIE_MAX_AGE = 86400; // 24h
 const SESSION_SECRET_LENGTH = 32;
 
@@ -148,21 +149,31 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   <div class="card" style="grid-column:1/-1"><div class="card-header"><span class="icon">⚡</span><h2>最近变更 · 7 天</h2></div><div id="changes"><div class="skeleton sk-row"></div></div></div>
 </div>
 <div class="footer">自动刷新 · 30s · 上次: <span id="last-refresh">—</span></div>
-<script>
-const API="/api";let refreshTimer;
-function fmtUSD(n){return"$"+(n||0).toFixed(2)}function fmtPct(n){return((n||0)*100).toFixed(0)+"%"}function fmtNum(n){return(n||0).toLocaleString()}
-function showToast(msg){const e=document.getElementById("toast");e.textContent=msg;e.style.display="block";setTimeout(()=>e.style.display="none",5000)}
-function setStatus(st){const p=document.getElementById("status-pill"),pl=document.getElementById("pulse"),t=document.getElementById("status-text");p.className="status-pill "+(st==="healthy"?"ok":st==="degraded"?"warn":"err");pl.className="pulse "+(st==="healthy"?"ok":st==="degraded"?"warn":"err");t.textContent=st}
-async function fetchJSON(path){const r=await fetch(API+path);if(!r.ok)throw new Error(path+": "+r.status);return r.json()}
-async function refresh(){try{const[h,q,e,s,c]=await Promise.all([fetchJSON("/v1/ai/health"),fetchJSON("/v1/ai/quota"),fetchJSON("/v1/ai/changes/effectiveness?days=90"),fetchJSON("/v1/ai/feedback/shadow"),fetchJSON("/v1/ai/changes?days=7")]);renderHealth(h);renderQuota(q.quota||q);renderEffectiveness(e.report||e);renderShadow(s.disagreements||[]);renderChanges((c.changes||[]).slice(0,15));document.getElementById("last-refresh").textContent=new Date().toLocaleTimeString();document.getElementById("time").textContent=new Date().toLocaleString()}catch(e){showToast("API: "+e.message)}}
-function renderHealth(h){setStatus(h.status||"unknown");let t='<div class="big-number">'+Math.round((h.uptime_seconds||0)/3600)+'<span style="font-size:16px;font-weight:400;color:var(--text2)"> h</span></div><div class="big-label">运行时间</div><div style="margin-top:14px">';if(!(h.endpoints||[]).length)t+='<div class="empty"><div class="icon">📡</div>暂无流量</div>';else for(const e of(h.endpoints||[])){const c=e.error_rate>0.1?"err":e.error_rate>0.02?"warn":"ok";t+='<div class="stat-row"><span class="stat-label">'+e.path.replace("/v1/ai/","/")+'</span><span class="stat-value '+c+'">'+fmtNum(e.total)+' req · p95 '+e.p95_ms+'ms · err '+fmtPct(e.error_rate)+'</span></div>'}t+='</div>';document.getElementById("health").innerHTML=t}
-function renderQuota(q){const r=q.repos||{};if(!Object.keys(r).length){document.getElementById("quota").innerHTML='<div class="empty"><div class="icon">💳</div>暂无用量</div>';return}let t="";for(const[n,d]of Object.entries(r)){const p=d.daily_budget?(d.total_cost_usd||0)/d.daily_budget*100:0,c=p>80?"err":p>50?"warn":"ok";t+='<div class="quota-item"><div class="quota-header"><span class="quota-repo">'+(n.split("/")[1]||n)+'</span><span class="quota-amount">'+fmtUSD(d.total_cost_usd)+' / '+fmtUSD(d.daily_budget)+'</span></div><div class="bar-track"><div class="bar-fill '+c+'" style="width:'+Math.min(p,100)+'%"></div></div></div>'}document.getElementById("quota").innerHTML=t}
-function renderEffectiveness(e){const r=e.improvement_rate||0;let t='<div style="display:flex;gap:24px;margin-bottom:16px">';t+='<div><div class="big-number" style="color:'+(r>0.7?'var(--green)':'var(--amber)')+'">'+fmtPct(r)+'</div><div class="big-label">成功率</div></div>';t+='<div><div class="big-number">'+(e.evaluated||0)+'</div><div class="big-label">已评估</div></div></div>';t+='<div class="stat-row"><span class="stat-label">📈 改善</span><span class="stat-value ok">'+(e.improved||0)+'</span></div>';t+='<div class="stat-row"><span class="stat-label">📉 退化</span><span class="stat-value err">'+(e.degraded||0)+'</span></div>';t+='<div class="stat-row"><span class="stat-label">➖ 持平</span><span class="stat-value">'+(e.neutral||0)+'</span></div>';t+='<div class="stat-row"><span class="stat-label">⏳ 待评估</span><span class="stat-value info">'+(e.pending||0)+'</span></div>';document.getElementById("effectiveness").innerHTML=t}
-function renderShadow(i){if(!i.length){document.getElementById("shadow").innerHTML='<div class="empty"><div class="icon">✅</div>无活跃分歧</div>';return}let t="";for(const d of i)t+='<div class="stat-row"><span class="stat-label">'+d.plugin+'</span><span class="stat-value err"><span class="badge badge-err">'+d.disagreement_count+'x</span> '+(d.ai_verdict||"")+'</span></div>';document.getElementById("shadow").innerHTML=t}
-function renderChanges(i){if(!i.length){document.getElementById("changes").innerHTML='<div class="empty"><div class="icon">📋</div>窗口内无变更</div>';return}let t='<table><thead><tr><th>仓库</th><th>操作</th><th>效果</th><th>置信度</th><th>时间</th></tr></thead><tbody>';for(const c of i){const e=c.effect||"pending",ec=e==="improved"?"ok":e==="degraded"?"err":"info",ac=c.action==="auto_merge"?"ok":c.action==="auto_pr"?"info":"warn",dt=c.created_at?new Date(c.created_at*1000).toLocaleDateString():"—";t+='<tr><td><span class="mono">'+(c.repo||"").split("/")[1]+'</span></td><td><span class="badge badge-'+ac+'">'+c.action+'</span></td><td class="stat-value '+ec+'">'+e+'</td><td class="mono">'+fmtPct(c.confidence||0)+'</td><td class="mono" style="color:var(--text3)">'+dt+'</td></tr>'}t+='</tbody></table>';document.getElementById("changes").innerHTML=t}
-async function loadUser(){try{const r=await fetch("/api/user");if(r.ok){const u=await r.json();document.getElementById("username").textContent=u.login;document.getElementById("avatar").src=u.avatar_url}}catch(e){}}
-document.getElementById("time").textContent=new Date().toLocaleString();loadUser();refresh();refreshTimer=setInterval(refresh,30000);
-</script>
+	<script>
+	const API="/api";let refreshTimer;
+	function fmtUSD(n){return "$"+(Number(n)||0).toFixed(2)}
+	function fmtPct(n){return ((Number(n)||0)*100).toFixed(0)+"%"}
+	function fmtNum(n){return (Number(n)||0).toLocaleString()}
+	function clsStatus(st){return st==="healthy"?"ok":st==="degraded"?"warn":"err"}
+	function clear(el){el.replaceChildren()}
+	function el(tag, className, text){const n=document.createElement(tag);if(className)n.className=className;if(text!==undefined)n.textContent=String(text);return n}
+	function append(parent){for(let i=1;i<arguments.length;i++)parent.appendChild(arguments[i]);return parent}
+	function showToast(msg){const e=document.getElementById("toast");e.textContent=msg;e.style.display="block";setTimeout(()=>e.style.display="none",5000)}
+	function setStatus(st){const c=clsStatus(st),p=document.getElementById("status-pill"),pl=document.getElementById("pulse"),t=document.getElementById("status-text");p.className="status-pill "+c;pl.className="pulse "+c;t.textContent=st}
+	function empty(target, icon, text){const box=el("div","empty");append(box,el("div","icon",icon),document.createTextNode(text));clear(target);target.appendChild(box)}
+	function statRow(label,value,valueClass){const row=el("div","stat-row");append(row,el("span","stat-label",label),el("span","stat-value "+(valueClass||""),value));return row}
+	function badge(kind,text){return el("span","badge badge-"+kind,text)}
+	async function fetchJSON(path){const r=await fetch(API+path);if(!r.ok)throw new Error(path+": "+r.status);return r.json()}
+	async function refresh(){try{const[h,q,e,s,c]=await Promise.all([fetchJSON("/v1/ai/health"),fetchJSON("/v1/ai/quota"),fetchJSON("/v1/ai/changes/effectiveness?days=90"),fetchJSON("/v1/ai/feedback/shadow"),fetchJSON("/v1/ai/changes?days=7")]);renderHealth(h);renderQuota(q.quota||q);renderEffectiveness(e.report||e);renderShadow(s.disagreements||[]);renderChanges((c.changes||[]).slice(0,15));document.getElementById("last-refresh").textContent=new Date().toLocaleTimeString();document.getElementById("time").textContent=new Date().toLocaleString()}catch(e){showToast("API: "+e.message)}}
+	function renderHealth(h){setStatus(h.status||"unknown");const target=document.getElementById("health");clear(target);const hours=el("div","big-number",Math.round((h.uptime_seconds||0)/3600));const unit=el("span","");unit.style.fontSize="16px";unit.style.fontWeight="400";unit.style.color="var(--text2)";unit.textContent=" h";hours.appendChild(unit);append(target,hours,el("div","big-label","运行时间"));const rows=el("div","");rows.style.marginTop="14px";if(!(h.endpoints||[]).length){append(rows,append(el("div","empty"),el("div","icon","📡"),document.createTextNode("暂无流量")))}else{for(const item of h.endpoints||[]){const c=item.error_rate>0.1?"err":item.error_rate>0.02?"warn":"ok";const path=String(item.path||"").replace("/v1/ai/","/");rows.appendChild(statRow(path,fmtNum(item.total)+" req · p95 "+fmtNum(item.p95_ms)+"ms · err "+fmtPct(item.error_rate),c))}}target.appendChild(rows)}
+	function renderQuota(q){const target=document.getElementById("quota"),repos=q.repos||{};clear(target);if(!Object.keys(repos).length){empty(target,"💳","暂无用量");return}for(const name of Object.keys(repos)){const d=repos[name]||{},p=d.daily_budget?(Number(d.total_cost_usd)||0)/(Number(d.daily_budget)||1)*100:0,c=p>80?"err":p>50?"warn":"ok";const item=el("div","quota-item"),head=el("div","quota-header"),track=el("div","bar-track"),bar=el("div","bar-fill "+c);bar.style.width=Math.max(0,Math.min(p,100))+"%";append(head,el("span","quota-repo",String(name).split("/")[1]||name),el("span","quota-amount",fmtUSD(d.total_cost_usd)+" / "+fmtUSD(d.daily_budget)));append(track,bar);append(item,head,track);target.appendChild(item)}}
+	function renderEffectiveness(e){const target=document.getElementById("effectiveness"),rate=Number(e.improvement_rate)||0;clear(target);const top=el("div","");top.style.display="flex";top.style.gap="24px";top.style.marginBottom="16px";const success=el("div",""),rateNode=el("div","big-number",fmtPct(rate));rateNode.style.color=rate>0.7?"var(--green)":"var(--amber)";append(success,rateNode,el("div","big-label","成功率"));const evaluated=append(el("div",""),el("div","big-number",e.evaluated||0),el("div","big-label","已评估"));append(top,success,evaluated);append(target,top,statRow("📈 改善",e.improved||0,"ok"),statRow("📉 退化",e.degraded||0,"err"),statRow("➖ 持平",e.neutral||0,""),statRow("⏳ 待评估",e.pending||0,"info"))}
+	function renderShadow(items){const target=document.getElementById("shadow");clear(target);if(!items.length){empty(target,"✅","无活跃分歧");return}for(const d of items){const row=el("div","stat-row"),label=el("span","stat-label",d.plugin||""),value=el("span","stat-value err");append(value,badge("err",(d.disagreement_count||0)+"x"),document.createTextNode(" "+(d.ai_verdict||"")));append(row,label,value);target.appendChild(row)}}
+	function renderChanges(items){const target=document.getElementById("changes");clear(target);if(!items.length){empty(target,"📋","窗口内无变更");return}const table=el("table",""),thead=el("thead",""),tr=el("tr","");for(const h of ["仓库","操作","效果","置信度","时间"])tr.appendChild(el("th","",h));thead.appendChild(tr);const tbody=el("tbody","");for(const c of items){const effect=c.effect||"pending",effectClass=effect==="improved"?"ok":effect==="degraded"?"err":"info",actionClass=c.action==="auto_merge"?"ok":c.action==="auto_pr"?"info":"warn",dt=c.created_at?new Date(c.created_at*1000).toLocaleDateString():"—",row=el("tr","");append(row,append(el("td",""),el("span","mono",String(c.repo||"").split("/")[1]||"")),append(el("td",""),badge(actionClass,c.action||"")),el("td","stat-value "+effectClass,effect),el("td","mono",fmtPct(c.confidence||0)),el("td","mono",dt));row.lastChild.style.color="var(--text3)";tbody.appendChild(row)}append(table,thead,tbody);target.appendChild(table)}
+	function safeAvatarUrl(value){try{const u=new URL(value);return u.protocol==="https:"?u.toString():""}catch(e){return ""}}
+	async function loadUser(){try{const r=await fetch("/api/user");if(r.ok){const u=await r.json();document.getElementById("username").textContent=u.login||"";document.getElementById("avatar").src=safeAvatarUrl(u.avatar_url)}}catch(e){}}
+	document.getElementById("time").textContent=new Date().toLocaleString();loadUser();refresh();refreshTimer=setInterval(refresh,30000);
+	</script>
 </body></html>`;
 
 // ── Helpers ────────────────────────────────────────────────────────────
@@ -181,14 +192,24 @@ function html(body, status = 200) {
   });
 }
 
-function redirect(url) {
-  return new Response(null, { status: 302, headers: { Location: url } });
+function redirect(url, headers = {}) {
+  return new Response(null, { status: 302, headers: { Location: url, ...headers } });
 }
 
 function getCookie(request, name) {
   const cookie = request.headers.get("Cookie") || "";
   const match = cookie.match(new RegExp(name + "=([^;]+)"));
   return match ? match[1] : "";
+}
+
+function cookieValue(name, value, maxAge, { httpOnly = true } = {}) {
+  const flags = ["Path=/", "Secure", "SameSite=Lax", "Max-Age=" + maxAge];
+  if (httpOnly) flags.push("HttpOnly");
+  return name + "=" + value + "; " + flags.join("; ");
+}
+
+function clearCookieValue(name) {
+  return name + "=; Path=/; Secure; SameSite=Lax; HttpOnly; Max-Age=0";
 }
 
 async function githubAPI(path, token) {
@@ -248,7 +269,7 @@ async function proxyAPI(path, env) {
   const body = await resp.text();
   return new Response(body, {
     status: resp.status,
-    headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store", "Access-Control-Allow-Origin": "*" },
+    headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" },
   });
 }
 
@@ -262,7 +283,12 @@ export default {
     // ── OAuth callback ─────────────────────────────────────────────
     if (path === "/callback") {
       const code = url.searchParams.get("code");
+      const state = url.searchParams.get("state") || "";
+      const expectedState = getCookie(request, STATE_COOKIE_NAME);
       if (!code) return redirect("/?error=" + encodeURIComponent("缺少授权码"));
+      if (!state || !expectedState || state !== expectedState) {
+        return redirect("/?error=" + encodeURIComponent("OAuth state 校验失败"));
+      }
 
       try {
         // Exchange code for access token
@@ -293,12 +319,12 @@ export default {
 
         // Create session
         const sessionToken = createSession(user);
+        const headers = new Headers({ Location: "/" });
+        headers.append("Set-Cookie", cookieValue(COOKIE_NAME, sessionToken, COOKIE_MAX_AGE));
+        headers.append("Set-Cookie", clearCookieValue(STATE_COOKIE_NAME));
         return new Response(null, {
           status: 302,
-          headers: {
-            Location: "/",
-            "Set-Cookie": COOKIE_NAME + "=" + sessionToken + "; Path=/; HttpOnly; SameSite=Lax; Max-Age=" + COOKIE_MAX_AGE,
-          },
+          headers,
         });
       } catch (e) {
         return redirect("/?error=" + encodeURIComponent("登录失败: " + e.message));
@@ -309,11 +335,13 @@ export default {
     if (path === "/login") {
       const clientId = env.GITHUB_OAUTH_CLIENT_ID;
       if (!clientId) return html("<h1>OAuth 未配置</h1><p>请设置 GITHUB_OAUTH_CLIENT_ID 和 GITHUB_OAUTH_CLIENT_SECRET 环境变量</p>", 500);
+      const state = generateSessionToken();
       const authUrl = GITHUB_OAUTH_AUTHORIZE
         + "?client_id=" + encodeURIComponent(clientId)
         + "&redirect_uri=" + encodeURIComponent(url.origin + "/callback")
-        + "&scope=read:org";
-      return redirect(authUrl);
+        + "&scope=read:org"
+        + "&state=" + encodeURIComponent(state);
+      return redirect(authUrl, { "Set-Cookie": cookieValue(STATE_COOKIE_NAME, state, 600) });
     }
 
     // ── Logout ─────────────────────────────────────────────────────
@@ -324,7 +352,7 @@ export default {
         status: 302,
         headers: {
           Location: "/",
-          "Set-Cookie": COOKIE_NAME + "=; Path=/; Max-Age=0",
+          "Set-Cookie": clearCookieValue(COOKIE_NAME),
         },
       });
     }

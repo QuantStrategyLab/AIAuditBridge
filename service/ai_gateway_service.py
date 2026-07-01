@@ -17,6 +17,7 @@ Backward-compatible aliases:
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
 import re
@@ -64,6 +65,8 @@ DEFAULT_AUDIENCE = "quant-codex-audit"
 DEFAULT_MAX_REQUEST_BYTES = 2_000_000
 DEFAULT_JOB_TTL_SECONDS = 86_400
 DEFAULT_JOB_MAX_ACTIVE = 10
+ACTIVE_JOB_STATUSES = frozenset({"queued", "running"})
+WRITE_AUTH_METHODS = frozenset({"github_oidc", "none"})
 
 # sandbox allowlist — restrict what callers can request
 ALLOWED_SANDBOXES: frozenset[str] = frozenset(
@@ -171,6 +174,12 @@ def _validate_source_repo_org(claims: dict[str, Any], source_repository: str) ->
             f"source_repository org {source_org!r} does not match "
             f"OIDC repository org {claims_org!r}"
         )
+
+
+def _assert_write_authz(claims: dict[str, Any], path: str) -> None:
+    auth_method = str(claims.get("auth_method") or "")
+    if auth_method not in WRITE_AUTH_METHODS:
+        raise PermissionError(f"{auth_method or 'unknown'} is not allowed to call {path}")
 
 
 # ── sandbox validation ─────────────────────────────────────────────────
@@ -330,7 +339,47 @@ def _public_job_payload(job: dict[str, Any]) -> dict[str, object]:
         payload["output"] = str(job.get("output") or "")
     if job.get("status") == "failed":
         payload["error"] = str(job.get("error") or "")
+        payload["failure_category"] = str(job.get("failure_category") or "unknown_failure")
     return payload
+
+
+def _job_dedupe_key(payload: dict[str, Any]) -> str:
+    issue_number = str(payload.get("issue_number") or "").strip()
+    prompt_hash = hashlib.sha256(str(payload.get("prompt") or "").encode("utf-8")).hexdigest()
+    parts = [
+        str(payload.get("source_repository") or ""),
+        str(payload.get("source_ref") or ""),
+        str(payload.get("task") or TASK_EXECUTE),
+        str(payload.get("mode") or MODE_REVIEW_ONLY),
+        issue_number or prompt_hash,
+    ]
+    return hashlib.sha256(json.dumps(parts, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _classify_failure(error: str) -> str:
+    text = error.lower()
+    if any(word in text for word in ("permission", "unauth", "forbidden", "oidc", "token", "allow", "secret")):
+        return "auth_or_config_failure"
+    if any(word in text for word in ("quota", "rate limit", "too many active", "budget")):
+        return "quota_or_capacity_failure"
+    if any(word in text for word in ("timeout", "timed out", "temporarily", "unavailable", "connection", "network")):
+        return "transient_service_failure"
+    if any(word in text for word in ("json", "contract", "parse", "patch")):
+        return "patch_contract_failure"
+    return "unknown_failure"
+
+
+def _find_active_job_by_dedupe_key(dedupe_key: str) -> dict[str, Any] | None:
+    if os.environ.get("CODEX_AUDIT_SERVICE_DEDUPE_JOBS", "true").strip().lower() in {"0", "false", "no", "off"}:
+        return None
+    for path in _job_dir().glob("*.json"):
+        try:
+            job = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if job.get("dedupe_key") == dedupe_key and job.get("status") in ACTIVE_JOB_STATUSES:
+            return _mark_stale_job_failed(job)
+    return None
 
 
 def _run_job(job_id: str, payload: dict[str, Any]) -> None:
@@ -355,6 +404,7 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
         else:
             job["status"] = "failed"
             job["error"] = result.error
+            job["failure_category"] = _classify_failure(result.error)
         job["updated_at"] = _now()
         _write_job(job)
         _audit_log("job_completed", job_id=job_id, status=job["status"],
@@ -367,6 +417,7 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
         job["status"] = "failed"
         job["updated_at"] = _now()
         job["error"] = str(exc)[-4000:]
+        job["failure_category"] = _classify_failure(str(exc))
         _write_job(job)
         _audit_log("job_failed", job_id=job_id, error=type(exc).__name__,
                    repository=job.get("repository"))
@@ -374,6 +425,12 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
 
 def _submit_job(claims: dict[str, Any], payload: dict[str, Any]) -> dict[str, object]:
     _cleanup_expired_jobs()
+    dedupe_key = _job_dedupe_key(payload)
+    existing_job = _find_active_job_by_dedupe_key(dedupe_key)
+    if existing_job is not None and existing_job.get("status") in ACTIVE_JOB_STATUSES:
+        public = _public_job_payload(existing_job)
+        public["deduped"] = True
+        return public
 
     # check active job cap
     max_active = _positive_int_env("CODEX_AUDIT_SERVICE_MAX_ACTIVE_JOBS", DEFAULT_JOB_MAX_ACTIVE)
@@ -399,6 +456,7 @@ def _submit_job(claims: dict[str, Any], payload: dict[str, Any]) -> dict[str, ob
         "task": str(payload.get("task") or TASK_EXECUTE),
         "mode": str(payload.get("mode") or MODE_REVIEW_ONLY),
         "timeout_seconds": int(payload.get("timeout_seconds", 2700)),
+        "dedupe_key": dedupe_key,
     }
     _write_job(job)
     _audit_log("job_submitted", job_id=job_id, repository=job["repository"],
@@ -498,18 +556,25 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
 
             # Route by path
             if self.path in {"/v1/ai/analyze"}:
+                _assert_write_authz(claims, self.path)
                 self._handle_analyze(payload)
             elif self.path in {"/v1/ai/feedback/register"}:
+                _assert_write_authz(claims, self.path)
                 self._handle_feedback_register(claims, payload)
             elif self.path in {"/v1/ai/feedback/evaluate"}:
+                _assert_write_authz(claims, self.path)
                 self._handle_feedback_evaluate(payload)
             elif self.path in {"/v1/ai/feedback/shadow"}:
+                _assert_write_authz(claims, self.path)
                 self._handle_feedback_shadow(payload)
             elif self.path in {"/v1/ai/execute/jobs", "/v1/codex-audit/jobs"}:
+                _assert_write_authz(claims, self.path)
                 self._handle_execute_async(claims, payload)
             elif self.path in {"/v1/ai/execute", "/v1/codex-audit"}:
-                self._handle_execute_sync(payload)
+                _assert_write_authz(claims, self.path)
+                self._handle_execute_sync(claims, payload)
             elif self.path in {"/v1/ai/review"}:
+                _assert_write_authz(claims, self.path)
                 self._handle_review(payload)
             else:
                 _json_response(self, HTTPStatus.NOT_FOUND, {"status": "error", "error": "not found"})
@@ -607,9 +672,23 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         job = _submit_job(claims, payload)
         _json_response(self, HTTPStatus.ACCEPTED, job)
 
-    def _handle_execute_sync(self, payload: dict[str, Any]) -> None:
+    def _handle_execute_sync(self, claims: dict[str, Any], payload: dict[str, Any]) -> None:
         """POST /v1/ai/execute — sync Codex execution (backward compat)."""
         req = parse_execute_request(payload)
+        source_repo = str(payload.get("source_repository") or "")
+        if source_repo:
+            _validate_source_repo(source_repo)
+            _validate_source_repo_org(claims, source_repo)
+        quota_repo = source_repo or str(claims.get("repository") or "unknown")
+        quota = get_quota_manager()
+        qr = quota.check(quota_repo, "codex-cli", req.prompt)
+        if not qr["allowed"]:
+            _json_response(self, HTTPStatus.TOO_MANY_REQUESTS, {
+                "status": "error", "error": qr["reason"],
+                "remaining_usd": qr.get("remaining_usd", 0),
+            })
+            return
+        quota.record_execute(quota_repo)
         adapter = CodexAdapter()
         sandbox = _validate_sandbox(str(payload.get("sandbox") or ""))
         result = adapter.execute(

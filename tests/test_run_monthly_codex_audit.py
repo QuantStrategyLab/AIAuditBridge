@@ -24,6 +24,7 @@ from scripts.run_monthly_codex_audit import (
     blocked_paths,
     build_api_review_prompt,
     build_service_prompt,
+    classify_service_failure,
     classify_guarded_auto_merge_risk,
     codex_service_job_url,
     codex_service_jobs_url,
@@ -56,6 +57,8 @@ from scripts.run_monthly_codex_audit import (
     run_configured_api_reviews,
     run_api_patch_provider,
     run_auto_provider_fallback,
+    service_failure_category,
+    is_service_infrastructure_failure,
     safe_branch_component,
     strip_audit_heading,
     validate_codex_backend,
@@ -523,6 +526,12 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         with self.assertRaises(BridgeError):
             codex_service_job_url(service_url, "short")
 
+    def test_service_failure_classification_identifies_infra_failures(self) -> None:
+        self.assertEqual(classify_service_failure("OIDC token is expired"), "auth_or_config_failure")
+        self.assertEqual(service_failure_category("Codex audit service job failed [quota_or_capacity_failure]: budget"), "quota_or_capacity_failure")
+        self.assertTrue(is_service_infrastructure_failure("Codex audit service job failed [transient_service_failure]: timed out"))
+        self.assertFalse(is_service_infrastructure_failure("Codex audit service job failed [patch_contract_failure]: invalid JSON"))
+
     def test_codex_audit_service_async_job_lifecycle(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             env = {
@@ -566,6 +575,53 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
                     self.assertEqual(polled["status"], "succeeded")
                     self.assertEqual(polled["output"], "async review output")
                     self.assertNotIn("prompt", polled)
+                finally:
+                    server.shutdown()
+                    server.server_close()
+
+    def test_codex_audit_service_deduplicates_active_audit_jobs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "CODEX_AUDIT_SERVICE_AUTH": "none",
+                "CODEX_AUDIT_SERVICE_ALLOW_NO_AUTH_FOR_LOCAL_TESTS": "true",
+                "CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES": "QuantStrategyLab/CryptoLivePoolPipelines",
+                "CODEX_AUDIT_SERVICE_JOB_DIR": tmp,
+            }
+            with (
+                patch.dict(os.environ, env, clear=False),
+                patch.object(codex_audit_service, "_run_job_background", side_effect=lambda *_args: time.sleep(0.2)),
+            ):
+                server = ThreadingHTTPServer(("127.0.0.1", 0), CodexAuditServiceRequestHandler)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    base_url = f"http://127.0.0.1:{server.server_port}"
+                    payload = {
+                        "source_repository": "QuantStrategyLab/CryptoLivePoolPipelines",
+                        "source_ref": "main",
+                        "issue_number": 42,
+                        "task": "monthly_snapshot_audit",
+                        "mode": "review_only",
+                        "prompt": "Review this snapshot.",
+                        "timeout_seconds": 60,
+                    }
+
+                    def submit() -> dict[str, object]:
+                        request = urllib.request.Request(
+                            f"{base_url}/v1/codex-audit/jobs",
+                            data=json.dumps(payload).encode("utf-8"),
+                            method="POST",
+                            headers={"Content-Type": "application/json"},
+                        )
+                        with urllib.request.urlopen(request, timeout=5) as response:
+                            self.assertEqual(response.status, 202)
+                            return json.loads(response.read().decode("utf-8"))
+
+                    first = submit()
+                    second = submit()
+
+                    self.assertEqual(second["job_id"], first["job_id"])
+                    self.assertTrue(second["deduped"])
                 finally:
                     server.shutdown()
                     server.server_close()

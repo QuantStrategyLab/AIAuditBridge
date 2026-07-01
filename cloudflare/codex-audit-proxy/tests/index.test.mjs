@@ -76,3 +76,28 @@ test("worker rejects malformed job ids before origin lookup", async () => {
   assert.equal(response.status, 404);
   assert.deepEqual(await response.json(), { status: "error", error: "not found" });
 });
+
+test("worker allows authenticated job status polling subroutes", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    assert.equal(url, `https://origin.example/v1/codex-audit/jobs/${JOB_ID}`);
+    assert.equal(init.method, "GET");
+    return new Response(JSON.stringify({ status: "queued" }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+
+  try {
+    const response = await worker.fetch(
+      new Request(`https://proxy.example/v1/codex-audit/jobs/${JOB_ID}`, {
+        headers: { Authorization: "Bearer test-token" },
+      }),
+      { CODEX_AUDIT_ORIGIN_URL: "https://origin.example" },
+    );
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { status: "queued" });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

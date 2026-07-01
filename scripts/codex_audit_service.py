@@ -51,7 +51,9 @@ _JWKS_CACHE_EXPIRES_AT = 0.0
 _JOB_WRITE_LOCK = threading.Lock()
 
 SUPPORTED_TASKS = frozenset({"analyze", "execute"})
+AUDIT_EXECUTE_TASKS = frozenset({"monthly_snapshot_audit", "long_horizon_signal_shadow"})
 SUPPORTED_MODES = frozenset({"review_only", "review_and_fix"})
+ACTIVE_JOB_STATUSES = frozenset({"queued", "running"})
 
 
 # ── Adapter Protocol ──────────────────────────────────────────────────
@@ -233,9 +235,16 @@ _ADAPTER_REGISTRY: dict[str, AiAdapter] = {
 }
 
 
+def _adapter_task(task: str, model: str) -> str:
+    resolved_task = task or _detect_task_from_model(model)
+    if resolved_task in AUDIT_EXECUTE_TASKS:
+        return "execute"
+    return resolved_task
+
+
 def resolve_adapter(task: str, model: str) -> AiAdapter:
     """Resolve the adapter for a task. Auto-detect analyze vs execute from model if task is empty."""
-    resolved_task = task or _detect_task_from_model(model)
+    resolved_task = _adapter_task(task, model)
     adapter = _ADAPTER_REGISTRY.get(resolved_task)
     if adapter is None:
         raise ValueError(f"Unsupported task={resolved_task!r}. Supported: {sorted(_ADAPTER_REGISTRY)}")
@@ -393,13 +402,15 @@ def _authenticate(headers: Any) -> dict[str, Any]:
         allow = os.environ.get("CODEX_AUDIT_SERVICE_ALLOW_NO_AUTH_FOR_LOCAL_TESTS", "")
         if allow.strip().lower() not in {"1", "true", "yes", "on"}:
             raise PermissionError("AUTH=none requires ALLOW_NO_AUTH_FOR_LOCAL_TESTS=true")
-        return {"repository": "local", "actor": "local"}
+        return {"repository": "local", "actor": "local", "auth_method": "none"}
     auth = str(headers.get("Authorization") or "")
     if not auth.startswith("Bearer "):
         raise PermissionError("Missing bearer token")
     token = auth[7:].strip()
     if mode in {"github-oidc", "oidc"}:
-        return _verify_github_oidc(token)
+        claims = _verify_github_oidc(token)
+        claims["auth_method"] = "github_oidc"
+        return claims
     raise PermissionError(f"Unsupported auth mode: {mode}")
 
 
@@ -416,19 +427,32 @@ def _validate_payload(payload: dict[str, Any]) -> None:
     # If no task specified, auto-detect from model
     if not task:
         task = _detect_task_from_model(model)
-    if task not in SUPPORTED_TASKS:
+    if task not in SUPPORTED_TASKS and task not in AUDIT_EXECUTE_TASKS:
         raise ValueError(f"Unsupported task: {task!r}")
 
     if mode not in SUPPORTED_MODES:
         raise ValueError(f"Unsupported mode: {mode!r}")
 
-    if task == "execute":
+    if _adapter_task(task, payload.get("model", "")) == "execute":
         source_repo = payload.get("source_repository")
         if not isinstance(source_repo, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", source_repo):
             raise ValueError("source_repository required for execute tasks")
         allowed = _split_csv_env("CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES")
         if allowed and source_repo not in allowed:
             raise PermissionError(f"source_repository {source_repo} not allowed")
+
+
+def _validate_source_repo_org(claims: dict[str, Any], payload: dict[str, Any]) -> None:
+    source_repo = str(payload.get("source_repository") or "")
+    claims_repo = str(claims.get("repository") or "")
+    if "/" not in source_repo or "/" not in claims_repo:
+        return
+    source_org = source_repo.split("/", 1)[0]
+    claims_org = claims_repo.split("/", 1)[0]
+    if source_org != claims_org:
+        raise PermissionError(
+            f"source_repository org {source_org!r} does not match OIDC repository org {claims_org!r}"
+        )
 
 
 # ── Task execution ───────────────────────────────────────────────────
@@ -450,7 +474,7 @@ def _run_task(payload: dict[str, Any], *, repo_dir: Path | None = None) -> str:
 # ── Job management ───────────────────────────────────────────────────
 
 def _job_dir() -> Path:
-    default = tempfile.gettempdir() / "codex-audit-service-jobs"
+    default = Path(tempfile.gettempdir()) / "codex-audit-service-jobs"
     path = Path(os.environ.get("CODEX_AUDIT_SERVICE_JOB_DIR", str(default))).expanduser()
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
     return path
@@ -464,11 +488,62 @@ def _job_path(job_id: str) -> Path:
     return _job_dir() / f"{job_id}.json"
 
 
-def _write_job(job_id: str, payload: dict[str, Any]) -> None:
+def _job_dedupe_key(payload: dict[str, Any]) -> str:
+    issue_number = str(payload.get("issue_number") or "").strip()
+    prompt_hash = hashlib.sha256(str(payload.get("prompt") or "").encode("utf-8")).hexdigest()
+    key_parts = [
+        str(payload.get("source_repository") or ""),
+        str(payload.get("source_ref") or ""),
+        str(payload.get("task") or _detect_task_from_model(payload.get("model", ""))),
+        str(payload.get("mode") or "review_only"),
+        issue_number or prompt_hash,
+    ]
+    return hashlib.sha256(json.dumps(key_parts, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _classify_failure(error: str) -> str:
+    text = error.lower()
+    if any(word in text for word in ("permission", "unauth", "forbidden", "oidc", "token", "allow", "secret")):
+        return "auth_or_config_failure"
+    if any(word in text for word in ("quota", "rate limit", "too many active", "budget")):
+        return "quota_or_capacity_failure"
+    if any(word in text for word in ("timeout", "timed out", "temporarily", "unavailable", "connection", "network")):
+        return "transient_service_failure"
+    if any(word in text for word in ("json", "contract", "parse", "patch")):
+        return "patch_contract_failure"
+    return "unknown_failure"
+
+
+def _public_job_payload(job_id: str, data: dict[str, Any], *, deduped: bool = False) -> dict[str, object]:
+    response: dict[str, object] = {
+        "job_id": job_id,
+        "status": str(data.get("status") or "unknown"),
+        "poll_url": f"/v1/codex-audit/jobs/{job_id}",
+    }
+    if deduped:
+        response["deduped"] = True
+    if data.get("output"):
+        response["output"] = str(data["output"])
+    if data.get("error"):
+        response["error"] = str(data["error"])
+    if data.get("failure_category"):
+        response["failure_category"] = str(data["failure_category"])
+    return response
+
+
+def _write_job(job_id: str, payload: dict[str, Any], dedupe_key: str) -> None:
     with _JOB_WRITE_LOCK:
+        now = time.time()
         _job_path(job_id).write_text(json.dumps({
-            "status": "queued", "payload": payload, "output": "", "error": "",
-            "created_at": time.time(),
+            "job_id": job_id,
+            "status": "queued",
+            "payload": payload,
+            "output": "",
+            "error": "",
+            "failure_category": "",
+            "dedupe_key": dedupe_key,
+            "created_at": now,
+            "updated_at": now,
         }, ensure_ascii=False), encoding="utf-8")
 
 
@@ -478,10 +553,12 @@ def _update_job(job_id: str, status: str, output: str = "", error: str = "") -> 
         if path.exists():
             data = json.loads(path.read_text(encoding="utf-8"))
             data["status"] = status
+            data["updated_at"] = time.time()
             if output:
                 data["output"] = output
             if error:
                 data["error"] = error
+                data["failure_category"] = _classify_failure(error)
             path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
 
@@ -505,6 +582,21 @@ def _cleanup_expired_jobs() -> None:
                 path.unlink(missing_ok=True)
         except Exception:
             path.unlink(missing_ok=True)
+
+
+def _find_existing_job(dedupe_key: str) -> tuple[str, dict[str, Any]] | None:
+    if os.environ.get("CODEX_AUDIT_SERVICE_DEDUPE_JOBS", "true").strip().lower() in {"0", "false", "no", "off"}:
+        return None
+    for path in _job_dir().glob("*.json"):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if data.get("dedupe_key") != dedupe_key:
+            continue
+        if data.get("status") in ACTIVE_JOB_STATUSES:
+            return path.stem, data
+    return None
 
 
 def _prepare_repo(repo: str, ref: str, tmp: Path) -> Path:
@@ -550,20 +642,24 @@ class AiGatewayHandler(BaseHTTPRequestHandler):
 
     def _handle_post_job(self) -> None:
         try:
-            _authenticate(self.headers)
+            claims = _authenticate(self.headers)
             length = int(self.headers.get("Content-Length", 0))
             if length > int(os.environ.get("CODEX_AUDIT_SERVICE_MAX_REQUEST_BYTES", str(DEFAULT_MAX_REQUEST_BYTES))):
                 _json_response(self, HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"error": "payload too large"})
                 return
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
             _validate_payload(payload)
-        except (json.JSONDecodeError, ValueError, PermissionError) as exc:
+            _validate_source_repo_org(claims, payload)
+        except PermissionError as exc:
+            _json_response(self, HTTPStatus.UNAUTHORIZED, {"error": str(exc)})
+            return
+        except (json.JSONDecodeError, ValueError) as exc:
             _json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
             return
 
         task = (payload.get("task") or _detect_task_from_model(payload.get("model", ""))).strip().lower()
 
-        if task == "execute":
+        if _adapter_task(task, payload.get("model", "")) == "execute":
             # Execute tasks run async (slow, repo clone)
             self._handle_async_job(payload)
         else:
@@ -580,10 +676,17 @@ class AiGatewayHandler(BaseHTTPRequestHandler):
 
     def _handle_async_job(self, payload: dict[str, Any]) -> None:
         """Execute tasks: submit job, respond with job_id, run in background."""
+        dedupe_key = _job_dedupe_key(payload)
+        existing = _find_existing_job(dedupe_key)
+        if existing is not None:
+            job_id, data = existing
+            _json_response(self, HTTPStatus.ACCEPTED, _public_job_payload(job_id, data, deduped=True))
+            return
         job_id = _next_job_id()
-        _write_job(job_id, payload)
+        _write_job(job_id, payload, dedupe_key)
         _json_response(self, HTTPStatus.ACCEPTED, {
-            "job_id": job_id, "status": "queued",
+            "job_id": job_id,
+            "status": "queued",
             "poll_url": f"/v1/codex-audit/jobs/{job_id}",
         })
         threading.Thread(target=_run_job_background, args=(job_id, payload), daemon=True).start()
@@ -593,15 +696,22 @@ class AiGatewayHandler(BaseHTTPRequestHandler):
         if job is None:
             _json_response(self, HTTPStatus.NOT_FOUND, {"error": "job not found"})
             return
-        resp: dict[str, object] = {"status": str(job["status"])}
-        if job.get("output"):
-            resp["output"] = job["output"]
-        if job.get("error"):
-            resp["error"] = job["error"]
-        _json_response(self, HTTPStatus.OK, resp)
+        _json_response(self, HTTPStatus.OK, _public_job_payload(job_id, job))
 
     def log_message(self, fmt: str, *args: Any) -> None:
         pass  # Suppress default HTTP server logs
+
+
+CodexAuditServiceRequestHandler = AiGatewayHandler
+
+
+def _codex_env() -> dict[str, str]:
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("CODEX_AUDIT_SERVICE_")
+        and key not in {"OPENAI_API_KEY", "ANTHROPIC_API_KEY"}
+    }
 
 
 def _run_job_background(job_id: str, payload: dict[str, Any]) -> None:

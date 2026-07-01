@@ -54,13 +54,26 @@ const GET_ROUTES = new Set([
 // POST-only routes (everything else in ALLOWED_ROUTES)
 
 
-function jsonResponse(status, payload) {
+function corsHeaders(request, env) {
+  const origin = request.headers.get("Origin") || "";
+  const allowed = (env.CODEX_AUDIT_ALLOWED_ORIGINS || "")
+    .split(/[,\n]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  if (!origin || !allowed.includes(origin)) return {};
+  return {
+    "Access-Control-Allow-Origin": origin,
+    "Vary": "Origin",
+  };
+}
+
+function jsonResponse(status, payload, request, env) {
   return new Response(JSON.stringify(payload), {
     status,
     headers: {
       "Content-Type": "application/json; charset=utf-8",
       "Cache-Control": "no-store",
-      "Access-Control-Allow-Origin": "*",
+      ...corsHeaders(request, env),
     },
   });
 }
@@ -119,10 +132,24 @@ export function buildOriginUrl(rawOriginUrl, pathname, search = "") {
   if (!route) throw new Error("route is not allowed");
 
   const origin = new URL(rawOriginUrl.trim());
-  origin.pathname = withoutTrailingSlash(origin.pathname) + pathname;
+  if (origin.protocol !== "https:") {
+    throw new Error("CODEX_AUDIT_ORIGIN_URL must use HTTPS");
+  }
+  const basePath = withoutTrailingSlash(origin.pathname);
+  if (!basePath || basePath === "/") {
+    origin.pathname = pathname;
+  } else if (pathname === basePath || pathname.startsWith(basePath + "/")) {
+    origin.pathname = pathname;
+  } else {
+    origin.pathname = basePath + pathname;
+  }
   origin.search = search;
   origin.hash = "";
   return origin.toString();
+}
+
+function hasBearerToken(request) {
+  return /^Bearer\s+\S+$/i.test(request.headers.get("Authorization") || "");
 }
 
 function forwardedHeaders(request) {
@@ -146,10 +173,15 @@ async function proxyRequest(request, env) {
     redirect: "manual",
   });
 
-  // Add CORS headers to proxied responses
   const corsHeaders = new Headers(resp.headers);
-  corsHeaders.set("Access-Control-Allow-Origin", "*");
+  for (const [key, value] of Object.entries(corsHeadersForRequest(request, env))) {
+    corsHeaders.set(key, value);
+  }
   return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers: corsHeaders });
+}
+
+function corsHeadersForRequest(request, env) {
+  return corsHeaders(request, env);
 }
 
 export default {
@@ -158,10 +190,14 @@ export default {
 
     // CORS preflight
     if (request.method === "OPTIONS") {
+      const cors = corsHeaders(request, env);
+      if (!cors["Access-Control-Allow-Origin"]) {
+        return new Response(null, { status: 403 });
+      }
       return new Response(null, {
         status: 204,
         headers: {
-          "Access-Control-Allow-Origin": "*",
+          ...cors,
           "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
           "Access-Control-Allow-Headers": "Authorization, Content-Type",
         },
@@ -171,20 +207,23 @@ export default {
     const route = matchRoute(url.pathname);
 
     if (url.pathname !== HEALTH_ROUTE && !route) {
-      return jsonResponse(404, { status: "error", error: "not found" });
+      return jsonResponse(404, { status: "error", error: "not found" }, request, env);
     }
-    if (!methodAllowed(request.method, route || url.pathname)) {
-      return jsonResponse(405, { status: "error", error: "method not allowed" });
+    if (!methodAllowed(request.method, url.pathname)) {
+      return jsonResponse(405, { status: "error", error: "method not allowed" }, request, env);
     }
     if (url.pathname === HEALTH_ROUTE) {
-      return jsonResponse(200, { status: "ok" });
+      return jsonResponse(200, { status: "ok" }, request, env);
+    }
+    if (!hasBearerToken(request)) {
+      return jsonResponse(401, { status: "error", error: "missing bearer token" }, request, env);
     }
 
     try {
       return await proxyRequest(request, env);
     } catch (error) {
       const message = error instanceof Error ? error.message : "origin request failed";
-      return jsonResponse(502, { status: "error", error: message });
+      return jsonResponse(502, { status: "error", error: message }, request, env);
     }
   },
 };

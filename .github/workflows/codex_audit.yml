@@ -56,7 +56,7 @@ permissions:
 
 concurrency:
   group: codex-audit-${{ github.event.client_payload.source_repo || inputs.source_repo }}-${{ github.event.client_payload.issue_number || inputs.issue_number }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   codex-audit:
