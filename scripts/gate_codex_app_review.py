@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import sys
 import time
 import urllib.error
@@ -23,9 +22,44 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+try:
+    from scripts.gate_codex_app_review_static import (
+        check_metadata as _check_metadata,
+        compile_patterns as _compile_patterns,
+        collect_static_gate_issues,
+        load_policy as _load_policy,
+        scan_diff as _scan_diff,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name != "scripts":
+        raise
+    from gate_codex_app_review_static import (
+        check_metadata as _check_metadata,
+        compile_patterns as _compile_patterns,
+        collect_static_gate_issues,
+        load_policy as _load_policy,
+        scan_diff as _scan_diff,
+    )
+
 API_BASE = "https://api.github.com"
 BOT_LOGIN = "chatgpt-codex-connector[bot]"
 POLICY_PATH = Path(".github/codex_auto_merge_policy.json")
+
+
+def load_policy(path: Path = POLICY_PATH) -> dict[str, Any]:
+    return _load_policy(path)
+
+
+def compile_patterns(policy: dict[str, Any]) -> list[Any]:
+    return _compile_patterns(policy)
+
+
+def scan_diff(diff_text: str, path_patterns: list[Any]) -> list[str]:
+    return _scan_diff(diff_text, path_patterns)
+
+
+def check_metadata(files: list[dict[str, Any]], policy: dict[str, Any]) -> list[str]:
+    return _check_metadata(files, policy)
 
 
 def env(name: str, default: str = "") -> str:
@@ -68,90 +102,9 @@ def step_summary(text: str) -> None:
             f.write(text + "\n")
 
 
-# ─── policy ──────────────────────────────────────────────────────────────────
-
-def load_policy() -> dict[str, Any]:
-    if POLICY_PATH.exists():
-        try:
-            return json.loads(POLICY_PATH.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            pass
-    return {
-        "version": 1,
-        "blocked_path_patterns": [
-            r"(^|/)(\.env|.*secret.*|.*credential.*|.*token.*|.*private.*|.*\.pem|.*\.key)$",
-        ],
-        "max_changed_files": 50,
-        "max_changed_lines": 5000,
-    }
-
-
-def compile_patterns(policy: dict[str, Any]) -> list[re.Pattern[str]]:
-    pp: list[re.Pattern[str]] = []
-    for p in policy.get("blocked_path_patterns", []):
-        if isinstance(p, str) and p.strip():
-            try:
-                pp.append(re.compile(p, re.IGNORECASE))
-            except re.error:
-                pass
-    return pp
-
-
-# ─── static guard ────────────────────────────────────────────────────────────
-
-_SENSITIVE = re.compile(
-    r'(?P<field>api[_\s]?key|secret|password|token|credential|private[_\s]?key)\s*[:=]\s*["\']'
-    r'(?!\$\{\{|{{|example|placeholder|test|your[-_\s]|xxx|TODO|CHANGEME)[^"\']{12,}["\']',
-    re.IGNORECASE,
-)
-
-
-def scan_diff(diff_text: str, path_patterns: list[re.Pattern[str]]) -> list[str]:
-    violations: list[str] = []
-    current = ""
-    for line in diff_text.splitlines():
-        if line.startswith("diff --git "):
-            parts = line.split(" ")
-            current = parts[3][2:] if len(parts) >= 4 and parts[3].startswith("b/") else ""
-            for pat in path_patterns:
-                if current and pat.search(current):
-                    violations.append(f"**Blocked file**: `{current}` matches `{pat.pattern}`")
-                    break
-            continue
-        if line.startswith("+++ b/"):
-            current = line[6:]
-            continue
-        if not line.startswith("+") or line.startswith("+++"):
-            continue
-        m = _SENSITIVE.search(line[1:])
-        if m:
-            violations.append(f"**Hardcoded secret** in `{current}`: `{m.group('field')}=<redacted>`")
-    return list(dict.fromkeys(violations))
-
-
-def check_metadata(files: list[dict[str, Any]], policy: dict[str, Any]) -> list[str]:
-    issues: list[str] = []
-    mx_f = policy.get("max_changed_files", 50)
-    mx_l = policy.get("max_changed_lines", 5000)
-    ta = sum(f.get("additions", 0) or 0 for f in files)
-    td = sum(f.get("deletions", 0) or 0 for f in files)
-    for f in files:
-        fn = f.get("filename", "?")
-        st = (f.get("status") or "").lower().strip()
-        if st == "removed":
-            issues.append(f"**File deleted**: `{fn}` — verify intentional")
-        elif st == "renamed":
-            issues.append(f"**File renamed**: `{f.get('previous_filename', '?')}` → `{fn}`")
-    if len(files) > mx_f:
-        issues.append(f"**Too many files**: {len(files)} changed (limit {mx_f})")
-    if ta + td > mx_l:
-        issues.append(f"**Too many lines**: {ta + td} changed (limit {mx_l})")
-    return issues
-
-
 def run_static_guard(token: str, repo: str, pr_number: int) -> int:
     """Return 0 if clean, 1 if blocked."""
-    policy = load_policy()
+    policy = load_policy(POLICY_PATH)
     files: list[dict[str, Any]] = []
     page = 1
     while True:
@@ -183,7 +136,7 @@ def run_static_guard(token: str, repo: str, pr_number: int) -> int:
     except Exception:
         pass
 
-    issues = check_metadata(files, policy) + scan_diff(diff_text, compile_patterns(policy))
+    issues = collect_static_gate_issues(files, diff_text, policy)
     if not issues:
         return 0
 
