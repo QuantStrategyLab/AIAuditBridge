@@ -64,6 +64,16 @@ Configure these values in `QuantStrategyLab/CodexAuditBridge`:
 - Repository variable `ANTHROPIC_MODEL` for Anthropic API fallback.
 - Repository variable `CODEX_AUDIT_SERVICE_MODEL` for the VPS Codex service primary
   path; `VPS Codex Service Ops` deploy writes it into the systemd unit.
+- Optional service-side model routing variables:
+  `AI_GATEWAY_LLM_LOW_COMPLEXITY_MODEL`,
+  `AI_GATEWAY_LLM_MEDIUM_COMPLEXITY_MODEL`, and
+  `AI_GATEWAY_LLM_HIGH_COMPLEXITY_MODEL`. PR review callers submit
+  `task=pr_review` with low/medium/high complexity hints; the VPS service keeps
+  Codex auth local and chooses the final Codex model.
+- Optional direct API fallback overrides:
+  `CODEX_AUDIT_OPENAI_LOW_COMPLEXITY_MODEL`,
+  `CODEX_AUDIT_ANTHROPIC_MEDIUM_COMPLEXITY_MODEL`, and matching
+  high/medium/low names.
 - Workflow permission `id-token: write` is already set so GitHub Actions can request an OIDC token for the service.
 
 Run the service host with:

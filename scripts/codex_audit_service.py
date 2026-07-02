@@ -52,8 +52,23 @@ _JOB_WRITE_LOCK = threading.Lock()
 
 SUPPORTED_TASKS = frozenset({"analyze", "execute"})
 AUDIT_EXECUTE_TASKS = frozenset({"monthly_snapshot_audit", "long_horizon_signal_shadow"})
+CODEX_REVIEW_TASKS = frozenset({"pr_review", "review"})
 SUPPORTED_MODES = frozenset({"review_only", "review_and_fix"})
 ACTIVE_JOB_STATUSES = frozenset({"queued", "running"})
+TASK_COMPLEXITY_LOW = "low"
+TASK_COMPLEXITY_MEDIUM = "medium"
+TASK_COMPLEXITY_HIGH = "high"
+TASK_COMPLEXITY_LEVELS = (TASK_COMPLEXITY_LOW, TASK_COMPLEXITY_MEDIUM, TASK_COMPLEXITY_HIGH)
+AI_GATEWAY_LLM_DEFAULT_MODEL = "claude-sonnet-4-6"
+AI_GATEWAY_LLM_DEFAULT_MODEL_LOW = os.environ.get(
+    "AI_GATEWAY_LLM_LOW_COMPLEXITY_MODEL", "gpt-5.4-mini"
+).strip()
+AI_GATEWAY_LLM_DEFAULT_MODEL_MEDIUM = os.environ.get(
+    "AI_GATEWAY_LLM_MEDIUM_COMPLEXITY_MODEL", AI_GATEWAY_LLM_DEFAULT_MODEL
+).strip()
+AI_GATEWAY_LLM_DEFAULT_MODEL_HIGH = os.environ.get(
+    "AI_GATEWAY_LLM_HIGH_COMPLEXITY_MODEL", "claude-fable-5"
+).strip()
 
 
 # ── Adapter Protocol ──────────────────────────────────────────────────
@@ -234,16 +249,32 @@ _ADAPTER_REGISTRY: dict[str, AiAdapter] = {
     "execute": CodexAdapter(),
 }
 
+TASK_COMPLEXITY_MEDIUM_LINE_THRESHOLD = int(
+    os.environ.get("AI_GATEWAY_COMPLEXITY_MEDIUM_THRESHOLD_LINES", "600")
+)
+TASK_COMPLEXITY_HIGH_LINE_THRESHOLD = int(os.environ.get("AI_GATEWAY_COMPLEXITY_HIGH_THRESHOLD_LINES", "1800"))
+TASK_COMPLEXITY_MEDIUM_PROMPT_THRESHOLD = int(os.environ.get("AI_GATEWAY_COMPLEXITY_MEDIUM_THRESHOLD_PROMPT_CHARS", "7000"))
+TASK_COMPLEXITY_HIGH_PROMPT_THRESHOLD = int(os.environ.get("AI_GATEWAY_COMPLEXITY_HIGH_THRESHOLD_PROMPT_CHARS", "18000"))
+TASK_COMPLEXITY_FILE_HIGH_THRESHOLD = int(os.environ.get("AI_GATEWAY_COMPLEXITY_HIGH_THRESHOLD_FILES", "12"))
+TASK_COMPLEXITY_FILE_MEDIUM_THRESHOLD = int(os.environ.get("AI_GATEWAY_COMPLEXITY_MEDIUM_THRESHOLD_FILES", "4"))
+
+
+def _canonicalize_task(task: str) -> str:
+    task = (task or "").strip().lower()
+    if task in {"review", "pr_review", "pr-review", "prreview"}:
+        return "pr_review"
+    return task
+
 
 def _adapter_task(task: str, model: str) -> str:
-    resolved_task = task or _detect_task_from_model(model)
-    if resolved_task in AUDIT_EXECUTE_TASKS:
+    resolved_task = _canonicalize_task(task or _detect_task_from_model(model))
+    if resolved_task == "execute" or resolved_task in AUDIT_EXECUTE_TASKS or resolved_task in CODEX_REVIEW_TASKS:
         return "execute"
     return resolved_task
 
 
 def resolve_adapter(task: str, model: str) -> AiAdapter:
-    """Resolve the adapter for a task. Auto-detect analyze vs execute from model if task is empty."""
+    """Resolve the adapter for a task."""
     resolved_task = _adapter_task(task, model)
     adapter = _ADAPTER_REGISTRY.get(resolved_task)
     if adapter is None:
@@ -256,19 +287,100 @@ def _detect_task_from_model(model: str) -> str:
     Claude/GPT models → analyze (API call).
     Others (codex, empty) → execute (codex CLI).
     """
-    m = model.lower().strip()
+    m = (model or "").lower().strip()
     if m.startswith("claude") or m.startswith("gpt"):
         return "analyze"
     return "execute"
 
 
 def _detect_provider(model: str) -> str:
-    m = model.lower().strip()
+    m = (model or "").lower().strip()
     if m.startswith("claude"):
         return "anthropic"
     if m.startswith("gpt"):
         return "openai"
     return "openai"
+
+
+def _normalize_complexity(value: str) -> str:
+    level = (value or "").strip().lower()
+    if level in TASK_COMPLEXITY_LEVELS:
+        return level
+    return ""
+
+
+def _as_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _estimate_task_complexity(
+    prompt: str,
+    *,
+    changed_files: int = 0,
+    changed_lines: int = 0,
+    changed_chars: int = 0,
+) -> str:
+    changed_files = max(0, _as_int(changed_files, 0))
+    changed_lines = max(0, _as_int(changed_lines, 0))
+    changed_chars = max(0, _as_int(changed_chars, 0))
+    prompt_chars = len(prompt or "")
+    complexity_score = (
+        changed_files * 2
+        + changed_lines * 0.15
+        + changed_chars / 200
+        + prompt_chars / 2500
+    )
+    if (
+        complexity_score >= TASK_COMPLEXITY_HIGH_LINE_THRESHOLD
+        or changed_files >= TASK_COMPLEXITY_FILE_HIGH_THRESHOLD
+        or changed_lines >= TASK_COMPLEXITY_HIGH_LINE_THRESHOLD
+        or prompt_chars >= TASK_COMPLEXITY_HIGH_PROMPT_THRESHOLD
+    ):
+        return TASK_COMPLEXITY_HIGH
+    if (
+        complexity_score >= TASK_COMPLEXITY_MEDIUM_LINE_THRESHOLD
+        or changed_files >= TASK_COMPLEXITY_FILE_MEDIUM_THRESHOLD
+        or changed_lines >= TASK_COMPLEXITY_MEDIUM_LINE_THRESHOLD
+        or prompt_chars >= TASK_COMPLEXITY_MEDIUM_PROMPT_THRESHOLD
+    ):
+        return TASK_COMPLEXITY_MEDIUM
+    return TASK_COMPLEXITY_LOW
+
+
+def _model_for_complexity(complexity: str) -> str:
+    if complexity == TASK_COMPLEXITY_HIGH:
+        return AI_GATEWAY_LLM_DEFAULT_MODEL_HIGH or AI_GATEWAY_LLM_DEFAULT_MODEL
+    if complexity == TASK_COMPLEXITY_MEDIUM:
+        return AI_GATEWAY_LLM_DEFAULT_MODEL_MEDIUM or AI_GATEWAY_LLM_DEFAULT_MODEL
+    return AI_GATEWAY_LLM_DEFAULT_MODEL_LOW or AI_GATEWAY_LLM_DEFAULT_MODEL
+
+
+def _resolve_model(payload: dict[str, Any], task: str) -> str:
+    model = (payload.get("model") or "").strip()
+    if task not in CODEX_REVIEW_TASKS and task != "analyze":
+        return model
+    normalized = _normalize_complexity(model)
+    if normalized:
+        return _model_for_complexity(normalized)
+    if not model or model.lower() == "auto":
+        complexity = _normalize_complexity(str(payload.get("complexity", "")))
+        if not complexity:
+            complexity = _estimate_task_complexity(
+                str(payload.get("prompt", "")),
+                changed_files=_as_int(payload.get("changed_files", 0), 0),
+                changed_lines=_as_int(payload.get("changed_lines", 0), 0),
+                changed_chars=_as_int(payload.get("changed_chars", 0), 0),
+            )
+        return _model_for_complexity(complexity)
+    return model
+
+
+def _task_requires_async(task: str) -> bool:
+    canonical = _canonicalize_task(task)
+    return canonical == "execute" or canonical in AUDIT_EXECUTE_TASKS or canonical in CODEX_REVIEW_TASKS
 
 
 # ── Auth ─────────────────────────────────────────────────────────────
@@ -420,14 +532,15 @@ def _validate_payload(payload: dict[str, Any]) -> None:
     prompt = payload.get("prompt")
     if not isinstance(prompt, str) or not prompt.strip():
         raise ValueError("prompt is required")
-    task = payload.get("task", "").strip().lower() or ""
+    task = _canonicalize_task(str(payload.get("task", "") or ""))
     model = payload.get("model", "").strip() or ""
     mode = payload.get("mode", "").strip().lower() or "review_only"
 
     # If no task specified, auto-detect from model
     if not task:
         task = _detect_task_from_model(model)
-    if task not in SUPPORTED_TASKS and task not in AUDIT_EXECUTE_TASKS:
+    normalized_for_validation = "execute" if task in CODEX_REVIEW_TASKS else task
+    if normalized_for_validation not in SUPPORTED_TASKS and normalized_for_validation not in AUDIT_EXECUTE_TASKS:
         raise ValueError(f"Unsupported task: {task!r}")
 
     if mode not in SUPPORTED_MODES:
@@ -458,8 +571,8 @@ def _validate_source_repo_org(claims: dict[str, Any], payload: dict[str, Any]) -
 # ── Task execution ───────────────────────────────────────────────────
 
 def _run_task(payload: dict[str, Any], *, repo_dir: Path | None = None) -> str:
-    task = (payload.get("task", "") or _detect_task_from_model(payload.get("model", ""))).strip().lower()
-    model = (payload.get("model") or "").strip()
+    task = _canonicalize_task(str(payload.get("task", "") or _detect_task_from_model(payload.get("model", ""))))
+    model = _resolve_model(payload, task)
     prompt = str(payload["prompt"])
     timeout = int(payload.get("timeout_seconds") or os.environ.get(
         "CODEX_AUDIT_SERVICE_TIMEOUT_SECONDS", "2700"))
@@ -704,9 +817,9 @@ class AiGatewayHandler(BaseHTTPRequestHandler):
             _json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
             return
 
-        task = (payload.get("task") or _detect_task_from_model(payload.get("model", ""))).strip().lower()
+        task = _canonicalize_task(str(payload.get("task", "") or _detect_task_from_model(payload.get("model", ""))))
 
-        if _adapter_task(task, payload.get("model", "")) == "execute":
+        if _task_requires_async(task):
             # Execute tasks run async (slow, repo clone)
             self._handle_async_job(payload)
         else:
@@ -762,18 +875,25 @@ def _codex_env() -> dict[str, str]:
 
 
 def _run_job_background(job_id: str, payload: dict[str, Any]) -> None:
-    """Background thread for execute tasks (repo clone + codex exec)."""
+    """Background thread for async tasks."""
     _update_job(job_id, "running")
     try:
+        task = _canonicalize_task(str(payload.get("task", "") or _detect_task_from_model(payload.get("model", ""))))
+        adapter = resolve_adapter(task, str(payload.get("model", "")))
         if os.environ.get("CODEX_AUDIT_SERVICE_FAKE_OUTPUT") is not None:
             output = _run_task(payload, repo_dir=None)
         else:
             with tempfile.TemporaryDirectory(prefix="ai-gateway-") as tmp:
-                repo_dir = _prepare_repo(
-                    payload["source_repository"],
-                    payload.get("source_ref", "main"),
-                    Path(tmp),
-                )
+                repo_dir = None
+                if isinstance(adapter, CodexAdapter):
+                    source_repository = payload.get("source_repository")
+                    if not isinstance(source_repository, str) or not source_repository:
+                        raise RuntimeError("source_repository required for Codex adapter async job")
+                    repo_dir = _prepare_repo(
+                        source_repository,
+                        payload.get("source_ref", "main"),
+                        Path(tmp),
+                    )
                 output = _run_task(payload, repo_dir=repo_dir)
         _update_job(job_id, "succeeded", output=output)
     except (RuntimeError, subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:

@@ -31,6 +31,10 @@ PROMPT_TEMPLATE_PATH = ROOT / "prompts" / "pr_review.md"
 DEFAULT_SERVICE_AUDIENCE = "quant-codex-audit"
 DEFAULT_TIMEOUT_MINUTES = 20
 DEFAULT_MAX_CONTEXT_LINES = 800
+TASK_COMPLEXITY_LOW = "low"
+TASK_COMPLEXITY_MEDIUM = "medium"
+TASK_COMPLEXITY_HIGH = "high"
+TASK_COMPLEXITY_LEVELS = (TASK_COMPLEXITY_LOW, TASK_COMPLEXITY_MEDIUM, TASK_COMPLEXITY_HIGH)
 
 # Risk → block mapping
 BLOCK_SEVERITIES = frozenset({"critical", "high"})
@@ -306,6 +310,47 @@ def _truncate_lines(text: str, max_lines: int) -> str:
     )
 
 
+def _normalize_complexity(value: str) -> str:
+    normalized = (value or "").strip().lower()
+    if normalized in TASK_COMPLEXITY_LEVELS:
+        return normalized
+    return ""
+
+
+def _estimate_review_complexity(
+    diff: str,
+    changed_files: list[str],
+    *,
+    title: str = "",
+    body: str = "",
+) -> str:
+    diff_lines = len((diff or "").splitlines())
+    file_count = len([f for f in changed_files if f])
+    prompt_chars = len((diff or "")) + len((title or "")) + len((body or ""))
+
+    if diff_lines >= 1800 or file_count >= 15 or prompt_chars >= 18000:
+        return TASK_COMPLEXITY_HIGH
+    if diff_lines >= 600 or file_count >= 6 or prompt_chars >= 7000:
+        return TASK_COMPLEXITY_MEDIUM
+    return TASK_COMPLEXITY_LOW
+
+
+def _direct_api_model_for_complexity(provider: str, complexity: str) -> str:
+    level = _normalize_complexity(complexity)
+    if not level:
+        return ""
+    prefix = "ANTHROPIC" if provider == "anthropic" else "OPENAI"
+    for name in (
+        f"CODEX_AUDIT_{prefix}_{level.upper()}_COMPLEXITY_MODEL",
+        f"{prefix}_{level.upper()}_COMPLEXITY_MODEL",
+        f"{prefix}_MODEL_{level.upper()}",
+    ):
+        value = env_value(name)
+        if value:
+            return value
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # Codex service integration
 # ---------------------------------------------------------------------------
@@ -337,7 +382,7 @@ def request_github_oidc_token(audience: str) -> str:
     return token
 
 
-def run_codex_service_review(prompt: str, timeout_minutes: int) -> str:
+def run_codex_service_review(prompt: str, timeout_minutes: int, complexity: str = "", changed_file_count: int = 0, changed_line_count: int = 0) -> str:
     """Submit a review job to the Codex audit service and wait for completion."""
     service_url = env_value("CODEX_AUDIT_SERVICE_URL")
     if not service_url:
@@ -354,6 +399,9 @@ def run_codex_service_review(prompt: str, timeout_minutes: int) -> str:
         "task": "pr_review",
         "mode": "review_only",
         "prompt": prompt,
+        "complexity": _normalize_complexity(complexity) or "auto",
+        "changed_files": int(changed_file_count),
+        "changed_lines": int(changed_line_count),
         "timeout_seconds": timeout_minutes * 60,
     }
     submit_resp = _service_request(
@@ -421,15 +469,32 @@ def _service_request(
 # ---------------------------------------------------------------------------
 
 
-def run_direct_api_review(prompt: str) -> str:
+def run_direct_api_review(prompt: str, complexity: str = "") -> str:
     """Run review directly via Anthropic or OpenAI API."""
     anthropic_key = env_value("ANTHROPIC_API_KEY")
-    if anthropic_key:
-        return _run_anthropic_review(prompt, anthropic_key)
-
     openai_key = env_value("OPENAI_API_KEY")
-    if openai_key:
-        return _run_openai_review(prompt, openai_key)
+
+    provider_order = [
+        "openai",
+        "anthropic",
+    ]
+    normalized = _normalize_complexity(complexity)
+    if normalized in (TASK_COMPLEXITY_HIGH, TASK_COMPLEXITY_MEDIUM):
+        provider_order = ["anthropic", "openai"]
+
+    for provider in provider_order:
+        if provider == "anthropic" and anthropic_key:
+            return _run_anthropic_review(
+                prompt,
+                anthropic_key,
+                model=_direct_api_model_for_complexity(provider, normalized),
+            )
+        if provider == "openai" and openai_key:
+            return _run_openai_review(
+                prompt,
+                openai_key,
+                model=_direct_api_model_for_complexity(provider, normalized),
+            )
 
     raise ReviewError(
         "No Codex service URL or API key configured. "
@@ -437,8 +502,8 @@ def run_direct_api_review(prompt: str) -> str:
     )
 
 
-def _run_anthropic_review(prompt: str, api_key: str) -> str:
-    model = env_value("ANTHROPIC_MODEL", "claude-sonnet-4-6")
+def _run_anthropic_review(prompt: str, api_key: str, model: str = "") -> str:
+    model = env_value("ANTHROPIC_MODEL", "claude-sonnet-4-6") if not model else model
     system = "You are a careful code reviewer. Return only the JSON object as specified."
     payload = {
         "model": model,
@@ -475,8 +540,8 @@ def _run_anthropic_review(prompt: str, api_key: str) -> str:
     return "\n\n".join(text_parts)
 
 
-def _run_openai_review(prompt: str, api_key: str) -> str:
-    model = env_value("OPENAI_MODEL", "gpt-5.4-mini")
+def _run_openai_review(prompt: str, api_key: str, model: str = "") -> str:
+    model = env_value("OPENAI_MODEL", "gpt-5.4-mini") if not model else model
     system = "You are a careful code reviewer. Return only the JSON object as specified."
     payload = {
         "model": model,
@@ -822,10 +887,18 @@ def main() -> int:
         service_url = env_value("CODEX_AUDIT_SERVICE_URL")
         if service_url:
             print(f"Running Codex review via service: {service_url}")
-            output = run_codex_service_review(prompt, DEFAULT_TIMEOUT_MINUTES)
+            complexity = _estimate_review_complexity(diff, changed_paths, title=pr_title, body=pr_body)
+            output = run_codex_service_review(
+                prompt,
+                DEFAULT_TIMEOUT_MINUTES,
+                complexity=complexity,
+                changed_file_count=len(changed_paths),
+                changed_line_count=len(diff.splitlines()),
+            )
         else:
             print("Running Codex review via direct API")
-            output = run_direct_api_review(prompt)
+            complexity = _estimate_review_complexity(diff, changed_paths, title=pr_title, body=pr_body)
+            output = run_direct_api_review(prompt, complexity=complexity)
     except ReviewError as exc:
         print(f"::error::Codex review failed: {exc}", file=sys.stderr)
         # Don't block on review failures — post a warning comment
