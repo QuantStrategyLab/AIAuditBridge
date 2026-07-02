@@ -802,6 +802,57 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         patch_remediation.assert_called_once()
         self.assertIs(patch_remediation.call_args.kwargs["workspace"], workspace)
 
+    def test_main_codex_quota_failure_uses_api_fallback_for_auto_provider(self) -> None:
+        issue = {
+            "number": 19,
+            "title": "Shadow",
+            "html_url": "https://example.test/issues/19",
+            "body": "Body",
+            "labels": [],
+        }
+        env = {
+            "SOURCE_REPO": "QuantStrategyLab/ResearchSignalContextPipelines",
+            "SOURCE_REF": "main",
+            "ISSUE_NUMBER": "19",
+            "CODEX_AUDIT_GH_TOKEN": "token",
+            "CODEX_AUDIT_TASK": "long_horizon_signal_shadow",
+            "CODEX_AUDIT_MODE": "review_and_fix",
+            "CODEX_AUDIT_PROVIDER": "auto",
+            "CODEX_AUDIT_CODEX_BACKEND": "service",
+            "CODEX_AUDIT_API_FALLBACK_ALLOWED_SOURCE_REPOSITORIES": (
+                "QuantStrategyLab/ResearchSignalContextPipelines"
+            ),
+            "CODEX_AUDIT_API_FALLBACK_ALLOW_FIX": "true",
+        }
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch("scripts.run_monthly_codex_audit.github_request", return_value=issue),
+            patch("scripts.run_monthly_codex_audit.fetch_issue_comments", return_value=[]),
+            patch("scripts.run_monthly_codex_audit.prepare_remediation_workspace") as prepare,
+            patch(
+                "scripts.run_monthly_codex_audit.run_codex_backend",
+                return_value=(75, "Codex audit service job failed [quota_or_capacity_failure]: budget", ""),
+            ),
+            patch("scripts.run_monthly_codex_audit.run_auto_provider_fallback", return_value=0) as patch_fallback,
+        ):
+            workspace = RemediationWorkspace(
+                repo_dir=Path("/tmp/source"),
+                branch_name="codex/long-horizon-signal-issue-19-test",
+                baseline_auto_merge_policy=dict(DEFAULT_GUARDED_AUTO_MERGE_POLICY),
+                feedback_retry_pr=None,
+                stale_auto_merge_label=GUARDED_AUTO_MERGE_LABEL,
+                stale_auto_merge_label_skip_reason="",
+                stale_auto_merge_label_removed=False,
+                prompt="prompt",
+            )
+            prepare.return_value = workspace
+            exit_code = run_audit_main()
+
+        self.assertEqual(exit_code, 0)
+        patch_fallback.assert_called_once()
+        self.assertIs(patch_fallback.call_args.kwargs["workspace"], workspace)
+        self.assertIn("quota_or_capacity_failure", patch_fallback.call_args.kwargs["reason"])
+
     def test_run_configured_api_reviews_uses_both_configured_reviewers(self) -> None:
         with (
             patch.dict(os.environ, {"OPENAI_API_KEY": "openai-key", "ANTHROPIC_API_KEY": "anthropic-key"}, clear=True),

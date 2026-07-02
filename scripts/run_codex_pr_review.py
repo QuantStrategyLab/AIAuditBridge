@@ -437,6 +437,33 @@ def run_codex_service_review(prompt: str, timeout_minutes: int, complexity: str 
     raise ReviewError("Codex service job timed out")
 
 
+def run_codex_review_with_fallback(
+    prompt: str,
+    timeout_minutes: int,
+    complexity: str = "",
+    changed_file_count: int = 0,
+    changed_line_count: int = 0,
+) -> str:
+    # env_value() returns "" when CODEX_AUDIT_SERVICE_URL is unset, so this
+    # guard keeps the direct-API path intact without special error handling.
+    service_url = env_value("CODEX_AUDIT_SERVICE_URL")
+    if service_url:
+        try:
+            print(f"Running Codex review via service: {service_url}")
+            return run_codex_service_review(
+                prompt,
+                timeout_minutes,
+                complexity=complexity,
+                changed_file_count=changed_file_count,
+                changed_line_count=changed_line_count,
+            )
+        except Exception as exc:  # noqa: BLE001 - any service failure should trigger the API fallback path.
+            print(f"::warning::Codex service review failed; falling back to direct API: {exc}")
+
+    print("Running Codex review via direct API")
+    return run_direct_api_review(prompt, complexity=complexity)
+
+
 def _service_request(
     method: str, url: str, oidc_token: str, payload: dict[str, Any] | None
 ) -> dict[str, Any]:
@@ -884,21 +911,14 @@ def main() -> int:
 
     # Run Codex review
     try:
-        service_url = env_value("CODEX_AUDIT_SERVICE_URL")
-        if service_url:
-            print(f"Running Codex review via service: {service_url}")
-            complexity = _estimate_review_complexity(diff, changed_paths, title=pr_title, body=pr_body)
-            output = run_codex_service_review(
-                prompt,
-                DEFAULT_TIMEOUT_MINUTES,
-                complexity=complexity,
-                changed_file_count=len(changed_paths),
-                changed_line_count=len(diff.splitlines()),
-            )
-        else:
-            print("Running Codex review via direct API")
-            complexity = _estimate_review_complexity(diff, changed_paths, title=pr_title, body=pr_body)
-            output = run_direct_api_review(prompt, complexity=complexity)
+        complexity = _estimate_review_complexity(diff, changed_paths, title=pr_title, body=pr_body)
+        output = run_codex_review_with_fallback(
+            prompt,
+            DEFAULT_TIMEOUT_MINUTES,
+            complexity=complexity,
+            changed_file_count=len(changed_paths),
+            changed_line_count=len(diff.splitlines()),
+        )
     except ReviewError as exc:
         print(f"::error::Codex review failed: {exc}", file=sys.stderr)
         # Don't block on review failures — post a warning comment

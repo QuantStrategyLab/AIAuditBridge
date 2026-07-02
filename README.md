@@ -62,6 +62,9 @@ Configure these values in `QuantStrategyLab/CodexAuditBridge`:
   `openai,anthropic`.
 - Repository variable `OPENAI_MODEL` for OpenAI API fallback.
 - Repository variable `ANTHROPIC_MODEL` for Anthropic API fallback.
+- When the Codex service path fails, monthly audits with `CODEX_AUDIT_PROVIDER=auto`
+  and PR review workflows fall back to the configured API reviewers for
+  allowlisted source repositories.
 - Repository variable `CODEX_AUDIT_SERVICE_MODEL` for the VPS Codex service primary
   path; `VPS Codex Service Ops` deploy writes it into the systemd unit.
 - Optional service-side model routing variables:
