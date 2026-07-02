@@ -101,10 +101,10 @@ DEFAULT_SERVICE_CONTEXT_MAX_BYTES = 700_000
 DEFAULT_SERVICE_CONTEXT_MAX_FILE_BYTES = 80_000
 DEFAULT_SERVICE_MAX_CHANGES = 20
 SERVICE_INFRA_FAILURE_EXIT_CODE = 75
+# Recoverable quota/capacity failures are routed to API fallback instead of infra comments.
 SERVICE_INFRA_FAILURE_CATEGORIES = frozenset(
     {
         "auth_or_config_failure",
-        "quota_or_capacity_failure",
         "transient_service_failure",
     }
 )
@@ -202,11 +202,26 @@ def service_infrastructure_failure_comment(reason: str) -> str:
             "CodexAuditBridge stopped before making repository changes because the service backend failed outside the source PR/test surface.",
             "",
             f"- Failure category: `{category}`",
-            f"- Detail: `{reason[:600]}`",
+            f"- Detail: `{sanitize_inline_code(reason, 600)}`",
             "",
             "No files were pushed and no PR feedback retry is needed for this run.",
         ]
     )
+
+
+def sanitize_inline_code(text: str, limit: int) -> str:
+    truncated = text if len(text) <= limit else f"{text[: limit - 3]}..."
+    return truncated.replace("`", "'").replace("\r", " ").replace("\n", " ")
+
+
+def service_fallback_reason(return_code: int, failure_category: str, failure_detail: str) -> str:
+    reason = f"Codex service failed with exit code `{return_code}`"
+    if failure_category != "unknown_failure":
+        reason += f" [{failure_category}]"
+    if failure_detail:
+        detail = sanitize_inline_code(failure_detail, 600)
+        reason += f": `{detail}`"
+    return f"{reason}."
 
 
 class GitHubRequestError(BridgeError):
@@ -2724,7 +2739,27 @@ def main() -> int:
                 issue_number=issue_number,
             )
             if return_code != 0:
-                if return_code == SERVICE_INFRA_FAILURE_EXIT_CODE or is_service_infrastructure_failure(_codex_log):
+                failure_category = service_failure_category(_codex_log)
+                failure_detail = str(_codex_log or "").strip()
+                # Quota/capacity is a recoverable service limit, so auto-provider runs
+                # should fall back to API reviewers instead of posting an infra comment.
+                if provider == "auto" and failure_category == "quota_or_capacity_failure":
+                    return run_auto_provider_fallback(
+                        token=token,
+                        source_repo=source_repo,
+                        source_ref=source_ref,
+                        issue=issue,
+                        comments=comments,
+                        issue_number=issue_number,
+                        reason=service_fallback_reason(return_code, failure_category, failure_detail),
+                        mode=mode,
+                        task=task,
+                        auto_merge=auto_merge,
+                        exit_code=return_code,
+                        workspace=workspace,
+                    )
+                is_infra_failure = return_code == SERVICE_INFRA_FAILURE_EXIT_CODE or is_service_infrastructure_failure(_codex_log)
+                if is_infra_failure:
                     post_issue_comment(token, source_repo, issue_number, service_infrastructure_failure_comment(_codex_log))
                     return 0
                 if provider == "auto":
@@ -2735,7 +2770,7 @@ def main() -> int:
                         issue=issue,
                         comments=comments,
                         issue_number=issue_number,
-                        reason=f"Codex service failed with exit code `{return_code}`.",
+                        reason=service_fallback_reason(return_code, failure_category, failure_detail),
                         mode=mode,
                         task=task,
                         auto_merge=auto_merge,
