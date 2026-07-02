@@ -7,6 +7,7 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -567,9 +568,16 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
                         submitted = json.loads(response.read().decode("utf-8"))
                     job_id = submitted["job_id"]
 
+                    polled: dict[str, object] = {}
                     for _ in range(50):
-                        with urllib.request.urlopen(f"{base_url}/v1/codex-audit/jobs/{job_id}", timeout=5) as response:
-                            polled = json.loads(response.read().decode("utf-8"))
+                        try:
+                            with urllib.request.urlopen(f"{base_url}/v1/codex-audit/jobs/{job_id}", timeout=5) as response:
+                                polled = json.loads(response.read().decode("utf-8"))
+                        except urllib.error.HTTPError as exc:
+                            if exc.code != 404:
+                                raise
+                            time.sleep(0.05)
+                            continue
                         if polled["status"] == "succeeded":
                             break
                         time.sleep(0.05)
