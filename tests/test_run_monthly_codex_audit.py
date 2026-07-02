@@ -531,6 +531,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
     def test_service_failure_classification_identifies_infra_failures(self) -> None:
         self.assertEqual(classify_service_failure("OIDC token is expired"), "auth_or_config_failure")
         self.assertEqual(service_failure_category("Codex audit service job failed [quota_or_capacity_failure]: budget"), "quota_or_capacity_failure")
+        self.assertFalse(is_service_infrastructure_failure("Codex audit service job failed [quota_or_capacity_failure]: budget"))
         self.assertTrue(is_service_infrastructure_failure("Codex audit service job failed [transient_service_failure]: timed out"))
         self.assertFalse(is_service_infrastructure_failure("Codex audit service job failed [patch_contract_failure]: invalid JSON"))
 
@@ -831,7 +832,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
             patch("scripts.run_monthly_codex_audit.prepare_remediation_workspace") as prepare,
             patch(
                 "scripts.run_monthly_codex_audit.run_codex_backend",
-                return_value=(75, "Codex audit service job failed [quota_or_capacity_failure]: budget", ""),
+                return_value=(1, "Codex audit service job failed [quota_or_capacity_failure]: budget", ""),
             ),
             patch("scripts.run_monthly_codex_audit.run_auto_provider_fallback", return_value=0) as patch_fallback,
         ):
@@ -902,6 +903,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         post_comment.assert_called_once()
+        self.assertIn("Failure category", post_comment.call_args.args[3])
         patch_fallback.assert_not_called()
 
     def test_run_configured_api_reviews_uses_both_configured_reviewers(self) -> None:

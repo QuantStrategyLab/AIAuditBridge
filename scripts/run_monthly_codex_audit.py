@@ -101,10 +101,10 @@ DEFAULT_SERVICE_CONTEXT_MAX_BYTES = 700_000
 DEFAULT_SERVICE_CONTEXT_MAX_FILE_BYTES = 80_000
 DEFAULT_SERVICE_MAX_CHANGES = 20
 SERVICE_INFRA_FAILURE_EXIT_CODE = 75
+# Recoverable quota/capacity failures are routed to API fallback instead of infra comments.
 SERVICE_INFRA_FAILURE_CATEGORIES = frozenset(
     {
         "auth_or_config_failure",
-        "quota_or_capacity_failure",
         "transient_service_failure",
     }
 )
@@ -202,11 +202,16 @@ def service_infrastructure_failure_comment(reason: str) -> str:
             "CodexAuditBridge stopped before making repository changes because the service backend failed outside the source PR/test surface.",
             "",
             f"- Failure category: `{category}`",
-            f"- Detail: `{reason[:600]}`",
+            f"- Detail: `{sanitize_inline_code(reason, 600)}`",
             "",
             "No files were pushed and no PR feedback retry is needed for this run.",
         ]
     )
+
+
+def sanitize_inline_code(text: str, limit: int) -> str:
+    truncated = text if len(text) <= limit else f"{text[: limit - 3]}..."
+    return truncated.replace("`", "'").replace("\r", " ").replace("\n", " ")
 
 
 def service_fallback_reason(return_code: int, failure_category: str, failure_detail: str) -> str:
@@ -214,7 +219,7 @@ def service_fallback_reason(return_code: int, failure_category: str, failure_det
     if failure_category != "unknown_failure":
         reason += f" [{failure_category}]"
     if failure_detail:
-        detail = failure_detail if len(failure_detail) <= 600 else f"{failure_detail[:597]}..."
+        detail = sanitize_inline_code(failure_detail, 600)
         reason += f": `{detail}`"
     return f"{reason}."
 
@@ -2736,6 +2741,8 @@ def main() -> int:
             if return_code != 0:
                 failure_category = service_failure_category(_codex_log)
                 failure_detail = str(_codex_log or "").strip()
+                # Quota/capacity is a recoverable service limit, so auto-provider runs
+                # should fall back to API reviewers instead of posting an infra comment.
                 if provider == "auto" and failure_category == "quota_or_capacity_failure":
                     return run_auto_provider_fallback(
                         token=token,

@@ -40,11 +40,6 @@ CODEX_SERVICE_FALLBACK_SIGNALS = (
     "too many requests",
     "rate limit",
     "quota",
-    "401",
-    "unauthorized",
-    "missing bearer",
-    "authentication",
-    "missing token",
 )
 
 # Risk → block mapping
@@ -478,7 +473,7 @@ def run_codex_review_with_fallback(
                 raise
             print(f"::warning::Codex service review failed; falling back to direct API: {exc}")
         except (json.JSONDecodeError, OSError, urllib.error.URLError) as exc:
-            print(f"::warning::Codex service review failed; falling back to direct API: {exc}")
+            print(f"::error::Codex service review failed; falling back to direct API: {exc}")
 
     print("Running Codex review via direct API")
     return run_direct_api_review(prompt, complexity=complexity)
