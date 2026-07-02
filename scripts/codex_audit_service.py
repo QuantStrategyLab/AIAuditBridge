@@ -1,20 +1,9 @@
 #!/usr/bin/env python3
-"""AI Gateway — unified service for LLM analysis and Codex execution.
+"""Codex audit service — authenticated VPS facade for Codex execution.
 
-Architecture:
-
-    POST /v1/codex-audit/jobs  ──▶ AiGateway
-    {                                │
-      "task": "analyze" | "execute", │──▶ LlmAdapter (API call, no repo)
-      "model": "claude-sonnet-4-6",  │──▶ CodexAdapter (codex exec, needs repo)
-      "prompt": "...",               │──▶ FutureAdapter (extensible)
-      ...                            │
-    }                                │
-
-Benefits:
-  - API keys live on the VPS (one place), not in N repos
-  - New AI backends = new adapter class, no service changes
-  - Same auth, same job lifecycle, same polling for all tasks
+The VPS service intentionally runs only Codex. Claude/GPT direct API fallbacks
+remain in caller-side GitHub workflows/scripts so provider API keys do not live
+in, or pass through, this service.
 """
 
 from __future__ import annotations
@@ -50,7 +39,7 @@ _JWKS_CACHE: dict[str, Any] | None = None
 _JWKS_CACHE_EXPIRES_AT = 0.0
 _JOB_WRITE_LOCK = threading.Lock()
 
-SUPPORTED_TASKS = frozenset({"analyze", "execute"})
+SUPPORTED_TASKS = frozenset({"execute"})
 AUDIT_EXECUTE_TASKS = frozenset({"monthly_snapshot_audit", "long_horizon_signal_shadow"})
 CODEX_REVIEW_TASKS = frozenset({"pr_review", "review"})
 SUPPORTED_MODES = frozenset({"review_only", "review_and_fix"})
@@ -59,7 +48,7 @@ TASK_COMPLEXITY_LOW = "low"
 TASK_COMPLEXITY_MEDIUM = "medium"
 TASK_COMPLEXITY_HIGH = "high"
 TASK_COMPLEXITY_LEVELS = (TASK_COMPLEXITY_LOW, TASK_COMPLEXITY_MEDIUM, TASK_COMPLEXITY_HIGH)
-AI_GATEWAY_LLM_DEFAULT_MODEL = "claude-sonnet-4-6"
+AI_GATEWAY_LLM_DEFAULT_MODEL = "gpt-5.4"
 AI_GATEWAY_LLM_DEFAULT_MODEL_LOW = os.environ.get(
     "AI_GATEWAY_LLM_LOW_COMPLEXITY_MODEL", "gpt-5.4-mini"
 ).strip()
@@ -67,7 +56,7 @@ AI_GATEWAY_LLM_DEFAULT_MODEL_MEDIUM = os.environ.get(
     "AI_GATEWAY_LLM_MEDIUM_COMPLEXITY_MODEL", AI_GATEWAY_LLM_DEFAULT_MODEL
 ).strip()
 AI_GATEWAY_LLM_DEFAULT_MODEL_HIGH = os.environ.get(
-    "AI_GATEWAY_LLM_HIGH_COMPLEXITY_MODEL", "claude-fable-5"
+    "AI_GATEWAY_LLM_HIGH_COMPLEXITY_MODEL", "gpt-5.5"
 ).strip()
 
 
@@ -77,10 +66,8 @@ AI_GATEWAY_LLM_DEFAULT_MODEL_HIGH = os.environ.get(
 class AiAdapter(ABC):
     """Base adapter for AI backends.
 
-    Each adapter implements one AI backend:
-      - LlmAdapter: calls Claude/GPT API directly (text-only, no repo)
-      - CodexAdapter: runs codex exec (code changes, repo checkout)
-      - FutureAdapter: your custom backend
+    The service currently exposes only the Codex backend. Caller-side scripts
+    may still perform Claude/GPT direct API fallback outside the VPS service.
 
     The adapter receives:
       - prompt: the full instruction text
@@ -245,7 +232,6 @@ class CodexAdapter(AiAdapter):
 # ── Adapter Registry ─────────────────────────────────────────────────
 
 _ADAPTER_REGISTRY: dict[str, AiAdapter] = {
-    "analyze": LlmAdapter(),
     "execute": CodexAdapter(),
 }
 
@@ -283,13 +269,7 @@ def resolve_adapter(task: str, model: str) -> AiAdapter:
 
 
 def _detect_task_from_model(model: str) -> str:
-    """Determine the task type from the model name.
-    Claude/GPT models → analyze (API call).
-    Others (codex, empty) → execute (codex CLI).
-    """
-    m = (model or "").lower().strip()
-    if m.startswith("claude") or m.startswith("gpt"):
-        return "analyze"
+    """The VPS service is Codex-only; API model names do not select API adapters."""
     return "execute"
 
 
@@ -823,11 +803,11 @@ class AiGatewayHandler(BaseHTTPRequestHandler):
             # Execute tasks run async (slow, repo clone)
             self._handle_async_job(payload)
         else:
-            # Analyze tasks run sync (fast, API call)
+            # Non-Codex tasks are rejected during validation; this is defensive.
             self._handle_sync_task(payload)
 
     def _handle_sync_task(self, payload: dict[str, Any]) -> None:
-        """Analyze tasks: call LLM API directly, return result inline."""
+        """Defensive path for unsupported sync tasks."""
         try:
             output = _run_task(payload, repo_dir=None)
             _json_response(self, HTTPStatus.OK, {"status": "succeeded", "output": output})

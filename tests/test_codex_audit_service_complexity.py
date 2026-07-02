@@ -34,8 +34,8 @@ class TestComplexityModelRouting(unittest.TestCase):
         self._orig_high_char = _service.TASK_COMPLEXITY_HIGH_PROMPT_THRESHOLD
 
         _service.AI_GATEWAY_LLM_DEFAULT_MODEL_LOW = "gpt-test-low"
-        _service.AI_GATEWAY_LLM_DEFAULT_MODEL_MEDIUM = "claude-test-medium"
-        _service.AI_GATEWAY_LLM_DEFAULT_MODEL_HIGH = "claude-test-high"
+        _service.AI_GATEWAY_LLM_DEFAULT_MODEL_MEDIUM = "gpt-test-medium"
+        _service.AI_GATEWAY_LLM_DEFAULT_MODEL_HIGH = "gpt-test-high"
         _service.TASK_COMPLEXITY_MEDIUM_LINE_THRESHOLD = 40
         _service.TASK_COMPLEXITY_HIGH_LINE_THRESHOLD = 80
         _service.TASK_COMPLEXITY_MEDIUM_PROMPT_THRESHOLD = 120
@@ -60,7 +60,7 @@ class TestComplexityModelRouting(unittest.TestCase):
             },
             "review",
         )
-        self.assertEqual(model, "claude-test-high")
+        self.assertEqual(model, "gpt-test-high")
 
     def test_auto_complexity_uses_prompt_estimation(self) -> None:
         payload = {
@@ -70,16 +70,17 @@ class TestComplexityModelRouting(unittest.TestCase):
             "changed_lines": 120,
         }
         model = _service._resolve_model(payload, "pr_review")
-        self.assertEqual(model, "claude-test-high")
+        self.assertEqual(model, "gpt-test-high")
 
     def test_task_requires_async_review_and_execute(self) -> None:
         self.assertTrue(_service._task_requires_async("pr_review"))
         self.assertTrue(_service._task_requires_async("review"))
         self.assertTrue(_service._task_requires_async("execute"))
         self.assertTrue(_service._task_requires_async("monthly_snapshot_audit"))
-        self.assertFalse(_service._task_requires_async("analyze"))
         self.assertEqual(_service._adapter_task("execute", ""), "execute")
         self.assertEqual(_service._adapter_task("pr_review", ""), "execute")
+        with self.assertRaisesRegex(ValueError, "Unsupported task='analyze'"):
+            _service.resolve_adapter("analyze", "")
 
     def test_direct_api_model_for_complexity_reads_provider_specific_env(self) -> None:
         with mock.patch.dict(
