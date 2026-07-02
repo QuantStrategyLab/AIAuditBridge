@@ -209,6 +209,16 @@ def service_infrastructure_failure_comment(reason: str) -> str:
     )
 
 
+def service_fallback_reason(return_code: int, failure_category: str, failure_detail: str) -> str:
+    reason = f"Codex service failed with exit code `{return_code}`"
+    if failure_category != "unknown_failure":
+        reason += f" [{failure_category}]"
+    if failure_detail:
+        detail = failure_detail if len(failure_detail) <= 600 else f"{failure_detail[:597]}..."
+        reason += f": `{detail}`"
+    return f"{reason}."
+
+
 class GitHubRequestError(BridgeError):
     def __init__(self, method: str, url: str, status_code: int, response_body: str) -> None:
         self.method = method
@@ -2724,14 +2734,9 @@ def main() -> int:
                 issue_number=issue_number,
             )
             if return_code != 0:
-                if provider == "auto":
-                    failure_category = service_failure_category(_codex_log)
-                    fallback_reason = f"Codex service failed with exit code `{return_code}`."
-                    failure_detail = str(_codex_log or "").strip()
-                    if failure_category != "unknown_failure":
-                        fallback_reason = f"Codex service failed with exit code `{return_code}` [{failure_category}]."
-                    if failure_detail:
-                        fallback_reason = f"{fallback_reason[:-1]}: `{failure_detail[:600]}`."
+                failure_category = service_failure_category(_codex_log)
+                failure_detail = str(_codex_log or "").strip()
+                if provider == "auto" and failure_category == "quota_or_capacity_failure":
                     return run_auto_provider_fallback(
                         token=token,
                         source_repo=source_repo,
@@ -2739,16 +2744,32 @@ def main() -> int:
                         issue=issue,
                         comments=comments,
                         issue_number=issue_number,
-                        reason=fallback_reason,
+                        reason=service_fallback_reason(return_code, failure_category, failure_detail),
                         mode=mode,
                         task=task,
                         auto_merge=auto_merge,
                         exit_code=return_code,
                         workspace=workspace,
                     )
-                if return_code == SERVICE_INFRA_FAILURE_EXIT_CODE or is_service_infrastructure_failure(_codex_log):
+                is_infra_failure = return_code == SERVICE_INFRA_FAILURE_EXIT_CODE or is_service_infrastructure_failure(_codex_log)
+                if is_infra_failure:
                     post_issue_comment(token, source_repo, issue_number, service_infrastructure_failure_comment(_codex_log))
                     return 0
+                if provider == "auto":
+                    return run_auto_provider_fallback(
+                        token=token,
+                        source_repo=source_repo,
+                        source_ref=source_ref,
+                        issue=issue,
+                        comments=comments,
+                        issue_number=issue_number,
+                        reason=service_fallback_reason(return_code, failure_category, failure_detail),
+                        mode=mode,
+                        task=task,
+                        auto_merge=auto_merge,
+                        exit_code=return_code,
+                        workspace=workspace,
+                    )
                 body = "\n".join(
                     [
                         "## Codex Audit",

@@ -35,6 +35,17 @@ TASK_COMPLEXITY_LOW = "low"
 TASK_COMPLEXITY_MEDIUM = "medium"
 TASK_COMPLEXITY_HIGH = "high"
 TASK_COMPLEXITY_LEVELS = (TASK_COMPLEXITY_LOW, TASK_COMPLEXITY_MEDIUM, TASK_COMPLEXITY_HIGH)
+CODEX_SERVICE_FALLBACK_SIGNALS = (
+    "429",
+    "too many requests",
+    "rate limit",
+    "quota",
+    "401",
+    "unauthorized",
+    "missing bearer",
+    "authentication",
+    "missing token",
+)
 
 # Risk → block mapping
 BLOCK_SEVERITIES = frozenset({"critical", "high"})
@@ -437,6 +448,11 @@ def run_codex_service_review(prompt: str, timeout_minutes: int, complexity: str 
     raise ReviewError("Codex service job timed out")
 
 
+def _service_review_should_fallback(exc: ReviewError) -> bool:
+    message = str(exc).lower()
+    return any(signal in message for signal in CODEX_SERVICE_FALLBACK_SIGNALS)
+
+
 def run_codex_review_with_fallback(
     prompt: str,
     timeout_minutes: int,
@@ -457,7 +473,11 @@ def run_codex_review_with_fallback(
                 changed_file_count=changed_file_count,
                 changed_line_count=changed_line_count,
             )
-        except Exception as exc:  # noqa: BLE001 - any service failure should trigger the API fallback path.
+        except ReviewError as exc:
+            if not _service_review_should_fallback(exc):
+                raise
+            print(f"::warning::Codex service review failed; falling back to direct API: {exc}")
+        except (json.JSONDecodeError, OSError, urllib.error.URLError) as exc:
             print(f"::warning::Codex service review failed; falling back to direct API: {exc}")
 
     print("Running Codex review via direct API")
