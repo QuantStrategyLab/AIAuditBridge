@@ -541,6 +541,9 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         allowlist_message = "codex exec failed: raise ValueError('not allowed by source allowlist')"
         self.assertEqual(classify_service_failure(allowlist_message), "unknown_failure")
         self.assertEqual(codex_audit_service._classify_failure(allowlist_message), "unknown_failure")
+        forbidden_message = "codex exec failed: fixture text includes 403 forbidden"
+        self.assertEqual(classify_service_failure(forbidden_message), "unknown_failure")
+        self.assertEqual(codex_audit_service._classify_failure(forbidden_message), "unknown_failure")
         self.assertEqual(classify_service_failure("codex exec failed: too many active requests"), "quota_or_capacity_failure")
         self.assertEqual(
             classify_service_failure("source_repository foo is not allowed by service allowlist"),
