@@ -71,11 +71,24 @@ class TestQuotaRecord(unittest.TestCase):
     """QuotaRecord serialization."""
 
     def test_to_dict_includes_all_fields(self) -> None:
-        record = QuotaRecord(repo="owner/repo", tokens_input=100, tokens_output=50, total_cost_usd=0.5)
+        record = QuotaRecord(
+            repo="owner/repo",
+            tokens_input=100,
+            tokens_output=50,
+            api_calls=1,
+            codex_calls=2,
+            total_cost_usd=0.5,
+            api_key_cost_usd=0.4,
+            codex_cost_usd=0.1,
+        )
         d = record.to_dict()
         self.assertEqual(d["repo"], "owner/repo")
         self.assertEqual(d["tokens_input"], 100)
         self.assertEqual(d["tokens_output"], 50)
+        self.assertEqual(d["api_calls"], 1)
+        self.assertEqual(d["codex_calls"], 2)
+        self.assertEqual(d["api_key_cost_usd"], 0.4)
+        self.assertEqual(d["codex_cost_usd"], 0.1)
         self.assertAlmostEqual(d["total_cost_usd"], 0.5)
 
     def test_from_dict_roundtrip(self) -> None:
@@ -122,11 +135,37 @@ class TestQuotaManager(unittest.TestCase):
         self.assertEqual(status["repo"], "test/repo")
         self.assertIn("daily_budget", status)
         self.assertIn("remaining_daily", status)
+        self.assertEqual(status["api_calls"], 1)
 
     def test_status_returns_empty_if_no_records(self) -> None:
         status = self.manager.status("unknown/repo")
         self.assertIn("repo", status)
         self.assertEqual(status["total_cost_usd"], 0.0)
+        self.assertEqual(status["api_calls"], 0)
+        self.assertEqual(status["codex_calls"], 0)
+
+    def test_status_summary_splits_api_key_and_codex_usage(self) -> None:
+        self.manager.record("test/repo", "claude-sonnet-4-6", "A" * 4000, "B" * 1000)
+        self.manager.record_execute("test/repo")
+        status = self.manager.status()
+        summary = status["summary"]
+        self.assertEqual(summary["quota_source"], "internal_estimate")
+        self.assertIn("combined", summary)
+        self.assertEqual(summary["api_key"]["calls"], 1)
+        self.assertEqual(summary["codex"]["calls"], 1)
+        self.assertGreater(summary["api_key"]["total_cost_usd"], 0)
+        self.assertGreater(summary["codex"]["total_cost_usd"], 0)
+        self.assertAlmostEqual(
+            summary["combined"]["total_cost_usd"],
+            summary["api_key"]["total_cost_usd"] + summary["codex"]["total_cost_usd"],
+        )
+
+    def test_status_summary_respects_zero_budget(self) -> None:
+        self.manager._repo_budgets["blocked/repo"] = {"daily": 0.0}
+        self.manager.record_execute("blocked/repo")
+        status = self.manager.status()
+        self.assertEqual(status["summary"]["combined"]["daily_budget"], 0.0)
+        self.assertEqual(status["summary"]["combined"]["remaining_daily"], 0.0)
 
     def test_daily_budget_resets(self) -> None:
         """Quick test: budget resets when last_reset is old."""

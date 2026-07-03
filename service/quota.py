@@ -64,8 +64,11 @@ class QuotaRecord:
     repo: str
     tokens_input: int = 0
     tokens_output: int = 0
+    api_calls: int = 0
     codex_calls: int = 0
     total_cost_usd: float = 0.0
+    api_key_cost_usd: float = 0.0
+    codex_cost_usd: float = 0.0
     last_reset_daily: float = field(default_factory=time.time)
     last_reset_weekly: float = field(default_factory=time.time)
 
@@ -74,20 +77,34 @@ class QuotaRecord:
             "repo": self.repo,
             "tokens_input": self.tokens_input,
             "tokens_output": self.tokens_output,
+            "api_calls": self.api_calls,
             "codex_calls": self.codex_calls,
             "total_cost_usd": round(self.total_cost_usd, 4),
+            "api_key_cost_usd": round(self.api_key_cost_usd, 4),
+            "codex_cost_usd": round(self.codex_cost_usd, 4),
             "last_reset_daily": self.last_reset_daily,
             "last_reset_weekly": self.last_reset_weekly,
         }
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "QuotaRecord":
+        total_cost_usd = float(d.get("total_cost_usd", 0.0))
+        codex_cost_usd = float(
+            d.get(
+                "codex_cost_usd",
+                min(total_cost_usd, DEFAULT_MODEL_COSTS.get("codex-cli", {}).get("flat", 0.05) * int(d.get("codex_calls", 0))),
+            )
+        )
+        api_key_cost_usd = float(d.get("api_key_cost_usd", max(0.0, total_cost_usd - codex_cost_usd)))
         return cls(
             repo=str(d.get("repo", "")),
             tokens_input=int(d.get("tokens_input", 0)),
             tokens_output=int(d.get("tokens_output", 0)),
+            api_calls=int(d.get("api_calls", 0)),
             codex_calls=int(d.get("codex_calls", 0)),
-            total_cost_usd=float(d.get("total_cost_usd", 0.0)),
+            total_cost_usd=total_cost_usd,
+            api_key_cost_usd=api_key_cost_usd,
+            codex_cost_usd=codex_cost_usd,
             last_reset_daily=float(d.get("last_reset_daily", time.time())),
             last_reset_weekly=float(d.get("last_reset_weekly", time.time())),
         )
@@ -208,6 +225,9 @@ class QuotaManager:
             record.tokens_output = 0
             record.codex_calls = 0
             record.total_cost_usd = 0.0
+            record.api_calls = 0
+            record.api_key_cost_usd = 0.0
+            record.codex_cost_usd = 0.0
             record.last_reset_daily = now
         if now - record.last_reset_weekly > 604800:
             record.last_reset_weekly = now
@@ -270,6 +290,10 @@ class QuotaManager:
             record.tokens_output += tokens_output
             if model == "codex-cli":
                 record.codex_calls += 1
+                record.codex_cost_usd += cost
+            else:
+                record.api_calls += 1
+                record.api_key_cost_usd += cost
             record.total_cost_usd += cost
             self._records[repo] = record
             self._save_records_locked()
@@ -283,9 +307,37 @@ class QuotaManager:
             record = self._records[repo]
             record = self._reset_if_needed(record)
             record.codex_calls += 1
+            record.codex_cost_usd += cost
             record.total_cost_usd += cost
             self._records[repo] = record
             self._save_records_locked()
+
+    def _summary_from_statuses(self, statuses: dict[str, dict[str, Any]]) -> dict[str, Any]:
+        total_budget = sum(float(item.get("daily_budget", 0.0)) for item in statuses.values()) if statuses else self._daily_budget
+        api_key_cost = sum(float(item.get("api_key_cost_usd", 0.0)) for item in statuses.values())
+        codex_cost = sum(float(item.get("codex_cost_usd", 0.0)) for item in statuses.values())
+        total_cost = api_key_cost + codex_cost
+        return {
+            "quota_source": "internal_estimate",
+            "combined": {
+                "label": "API key + Codex",
+                "total_cost_usd": round(total_cost, 4),
+                "daily_budget": round(total_budget, 4),
+                "remaining_daily": round(max(0.0, total_budget - total_cost), 4),
+            },
+            "api_key": {
+                "label": "API key",
+                "calls": sum(int(item.get("api_calls", 0)) for item in statuses.values()),
+                "tokens_input": sum(int(item.get("tokens_input", 0)) for item in statuses.values()),
+                "tokens_output": sum(int(item.get("tokens_output", 0)) for item in statuses.values()),
+                "total_cost_usd": round(api_key_cost, 4),
+            },
+            "codex": {
+                "label": "Codex",
+                "calls": sum(int(item.get("codex_calls", 0)) for item in statuses.values()),
+                "total_cost_usd": round(codex_cost, 4),
+            },
+        }
 
     def status(self, repo: str = "") -> dict[str, Any]:
         """Get quota status for a repo or all repos."""
@@ -293,7 +345,8 @@ class QuotaManager:
             if repo:
                 record = self._records.get(repo)
                 if not record:
-                    return {"repo": repo, "total_cost_usd": 0.0, "daily_budget": self.get_daily_budget(repo)}
+                    empty = QuotaRecord(repo=repo).to_dict()
+                    return {**empty, "daily_budget": self.get_daily_budget(repo), "weekly_budget": self.get_weekly_budget(repo)}
                 record = self._reset_if_needed(record)
                 return {
                     **record.to_dict(),
@@ -301,8 +354,10 @@ class QuotaManager:
                     "weekly_budget": self.get_weekly_budget(repo),
                     "remaining_daily": self.remaining_daily(repo),
                 }
+            repos = {r: self.status(r) for r in self._records}
             return {
-                "repos": {r: self.status(r) for r in self._records},
+                "repos": repos,
+                "summary": self._summary_from_statuses(repos),
                 "default_daily_budget": self._daily_budget,
             }
 

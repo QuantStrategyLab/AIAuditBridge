@@ -103,6 +103,7 @@ class TestHealthMonitor(unittest.TestCase):
         for _ in range(int((1 - ERROR_RATE_DEGRADED) * 100) - 1):
             self.monitor.record("/v1/ai/analyze", latency=0.1, success=True)
         self.assertEqual(self.monitor.status, "degraded")
+        self.assertEqual(self.monitor.degradation_reasons[0]["reason"], "error_rate")
 
     def test_status_unhealthy_on_very_high_error_rate(self) -> None:
         for _ in range(int(ERROR_RATE_UNHEALTHY * 100)):
@@ -131,7 +132,20 @@ class TestHealthMonitor(unittest.TestCase):
         self.assertIn("status", snap)
         self.assertIn("uptime_seconds", snap)
         self.assertIn("endpoints", snap)
+        self.assertIn("degradation_reasons", snap)
         self.assertIn("last_error", snap)
+
+    def test_snapshot_explains_latency_degradation(self) -> None:
+        self.monitor.record("/v1/ai/execute/jobs", latency=31.0, success=True)
+        snap = self.monitor.snapshot()
+        self.assertEqual(snap["status"], "degraded")
+        self.assertEqual(snap["degradation_reasons"][0]["reason"], "p95_latency_ms")
+
+    def test_degradation_reasons_prioritize_unhealthy(self) -> None:
+        self.monitor.record("/v1/ai/degraded", latency=31.0, success=True)
+        self.monitor.record("/v1/ai/unhealthy", latency=121.0, success=True)
+        reasons = self.monitor.degradation_reasons
+        self.assertEqual(reasons[0]["severity"], "unhealthy")
 
     def test_multiple_endpoints_tracked_independently(self) -> None:
         self.monitor.record("/v1/ai/analyze", latency=0.5, success=True)

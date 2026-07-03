@@ -158,6 +158,46 @@ class HealthMonitor:
         return "healthy"
 
     @property
+    def degradation_reasons(self) -> list[dict[str, Any]]:
+        """Structured reasons explaining degraded or unhealthy status."""
+        reasons: list[dict[str, Any]] = []
+        for m in list(self._metrics.values()):
+            if m.recent_error_rate >= ERROR_RATE_UNHEALTHY:
+                reasons.append({
+                    "path": m.path,
+                    "reason": "error_rate",
+                    "severity": "unhealthy",
+                    "value": round(m.recent_error_rate, 4),
+                    "threshold": ERROR_RATE_UNHEALTHY,
+                })
+            elif m.recent_error_rate >= ERROR_RATE_DEGRADED:
+                reasons.append({
+                    "path": m.path,
+                    "reason": "error_rate",
+                    "severity": "degraded",
+                    "value": round(m.recent_error_rate, 4),
+                    "threshold": ERROR_RATE_DEGRADED,
+                })
+            if m.p95_latency >= LATENCY_P95_UNHEALTHY:
+                reasons.append({
+                    "path": m.path,
+                    "reason": "p95_latency_ms",
+                    "severity": "unhealthy",
+                    "value": round(m.p95_latency * 1000, 1),
+                    "threshold": round(LATENCY_P95_UNHEALTHY * 1000, 1),
+                })
+            elif m.p95_latency >= LATENCY_P95_DEGRADED:
+                reasons.append({
+                    "path": m.path,
+                    "reason": "p95_latency_ms",
+                    "severity": "degraded",
+                    "value": round(m.p95_latency * 1000, 1),
+                    "threshold": round(LATENCY_P95_DEGRADED * 1000, 1),
+                })
+        severity_rank = {"unhealthy": 0, "degraded": 1}
+        return sorted(reasons, key=lambda item: (severity_rank.get(str(item.get("severity")), 9), str(item.get("path", ""))))
+
+    @property
     def uptime_seconds(self) -> float:
         return time.time() - self._started_at
 
@@ -179,6 +219,7 @@ class HealthMonitor:
             "status": self.status,
             "uptime_seconds": self.uptime_seconds,
             "endpoints": endpoints,
+            "degradation_reasons": self.degradation_reasons,
             "last_error": self.last_error,
         }
 
