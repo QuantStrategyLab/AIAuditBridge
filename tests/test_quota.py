@@ -86,6 +86,7 @@ class TestQuotaRecord(unittest.TestCase):
         self.assertEqual(d["tokens_input"], 100)
         self.assertEqual(d["tokens_output"], 50)
         self.assertEqual(d["api_calls"], 1)
+        self.assertFalse(d["api_calls_incomplete"])
         self.assertEqual(d["codex_calls"], 2)
         self.assertEqual(d["api_key_cost_usd"], 0.4)
         self.assertEqual(d["codex_cost_usd"], 0.1)
@@ -136,6 +137,7 @@ class TestQuotaManager(unittest.TestCase):
         self.assertIn("daily_budget", status)
         self.assertIn("remaining_daily", status)
         self.assertEqual(status["api_calls"], 1)
+        self.assertFalse(status["api_calls_incomplete"])
 
     def test_status_returns_empty_if_no_records(self) -> None:
         status = self.manager.status("unknown/repo")
@@ -152,6 +154,7 @@ class TestQuotaManager(unittest.TestCase):
         self.assertEqual(summary["quota_source"], "internal_estimate")
         self.assertIn("combined", summary)
         self.assertEqual(summary["api_key"]["calls"], 1)
+        self.assertFalse(summary["api_key"]["calls_incomplete"])
         self.assertEqual(summary["codex"]["calls"], 1)
         self.assertGreater(summary["api_key"]["total_cost_usd"], 0)
         self.assertGreater(summary["codex"]["total_cost_usd"], 0)
@@ -166,6 +169,19 @@ class TestQuotaManager(unittest.TestCase):
         status = self.manager.status()
         self.assertEqual(status["summary"]["combined"]["daily_budget"], 0.0)
         self.assertEqual(status["summary"]["combined"]["remaining_daily"], 0.0)
+
+    def test_missing_historical_api_call_count_is_marked_incomplete(self) -> None:
+        record = QuotaRecord.from_dict({
+            "repo": "old/repo",
+            "tokens_input": 1000,
+            "tokens_output": 500,
+            "codex_calls": 0,
+            "total_cost_usd": 0.25,
+        })
+        self.manager._records["old/repo"] = record
+        status = self.manager.status()
+        self.assertTrue(status["repos"]["old/repo"]["api_calls_incomplete"])
+        self.assertTrue(status["summary"]["api_key"]["calls_incomplete"])
 
     def test_daily_budget_resets(self) -> None:
         """Quick test: budget resets when last_reset is old."""

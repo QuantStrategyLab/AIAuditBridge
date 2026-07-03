@@ -65,6 +65,7 @@ class QuotaRecord:
     tokens_input: int = 0
     tokens_output: int = 0
     api_calls: int = 0
+    api_calls_incomplete: bool = False
     codex_calls: int = 0
     total_cost_usd: float = 0.0
     api_key_cost_usd: float = 0.0
@@ -78,6 +79,7 @@ class QuotaRecord:
             "tokens_input": self.tokens_input,
             "tokens_output": self.tokens_output,
             "api_calls": self.api_calls,
+            "api_calls_incomplete": self.api_calls_incomplete,
             "codex_calls": self.codex_calls,
             "total_cost_usd": round(self.total_cost_usd, 4),
             "api_key_cost_usd": round(self.api_key_cost_usd, 4),
@@ -96,11 +98,15 @@ class QuotaRecord:
             )
         )
         api_key_cost_usd = float(d.get("api_key_cost_usd", max(0.0, total_cost_usd - codex_cost_usd)))
+        has_api_calls = "api_calls" in d
+        api_calls = int(d.get("api_calls", 0))
+        api_calls_incomplete = bool(d.get("api_calls_incomplete", False) or (not has_api_calls and api_key_cost_usd > 0))
         return cls(
             repo=str(d.get("repo", "")),
             tokens_input=int(d.get("tokens_input", 0)),
             tokens_output=int(d.get("tokens_output", 0)),
-            api_calls=int(d.get("api_calls", 0)),
+            api_calls=api_calls,
+            api_calls_incomplete=api_calls_incomplete,
             codex_calls=int(d.get("codex_calls", 0)),
             total_cost_usd=total_cost_usd,
             api_key_cost_usd=api_key_cost_usd,
@@ -226,6 +232,7 @@ class QuotaManager:
             record.codex_calls = 0
             record.total_cost_usd = 0.0
             record.api_calls = 0
+            record.api_calls_incomplete = False
             record.api_key_cost_usd = 0.0
             record.codex_cost_usd = 0.0
             record.last_reset_daily = now
@@ -328,6 +335,7 @@ class QuotaManager:
             "api_key": {
                 "label": "API key",
                 "calls": sum(int(item.get("api_calls", 0)) for item in statuses.values()),
+                "calls_incomplete": any(bool(item.get("api_calls_incomplete", False)) for item in statuses.values()),
                 "tokens_input": sum(int(item.get("tokens_input", 0)) for item in statuses.values()),
                 "tokens_output": sum(int(item.get("tokens_output", 0)) for item in statuses.values()),
                 "total_cost_usd": round(api_key_cost, 4),
