@@ -34,5 +34,5 @@ def test_monthly_orchestrator_does_not_dispatch_without_source_issue() -> None:
 
     assert "peter-evans/repository-dispatch" not in text
     assert "event-type: monthly-audit" not in text
-    assert "CodexAuditBridge execution requires a source repository issue number." in text
+    assert "AIAuditBridge execution requires a source repository issue number." in text
     assert "source_repo and issue_number" in text

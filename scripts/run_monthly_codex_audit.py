@@ -39,7 +39,7 @@ DEFAULT_TASK = "monthly_snapshot_audit"
 DEFAULT_MODE = "review_and_fix"
 DEFAULT_PROVIDER = "auto"
 API_PATCH_SYSTEM_PROMPT = (
-    "You are CodexAuditBridge's API fallback patch provider. "
+    "You are AIAuditBridge's API fallback patch provider. "
     "Return exactly one JSON object that matches the service patch contract. "
     "Do not wrap the JSON in markdown fences or add surrounding prose."
 )
@@ -223,7 +223,7 @@ def service_infrastructure_failure_comment(reason: str) -> str:
         [
             "## Codex Audit",
             "",
-            "CodexAuditBridge stopped before making repository changes because the service backend failed outside the source PR/test surface.",
+            "AIAuditBridge stopped before making repository changes because the service backend failed outside the source PR/test surface.",
             "",
             f"- Failure category: `{category}`",
             f"- Detail: `{sanitize_inline_code(reason, 600)}`",
@@ -741,7 +741,7 @@ def build_service_repository_context(
         "## Repository context snapshot",
         "",
         "The service backend cannot access the source checkout directly. The following bounded text snapshot is provided "
-        "by CodexAuditBridge after path filtering.",
+        "by AIAuditBridge after path filtering.",
         "",
     ]
     total = len("\n".join(parts).encode("utf-8"))
@@ -776,7 +776,7 @@ def service_patch_contract_instructions() -> str:
         [
             "## Service patch contract",
             "",
-            "You are running behind CodexAuditBridge's service backend. You cannot edit the checkout directly.",
+            "You are running behind AIAuditBridge's service backend. You cannot edit the checkout directly.",
             "For review_and_fix mode, return exactly one JSON object and no surrounding prose:",
             "",
             "```json",
@@ -838,6 +838,16 @@ def codex_service_job_url(service_url: str, job_id: str) -> str:
     if not re.fullmatch(r"[A-Za-z0-9_-]{24,96}", job_id):
         raise BridgeError("Codex audit service returned an invalid job id")
     return service_url.rstrip("/") + f"/jobs/{job_id}"
+
+
+def codex_service_api_url(service_url: str, api_path: str) -> str:
+    if not api_path.startswith("/v1/ai/"):
+        raise BridgeError("Codex audit service API path must start with /v1/ai/")
+    suffix = "/v1/codex-audit"
+    base = service_url.rstrip("/")
+    if base.endswith(suffix):
+        base = base[: -len(suffix)]
+    return base.rstrip("/") + api_path
 
 
 def request_github_oidc_token(audience: str) -> str:
@@ -964,6 +974,47 @@ def request_codex_service(
         if status not in {"queued", "running"}:
             raise BridgeError(f"Codex audit service job returned unexpected status: {status!r}")
     raise BridgeError("Codex audit service job timed out before completion")
+
+
+def register_gateway_change(
+    *,
+    source_repo: str,
+    task: str,
+    action: str,
+    risk: str,
+    changed_paths: list[str],
+    issue_number: int,
+    pr_number: int,
+    pr_url: str,
+) -> str:
+    """Best-effort write to AiGateway closed-loop change registry."""
+    raw_url = env_value("CODEX_AUDIT_SERVICE_URL")
+    if not raw_url:
+        return ""
+    try:
+        service_url = normalize_codex_service_url(raw_url)
+        audience = env_value("CODEX_AUDIT_SERVICE_AUDIENCE", DEFAULT_SERVICE_AUDIENCE)
+        request_codex_service_json(
+            method="POST",
+            url=codex_service_api_url(service_url, "/v1/ai/feedback/register"),
+            audience=audience,
+            payload={
+                "source_repository": source_repo,
+                "task": task,
+                "action": action,
+                "risk": risk,
+                "confidence": 0.0,
+                "changed_paths": changed_paths,
+                "before_metrics": {},
+                "issue_number": issue_number,
+                "pr_number": pr_number,
+                "external_url": pr_url,
+            },
+            timeout_seconds=30,
+        )
+    except BridgeError as exc:
+        return str(exc)
+    return ""
 
 
 def extract_json_object(text: str) -> dict[str, Any]:
@@ -1652,6 +1703,7 @@ def publish_remediation(
         policy=workspace.baseline_auto_merge_policy,
         diff_stats=diff_stats,
     )
+    gateway_action = "auto_pr"
     stale_auto_merge_label_removed = workspace.stale_auto_merge_label_removed
     stale_auto_merge_label_error = ""
     if (
@@ -1749,6 +1801,7 @@ def publish_remediation(
                 f"after Bridge classified the change set as `{guard['risk_level']}` risk. "
                 "CI and the source guard own the final merge decision."
             )
+            gateway_action = "auto_merge"
         except BridgeError as exc:
             body_lines.append("")
             body_lines.append(f"Auto-merge was requested but the guarded label could not be added: `{exc}`")
@@ -1767,6 +1820,18 @@ def publish_remediation(
     elif workspace.feedback_retry_pr and workspace.stale_auto_merge_label_skip_reason:
         body_lines.append("")
         body_lines.append(stale_auto_merge_label_skip_message(workspace.stale_auto_merge_label_skip_reason))
+    gateway_warning = register_gateway_change(
+        source_repo=source_repo,
+        task=task,
+        action=gateway_action,
+        risk=str(guard_risk.get("risk_level") or ""),
+        changed_paths=paths,
+        issue_number=issue_number,
+        pr_number=int(pr["number"]),
+        pr_url=str(pr_url),
+    )
+    if gateway_warning:
+        print(f"warning: AiGateway change registration failed: {gateway_warning[:300]}", file=sys.stderr)
     post_issue_comment(token, source_repo, issue_number, "\n".join(body_lines))
     return 0
 
@@ -2411,7 +2476,7 @@ def blocked_paths(paths: list[str], *, task: str = DEFAULT_TASK) -> list[str]:
 def truncate_markdown(text: str, limit: int = 12000) -> str:
     if len(text) <= limit:
         return text
-    return text[:limit] + "\n\n...[truncated by CodexAuditBridge]"
+    return text[:limit] + "\n\n...[truncated by AIAuditBridge]"
 
 
 def strip_audit_heading(text: str) -> str:

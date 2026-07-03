@@ -149,6 +149,17 @@ class TestQuotaManager(unittest.TestCase):
         self.manager._repo_budgets["premium/repo"] = {"weekly": 250.0}
         self.assertEqual(self.manager.get_weekly_budget("premium/repo"), 250.0)
 
+    def test_records_persist_to_store(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = str(Path(tmp) / "quota.json")
+            with patch.dict(os.environ, {"CODEX_AUDIT_SERVICE_QUOTA_STORE": store}):
+                first = QuotaManager()
+                first.record_execute("test/repo")
+                second = QuotaManager()
+                status = second.status("test/repo")
+        self.assertEqual(status["codex_calls"], 1)
+        self.assertGreater(status["total_cost_usd"], 0)
+
 
 class TestQuotaConfigLoading(unittest.TestCase):
     """Quota configuration from JSON file."""

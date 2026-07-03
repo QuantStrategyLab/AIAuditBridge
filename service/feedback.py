@@ -108,6 +108,9 @@ class ChangeRecord:
     effect: str = EFFECT_PENDING
     effect_detail: str = ""
     rollback_issue_url: str = ""
+    external_url: str = ""
+    issue_number: int | None = None
+    pr_number: int | None = None
     created_at: float = field(default_factory=_now)
     evaluated_at: float | None = None
     source_repo: str = ""
@@ -126,6 +129,9 @@ class ChangeRecord:
             "effect": self.effect,
             "effect_detail": self.effect_detail,
             "rollback_issue_url": self.rollback_issue_url,
+            "external_url": self.external_url,
+            "issue_number": self.issue_number,
+            "pr_number": self.pr_number,
             "created_at": self.created_at,
             "evaluated_at": self.evaluated_at,
             "source_repo": self.source_repo,
@@ -146,6 +152,9 @@ class ChangeRecord:
             effect=str(d.get("effect", EFFECT_PENDING)),
             effect_detail=str(d.get("effect_detail", "")),
             rollback_issue_url=str(d.get("rollback_issue_url", "")),
+            external_url=str(d.get("external_url", "")),
+            issue_number=int(d["issue_number"]) if d.get("issue_number") is not None else None,
+            pr_number=int(d["pr_number"]) if d.get("pr_number") is not None else None,
             created_at=float(d.get("created_at", _now())),
             evaluated_at=float(d.get("evaluated_at", 0)) if d.get("evaluated_at") else None,
             source_repo=str(d.get("source_repo", "")),

@@ -117,7 +117,7 @@ jobs:
               ...targets.map(t => `- ${t}`),
               '',
               'Only snapshot artifact repositories are in scope for monthly report audits.',
-              'Each source repository owns its monthly review issue and dispatches CodexAuditBridge with source_repo and issue_number.',
+              'Each source repository owns its monthly review issue and dispatches AIAuditBridge with source_repo and issue_number.',
               '',
               'Source of truth for policy and scheduling stays in GitHub Actions.',
               '',
@@ -175,6 +175,6 @@ jobs:
             echo "- Month: ${{ steps.resolve-month.outputs.month }}"
             echo "- Tracking issue: ${{ steps.publish-monthly-issue.outputs.issue_url }}"
             echo
-            echo "CodexAuditBridge execution requires a source repository issue number."
+            echo "AIAuditBridge execution requires a source repository issue number."
             echo "The source repositories create those issues in their own monthly workflows, then dispatch codex_audit.yml with source_repo and issue_number."
           } >> "$GITHUB_STEP_SUMMARY"

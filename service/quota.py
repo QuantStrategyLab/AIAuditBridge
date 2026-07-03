@@ -141,6 +141,16 @@ class QuotaManager:
         self._weekly_budget = DEFAULT_WEEKLY_BUDGET_USD
         self._repo_budgets: dict[str, dict[str, float]] = {}
         self._load_config()
+        self._load_records()
+
+    def _store_path(self) -> Path | None:
+        path = os.environ.get("CODEX_AUDIT_SERVICE_QUOTA_STORE", "").strip()
+        if path:
+            return Path(path)
+        job_dir = os.environ.get("CODEX_AUDIT_SERVICE_JOB_DIR", "").strip()
+        if job_dir:
+            return Path(job_dir) / "quota.json"
+        return None
 
     def _load_config(self) -> None:
         config_path = os.environ.get("CODEX_AUDIT_SERVICE_QUOTA_CONFIG", "").strip()
@@ -155,6 +165,41 @@ class QuotaManager:
             self._weekly_budget = float(raw.get("default_weekly_budget_usd", DEFAULT_WEEKLY_BUDGET_USD))
             if isinstance(raw.get("repo_budgets"), dict):
                 self._repo_budgets = raw["repo_budgets"]
+
+    def _load_records(self) -> None:
+        path = self._store_path()
+        if path is None:
+            return
+        if not path.exists():
+            return
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return
+        records = raw.get("records") if isinstance(raw, dict) else None
+        if not isinstance(records, dict):
+            return
+        self._records = {
+            repo: QuotaRecord.from_dict(item)
+            for repo, item in records.items()
+            if isinstance(repo, str) and isinstance(item, dict)
+        }
+
+    def _save_records_locked(self) -> None:
+        path = self._store_path()
+        if path is None:
+            return
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        payload = json.dumps(
+            {"records": {repo: record.to_dict() for repo, record in self._records.items()}},
+            ensure_ascii=False,
+            sort_keys=True,
+        ).encode("utf-8")
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        with open(tmp, "wb") as handle:
+            handle.write(payload)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
 
     def _reset_if_needed(self, record: QuotaRecord) -> QuotaRecord:
         now = time.time()
@@ -227,6 +272,7 @@ class QuotaManager:
                 record.codex_calls += 1
             record.total_cost_usd += cost
             self._records[repo] = record
+            self._save_records_locked()
 
     def record_execute(self, repo: str) -> None:
         """Record a codex exec call (flat cost)."""
@@ -239,6 +285,7 @@ class QuotaManager:
             record.codex_calls += 1
             record.total_cost_usd += cost
             self._records[repo] = record
+            self._save_records_locked()
 
     def status(self, repo: str = "") -> dict[str, Any]:
         """Get quota status for a repo or all repos."""

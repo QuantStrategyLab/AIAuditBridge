@@ -28,6 +28,7 @@ from scripts.run_monthly_codex_audit import (
     build_service_prompt,
     classify_service_failure,
     classify_guarded_auto_merge_risk,
+    codex_service_api_url,
     codex_service_job_url,
     codex_service_jobs_url,
     convert_local_markdown_links,
@@ -100,6 +101,12 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         for source_repo in SOURCE_REPO_TASKS:
             with self.subTest(source_repo=source_repo):
                 self.assertEqual(validate_repo(source_repo), source_repo)
+
+    def test_codex_service_api_url_maps_legacy_endpoint_to_ai_route(self) -> None:
+        self.assertEqual(
+            codex_service_api_url("https://codex.quant.example/v1/codex-audit", "/v1/ai/feedback/register"),
+            "https://codex.quant.example/v1/ai/feedback/register",
+        )
 
     def test_validate_repo_rejects_invalid_values(self) -> None:
         with self.assertRaises(Exception):
@@ -2255,6 +2262,11 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertIn("- self-hosted", workflow)
         self.assertIn("- codex-vps", workflow)
         self.assertIn('bash scripts/deploy_codex_audit_service.sh "${{ inputs.mode }}"', workflow)
+        self.assertIn("CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES", workflow)
+        self.assertIn("CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS", workflow)
+        self.assertIn("CODEX_AUDIT_SERVICE_ALLOWED_REFS", workflow)
+        self.assertIn("CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES", workflow)
+        self.assertIn("QuantStrategyLab/AIAuditBridge,QuantStrategyLab/CodexAuditBridge,QuantStrategyLab/CryptoLivePoolPipelines", workflow)
         self.assertIn("actions/checkout@v6.0.3", workflow)
 
     def test_vps_deploy_adds_nginx_audit_route_without_router_service(self) -> None:
@@ -2263,10 +2275,20 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertIn("location = /v1/codex-audit", deploy_script)
         self.assertIn("location ^~ /v1/codex-audit/", deploy_script)
         self.assertIn("CODEX_AUDIT_SERVICE_JOB_DIR", deploy_script)
+        self.assertIn("codex_pr_review.yml@refs/pull/*/merge", deploy_script)
+        self.assertIn("refs/pull/*/merge", deploy_script)
+        self.assertIn("QuantStrategyLab/AIAuditBridge,QuantStrategyLab/CodexAuditBridge,QuantStrategyLab/CryptoLivePoolPipelines", deploy_script)
         self.assertIn("proxy_pass http://127.0.0.1:{port}", deploy_script)
         self.assertIn('"# CodexAuditBridge route start" not in block', deploy_script)
         self.assertIn("audit service did not become healthy", deploy_script)
         self.assertIn("nginx config test failed; restoring previous config", deploy_script)
+        self.assertIn("zzzz-managed-allowlists.conf", deploy_script)
+        self.assertIn('Environment="CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES=${ALLOWED_REPOSITORIES}"', deploy_script)
+        self.assertIn("systemctl_environment_brief", deploy_script)
+        self.assertIn('sed -E "s/^[\\"', deploy_script)
+        self.assertIn('s/[\\"\']$//"', deploy_script)
+        self.assertIn("CODEX_AUDIT_SERVICE_(ALLOWED_|AUDIENCE=", deploy_script)
+        self.assertNotIn("^CODEX_AUDIT_SERVICE_TOKEN", deploy_script)
         self.assertNotIn("CODEX_SERVICE_ROUTER", deploy_script)
         self.assertNotIn("codex_service_router", deploy_script)
 

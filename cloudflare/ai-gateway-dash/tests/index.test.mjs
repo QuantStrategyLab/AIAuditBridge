@@ -17,6 +17,13 @@ test("buildDashboardApiUrl allows effectiveness route with query", () => {
   );
 });
 
+test("buildDashboardApiUrl maps AiGateway routes at root when origin is legacy audit endpoint", () => {
+  assert.equal(
+    buildDashboardApiUrl("https://origin.example/v1/codex-audit", "/v1/ai/health", ""),
+    "https://origin.example/v1/ai/health",
+  );
+});
+
 test("buildDashboardApiUrl rejects unsupported origin paths", () => {
   assert.throws(
     () => buildDashboardApiUrl("https://origin.example", "/v1/ai/execute/jobs", ""),

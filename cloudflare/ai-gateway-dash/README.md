@@ -14,6 +14,9 @@ Cloudflare Worker that serves an operations dashboard for the AiGateway service.
 | `AI_GATEWAY_ORIGIN_URL` | VPS origin URL (e.g. `https://43.156.238.238.sslip.io`) |
 | `DASHBOARD_API_TOKEN` | Static token for read-only API access |
 
+`DASHBOARD_API_TOKEN` must match the VPS service `CODEX_AUDIT_SERVICE_TOKEN`
+so the dashboard can read `/v1/ai/*` endpoints.
+
 ## Deploy
 
 ```bash

@@ -15,7 +15,7 @@ The synchronous `POST /v1/codex-audit` endpoint remains available for local diag
 
 ## Boundary with Pigbibi CodexGateway
 
-`AIAuditBridge` intentionally stays separate from `Pigbibi/AIGateway`.
+`AIAuditBridge` intentionally stays separate from `Pigbibi/CodexGateway`.
 
 - `CodexGateway` is a generic Codex invocation facade for prompt/context/image/schema calls.
 - `AIAuditBridge` owns QuantStrategyLab monthly audit semantics: source issue context, bounded repository snapshots, service patch contracts, source repository allowlists, GitHub App writeback, and generated remediation PRs.
@@ -29,11 +29,11 @@ The historical self-hosted direct-Codex workflows in `SelfHostedCodexAuditBridge
 - Source repositories, including public QuantStrategyLab repositories, must not store provider keys or the Codex service URL.
 - Source repositories should only dispatch the bridge workflow and provide issue/source context. Avoid running Codex directly in public workflows.
 - `QuantStrategyLab/AIAuditBridge` is public, so it may contain only client/orchestration code. Its service URL, provider fallback keys, GitHub App private key, and Cloudflare origin stay in GitHub or Cloudflare secrets.
-- The VPS service should allow only `QuantStrategyLab/AIAuditBridge` in `CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES`; this OIDC allowlist is required because the bridge repository is public.
-- The VPS service should require `CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS=QuantStrategyLab/AIAuditBridge/.github/workflows/codex_audit.yml@refs/heads/main`.
-- The VPS service should require `CODEX_AUDIT_SERVICE_ALLOWED_REFS=refs/heads/main`.
+- The VPS service should allow `QuantStrategyLab/AIAuditBridge` in `CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES`; keep `QuantStrategyLab/CodexAuditBridge` only as temporary migration compatibility.
+- The VPS service should require explicit `CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS` for the canonical `AIAuditBridge` workflows and any temporary legacy workflow refs.
+- The VPS service should keep `CODEX_AUDIT_SERVICE_ALLOWED_REFS` as narrow as the enabled workflows allow, normally `refs/heads/main` plus `refs/pull/*/merge` for PR review smoke tests.
 - Keep `CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORY_VISIBILITIES=public` unless the bridge repository is intentionally private.
-- The VPS service should keep `CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES` limited to the current source repositories.
+- The VPS service should keep `CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES` limited to current audit source repositories and PR review targets.
 - The Cloudflare Worker stores only `CODEX_AUDIT_ORIGIN_URL` as a Worker secret. Do not commit the origin URL if it exposes infrastructure details.
 - Job IDs are random and status reads still require service authentication. Job responses never include the original prompt.
 - Static service bearer tokens are no longer supported; production calls must use GitHub Actions OIDC.
@@ -55,11 +55,11 @@ For public source repositories:
 After merging the async service code, run the manual `VPS Codex Service Ops` workflow with deploy mode, or run on the VPS:
 
 ```bash
-CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES=QuantStrategyLab/AIAuditBridge \
-CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS='QuantStrategyLab/AIAuditBridge/.github/workflows/codex_audit.yml@refs/heads/main' \
-CODEX_AUDIT_SERVICE_ALLOWED_REFS='refs/heads/main' \
+CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES=QuantStrategyLab/AIAuditBridge,QuantStrategyLab/CodexAuditBridge \
+CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS='QuantStrategyLab/AIAuditBridge/.github/workflows/codex_audit.yml@refs/heads/main,QuantStrategyLab/AIAuditBridge/.github/workflows/codex_pr_review.yml@refs/heads/main,QuantStrategyLab/AIAuditBridge/.github/workflows/codex_pr_review.yml@refs/pull/*/merge,QuantStrategyLab/CodexAuditBridge/.github/workflows/codex_audit.yml@refs/heads/main,QuantStrategyLab/CodexAuditBridge/.github/workflows/codex_pr_review.yml@refs/heads/main,QuantStrategyLab/CodexAuditBridge/.github/workflows/codex_pr_review.yml@refs/pull/*/merge' \
+CODEX_AUDIT_SERVICE_ALLOWED_REFS='refs/heads/main,refs/pull/*/merge' \
 CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORY_VISIBILITIES='public' \
-CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES='QuantStrategyLab/CryptoLivePoolPipelines,QuantStrategyLab/HkEquitySnapshotPipelines,QuantStrategyLab/UsEquitySnapshotPipelines,QuantStrategyLab/ResearchSignalContextPipelines' \
+CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES='QuantStrategyLab/AIAuditBridge,QuantStrategyLab/CodexAuditBridge,QuantStrategyLab/CryptoLivePoolPipelines,QuantStrategyLab/HkEquitySnapshotPipelines,QuantStrategyLab/UsEquitySnapshotPipelines,QuantStrategyLab/ResearchSignalContextPipelines' \
 CODEX_AUDIT_SERVICE_AUDIENCE=quant-codex-audit \
 CODEX_AUDIT_SERVICE_MODEL=gpt-5.4 \
 CODEX_AUDIT_SERVICE_REASONING_EFFORT=auto \
