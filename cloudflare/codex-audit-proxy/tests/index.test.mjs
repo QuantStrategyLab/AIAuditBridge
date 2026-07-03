@@ -33,6 +33,13 @@ test("buildOriginUrl maps async status route next to audit endpoint", () => {
   );
 });
 
+test("buildOriginUrl maps AiGateway routes at root when origin is legacy audit endpoint", () => {
+  assert.equal(
+    buildOriginUrl("https://origin.example/v1/codex-audit", "/v1/ai/health"),
+    "https://origin.example/v1/ai/health",
+  );
+});
+
 test("buildOriginUrl preserves nested base path", () => {
   assert.equal(
     buildOriginUrl("https://origin.example/codex", "/v1/codex-audit"),

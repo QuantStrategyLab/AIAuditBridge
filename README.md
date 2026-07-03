@@ -33,11 +33,11 @@ This avoids hard-coding Codex CLI setup in every source repository and avoids de
 
 ## Compatibility governance role
 
-Compatibility governance metadata in this repository is ops/control-plane only:
+`QuantStrategyLab/AIAuditBridge` is an ops/control-plane consumer only:
 
-- It aligns audit/review execution contracts across QuantStrategyLab repositories.
+- It consumes compatibility governance metadata to align audit/review execution.
 - It must **not** participate in trading runtime dependency graphs or strategy/runtime upgrade flows.
-- All governance references from this repo should be interpreted as control-plane/tooling compatibility, not runtime coupling.
+- All governance references here are for control-plane operation and should not be interpreted as runtime coupling.
 
 
 ## Supported source repositories
@@ -99,12 +99,12 @@ Configure these values in `QuantStrategyLab/AIAuditBridge`:
 Run the service host with:
 
 ```bash
-CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES=QuantStrategyLab/AIAuditBridge \
-CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES='QuantStrategyLab/CryptoLivePoolPipelines,QuantStrategyLab/HkEquitySnapshotPipelines,QuantStrategyLab/UsEquitySnapshotPipelines,QuantStrategyLab/ResearchSignalContextPipelines' \
+CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES=QuantStrategyLab/AIAuditBridge,QuantStrategyLab/CodexAuditBridge \
+CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES='QuantStrategyLab/AIAuditBridge,QuantStrategyLab/CodexAuditBridge,QuantStrategyLab/CryptoLivePoolPipelines,QuantStrategyLab/HkEquitySnapshotPipelines,QuantStrategyLab/UsEquitySnapshotPipelines,QuantStrategyLab/ResearchSignalContextPipelines' \
 CODEX_AUDIT_SERVICE_AUDIENCE=quant-codex-audit \
 CODEX_AUDIT_SERVICE_MODEL=gpt-5.4 \
 CODEX_AUDIT_SERVICE_REASONING_EFFORT=auto \
-python3 scripts/codex_audit_service.py
+python3 -m service.ai_gateway_service
 ```
 
 Terminate TLS on 443 with the platform load balancer or a reverse proxy and forward `/v1/codex-audit` to the service port. Do not pass GitHub write tokens to this service.

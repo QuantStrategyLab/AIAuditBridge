@@ -8,10 +8,10 @@ DEPLOY_DIR="${CODEX_AUDIT_SERVICE_DEPLOY_DIR:-/opt/codex-audit-bridge}"
 AUDIT_PORT="${CODEX_AUDIT_SERVICE_PORT:-8797}"
 AUDIENCE="${CODEX_AUDIT_SERVICE_AUDIENCE:-quant-codex-audit}"
 ALLOWED_REPOSITORIES="${CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES:-QuantStrategyLab/AIAuditBridge,QuantStrategyLab/CodexAuditBridge}"
-ALLOWED_WORKFLOW_REFS="${CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS:-QuantStrategyLab/AIAuditBridge/.github/workflows/codex_audit.yml@refs/heads/main,QuantStrategyLab/CodexAuditBridge/.github/workflows/codex_audit.yml@refs/heads/main}"
-ALLOWED_REFS="${CODEX_AUDIT_SERVICE_ALLOWED_REFS:-refs/heads/main}"
+ALLOWED_WORKFLOW_REFS="${CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS:-QuantStrategyLab/AIAuditBridge/.github/workflows/codex_audit.yml@refs/heads/main,QuantStrategyLab/AIAuditBridge/.github/workflows/codex_pr_review.yml@refs/heads/main,QuantStrategyLab/AIAuditBridge/.github/workflows/codex_pr_review.yml@refs/pull/*/merge,QuantStrategyLab/CodexAuditBridge/.github/workflows/codex_audit.yml@refs/heads/main,QuantStrategyLab/CodexAuditBridge/.github/workflows/codex_pr_review.yml@refs/heads/main,QuantStrategyLab/CodexAuditBridge/.github/workflows/codex_pr_review.yml@refs/pull/*/merge}"
+ALLOWED_REFS="${CODEX_AUDIT_SERVICE_ALLOWED_REFS:-refs/heads/main,refs/pull/*/merge}"
 ALLOWED_REPOSITORY_VISIBILITIES="${CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORY_VISIBILITIES:-public}"
-ALLOWED_SOURCE_REPOSITORIES="${CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES:-QuantStrategyLab/CryptoLivePoolPipelines,QuantStrategyLab/HkEquitySnapshotPipelines,QuantStrategyLab/UsEquitySnapshotPipelines,QuantStrategyLab/ResearchSignalContextPipelines}"
+ALLOWED_SOURCE_REPOSITORIES="${CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES:-QuantStrategyLab/AIAuditBridge,QuantStrategyLab/CodexAuditBridge,QuantStrategyLab/CryptoLivePoolPipelines,QuantStrategyLab/HkEquitySnapshotPipelines,QuantStrategyLab/UsEquitySnapshotPipelines,QuantStrategyLab/ResearchSignalContextPipelines}"
 JOB_DIR="${CODEX_AUDIT_SERVICE_JOB_DIR:-/var/lib/codex-audit-bridge/jobs}"
 AUDIT_MODEL="${CODEX_AUDIT_SERVICE_MODEL:-}"
 AUDIT_REASONING_EFFORT="${CODEX_AUDIT_SERVICE_REASONING_EFFORT:-}"
@@ -45,6 +45,19 @@ systemctl_status_brief() {
     systemctl is-enabled "$service" 2>/dev/null || true
     systemctl is-active "$service" 2>/dev/null || true
     systemctl status "$service" --no-pager --lines=8 2>/dev/null | mask_infra || true
+  fi
+}
+
+systemctl_environment_brief() {
+  local service="$1"
+  if systemctl list-unit-files "${service}.service" >/dev/null 2>&1; then
+    echo "### ${service}.service environment"
+    systemctl show "$service" --property=Environment --no-pager 2>/dev/null \
+      | sed 's/^Environment=//' \
+      | tr ' ' '\n' \
+      | sed -E "s/^[\"']//; s/[\"']$//" \
+      | grep -E '^CODEX_AUDIT_SERVICE_(ALLOWED_|AUDIENCE=|HOST=|PORT=|JOB_DIR=|QUOTA_STORE=|SANDBOX=|MODEL=|REASONING_EFFORT=)' \
+      | mask_infra || true
   fi
 }
 
@@ -125,6 +138,10 @@ inspect() {
   systemctl_status_brief caddy
   echo
 
+  echo "## Codex audit service environment"
+  systemctl_environment_brief "$AUDIT_SERVICE_NAME"
+  echo
+
   echo "## SSH access hints"
   local sshd
   sshd="$(sshd_bin || true)"
@@ -162,6 +179,14 @@ install_file() {
   sudo install -D -m "$mode" "$source" "$target"
 }
 
+install_service_package() {
+  sudo rm -rf "${DEPLOY_DIR}/service"
+  sudo install -d -m 0755 "${DEPLOY_DIR}/service"
+  sudo cp -R service/. "${DEPLOY_DIR}/service/"
+  sudo find "${DEPLOY_DIR}/service" -type d -exec chmod 0755 {} +
+  sudo find "${DEPLOY_DIR}/service" -type f -exec chmod 0644 {} +
+}
+
 write_audit_service_unit() {
   local runner_user runner_home
   runner_user="$(id -un)"
@@ -173,6 +198,10 @@ write_audit_service_unit() {
   audit_reasoning_effort_line=""
   if [ -n "$AUDIT_REASONING_EFFORT" ]; then
     audit_reasoning_effort_line="Environment=CODEX_AUDIT_SERVICE_REASONING_EFFORT=${AUDIT_REASONING_EFFORT}"
+  fi
+  audit_token_line=""
+  if [ -n "${CODEX_AUDIT_SERVICE_TOKEN:-}" ]; then
+    audit_token_line="Environment=CODEX_AUDIT_SERVICE_TOKEN=${CODEX_AUDIT_SERVICE_TOKEN}"
   fi
   sudo tee "/etc/systemd/system/${AUDIT_SERVICE_NAME}.service" >/dev/null <<EOF_UNIT
 [Unit]
@@ -195,10 +224,12 @@ Environment=CODEX_AUDIT_SERVICE_ALLOWED_REFS=${ALLOWED_REFS}
 Environment=CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORY_VISIBILITIES=${ALLOWED_REPOSITORY_VISIBILITIES}
 Environment=CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES=${ALLOWED_SOURCE_REPOSITORIES}
 Environment=CODEX_AUDIT_SERVICE_JOB_DIR=${JOB_DIR}
+Environment=CODEX_AUDIT_SERVICE_QUOTA_STORE=${JOB_DIR}/quota.json
 Environment=CODEX_AUDIT_SERVICE_SANDBOX=read-only
 ${audit_model_line}
 ${audit_reasoning_effort_line}
-ExecStart=/usr/bin/env python3 ${DEPLOY_DIR}/scripts/codex_audit_service.py
+${audit_token_line}
+ExecStart=/usr/bin/env python3 -m service.ai_gateway_service
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
@@ -206,6 +237,20 @@ NoNewPrivileges=true
 [Install]
 WantedBy=multi-user.target
 EOF_UNIT
+}
+
+write_managed_audit_service_dropin() {
+  local dropin_dir="/etc/systemd/system/${AUDIT_SERVICE_NAME}.service.d"
+  sudo install -d -m 0755 "$dropin_dir"
+  sudo tee "${dropin_dir}/zzzz-managed-allowlists.conf" >/dev/null <<EOF_DROPIN
+[Service]
+# Managed by scripts/deploy_codex_audit_service.sh; parsed after legacy drop-ins.
+Environment="CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES=${ALLOWED_REPOSITORIES}"
+Environment="CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS=${ALLOWED_WORKFLOW_REFS}"
+Environment="CODEX_AUDIT_SERVICE_ALLOWED_REFS=${ALLOWED_REFS}"
+Environment="CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORY_VISIBILITIES=${ALLOWED_REPOSITORY_VISIBILITIES}"
+Environment="CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES=${ALLOWED_SOURCE_REPOSITORIES}"
+EOF_DROPIN
 }
 
 configure_nginx_codex_audit_route() {
@@ -248,6 +293,16 @@ route_template = """
 {indent}    proxy_send_timeout 3600s;
 {indent}}}
 {indent}location ^~ /v1/codex-audit/ {{
+{indent}    proxy_pass http://127.0.0.1:{port};
+{indent}    proxy_http_version 1.1;
+{indent}    proxy_set_header Host $host;
+{indent}    proxy_set_header X-Real-IP $remote_addr;
+{indent}    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+{indent}    proxy_set_header X-Forwarded-Proto https;
+{indent}    proxy_read_timeout 3600s;
+{indent}    proxy_send_timeout 3600s;
+{indent}}}
+{indent}location ^~ /v1/ai/ {{
 {indent}    proxy_pass http://127.0.0.1:{port};
 {indent}    proxy_http_version 1.1;
 {indent}    proxy_set_header Host $host;
@@ -318,7 +373,7 @@ for _ in range(30):
     try:
         with urllib.request.urlopen("http://127.0.0.1:${AUDIT_PORT}/healthz", timeout=3) as response:
             payload = json.loads(response.read().decode("utf-8"))
-        if payload.get("status") == "ok":
+        if payload.get("status") in {"ok", "healthy"}:
             break
         last_error = RuntimeError(f"unexpected health response: {payload}")
     except Exception as exc:  # noqa: BLE001 - deployment readiness probe.
@@ -420,8 +475,10 @@ deploy() {
   runner_user="$(id -un)"
 
   install_file "scripts/codex_audit_service.py" "${DEPLOY_DIR}/scripts/codex_audit_service.py" "0755"
+  install_service_package
   sudo install -d -m 0700 -o "$runner_user" -g "$runner_user" "$JOB_DIR"
   write_audit_service_unit
+  write_managed_audit_service_dropin
   sudo systemctl daemon-reload
   sudo systemctl enable --now "$AUDIT_SERVICE_NAME"
   sudo systemctl restart "$AUDIT_SERVICE_NAME"

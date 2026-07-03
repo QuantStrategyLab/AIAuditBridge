@@ -1,4 +1,4 @@
-/** CodexAuditBridge Cloudflare proxy — forwards authenticated requests to VPS origin.
+/** AIAuditBridge Cloudflare proxy — forwards authenticated requests to VPS origin.
 
   Allowed paths (expanded for AiGateway v2):
     GET  /healthz
@@ -82,6 +82,10 @@ function withoutTrailingSlash(pathname) {
   return pathname.replace(/\/+$/, "");
 }
 
+function shouldIgnoreLegacyEndpointBase(basePath, pathname) {
+  return basePath === "/v1/codex-audit" && pathname.startsWith("/v1/ai/");
+}
+
 /** Check if pathname matches any allowed route or is a valid sub-path (jobs/{id}, changes/{id}). */
 function matchRoute(pathname) {
   const clean = withoutTrailingSlash(pathname);
@@ -136,7 +140,7 @@ export function buildOriginUrl(rawOriginUrl, pathname, search = "") {
     throw new Error("CODEX_AUDIT_ORIGIN_URL must use HTTPS");
   }
   const basePath = withoutTrailingSlash(origin.pathname);
-  if (!basePath || basePath === "/") {
+  if (!basePath || basePath === "/" || shouldIgnoreLegacyEndpointBase(basePath, pathname)) {
     origin.pathname = pathname;
   } else if (pathname === basePath || pathname.startsWith(basePath + "/")) {
     origin.pathname = pathname;

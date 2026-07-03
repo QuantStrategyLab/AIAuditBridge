@@ -485,6 +485,7 @@ def _find_active_job_by_dedupe_key(dedupe_key: str) -> dict[str, Any] | None:
 
 
 def _run_job(job_id: str, payload: dict[str, Any]) -> None:
+    started = time.time()
     try:
         job = _read_job(job_id)
         job["status"] = "running"
@@ -511,6 +512,12 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
             job["failure_category"] = _classify_failure(result.error)
         job["updated_at"] = _now()
         _write_job(job)
+        get_health_monitor().record(
+            "/v1/ai/execute/jobs/run",
+            time.time() - started,
+            job["status"] == "succeeded",
+            str(job.get("failure_category") or job.get("error") or ""),
+        )
         _audit_log("job_completed", job_id=job_id, status=job["status"],
                    repository=job.get("repository"), task=job.get("task"))
     except Exception as exc:
@@ -523,6 +530,7 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
         job["error"] = str(exc)[-4000:]
         job["failure_category"] = _classify_failure(str(exc))
         _write_job(job)
+        get_health_monitor().record("/v1/ai/execute/jobs/run", time.time() - started, False, type(exc).__name__)
         _audit_log("job_failed", job_id=job_id, error=type(exc).__name__,
                    repository=job.get("repository"))
 
@@ -756,6 +764,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
 
     def _handle_execute_async(self, claims: dict[str, Any], payload: dict[str, Any]) -> None:
         """POST /v1/ai/execute/jobs — async Codex execution."""
+        started = time.time()
         req = parse_execute_request(payload)
 
         # Security: validate source_repository against allowlist
@@ -763,24 +772,27 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         if source_repo:
             _validate_source_repo(source_repo)
             _validate_source_repo_org(claims, source_repo)
+        quota_repo = source_repo or str(claims.get("repository") or "unknown")
 
         # Quota check
         quota = get_quota_manager()
-        qr = quota.check(source_repo, "codex-cli", req.prompt)
+        qr = quota.check(quota_repo, "codex-cli", req.prompt)
         if not qr["allowed"]:
             _json_response(self, HTTPStatus.TOO_MANY_REQUESTS, {
                 "status": "error", "error": qr["reason"],
                 "remaining_usd": qr.get("remaining_usd", 0),
             })
             return
-        quota.record_execute(source_repo)
+        quota.record_execute(quota_repo)
 
         payload.setdefault("task", TASK_EXECUTE)
         job = _submit_job(claims, payload)
+        get_health_monitor().record("/v1/ai/execute/jobs", time.time() - started, True)
         _json_response(self, HTTPStatus.ACCEPTED, job)
 
     def _handle_execute_sync(self, claims: dict[str, Any], payload: dict[str, Any]) -> None:
         """POST /v1/ai/execute — sync Codex execution (backward compat)."""
+        started = time.time()
         req = parse_execute_request(payload)
         source_repo = str(payload.get("source_repository") or "")
         if source_repo:
@@ -806,6 +818,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             reasoning_effort=reasoning_effort,
             timeout=req.timeout_seconds,
         )
+        get_health_monitor().record("/v1/ai/execute", time.time() - started, result.success, result.error if not result.success else "")
         if result.success:
             _json_response(self, HTTPStatus.OK, {"status": "ok", "output": result.output})
         else:
@@ -899,16 +912,23 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
     def _handle_feedback_register(self, claims: dict[str, Any], payload: dict[str, Any]) -> None:
         """POST /v1/ai/feedback/register — register an autonomous change with pre-metrics."""
         change_id = _new_change_id()
+        source_repo = str(payload.get("source_repository") or "")
+        if source_repo:
+            _validate_source_repo(source_repo)
+            _validate_source_repo_org(claims, source_repo)
         record = ChangeRecord(
             change_id=change_id,
-            repo=str(claims.get("repository", "")),
+            repo=source_repo or str(claims.get("repository", "")),
             task=str(payload.get("task", "")),
             action=str(payload.get("action", "")),
             confidence=float(payload.get("confidence", 0.0)),
             risk=str(payload.get("risk", "")),
             changed_paths=[str(p) for p in payload.get("changed_paths", []) if isinstance(p, str)],
             before_metrics={str(k): float(v) for k, v in payload.get("before_metrics", {}).items()},
-            source_repo=str(payload.get("source_repository", "")),
+            source_repo=source_repo,
+            external_url=str(payload.get("external_url", "")),
+            issue_number=int(payload["issue_number"]) if payload.get("issue_number") is not None else None,
+            pr_number=int(payload["pr_number"]) if payload.get("pr_number") is not None else None,
         )
         write_change(record)
         _audit_log("change_registered", change_id=change_id, repo=record.repo,

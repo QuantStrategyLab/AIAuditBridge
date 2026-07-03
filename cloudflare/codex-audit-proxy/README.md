@@ -1,6 +1,6 @@
-# Cloudflare Worker Proxy for CodexAuditBridge
+# Cloudflare Worker Proxy for AIAuditBridge
 
-This Worker provides a free `workers.dev` HTTPS entry point for CodexAuditBridge when no custom domain is available.
+This Worker provides a free `workers.dev` HTTPS entry point for AIAuditBridge when no custom domain is available.
 
 This Worker should stay separate from the Pigbibi CodexGateway Worker so origin URLs, repository allowlists, and logs remain isolated.
 
@@ -28,7 +28,7 @@ The production shape is:
 quantstrategylab-codex-audit-proxy -> VPS HTTPS origin -> codex-audit-service
 ```
 
-After deploy, set the `CodexAuditBridge` GitHub secret `CODEX_AUDIT_SERVICE_URL` to the Worker URL, for example:
+After deploy, set the `AIAuditBridge` GitHub secret `CODEX_AUDIT_SERVICE_URL` to the Worker URL, for example:
 
 ```text
 https://quantstrategylab-codex-audit-proxy.<cloudflare-account-subdomain>.workers.dev
