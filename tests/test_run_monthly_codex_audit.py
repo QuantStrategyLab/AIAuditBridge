@@ -535,6 +535,10 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertTrue(is_service_infrastructure_failure("Codex audit service job failed [transient_service_failure]: timed out"))
         self.assertFalse(is_service_infrastructure_failure("Codex audit service job failed [patch_contract_failure]: invalid JSON"))
 
+    def test_service_failure_classification_ignores_source_code_secret_words(self) -> None:
+        message = "codex exec failed: BLOCKED_PATH_RE = r'.*token.*|.*secret.*'"
+        self.assertEqual(classify_service_failure(message), "unknown_failure")
+
     def test_codex_audit_service_async_job_lifecycle(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             env = {
