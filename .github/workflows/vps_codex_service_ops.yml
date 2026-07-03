@@ -40,4 +40,5 @@ jobs:
         env:
           CODEX_AUDIT_SSH_UNBAN_IP: ${{ inputs.ssh_unban_ip }}
           CODEX_AUDIT_SERVICE_MODEL: ${{ vars.CODEX_AUDIT_SERVICE_MODEL }}
+          CODEX_AUDIT_SERVICE_REASONING_EFFORT: ${{ vars.CODEX_AUDIT_SERVICE_REASONING_EFFORT }}
         run: bash scripts/deploy_codex_audit_service.sh "${{ inputs.mode }}"

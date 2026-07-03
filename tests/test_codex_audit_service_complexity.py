@@ -28,6 +28,9 @@ class TestComplexityModelRouting(unittest.TestCase):
         self._orig_low = _service.AI_GATEWAY_LLM_DEFAULT_MODEL_LOW
         self._orig_medium = _service.AI_GATEWAY_LLM_DEFAULT_MODEL_MEDIUM
         self._orig_high = _service.AI_GATEWAY_LLM_DEFAULT_MODEL_HIGH
+        self._orig_effort_low = _service.AI_GATEWAY_CODEX_DEFAULT_REASONING_EFFORT_LOW
+        self._orig_effort_medium = _service.AI_GATEWAY_CODEX_DEFAULT_REASONING_EFFORT_MEDIUM
+        self._orig_effort_high = _service.AI_GATEWAY_CODEX_DEFAULT_REASONING_EFFORT_HIGH
         self._orig_low_line = _service.TASK_COMPLEXITY_MEDIUM_LINE_THRESHOLD
         self._orig_low_char = _service.TASK_COMPLEXITY_MEDIUM_PROMPT_THRESHOLD
         self._orig_high_line = _service.TASK_COMPLEXITY_HIGH_LINE_THRESHOLD
@@ -36,6 +39,9 @@ class TestComplexityModelRouting(unittest.TestCase):
         _service.AI_GATEWAY_LLM_DEFAULT_MODEL_LOW = "gpt-test-low"
         _service.AI_GATEWAY_LLM_DEFAULT_MODEL_MEDIUM = "gpt-test-medium"
         _service.AI_GATEWAY_LLM_DEFAULT_MODEL_HIGH = "gpt-test-high"
+        _service.AI_GATEWAY_CODEX_DEFAULT_REASONING_EFFORT_LOW = "low"
+        _service.AI_GATEWAY_CODEX_DEFAULT_REASONING_EFFORT_MEDIUM = "medium"
+        _service.AI_GATEWAY_CODEX_DEFAULT_REASONING_EFFORT_HIGH = "high"
         _service.TASK_COMPLEXITY_MEDIUM_LINE_THRESHOLD = 40
         _service.TASK_COMPLEXITY_HIGH_LINE_THRESHOLD = 80
         _service.TASK_COMPLEXITY_MEDIUM_PROMPT_THRESHOLD = 120
@@ -45,6 +51,9 @@ class TestComplexityModelRouting(unittest.TestCase):
         _service.AI_GATEWAY_LLM_DEFAULT_MODEL_LOW = self._orig_low
         _service.AI_GATEWAY_LLM_DEFAULT_MODEL_MEDIUM = self._orig_medium
         _service.AI_GATEWAY_LLM_DEFAULT_MODEL_HIGH = self._orig_high
+        _service.AI_GATEWAY_CODEX_DEFAULT_REASONING_EFFORT_LOW = self._orig_effort_low
+        _service.AI_GATEWAY_CODEX_DEFAULT_REASONING_EFFORT_MEDIUM = self._orig_effort_medium
+        _service.AI_GATEWAY_CODEX_DEFAULT_REASONING_EFFORT_HIGH = self._orig_effort_high
         _service.TASK_COMPLEXITY_MEDIUM_LINE_THRESHOLD = self._orig_low_line
         _service.TASK_COMPLEXITY_MEDIUM_PROMPT_THRESHOLD = self._orig_low_char
         _service.TASK_COMPLEXITY_HIGH_LINE_THRESHOLD = self._orig_high_line
@@ -71,6 +80,32 @@ class TestComplexityModelRouting(unittest.TestCase):
         }
         model = _service._resolve_model(payload, "pr_review")
         self.assertEqual(model, "gpt-test-high")
+
+    def test_reasoning_effort_uses_explicit_or_complexity_routing(self) -> None:
+        explicit = _service._resolve_reasoning_effort(
+            {"reasoning_effort": "xhigh", "prompt": "review"},
+            "pr_review",
+        )
+        self.assertEqual(explicit, "xhigh")
+
+        inferred = _service._resolve_reasoning_effort(
+            {"reasoning_effort": "auto", "prompt": "x" * 200, "changed_lines": 120},
+            "pr_review",
+        )
+        self.assertEqual(inferred, "high")
+
+    def test_codex_command_passes_reasoning_effort(self) -> None:
+        with mock.patch.object(_service.shutil, "which", return_value="/usr/bin/codex"):
+            command = _service.CodexAdapter()._build_command(
+                Path("last-message.md"),
+                "gpt-test",
+                "high",
+            )
+
+        self.assertIn("--model", command)
+        self.assertIn("gpt-test", command)
+        self.assertIn("-c", command)
+        self.assertIn("model_reasoning_effort=high", command)
 
     def test_task_requires_async_review_and_execute(self) -> None:
         self.assertTrue(_service._task_requires_async("pr_review"))

@@ -68,12 +68,19 @@ Configure these values in `QuantStrategyLab/AIAuditBridge`:
   service failures.
 - Repository variable `CODEX_AUDIT_SERVICE_MODEL` for the VPS Codex service primary
   path; `VPS Codex Service Ops` deploy writes it into the systemd unit.
+- Optional repository variable `CODEX_AUDIT_SERVICE_REASONING_EFFORT` for a
+  VPS Codex reasoning-effort hard override. Leave it unset or set `auto` to let
+  the service choose low/medium/high effort from task complexity.
 - Optional service-side model routing variables:
   `AI_GATEWAY_LLM_LOW_COMPLEXITY_MODEL`,
   `AI_GATEWAY_LLM_MEDIUM_COMPLEXITY_MODEL`, and
   `AI_GATEWAY_LLM_HIGH_COMPLEXITY_MODEL`. PR review callers submit
   `task=pr_review` with low/medium/high complexity hints; the VPS service keeps
   Codex auth local and chooses the final Codex model.
+- Optional service-side reasoning routing variables:
+  `CODEX_AUDIT_SERVICE_<TASK>_<LOW|MEDIUM|HIGH>_REASONING_EFFORT`,
+  `CODEX_AUDIT_SERVICE_<LOW|MEDIUM|HIGH>_COMPLEXITY_REASONING_EFFORT`, and
+  `AI_GATEWAY_CODEX_<LOW|MEDIUM|HIGH>_COMPLEXITY_REASONING_EFFORT`.
 - Optional direct API fallback overrides:
   `CODEX_AUDIT_OPENAI_LOW_COMPLEXITY_MODEL`,
   `CODEX_AUDIT_ANTHROPIC_MEDIUM_COMPLEXITY_MODEL`, and matching
@@ -87,6 +94,7 @@ CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES=QuantStrategyLab/AIAuditBridge,QuantStr
 CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES='QuantStrategyLab/CryptoLivePoolPipelines,QuantStrategyLab/HkEquitySnapshotPipelines,QuantStrategyLab/UsEquitySnapshotPipelines,QuantStrategyLab/ResearchSignalContextPipelines' \
 CODEX_AUDIT_SERVICE_AUDIENCE=quant-codex-audit \
 CODEX_AUDIT_SERVICE_MODEL=gpt-5.4 \
+CODEX_AUDIT_SERVICE_REASONING_EFFORT=auto \
 python3 scripts/codex_audit_service.py
 ```
 

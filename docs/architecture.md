@@ -97,6 +97,7 @@ POST /v1/ai/execute/jobs
   → authenticate
   → validate source_repository (allowlist + org match)
   → quota check
+  → resolve Codex reasoning effort from override or task complexity
   → submit job (file-based store)
   → background thread: CodexAdapter.execute()
   → poll via GET /v1/ai/execute/jobs/{id}
@@ -122,6 +123,8 @@ POST /v1/ai/review
 - **Authorization**: Source repository org must match OIDC claims repository org
   (prevents cross-org escalation).
 - **Sandbox**: Codex sandbox restricted to service-side allowlist (default: `read-only`).
+- **Codex reasoning effort**: `CODEX_AUDIT_SERVICE_REASONING_EFFORT` can hard
+  override CLI effort; unset/`auto` routes low/medium/high by task complexity.
 - **Rate Limiting**: Sliding window of 30 requests per 60 seconds for sync endpoints.
 - **Input Validation**: Payload size capped at 2 MB. Prompt must be non-empty.
   Task/mode must be valid constants. Reviewers must be supported.
