@@ -36,6 +36,7 @@ from service.contracts import (
     MODE_REVIEW_ONLY,
     TASK_ANALYZE,
     TASK_EXECUTE,
+    TASK_REVIEW,
     parse_analyze_request,
     parse_execute_request,
     parse_review_request,
@@ -73,6 +74,11 @@ ALLOWED_SANDBOXES: frozenset[str] = frozenset(
     os.environ.get("CODEX_AUDIT_SERVICE_ALLOWED_SANDBOXES", "read-only").replace(" ", "").split(",")
 )
 DEFAULT_SANDBOX = "read-only"
+CODEX_REASONING_EFFORTS = frozenset({"minimal", "low", "medium", "high", "xhigh"})
+TASK_COMPLEXITY_LOW = "low"
+TASK_COMPLEXITY_MEDIUM = "medium"
+TASK_COMPLEXITY_HIGH = "high"
+TASK_COMPLEXITY_LEVELS = (TASK_COMPLEXITY_LOW, TASK_COMPLEXITY_MEDIUM, TASK_COMPLEXITY_HIGH)
 
 # rate limiting for analyze/review (sync endpoints that cost API $$)
 _RATE_LIMIT_WINDOW_SECONDS = 60
@@ -126,6 +132,78 @@ def _positive_int_env(name: str, default: int) -> int:
 
 def _is_production() -> bool:
     return os.environ.get("CODEX_AUDIT_SERVICE_ENV", "").strip().lower() in {"production", "prod"}
+
+
+def _normalize_complexity(value: str) -> str:
+    level = (value or "").strip().lower()
+    return level if level in TASK_COMPLEXITY_LEVELS else ""
+
+
+def _normalize_reasoning_effort(value: str) -> str:
+    effort = (value or "").strip().lower()
+    if not effort or effort == "auto":
+        return effort
+    if effort not in CODEX_REASONING_EFFORTS:
+        raise ValueError(
+            f"reasoning_effort must be one of auto,{','.join(sorted(CODEX_REASONING_EFFORTS))}"
+        )
+    return effort
+
+
+def _as_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _estimate_codex_complexity(payload: dict[str, Any]) -> str:
+    prompt_chars = len(str(payload.get("prompt") or ""))
+    changed_files = max(0, _as_int(payload.get("changed_files", 0)))
+    changed_lines = max(0, _as_int(payload.get("changed_lines", 0)))
+    if (
+        changed_files >= _positive_int_env("AI_GATEWAY_COMPLEXITY_HIGH_THRESHOLD_FILES", 12)
+        or changed_lines >= _positive_int_env("AI_GATEWAY_COMPLEXITY_HIGH_THRESHOLD_LINES", 1800)
+        or prompt_chars >= _positive_int_env("AI_GATEWAY_COMPLEXITY_HIGH_THRESHOLD_PROMPT_CHARS", 18000)
+    ):
+        return TASK_COMPLEXITY_HIGH
+    if (
+        changed_files >= _positive_int_env("AI_GATEWAY_COMPLEXITY_MEDIUM_THRESHOLD_FILES", 4)
+        or changed_lines >= _positive_int_env("AI_GATEWAY_COMPLEXITY_MEDIUM_THRESHOLD_LINES", 600)
+        or prompt_chars >= _positive_int_env("AI_GATEWAY_COMPLEXITY_MEDIUM_THRESHOLD_PROMPT_CHARS", 7000)
+    ):
+        return TASK_COMPLEXITY_MEDIUM
+    return TASK_COMPLEXITY_LOW
+
+
+def _resolve_codex_reasoning_effort(payload: dict[str, Any], task: str) -> str:
+    requested = _normalize_reasoning_effort(str(payload.get("reasoning_effort") or ""))
+    if requested and requested != "auto":
+        return requested
+    configured = _normalize_reasoning_effort(os.environ.get("CODEX_AUDIT_SERVICE_REASONING_EFFORT", ""))
+    if configured and configured != "auto":
+        return configured
+    complexity = _normalize_complexity(str(payload.get("complexity") or "")) or _estimate_codex_complexity(payload)
+    task_key = re.sub(r"[^A-Z0-9]+", "_", (task or "").strip().upper()).strip("_")
+    env_names: list[str] = []
+    if task_key:
+        env_names.extend([
+            f"CODEX_AUDIT_SERVICE_{task_key}_{complexity.upper()}_REASONING_EFFORT",
+            f"CODEX_AUDIT_SERVICE_{task_key}_REASONING_EFFORT",
+        ])
+    env_names.extend([
+        f"CODEX_AUDIT_SERVICE_{complexity.upper()}_COMPLEXITY_REASONING_EFFORT",
+        f"AI_GATEWAY_CODEX_{complexity.upper()}_COMPLEXITY_REASONING_EFFORT",
+    ])
+    for name in env_names:
+        effort = _normalize_reasoning_effort(os.environ.get(name, ""))
+        if effort and effort != "auto":
+            return effort
+    return {
+        TASK_COMPLEXITY_LOW: "low",
+        TASK_COMPLEXITY_MEDIUM: "medium",
+        TASK_COMPLEXITY_HIGH: "high",
+    }[complexity]
 
 
 # ── rate limiter (sliding window) ──────────────────────────────────────
@@ -390,10 +468,12 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
         _write_job(job)
         adapter = CodexAdapter()
         sandbox = _validate_sandbox(str(payload.get("sandbox") or ""))
+        reasoning_effort = _resolve_codex_reasoning_effort(payload, str(payload.get("task") or TASK_EXECUTE))
         result = adapter.execute(
             prompt=str(payload["prompt"]),
             sandbox=sandbox,
             model=str(payload.get("model") or "").strip() or None,
+            reasoning_effort=reasoning_effort,
             timeout=int(payload.get("timeout_seconds", 2700)),
         )
         job = _read_job(job_id)
@@ -691,10 +771,12 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         quota.record_execute(quota_repo)
         adapter = CodexAdapter()
         sandbox = _validate_sandbox(str(payload.get("sandbox") or ""))
+        reasoning_effort = _resolve_codex_reasoning_effort(payload, str(payload.get("task") or TASK_EXECUTE))
         result = adapter.execute(
             prompt=req.prompt,
             sandbox=sandbox,
             model=req.model or None,
+            reasoning_effort=reasoning_effort,
             timeout=req.timeout_seconds,
         )
         if result.success:
@@ -739,6 +821,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             codex_result = codex.execute(
                 prompt=req.prompt,
                 sandbox=_validate_sandbox("read-only"),
+                reasoning_effort=_resolve_codex_reasoning_effort(payload, TASK_REVIEW),
                 timeout=req.timeout_seconds,
             )
 

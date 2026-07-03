@@ -58,6 +58,16 @@ AI_GATEWAY_LLM_DEFAULT_MODEL_MEDIUM = os.environ.get(
 AI_GATEWAY_LLM_DEFAULT_MODEL_HIGH = os.environ.get(
     "AI_GATEWAY_LLM_HIGH_COMPLEXITY_MODEL", "gpt-5.5"
 ).strip()
+CODEX_REASONING_EFFORTS = frozenset({"minimal", "low", "medium", "high", "xhigh"})
+AI_GATEWAY_CODEX_DEFAULT_REASONING_EFFORT_LOW = os.environ.get(
+    "AI_GATEWAY_CODEX_LOW_COMPLEXITY_REASONING_EFFORT", "low"
+).strip().lower()
+AI_GATEWAY_CODEX_DEFAULT_REASONING_EFFORT_MEDIUM = os.environ.get(
+    "AI_GATEWAY_CODEX_MEDIUM_COMPLEXITY_REASONING_EFFORT", "medium"
+).strip().lower()
+AI_GATEWAY_CODEX_DEFAULT_REASONING_EFFORT_HIGH = os.environ.get(
+    "AI_GATEWAY_CODEX_HIGH_COMPLEXITY_REASONING_EFFORT", "high"
+).strip().lower()
 
 
 # ── Adapter Protocol ──────────────────────────────────────────────────
@@ -78,7 +88,7 @@ class AiAdapter(ABC):
 
     @abstractmethod
     def run(self, *, prompt: str, model: str, timeout_seconds: int,
-            repo_dir: Path | None = None) -> str:
+            repo_dir: Path | None = None, reasoning_effort: str = "") -> str:
         ...
 
 
@@ -93,7 +103,7 @@ class LlmAdapter(AiAdapter):
     """
 
     def run(self, *, prompt: str, model: str, timeout_seconds: int,
-            repo_dir: Path | None = None) -> str:
+            repo_dir: Path | None = None, reasoning_effort: str = "") -> str:
         default_model = os.environ.get("AI_GATEWAY_LLM_DEFAULT_MODEL", "claude-sonnet-4-6").strip()
         resolved = model or default_model
         provider = _detect_provider(resolved)
@@ -179,7 +189,7 @@ class CodexAdapter(AiAdapter):
     """
 
     def run(self, *, prompt: str, model: str, timeout_seconds: int,
-            repo_dir: Path | None = None) -> str:
+            repo_dir: Path | None = None, reasoning_effort: str = "") -> str:
         fake = os.environ.get("CODEX_AUDIT_SERVICE_FAKE_OUTPUT")
         if fake is not None:
             return fake
@@ -191,7 +201,7 @@ class CodexAdapter(AiAdapter):
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         completed = subprocess.run(
-            self._build_command(output_path, model),
+            self._build_command(output_path, model, reasoning_effort),
             input=prompt, text=True,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             check=False, timeout=timeout_seconds,
@@ -205,7 +215,7 @@ class CodexAdapter(AiAdapter):
             return output_path.read_text(encoding="utf-8")
         return completed.stdout
 
-    def _build_command(self, output_path: Path, model: str) -> list[str]:
+    def _build_command(self, output_path: Path, model: str, reasoning_effort: str = "") -> list[str]:
         codex = shutil.which(os.environ.get("CODEX_AUDIT_SERVICE_CODEX_BIN", "codex"))
         if not codex:
             raise RuntimeError("codex CLI not found on host")
@@ -217,6 +227,11 @@ class CodexAdapter(AiAdapter):
         resolved = model or os.environ.get("CODEX_AUDIT_SERVICE_MODEL", "").strip()
         if resolved:
             cmd.extend(["--model", resolved])
+        selected_reasoning_effort = _normalize_reasoning_effort(
+            reasoning_effort or os.environ.get("CODEX_AUDIT_SERVICE_REASONING_EFFORT", "")
+        )
+        if selected_reasoning_effort and selected_reasoning_effort != "auto":
+            cmd.extend(["-c", f"model_reasoning_effort={selected_reasoning_effort}"])
         cmd.append("-")
         return cmd
 
@@ -289,6 +304,17 @@ def _normalize_complexity(value: str) -> str:
     return ""
 
 
+def _normalize_reasoning_effort(value: str) -> str:
+    effort = (value or "").strip().lower()
+    if not effort or effort == "auto":
+        return effort
+    if effort not in CODEX_REASONING_EFFORTS:
+        raise ValueError(
+            f"reasoning_effort must be one of auto,{','.join(sorted(CODEX_REASONING_EFFORTS))}"
+        )
+    return effort
+
+
 def _as_int(value: Any, default: int) -> int:
     try:
         return int(value)
@@ -336,6 +362,55 @@ def _model_for_complexity(complexity: str) -> str:
     if complexity == TASK_COMPLEXITY_MEDIUM:
         return AI_GATEWAY_LLM_DEFAULT_MODEL_MEDIUM or AI_GATEWAY_LLM_DEFAULT_MODEL
     return AI_GATEWAY_LLM_DEFAULT_MODEL_LOW or AI_GATEWAY_LLM_DEFAULT_MODEL
+
+
+def _reasoning_effort_for_complexity(complexity: str) -> str:
+    if complexity == TASK_COMPLEXITY_HIGH:
+        return _normalize_reasoning_effort(AI_GATEWAY_CODEX_DEFAULT_REASONING_EFFORT_HIGH) or "high"
+    if complexity == TASK_COMPLEXITY_MEDIUM:
+        return _normalize_reasoning_effort(AI_GATEWAY_CODEX_DEFAULT_REASONING_EFFORT_MEDIUM) or "medium"
+    return _normalize_reasoning_effort(AI_GATEWAY_CODEX_DEFAULT_REASONING_EFFORT_LOW) or "low"
+
+
+def _normalize_task_env_key(task: str) -> str:
+    return re.sub(r"[^A-Z0-9]+", "_", (task or "").strip().upper()).strip("_")
+
+
+def _resolve_reasoning_effort(payload: dict[str, Any], task: str) -> str:
+    requested = _normalize_reasoning_effort(str(payload.get("reasoning_effort") or ""))
+    if requested and requested != "auto":
+        return requested
+
+    configured = _normalize_reasoning_effort(os.environ.get("CODEX_AUDIT_SERVICE_REASONING_EFFORT", ""))
+    if configured and configured != "auto":
+        return configured
+
+    complexity = _normalize_complexity(str(payload.get("complexity", "")))
+    if not complexity:
+        complexity = _estimate_task_complexity(
+            str(payload.get("prompt", "")),
+            changed_files=_as_int(payload.get("changed_files", 0), 0),
+            changed_lines=_as_int(payload.get("changed_lines", 0), 0),
+            changed_chars=_as_int(payload.get("changed_chars", 0), 0),
+        )
+
+    env_names: list[str] = []
+    task_key = _normalize_task_env_key(task)
+    if task_key:
+        env_names.extend([
+            f"CODEX_AUDIT_SERVICE_{task_key}_{complexity.upper()}_REASONING_EFFORT",
+            f"CODEX_AUDIT_SERVICE_{task_key}_REASONING_EFFORT",
+        ])
+    env_names.extend([
+        f"CODEX_AUDIT_SERVICE_{complexity.upper()}_COMPLEXITY_REASONING_EFFORT",
+        f"AI_GATEWAY_CODEX_{complexity.upper()}_COMPLEXITY_REASONING_EFFORT",
+    ])
+    for name in env_names:
+        effort = _normalize_reasoning_effort(os.environ.get(name, ""))
+        if effort and effort != "auto":
+            return effort
+
+    return _reasoning_effort_for_complexity(complexity)
 
 
 def _resolve_model(payload: dict[str, Any], task: str) -> str:
@@ -553,6 +628,7 @@ def _validate_source_repo_org(claims: dict[str, Any], payload: dict[str, Any]) -
 def _run_task(payload: dict[str, Any], *, repo_dir: Path | None = None) -> str:
     task = _canonicalize_task(str(payload.get("task", "") or _detect_task_from_model(payload.get("model", ""))))
     model = _resolve_model(payload, task)
+    reasoning_effort = _resolve_reasoning_effort(payload, task)
     prompt = str(payload["prompt"])
     timeout = int(payload.get("timeout_seconds") or os.environ.get(
         "CODEX_AUDIT_SERVICE_TIMEOUT_SECONDS", "2700"))
@@ -560,7 +636,7 @@ def _run_task(payload: dict[str, Any], *, repo_dir: Path | None = None) -> str:
     adapter = resolve_adapter(task, model)
     return adapter.run(
         prompt=prompt, model=model,
-        timeout_seconds=timeout, repo_dir=repo_dir,
+        timeout_seconds=timeout, repo_dir=repo_dir, reasoning_effort=reasoning_effort,
     )
 
 

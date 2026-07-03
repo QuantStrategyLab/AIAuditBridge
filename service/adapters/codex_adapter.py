@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 SECRET_ENV_MARKERS = ("TOKEN", "SECRET", "PASSWORD", "PRIVATE_KEY", "CREDENTIAL", "API_KEY")
+CODEX_REASONING_EFFORTS = frozenset({"minimal", "low", "medium", "high", "xhigh"})
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,7 @@ def _codex_command(
     *,
     sandbox: str | None = None,
     model: str | None = None,
+    reasoning_effort: str | None = None,
     output_schema: Path | None = None,
     cwd: Path | None = None,
     images: list[Path] | None = None,
@@ -61,6 +63,13 @@ def _codex_command(
     selected_model = model or os.environ.get("CODEX_AUDIT_SERVICE_MODEL", "").strip()
     if selected_model:
         command.extend(["--model", selected_model])
+    selected_reasoning_effort = (reasoning_effort or os.environ.get("CODEX_AUDIT_SERVICE_REASONING_EFFORT", "")).strip().lower()
+    if selected_reasoning_effort and selected_reasoning_effort != "auto":
+        if selected_reasoning_effort not in CODEX_REASONING_EFFORTS:
+            raise ValueError(
+                f"reasoning_effort must be one of auto,{','.join(sorted(CODEX_REASONING_EFFORTS))}"
+            )
+        command.extend(["-c", f"model_reasoning_effort={selected_reasoning_effort}"])
     if cwd:
         command.extend(["-C", str(cwd)])
     if output_schema:
@@ -90,6 +99,7 @@ class CodexAdapter:
         prompt: str,
         sandbox: str = "read-only",
         model: str | None = None,
+        reasoning_effort: str | None = None,
         timeout: int = 2700,
         output_schema: Path | None = None,
         cwd: Path | None = None,
@@ -118,6 +128,7 @@ class CodexAdapter:
                         output_last_message,
                         sandbox=sandbox,
                         model=model,
+                        reasoning_effort=reasoning_effort,
                         output_schema=output_schema,
                         cwd=cwd,
                         images=images,
