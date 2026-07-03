@@ -15,7 +15,7 @@ The synchronous `POST /v1/codex-audit` endpoint remains available for local diag
 
 ## Boundary with Pigbibi CodexGateway
 
-`CodexAuditBridge` intentionally stays separate from `Pigbibi/CodexGateway`.
+`CodexAuditBridge` intentionally stays separate from `Pigbibi/AIGateway`.
 
 - `CodexGateway` is a generic Codex invocation facade for prompt/context/image/schema calls.
 - `CodexAuditBridge` owns QuantStrategyLab monthly audit semantics: source issue context, bounded repository snapshots, service patch contracts, source repository allowlists, GitHub App writeback, and generated remediation PRs.
@@ -55,8 +55,8 @@ For public source repositories:
 After merging the async service code, run the manual `VPS Codex Service Ops` workflow with deploy mode, or run on the VPS:
 
 ```bash
-CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES=QuantStrategyLab/AIAuditBridge \
-CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS='QuantStrategyLab/AIAuditBridge/.github/workflows/codex_audit.yml@refs/heads/main' \
+CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES=QuantStrategyLab/AIAuditBridge,QuantStrategyLab/CodexAuditBridge \
+CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS='QuantStrategyLab/AIAuditBridge/.github/workflows/codex_audit.yml@refs/heads/main,QuantStrategyLab/CodexAuditBridge/.github/workflows/codex_audit.yml@refs/heads/main' \
 CODEX_AUDIT_SERVICE_ALLOWED_REFS='refs/heads/main' \
 CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORY_VISIBILITIES='public' \
 CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES='QuantStrategyLab/CryptoLivePoolPipelines,QuantStrategyLab/HkEquitySnapshotPipelines,QuantStrategyLab/UsEquitySnapshotPipelines,QuantStrategyLab/ResearchSignalContextPipelines' \
