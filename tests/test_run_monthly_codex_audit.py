@@ -538,6 +538,14 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
     def test_service_failure_classification_ignores_source_code_secret_words(self) -> None:
         message = "codex exec failed: BLOCKED_PATH_RE = r'.*token.*|.*secret.*'"
         self.assertEqual(classify_service_failure(message), "unknown_failure")
+        allowlist_message = "codex exec failed: raise ValueError('not allowed by source allowlist')"
+        self.assertEqual(classify_service_failure(allowlist_message), "unknown_failure")
+        self.assertEqual(codex_audit_service._classify_failure(allowlist_message), "unknown_failure")
+        self.assertEqual(classify_service_failure("codex exec failed: too many active requests"), "quota_or_capacity_failure")
+        self.assertEqual(
+            classify_service_failure("source_repository foo is not allowed by service allowlist"),
+            "auth_or_config_failure",
+        )
 
     def test_codex_audit_service_async_job_lifecycle(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
