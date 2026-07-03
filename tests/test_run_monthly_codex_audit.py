@@ -259,15 +259,15 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
             "aud": "quant-codex-audit",
             "iss": codex_audit_service.GITHUB_OIDC_ISSUER,
             "exp": int(time.time()) + 300,
-            "repository": "QuantStrategyLab/CodexAuditBridge",
-            "workflow_ref": "QuantStrategyLab/CodexAuditBridge/.github/workflows/codex_audit.yml@refs/heads/main",
+            "repository": "QuantStrategyLab/AIAuditBridge",
+            "workflow_ref": "QuantStrategyLab/AIAuditBridge/.github/workflows/codex_audit.yml@refs/heads/main",
             "ref": "refs/heads/main",
             "repository_visibility": "public",
         }
         env = {
-            "CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES": "QuantStrategyLab/CodexAuditBridge",
+            "CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES": "QuantStrategyLab/AIAuditBridge",
             "CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS": (
-                "QuantStrategyLab/CodexAuditBridge/.github/workflows/codex_audit.yml@refs/heads/main"
+                "QuantStrategyLab/AIAuditBridge/.github/workflows/codex_audit.yml@refs/heads/main"
             ),
             "CODEX_AUDIT_SERVICE_ALLOWED_REFS": "refs/heads/main",
             "CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORY_VISIBILITIES": "public",
@@ -284,19 +284,19 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         ):
             claims = codex_audit_service._verify_github_oidc("header.payload.signature")
 
-        self.assertEqual(claims["repository"], "QuantStrategyLab/CodexAuditBridge")
+        self.assertEqual(claims["repository"], "QuantStrategyLab/AIAuditBridge")
 
     def test_codex_audit_service_oidc_rejects_missing_workflow_allowlist(self) -> None:
         payload = {
             "aud": "quant-codex-audit",
             "iss": codex_audit_service.GITHUB_OIDC_ISSUER,
             "exp": int(time.time()) + 300,
-            "repository": "QuantStrategyLab/CodexAuditBridge",
-            "workflow_ref": "QuantStrategyLab/CodexAuditBridge/.github/workflows/codex_audit.yml@refs/heads/main",
+            "repository": "QuantStrategyLab/AIAuditBridge",
+            "workflow_ref": "QuantStrategyLab/AIAuditBridge/.github/workflows/codex_audit.yml@refs/heads/main",
             "ref": "refs/heads/main",
         }
         env = {
-            "CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES": "QuantStrategyLab/CodexAuditBridge",
+            "CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES": "QuantStrategyLab/AIAuditBridge",
             "CODEX_AUDIT_SERVICE_ALLOWED_REFS": "refs/heads/main",
         }
         with (
@@ -348,7 +348,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
             {
                 "CODEX_AUDIT_GH_TOKEN": "source-token",
                 "GITHUB_TOKEN": "workflow-token",
-                "GITHUB_REPOSITORY": "QuantStrategyLab/CodexAuditBridge",
+                "GITHUB_REPOSITORY": "QuantStrategyLab/AIAuditBridge",
             },
             clear=True,
         ):
@@ -376,7 +376,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
             os.environ,
             {
                 "GITHUB_TOKEN": "workflow-token",
-                "GITHUB_REPOSITORY": "QuantStrategyLab/CodexAuditBridge",
+                "GITHUB_REPOSITORY": "QuantStrategyLab/AIAuditBridge",
             },
             clear=True,
         ):

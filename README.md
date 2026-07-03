@@ -46,7 +46,7 @@ When adding a new dispatcher, update `SOURCE_REPO_TASKS` in `scripts/run_monthly
 
 CodexAuditBridge uses the service backend only. The workflow runs on `ubuntu-latest` and requires a QuantStrategyLab-owned HTTPS/443 Codex audit service.
 
-Configure these values in `QuantStrategyLab/CodexAuditBridge`:
+Configure these values in `QuantStrategyLab/AIAuditBridge`:
 
 - Repository secret `CODEX_AUDIT_SERVICE_URL`, for example `https://codex-audit.example.com`.
   Use a secret because the URL may expose origin infrastructure details.
@@ -83,7 +83,7 @@ Configure these values in `QuantStrategyLab/CodexAuditBridge`:
 Run the service host with:
 
 ```bash
-CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES=QuantStrategyLab/CodexAuditBridge \
+CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES=QuantStrategyLab/AIAuditBridge \
 CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES='QuantStrategyLab/CryptoLivePoolPipelines,QuantStrategyLab/HkEquitySnapshotPipelines,QuantStrategyLab/UsEquitySnapshotPipelines,QuantStrategyLab/ResearchSignalContextPipelines' \
 CODEX_AUDIT_SERVICE_AUDIENCE=quant-codex-audit \
 CODEX_AUDIT_SERVICE_MODEL=gpt-5.4 \

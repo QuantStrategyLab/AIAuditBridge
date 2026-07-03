@@ -4,7 +4,7 @@ CodexAuditBridge uses an async service contract to avoid keeping a GitHub Action
 
 ## Architecture
 
-1. A source repository creates or updates an audit issue, then dispatches `QuantStrategyLab/CodexAuditBridge`.
+1. A source repository creates or updates an audit issue, then dispatches `QuantStrategyLab/AIAuditBridge`.
 2. CodexAuditBridge clones the source repository with a scoped GitHub App token, builds the audit prompt, and requests a GitHub Actions OIDC token with audience `quant-codex-audit`.
 3. CodexAuditBridge submits `POST /v1/codex-audit/jobs` through the Cloudflare Worker.
 4. The Worker forwards only Quant audit routes with bearer tokens to the VPS origin. The VPS service validates OIDC signature, audience, repository, workflow ref, git ref, source repository allowlists, and payload size.
@@ -28,9 +28,9 @@ The historical self-hosted direct-Codex workflows in `SelfHostedCodexAuditBridge
 
 - Source repositories, including public QuantStrategyLab repositories, must not store provider keys or the Codex service URL.
 - Source repositories should only dispatch the bridge workflow and provide issue/source context. Avoid running Codex directly in public workflows.
-- `QuantStrategyLab/CodexAuditBridge` is public, so it may contain only client/orchestration code. Its service URL, provider fallback keys, GitHub App private key, and Cloudflare origin stay in GitHub or Cloudflare secrets.
-- The VPS service should allow only `QuantStrategyLab/CodexAuditBridge` in `CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES`; this OIDC allowlist is required because the bridge repository is public.
-- The VPS service should require `CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS=QuantStrategyLab/CodexAuditBridge/.github/workflows/codex_audit.yml@refs/heads/main`.
+- `QuantStrategyLab/AIAuditBridge` is public, so it may contain only client/orchestration code. Its service URL, provider fallback keys, GitHub App private key, and Cloudflare origin stay in GitHub or Cloudflare secrets.
+- The VPS service should allow only `QuantStrategyLab/AIAuditBridge` in `CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES`; this OIDC allowlist is required because the bridge repository is public.
+- The VPS service should require `CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS=QuantStrategyLab/AIAuditBridge/.github/workflows/codex_audit.yml@refs/heads/main`.
 - The VPS service should require `CODEX_AUDIT_SERVICE_ALLOWED_REFS=refs/heads/main`.
 - Keep `CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORY_VISIBILITIES=public` unless the bridge repository is intentionally private.
 - The VPS service should keep `CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES` limited to the current source repositories.
@@ -55,8 +55,8 @@ For public source repositories:
 After merging the async service code, run the manual `VPS Codex Service Ops` workflow with deploy mode, or run on the VPS:
 
 ```bash
-CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES=QuantStrategyLab/CodexAuditBridge \
-CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS='QuantStrategyLab/CodexAuditBridge/.github/workflows/codex_audit.yml@refs/heads/main' \
+CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES=QuantStrategyLab/AIAuditBridge \
+CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS='QuantStrategyLab/AIAuditBridge/.github/workflows/codex_audit.yml@refs/heads/main' \
 CODEX_AUDIT_SERVICE_ALLOWED_REFS='refs/heads/main' \
 CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORY_VISIBILITIES='public' \
 CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES='QuantStrategyLab/CryptoLivePoolPipelines,QuantStrategyLab/HkEquitySnapshotPipelines,QuantStrategyLab/UsEquitySnapshotPipelines,QuantStrategyLab/ResearchSignalContextPipelines' \
@@ -95,7 +95,7 @@ the Worker URL, the Worker may reject it before it reaches the origin service.
 ### 3. Point CodexAuditBridge at the Worker
 
 ```bash
-gh secret set CODEX_AUDIT_SERVICE_URL -R QuantStrategyLab/CodexAuditBridge
+gh secret set CODEX_AUDIT_SERVICE_URL -R QuantStrategyLab/AIAuditBridge
 ```
 
 Set the secret value to the Worker base URL, for example:
