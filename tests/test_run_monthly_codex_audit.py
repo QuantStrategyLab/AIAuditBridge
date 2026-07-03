@@ -952,6 +952,32 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertEqual(reviews, [("OpenAI", "openai review")])
         self.assertEqual(warnings, ["Anthropic Claude fallback skipped because `ANTHROPIC_API_KEY` is not configured."])
 
+    def test_run_configured_api_reviews_sanitizes_failed_reviewer_errors(self) -> None:
+        with (
+            patch.dict(os.environ, {"OPENAI_API_KEY": "openai-key", "ANTHROPIC_API_KEY": "anthropic-key"}, clear=True),
+            patch(
+                "scripts.run_monthly_codex_audit.run_openai_review",
+                side_effect=BridgeError("Incorrect API key provided: sk-proj-secretTail"),
+            ),
+            patch(
+                "scripts.run_monthly_codex_audit.run_anthropic_review",
+                side_effect=BridgeError("Anthropic API request failed: 401 invalid x-api-key"),
+            ),
+        ):
+            reviews, warnings = run_configured_api_reviews(
+                "QuantStrategyLab/CryptoLivePoolPipelines",
+                "main",
+                {"title": "Monthly Report", "body": "Body"},
+                [],
+            )
+
+        warning_text = "\n".join(warnings)
+        self.assertEqual(reviews, [])
+        self.assertIn("OpenAI fallback failed", warning_text)
+        self.assertIn("Anthropic Claude fallback failed", warning_text)
+        self.assertNotIn("sk-proj", warning_text)
+        self.assertNotIn("secretTail", warning_text)
+
     def test_format_api_review_comment_combines_reviews(self) -> None:
         message = format_api_review_comment(
             "Codex failed.",
