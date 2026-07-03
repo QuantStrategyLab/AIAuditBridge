@@ -583,14 +583,17 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
     # -- GET --
 
     def do_GET(self) -> None:
-        if self.path == "/healthz":
+        from urllib.parse import urlparse
+        request_path = urlparse(self.path).path
+
+        if request_path == "/healthz":
             health = get_health_monitor()
             _json_response(self, HTTPStatus.OK, {
                 "status": health.status,
                 "uptime_seconds": health.uptime_seconds,
             })
             return
-        if self.path == "/v1/ai/health":
+        if request_path == "/v1/ai/health":
             try:
                 claims = authenticate(self.headers, audience=DEFAULT_AUDIENCE)
             except PermissionError as exc:
@@ -599,29 +602,29 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             health = get_health_monitor()
             _json_response(self, HTTPStatus.OK, {"status": "ok", **health.snapshot()})
             return
-        if self.path == "/v1/ai/quota":
+        if request_path == "/v1/ai/quota":
             self._handle_quota_status()
             return
 
         # Feedback: list changes or get effectiveness report
-        if self.path == "/v1/ai/changes/effectiveness":
+        if request_path == "/v1/ai/changes/effectiveness":
             self._handle_effectiveness()
             return
-        if self.path.startswith("/v1/ai/changes/"):
-            change_id = self.path[len("/v1/ai/changes/"):]
+        if request_path.startswith("/v1/ai/changes/"):
+            change_id = request_path[len("/v1/ai/changes/"):]
             self._handle_get_change(change_id)
             return
-        if self.path.startswith("/v1/ai/changes"):
+        if request_path.startswith("/v1/ai/changes"):
             self._handle_list_changes()
             return
-        if self.path == "/v1/ai/feedback/shadow":
+        if request_path == "/v1/ai/feedback/shadow":
             self._handle_get_shadow()
             return
 
         # async job polling: /v1/ai/execute/jobs/{id}  or  /v1/codex-audit/jobs/{id}
         for prefix in ("/v1/ai/execute/jobs/", "/v1/codex-audit/jobs/"):
-            if self.path.startswith(prefix):
-                job_id = self.path[len(prefix):]
+            if request_path.startswith(prefix):
+                job_id = request_path[len(prefix):]
                 if not re.fullmatch(r"[A-Za-z0-9_-]{24,96}", job_id):
                     _json_response(self, HTTPStatus.BAD_REQUEST, {"status": "error", "error": "invalid job_id"})
                     return

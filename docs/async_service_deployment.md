@@ -1,28 +1,28 @@
 # Async Codex Audit Service Deployment
 
-CodexAuditBridge uses an async service contract to avoid keeping a GitHub Actions request open while Codex runs on the VPS.
+AIAuditBridge uses an async service contract to avoid keeping a GitHub Actions request open while Codex runs on the VPS.
 
 ## Architecture
 
 1. A source repository creates or updates an audit issue, then dispatches `QuantStrategyLab/AIAuditBridge`.
-2. CodexAuditBridge clones the source repository with a scoped GitHub App token, builds the audit prompt, and requests a GitHub Actions OIDC token with audience `quant-codex-audit`.
-3. CodexAuditBridge submits `POST /v1/codex-audit/jobs` through the Cloudflare Worker.
+2. AIAuditBridge clones the source repository with a scoped GitHub App token, builds the audit prompt, and requests a GitHub Actions OIDC token with audience `quant-codex-audit`.
+3. AIAuditBridge submits `POST /v1/codex-audit/jobs` through the Cloudflare Worker.
 4. The Worker forwards only Quant audit routes with bearer tokens to the VPS origin. The VPS service validates OIDC signature, audience, repository, workflow ref, git ref, source repository allowlists, and payload size.
 5. The VPS service returns a random `job_id`, runs Codex in a background thread, and persists job state in a private local directory.
-6. CodexAuditBridge polls `GET /v1/codex-audit/jobs/{job_id}` until the job succeeds, fails, or times out.
+6. AIAuditBridge polls `GET /v1/codex-audit/jobs/{job_id}` until the job succeeds, fails, or times out.
 
 The synchronous `POST /v1/codex-audit` endpoint remains available for local diagnostics, but production workflows should use the async job endpoints.
 
 ## Boundary with Pigbibi CodexGateway
 
-`CodexAuditBridge` intentionally stays separate from `Pigbibi/AIGateway`.
+`AIAuditBridge` intentionally stays separate from `Pigbibi/AIGateway`.
 
 - `CodexGateway` is a generic Codex invocation facade for prompt/context/image/schema calls.
-- `CodexAuditBridge` owns QuantStrategyLab monthly audit semantics: source issue context, bounded repository snapshots, service patch contracts, source repository allowlists, GitHub App writeback, and generated remediation PRs.
+- `AIAuditBridge` owns QuantStrategyLab monthly audit semantics: source issue context, bounded repository snapshots, service patch contracts, source repository allowlists, GitHub App writeback, and generated remediation PRs.
 - Do not route Quant monthly audits through the Pigbibi gateway Worker or Pigbibi repository allowlist.
 - Do not move audit-specific issue/PR behavior into `CodexGateway`; share only low-level primitives after the HTTP contracts are stable.
 
-The historical self-hosted direct-Codex workflows in `SelfHostedCodexAuditBridge` and `CryptoCodexAuditBridge` should be treated as compatibility fallback. The preferred production path is the GitHub-hosted `CodexAuditBridge` workflow plus async VPS service. After parity is verified for current monthly sources, the self-hosted direct-Codex workflows can be disabled or deleted.
+The historical self-hosted direct-Codex workflows in `SelfHostedCodexAuditBridge`, `CryptoCodexAuditBridge`, and the legacy `CodexAuditBridge` repository should be treated as compatibility fallback. The preferred production path is the GitHub-hosted `AIAuditBridge` workflow plus async VPS service. After parity is verified for current monthly sources, the legacy direct-Codex and bridge workflows can be disabled or archived.
 
 ## Permission and secret boundary
 
@@ -55,8 +55,8 @@ For public source repositories:
 After merging the async service code, run the manual `VPS Codex Service Ops` workflow with deploy mode, or run on the VPS:
 
 ```bash
-CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES=QuantStrategyLab/AIAuditBridge,QuantStrategyLab/CodexAuditBridge \
-CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS='QuantStrategyLab/AIAuditBridge/.github/workflows/codex_audit.yml@refs/heads/main,QuantStrategyLab/CodexAuditBridge/.github/workflows/codex_audit.yml@refs/heads/main' \
+CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES=QuantStrategyLab/AIAuditBridge \
+CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS='QuantStrategyLab/AIAuditBridge/.github/workflows/codex_audit.yml@refs/heads/main' \
 CODEX_AUDIT_SERVICE_ALLOWED_REFS='refs/heads/main' \
 CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORY_VISIBILITIES='public' \
 CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES='QuantStrategyLab/CryptoLivePoolPipelines,QuantStrategyLab/HkEquitySnapshotPipelines,QuantStrategyLab/UsEquitySnapshotPipelines,QuantStrategyLab/ResearchSignalContextPipelines' \
@@ -95,7 +95,7 @@ curl -sS -o /tmp/codex-audit-probe.json -w '%{http_code}\n' \
 The unauthenticated submit probe should return `401`. If the request is sent to
 the Worker URL, the Worker may reject it before it reaches the origin service.
 
-### 3. Point CodexAuditBridge at the Worker
+### 3. Point AIAuditBridge at the Worker
 
 ```bash
 gh secret set CODEX_AUDIT_SERVICE_URL -R QuantStrategyLab/AIAuditBridge

@@ -6,24 +6,24 @@
 
 ## What this repository is
 
-CodexAuditBridge is the QuantStrategyLab AI audit automation bridge. It runs Codex VPS/service-backed audit workflows first, with OpenAI/Anthropic API fallback for approved reviews and low-risk fix pull requests.
+AIAuditBridge is the QuantStrategyLab AI audit automation bridge. It runs Codex VPS/service-backed audit workflows first, with OpenAI/Anthropic API fallback for approved reviews and low-risk fix pull requests.
 
 It produces research, audit, or orchestration artifacts. It should not submit broker orders or mutate live allocations by itself.
 
 ## Architecture boundary
 
-CodexAuditBridge is the organization-local AI audit boundary for QuantStrategyLab. Source repositories dispatch review requests to this repository; they should not embed raw `codex exec` commands, direct provider API calls, model routing, or fallback policy themselves.
+AIAuditBridge is the organization-local AI audit boundary for QuantStrategyLab. Source repositories dispatch review requests to this repository; they should not embed raw `codex exec` commands, direct provider API calls, model routing, or fallback policy themselves.
 
 Current execution model:
 
 1. A source repository creates or identifies an audit issue.
 2. The source repository dispatches this repository's monthly review workflow. The workflow filename is still `codex_audit.yml` for dispatch compatibility, but Codex execution is service-backed.
-3. CodexAuditBridge validates the source repository and task mapping, clones the source repository with a scoped GitHub token, and runs the selected provider/backend.
-4. Only CodexAuditBridge performs GitHub writes such as comments, branches, commits, pushes, and pull requests.
+3. AIAuditBridge validates the source repository and task mapping, clones the source repository with a scoped GitHub token, and runs the selected provider/backend.
+4. Only AIAuditBridge performs GitHub writes such as comments, branches, commits, pushes, and pull requests.
 
 Keep this boundary inside the `QuantStrategyLab` organization. Do not move QuantStrategyLab audit execution or source-repository write tokens to another organization.
 
-Codex execution is service-only: the workflow calls a QuantStrategyLab-owned HTTPS/443 Codex audit service from a standard GitHub-hosted runner. The service returns review text or structured patch suggestions only. CodexAuditBridge still owns clone, path validation, patch application, commit, push, PR creation, and issue comments.
+Codex execution is service-only: the workflow calls a QuantStrategyLab-owned HTTPS/443 Codex audit service from a standard GitHub-hosted runner. The service returns review text or structured patch suggestions only. AIAuditBridge still owns clone, path validation, patch application, commit, push, PR creation, and issue comments.
 
 When `CODEX_AUDIT_AUTO_MERGE=true`, the bridge requests guarded auto-merge by adding the `auto-merge-ok` label to the generated PR only after the changed-file surface is low or medium risk and the file / total changed-line caps stay within policy. The bridge ensures the configured label exists before applying it; if the source token cannot create labels, create the label manually before enabling guarded auto-merge. If a source checkout contains `.github/codex_auto_merge_policy.json`, the bridge reads the baseline policy before Codex edits run, then uses that baseline policy before falling back to its built-in defaults. High-risk, unknown, policy-changing, file-removal/rename/copy, or invalid-policy surfaces are labeled with the configured human-review label (`human-review-required` by default) instead of `auto-merge-ok`, and the source issue comment includes the risk reasons and files for operator review. The bridge does not call GitHub native auto-merge directly; source repositories must keep their own CI and merge-guard workflow in control of the final merge decision.
 
@@ -33,9 +33,9 @@ This avoids hard-coding Codex CLI setup in every source repository and avoids de
 
 ## Compatibility governance role
 
-QuantStrategyLab `AIAuditBridge` is an ops/control-plane consumer only:
+Compatibility governance metadata in this repository is ops/control-plane only:
 
-- It consumes compatibility governance metadata to align audit/review execution contracts.
+- It aligns audit/review execution contracts across QuantStrategyLab repositories.
 - It must **not** participate in trading runtime dependency graphs or strategy/runtime upgrade flows.
 - All governance references from this repo should be interpreted as control-plane/tooling compatibility, not runtime coupling.
 
@@ -53,7 +53,7 @@ When adding a new dispatcher, update `SOURCE_REPO_TASKS` in `scripts/run_monthly
 
 ## Codex service configuration
 
-CodexAuditBridge uses the service backend only. The workflow runs on `ubuntu-latest` and requires a QuantStrategyLab-owned HTTPS/443 Codex audit service.
+AIAuditBridge uses the service backend only. The workflow runs on `ubuntu-latest` and requires a QuantStrategyLab-owned HTTPS/443 Codex audit service.
 
 Configure these values in `QuantStrategyLab/AIAuditBridge`:
 
@@ -99,7 +99,7 @@ Configure these values in `QuantStrategyLab/AIAuditBridge`:
 Run the service host with:
 
 ```bash
-CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES=QuantStrategyLab/AIAuditBridge,QuantStrategyLab/CodexAuditBridge \
+CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES=QuantStrategyLab/AIAuditBridge \
 CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES='QuantStrategyLab/CryptoLivePoolPipelines,QuantStrategyLab/HkEquitySnapshotPipelines,QuantStrategyLab/UsEquitySnapshotPipelines,QuantStrategyLab/ResearchSignalContextPipelines' \
 CODEX_AUDIT_SERVICE_AUDIENCE=quant-codex-audit \
 CODEX_AUDIT_SERVICE_MODEL=gpt-5.4 \
@@ -133,7 +133,7 @@ In `review_and_fix` mode, the service must return exactly one JSON object:
 }
 ```
 
-CodexAuditBridge rejects absolute paths, `.git` paths, secret-like paths, and blocked data paths before writing files locally.
+AIAuditBridge rejects absolute paths, `.git` paths, secret-like paths, and blocked data paths before writing files locally.
 
 ## Output boundary
 
