@@ -1,4 +1,4 @@
-# CodexAuditBridge
+# Quant AI Audit Bridge
 
 [Chinese README](README.zh-CN.md)
 
@@ -6,13 +6,13 @@
 
 ## What this repository is
 
-CodexAuditBridge is a QuantStrategyLab audit automation bridge. It runs service-backed Codex audit workflows for snapshot reviews and low-risk fix pull requests.
+CodexAuditBridge is the QuantStrategyLab AI audit automation bridge. It runs Codex VPS/service-backed audit workflows first, with OpenAI/Anthropic API fallback for approved reviews and low-risk fix pull requests.
 
 It produces research, audit, or orchestration artifacts. It should not submit broker orders or mutate live allocations by itself.
 
 ## Architecture boundary
 
-CodexAuditBridge is the organization-local Codex boundary for QuantStrategyLab. Source repositories dispatch review requests to this repository; they should not embed raw `codex exec` commands or depend on a specific Codex runner themselves.
+CodexAuditBridge is the organization-local AI audit boundary for QuantStrategyLab. Source repositories dispatch review requests to this repository; they should not embed raw `codex exec` commands, direct provider API calls, model routing, or fallback policy themselves.
 
 Current execution model:
 

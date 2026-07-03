@@ -1,4 +1,4 @@
-# CodexAuditBridge
+# Quant AI Audit Bridge
 
 [English README](README.md)
 
@@ -6,13 +6,13 @@
 
 ## 这个仓库是什么
 
-CodexAuditBridge 是 QuantStrategyLab 的审计自动化桥接工具。运行 service-backed Codex 审计 workflow，用于 snapshot review 和低风险修复 PR。
+CodexAuditBridge 是 QuantStrategyLab 的 AI 审计自动化桥接工具。优先运行 Codex VPS/service-backed 审计 workflow，并对获批的 review 和低风险修复 PR 提供 OpenAI/Anthropic API fallback。
 
 它产出研究、审计或编排类 artifact，不应自行提交券商订单，也不应直接修改 live allocation。
 
 ## 架构边界
 
-CodexAuditBridge 是 QuantStrategyLab 组织内的 Codex 调用边界。各 source repository 只负责派发审计请求，不应在自身 workflow 中直接拼接 `codex exec`，也不应依赖某个特定 Codex runner。
+CodexAuditBridge 是 QuantStrategyLab 组织内的 AI 审计调用边界。各 source repository 只负责派发审计请求，不应在自身 workflow 中直接拼接 `codex exec`、直接调用 provider API、实现模型路由或 fallback 策略。
 
 当前执行模型：
 
