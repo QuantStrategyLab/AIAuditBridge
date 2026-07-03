@@ -1228,6 +1228,32 @@ def extract_anthropic_text(response: dict[str, Any]) -> str:
     raise BridgeError("Anthropic response did not include text content")
 
 
+def summarize_api_http_error(provider: str, status_code: int, detail: str) -> str:
+    error_code = ""
+    try:
+        payload = json.loads(detail)
+    except json.JSONDecodeError:
+        payload = {}
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        if isinstance(error, dict):
+            error_code = str(error.get("code") or error.get("type") or "")
+        if not error_code:
+            error_code = str(payload.get("code") or payload.get("type") or "")
+    suffix = f" ({error_code})" if error_code else ""
+    return f"{provider} API request failed: HTTP {status_code}{suffix}"
+
+
+def sanitize_fallback_error(error: object) -> str:
+    text = str(error).replace("\n", " ").strip()
+    text = re.sub(r"sk-[^\s\"'`]+", "[redacted-api-key]", text)
+    text = re.sub(r"(?i)(api[-_ ]?key[^:]*:\s*)[^\s\"'`,}]+", r"\1[redacted]", text)
+    text = re.sub(r"(?i)(x-api-key[^:]*:\s*)[^\s\"'`,}]+", r"\1[redacted]", text)
+    if len(text) > 300:
+        text = text[:297].rstrip() + "..."
+    return text or "provider request failed"
+
+
 def request_openai_completion(*, system: str, user: str) -> str:
     api_key = env_value("OPENAI_API_KEY")
     if not api_key:
@@ -1256,7 +1282,7 @@ def request_openai_completion(*, system: str, user: str) -> str:
             body = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
-        raise BridgeError(f"OpenAI API request failed: {exc.code} {detail[:600]}") from exc
+        raise BridgeError(summarize_api_http_error("OpenAI", exc.code, detail)) from exc
     return extract_openai_text(json.loads(body))
 
 
@@ -1289,7 +1315,7 @@ def request_anthropic_completion(*, system: str, user: str) -> str:
             body = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
-        raise BridgeError(f"Anthropic API request failed: {exc.code} {detail[:600]}") from exc
+        raise BridgeError(summarize_api_http_error("Anthropic", exc.code, detail)) from exc
     return extract_anthropic_text(json.loads(body))
 
 
@@ -1352,7 +1378,7 @@ def run_configured_api_reviews(
         try:
             reviews.append((label, runner(source_repo, source_ref, issue, comments)))
         except BridgeError as exc:
-            warnings.append(f"{label} fallback failed: `{exc}`")
+            warnings.append(f"{label} fallback failed: `{sanitize_fallback_error(exc)}`")
     return reviews, warnings
 
 
@@ -1777,7 +1803,7 @@ def run_api_patch_remediation(
                 provider=provider_name,
             )
             if return_code != 0:
-                warnings.append(f"{provider_name} patch fallback failed: `{log_text}`")
+                warnings.append(f"{provider_name} patch fallback failed: `{sanitize_fallback_error(log_text)}`")
                 continue
             note = f"{reason} Applied via API fallback provider `{provider_name}`.".strip()
             return publish_remediation(
