@@ -434,8 +434,29 @@ def _job_dedupe_key(payload: dict[str, Any]) -> str:
     return hashlib.sha256(json.dumps(parts, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
+def _classify_codex_exec_failure(text: str) -> str:
+    if any(word in text for word in ("quota", "rate limit", "too many active", "budget")):
+        return "quota_or_capacity_failure"
+    if any(word in text for word in ("timeout", "timed out", "temporarily", "unavailable", "connection", "network")):
+        return "transient_service_failure"
+    codex_auth_config_signals = (
+        "not authenticated",
+        "authentication failed",
+        "login required",
+        "please log in",
+        "invalid api key",
+        "401 unauthorized",
+        "403 forbidden",
+    )
+    if any(signal in text for signal in codex_auth_config_signals):
+        return "auth_or_config_failure"
+    return "unknown_failure"
+
+
 def _classify_failure(error: str) -> str:
     text = error.lower()
+    if "codex exec failed" in text:
+        return _classify_codex_exec_failure(text)
     auth_config_signals = (
         "permission denied",
         "unauthorized",
