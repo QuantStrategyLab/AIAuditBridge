@@ -31,6 +31,15 @@ When a source issue contains a `codex-pr-feedback` marker from a failed CI run o
 
 This avoids hard-coding Codex CLI setup in every source repository and avoids depending on a repository outside the `QuantStrategyLab` organization.
 
+## Compatibility governance role
+
+QuantStrategyLab `AIAuditBridge` is an ops/control-plane consumer only:
+
+- It consumes compatibility governance metadata to align audit/review execution contracts.
+- It must **not** participate in trading runtime dependency graphs or strategy/runtime upgrade flows.
+- All governance references from this repo should be interpreted as control-plane/tooling compatibility, not runtime coupling.
+
+
 ## Supported source repositories
 
 | Source repository | Allowed task |

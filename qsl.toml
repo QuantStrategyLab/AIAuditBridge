@@ -1,0 +1,6 @@
+tier = "ops-tooling"
+ring = 4
+runtime_dependency = false
+
+[compat]
+bundle = "2026.07.0"

@@ -31,6 +31,14 @@ Codex 执行现在只走 service backend：workflow 从 GitHub-hosted runner 调
 
 这样可以避免每个 source repository 都硬编码 Codex CLI，也不会依赖 `QuantStrategyLab` 组织外的仓库。
 
+## 兼容性治理定位
+
+`QuantStrategyLab/AIAuditBridge` 只作为 ops/control-plane 的消费侧参与兼容治理：
+
+- 仅消费兼容矩阵和治理元数据，确保审计/评审边界行为一致；
+- 不参与策略/交易运行时的依赖图、升级决策或 runtime 级联；
+- 本仓库中的兼容关系只用于审计与 review 运营（control-plane），不应被源仓库当作交易策略运行时依赖。
+
 ## 支持的 source repository
 
 | Source repository | 允许的 task |
