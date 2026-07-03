@@ -436,7 +436,23 @@ def _job_dedupe_key(payload: dict[str, Any]) -> str:
 
 def _classify_failure(error: str) -> str:
     text = error.lower()
-    if any(word in text for word in ("permission", "unauth", "forbidden", "oidc", "token", "allow", "secret")):
+    auth_config_signals = (
+        "permission denied",
+        "unauthorized",
+        "forbidden",
+        "oidc",
+        "missing bearer",
+        "missing token",
+        "invalid token",
+        "bad credentials",
+        "not allowed",
+        "allowlist",
+        "api key is required",
+        "no api key configured",
+        "secret is missing",
+        "secret not configured",
+    )
+    if any(signal in text for signal in auth_config_signals):
         return "auth_or_config_failure"
     if any(word in text for word in ("quota", "rate limit", "too many active", "budget")):
         return "quota_or_capacity_failure"
