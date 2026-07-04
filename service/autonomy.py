@@ -90,16 +90,26 @@ LOW_RISK_EXACT = frozenset({
     "LICENSE",
     ".gitignore",
 })
+CRITICAL_EXACT = frozenset({
+    ".github/codex_auto_merge_policy.json",
+})
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_POLICY_PATH = REPO_ROOT / ".github" / "codex_auto_merge_policy.json"
+AUTONOMY_POLICY_PATH_ENV = "CODEX_AUDIT_SERVICE_AUTONOMY_POLICY_PATH"
 
 
-def load_autonomy_policy(path: Path = DEFAULT_POLICY_PATH) -> dict[str, Any]:
-    """Load the shared repo autonomy policy.
+def load_autonomy_policy(path: Path | None = None) -> dict[str, Any]:
+    """Load the shared autonomy policy from a trusted service-owned path.
 
-    The policy is intentionally best-effort: malformed or missing files fall
-    back to the built-in conservative classifier instead of disabling review.
+    The service must not read policy rules from the untrusted PR checkout being
+    reviewed. Set CODEX_AUDIT_SERVICE_AUTONOMY_POLICY_PATH to a deployment-owned
+    file or pass an explicit path in tests/tools. Missing or malformed files
+    fall back to the built-in conservative classifier.
     """
+    if path is None:
+        env_path = os.environ.get(AUTONOMY_POLICY_PATH_ENV, "").strip()
+        if not env_path:
+            return {}
+        path = Path(env_path)
     if not path.exists():
         return {}
     try:
@@ -180,6 +190,8 @@ def _policy_matches(path: str, rule: dict[str, Any]) -> bool:
 
 
 def _blocked_by_policy(path: str, policy: dict[str, Any] | None) -> bool:
+    if path in CRITICAL_EXACT:
+        return True
     patterns = (policy or {}).get("blocked_path_patterns") if isinstance(policy, dict) else None
     raw_patterns = list(CRITICAL_PATTERNS)
     if isinstance(patterns, list):
