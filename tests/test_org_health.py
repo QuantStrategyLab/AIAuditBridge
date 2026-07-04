@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -196,6 +197,7 @@ class OrgHealthTest(unittest.TestCase):
         with patch.dict(os.environ, {
             "CODEX_AUDIT_SERVICE_GITHUB_TOKEN": "ghs_test",
             "CODEX_AUDIT_SERVICE_ORG_HEALTH_REPOSITORIES": "mixed",
+            "CODEX_AUDIT_SERVICE_ORG_HEALTH_WORKFLOWS": "all",
         }, clear=False), patch("service.org_health.urlopen", fake_urlopen):
             result = read_org_health()
 
@@ -432,6 +434,83 @@ class OrgHealthTest(unittest.TestCase):
                 server.shutdown()
                 server.server_close()
 
+    def test_read_org_health_limits_default_monitored_workflows(self) -> None:
+        workflows = [
+            {"id": 1, "name": "CI", "state": "active"},
+            {"id": 2, "name": "Docs", "state": "active"},
+            {"id": 3, "name": "Codex PR Review", "state": "active"},
+        ]
+        selected = org_health._monitored_workflows(workflows)
+        self.assertEqual([item["name"] for item in selected], ["CI", "Codex PR Review"])
+
+    def test_read_org_health_serves_expired_stale_cache_and_refreshes_in_background(self) -> None:
+        cache_key = (("QuantStrategyLab/cached",), "CODEX_AUDIT_SERVICE_GITHUB_TOKEN", "token", "all")
+        cached_result = {
+            "status": "ok",
+            "provider": {"status": "available", "source": "github_rest", "token_source": "CODEX_AUDIT_SERVICE_GITHUB_TOKEN"},
+            "summary": {"total_repositories": 1, "unhealthy_repositories": 0, "degraded_repositories": 0, "failed_workflow_runs": 0, "in_progress_workflow_runs": 0},
+            "repositories": [],
+        }
+        refreshed_result = {**cached_result, "status": "degraded"}
+        org_health._CACHE[cache_key] = (0, cached_result)
+        started = threading.Event()
+
+        def fake_build(*args, **kwargs):
+            started.set()
+            return refreshed_result
+
+        with patch.dict(os.environ, {
+            "CODEX_AUDIT_SERVICE_GITHUB_TOKEN": "ghs_test",
+            "CODEX_AUDIT_SERVICE_ORG_HEALTH_REPOSITORIES": "cached",
+            "CODEX_AUDIT_SERVICE_ORG_HEALTH_CACHE_SECONDS": "60",
+        }, clear=False), patch("service.org_health._build_org_health_snapshot", fake_build):
+            result = read_org_health()
+            self.assertIs(result, cached_result)
+            self.assertTrue(started.wait(timeout=1))
+
+        deadline = time.time() + 1
+        while time.time() < deadline:
+            cached = org_health._CACHE.get(cache_key)
+            if cached and cached[1] is refreshed_result:
+                break
+            time.sleep(0.01)
+        self.assertIs(org_health._CACHE[cache_key][1], refreshed_result)
+
+
+    def test_read_org_health_returns_placeholder_for_large_cold_cache(self) -> None:
+        cache_key = (("QuantStrategyLab/one", "QuantStrategyLab/two"), "CODEX_AUDIT_SERVICE_GITHUB_TOKEN", "token", "all")
+        refreshed_result = {
+            "status": "ok",
+            "provider": {"status": "available", "source": "github_rest", "token_source": "CODEX_AUDIT_SERVICE_GITHUB_TOKEN"},
+            "summary": {"total_repositories": 2, "unhealthy_repositories": 0, "unknown_repositories": 0, "degraded_repositories": 0, "failed_workflow_runs": 0, "in_progress_workflow_runs": 0},
+            "repositories": [],
+        }
+        started = threading.Event()
+
+        def fake_build(*args, **kwargs):
+            started.set()
+            return refreshed_result
+
+        with patch.dict(os.environ, {
+            "CODEX_AUDIT_SERVICE_GITHUB_TOKEN": "ghs_test",
+            "CODEX_AUDIT_SERVICE_ORG_HEALTH_REPOSITORIES": "one,two",
+            "CODEX_AUDIT_SERVICE_ORG_HEALTH_CACHE_SECONDS": "60",
+            "CODEX_AUDIT_SERVICE_ORG_HEALTH_COLD_ASYNC_REPOSITORIES": "1",
+        }, clear=False), patch("service.org_health._build_org_health_snapshot", fake_build):
+            result = read_org_health()
+            self.assertEqual(result["status"], "unknown")
+            self.assertEqual(result["provider"]["status"], "refreshing")
+            self.assertEqual(result["provider"]["reason"], "cold_cache_refreshing")
+            self.assertTrue(started.wait(timeout=1))
+
+        deadline = time.time() + 1
+        while time.time() < deadline:
+            cached = org_health._CACHE.get(cache_key)
+            if cached and cached[1] is refreshed_result:
+                break
+            time.sleep(0.01)
+        self.assertIs(org_health._CACHE[cache_key][1], refreshed_result)
+
     def test_org_health_endpoint_returns_unavailable_without_github_token(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {
             "CODEX_AUDIT_SERVICE_AUTH": "none",
@@ -445,10 +524,9 @@ class OrgHealthTest(unittest.TestCase):
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             try:
-                with self.assertRaises(urllib.error.HTTPError) as ctx:
-                    urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/v1/ai/org-health", timeout=5)
-                self.assertEqual(ctx.exception.code, 503)
-                payload = json.loads(ctx.exception.read().decode("utf-8"))
+                response = urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/v1/ai/org-health", timeout=5)
+                self.assertEqual(response.status, 200)
+                payload = json.loads(response.read().decode("utf-8"))
                 self.assertEqual(payload["status"], "unavailable")
                 self.assertEqual(payload["provider"]["reason"], "needs_token")
             finally:

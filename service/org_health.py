@@ -39,6 +39,20 @@ _REFRESH_EVENTS: dict[CacheKey, threading.Event] = {}
 DEFAULT_WORKER_LIMIT = 4
 DEFAULT_RUNS_PER_PAGE = 5
 DEFAULT_RUN_LOOKBACK_PAGES = 3
+DEFAULT_WORKFLOW_LIMIT = 8
+DEFAULT_REFRESH_DEADLINE_SECONDS = 12.0
+DEFAULT_COLD_ASYNC_REPOSITORY_THRESHOLD = 4
+DEFAULT_WORKFLOW_ALLOWLIST = (
+    "Auto Merge Dependabot PR",
+    "Check",
+    "CI",
+    "Codex PR Review",
+    "Codex Review Gate",
+    "Monthly Orchestrator",
+    "Secret Scan",
+    "VPS Codex Service Ops",
+    "ci",
+)
 
 
 def _split_repo_env(name: str) -> list[str]:
@@ -74,7 +88,16 @@ def _github_token() -> tuple[str, str]:
     return "", ""
 
 
-def _github_request_json(path: str, token: str, timeout_seconds: float) -> dict[str, Any]:
+def _remaining_timeout(timeout_seconds: float, deadline: float | None) -> float:
+    if deadline is None:
+        return timeout_seconds
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("org health collection deadline exceeded")
+    return min(timeout_seconds, max(0.1, remaining))
+
+
+def _github_request_json(path: str, token: str, timeout_seconds: float, deadline: float | None = None) -> dict[str, Any]:
     request = Request(
         f"https://api.github.com{path}",
         headers={
@@ -84,7 +107,7 @@ def _github_request_json(path: str, token: str, timeout_seconds: float) -> dict[
             "User-Agent": "AIAuditBridge",
         },
     )
-    with urlopen(request, timeout=timeout_seconds) as response:
+    with urlopen(request, timeout=_remaining_timeout(timeout_seconds, deadline)) as response:
         payload = json.loads(response.read().decode("utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("GitHub API response was not an object")
@@ -117,12 +140,12 @@ def _unknown_run_reason(run: dict[str, Any]) -> str:
     return ""
 
 
-def _list_workflows(repo_path: str, token: str, timeout_seconds: float) -> list[dict[str, Any]]:
+def _list_workflows(repo_path: str, token: str, timeout_seconds: float, deadline: float | None) -> list[dict[str, Any]]:
     workflows: list[dict[str, Any]] = []
     page = 1
     while True:
         query = urlencode({"per_page": "100", "page": str(page)})
-        payload = _github_request_json(f"{repo_path}/actions/workflows?{query}", token, timeout_seconds)
+        payload = _github_request_json(f"{repo_path}/actions/workflows?{query}", token, timeout_seconds, deadline)
         items = payload.get("workflows", [])
         if not isinstance(items, list):
             return workflows
@@ -181,13 +204,13 @@ def _classify_repo(latest_run: dict[str, Any], *, has_runs: bool, error: str = "
     return status, reasons
 
 
-def _latest_run_for_repo(repo: str, token: str, timeout_seconds: float) -> tuple[dict[str, Any], list[str], str]:
+def _latest_run_for_repo(repo: str, token: str, timeout_seconds: float, deadline: float | None = None) -> tuple[dict[str, Any], list[str], str]:
     owner, name = repo.split("/", 1)
     repo_path = f"/repos/{quote(owner, safe='')}/{quote(name, safe='')}"
     try:
-        repo_payload = _github_request_json(repo_path, token, timeout_seconds)
+        repo_payload = _github_request_json(repo_path, token, timeout_seconds, deadline)
         default_branch = str(repo_payload.get("default_branch") or "main").strip() or "main"
-        workflows = _list_workflows(repo_path, token, timeout_seconds)
+        workflows = _list_workflows(repo_path, token, timeout_seconds, deadline)
     except (HTTPError, OSError, TimeoutError, URLError, ValueError, json.JSONDecodeError):
         return _empty_run(), ["github_api_error"], "degraded"
 
@@ -202,11 +225,7 @@ def _latest_run_for_repo(repo: str, token: str, timeout_seconds: float) -> tuple
     branch_scope = _branch_scope(default_branch)
     branch_label = branch_scope or "all_branches"
     max_run_pages = _run_lookback_pages()
-    for workflow in workflows:
-        if not isinstance(workflow, dict):
-            continue
-        if str(workflow.get("state") or "").startswith("disabled"):
-            continue
+    for workflow in _monitored_workflows(workflows):
         workflow_id = str(workflow.get("id") or "").strip()
         if not workflow_id:
             continue
@@ -221,7 +240,7 @@ def _latest_run_for_repo(repo: str, token: str, timeout_seconds: float) -> tuple
                 query_params["branch"] = branch_scope
             query = urlencode(query_params)
             try:
-                payload = _github_request_json(f"{repo_path}/actions/workflows/{quote(workflow_id, safe='')}/runs?{query}", token, timeout_seconds)
+                payload = _github_request_json(f"{repo_path}/actions/workflows/{quote(workflow_id, safe='')}/runs?{query}", token, timeout_seconds, deadline)
             except (HTTPError, OSError, TimeoutError, URLError, ValueError, json.JSONDecodeError):
                 workflow_errors += 1
                 break
@@ -311,6 +330,92 @@ def _worker_limit() -> int:
     return min(max(1, value), 8)
 
 
+def _workflow_limit() -> int:
+    raw = os.environ.get("CODEX_AUDIT_SERVICE_ORG_HEALTH_MAX_WORKFLOWS_PER_REPO", str(DEFAULT_WORKFLOW_LIMIT)).strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_WORKFLOW_LIMIT
+    return min(max(1, value), 25)
+
+
+def _workflow_allowlist() -> set[str]:
+    raw = os.environ.get("CODEX_AUDIT_SERVICE_ORG_HEALTH_WORKFLOWS")
+    if raw is None:
+        values = list(DEFAULT_WORKFLOW_ALLOWLIST)
+    else:
+        stripped = raw.strip()
+        if stripped.lower() in {"", "*", "all"}:
+            return set()
+        values = [item.strip() for item in stripped.replace("\n", ",").split(",") if item.strip()]
+    return {item.lower() for item in values}
+
+
+def _workflow_matches_allowlist(workflow: dict[str, Any], allowlist: set[str]) -> bool:
+    if not allowlist:
+        return True
+    name = str(workflow.get("name") or "").strip().lower()
+    path = str(workflow.get("path") or "").strip().lower()
+    filename = path.rsplit("/", 1)[-1]
+    return name in allowlist or path in allowlist or filename in allowlist
+
+
+def _monitored_workflows(workflows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    active = [
+        workflow
+        for workflow in workflows
+        if isinstance(workflow, dict) and not str(workflow.get("state") or "").startswith("disabled")
+    ]
+    allowlist = _workflow_allowlist()
+    selected = [workflow for workflow in active if _workflow_matches_allowlist(workflow, allowlist)]
+    if not selected and allowlist:
+        selected = active
+    return selected[:_workflow_limit()]
+
+
+def _refresh_deadline_seconds() -> float:
+    raw = os.environ.get("CODEX_AUDIT_SERVICE_ORG_HEALTH_REFRESH_DEADLINE_SECONDS", str(DEFAULT_REFRESH_DEADLINE_SECONDS)).strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_REFRESH_DEADLINE_SECONDS
+    return min(max(1.0, value), 60.0)
+
+
+def _cold_async_repository_threshold() -> int:
+    raw = os.environ.get("CODEX_AUDIT_SERVICE_ORG_HEALTH_COLD_ASYNC_REPOSITORIES", str(DEFAULT_COLD_ASYNC_REPOSITORY_THRESHOLD)).strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_COLD_ASYNC_REPOSITORY_THRESHOLD
+    return max(1, value)
+
+
+def _should_return_cold_placeholder(repos: list[str], token: str, ttl_seconds: float) -> bool:
+    return bool(token and ttl_seconds and len(repos) > _cold_async_repository_threshold())
+
+
+def _refreshing_snapshot(repos: list[str], token_source: str) -> dict[str, Any]:
+    return {
+        "status": "unknown",
+        "provider": {
+            "status": "refreshing",
+            "reason": "cold_cache_refreshing",
+            "source": "github_rest",
+            "token_source": token_source,
+        },
+        "summary": {
+            "total_repositories": len(repos),
+            "unhealthy_repositories": 0,
+            "unknown_repositories": len(repos),
+            "degraded_repositories": 0,
+            "failed_workflow_runs": 0,
+            "in_progress_workflow_runs": 0,
+        },
+        "repositories": [],
+    }
+
+
 def _run_lookback_pages() -> int:
     raw = os.environ.get("CODEX_AUDIT_SERVICE_ORG_HEALTH_RUN_LOOKBACK_PAGES", str(DEFAULT_RUN_LOOKBACK_PAGES)).strip()
     try:
@@ -339,33 +444,12 @@ def _discard_refresh(cache_key: CacheKey, ttl_seconds: float) -> None:
             event.set()
 
 
-def read_org_health(timeout_seconds: float = 3.0) -> dict[str, Any]:
-    """Return a GitHub Actions health snapshot for the configured repositories."""
-    repos = _repository_targets()
-    token, token_source = _github_token()
-    branch_cache_scope = os.environ.get("CODEX_AUDIT_SERVICE_ORG_HEALTH_BRANCH", "").strip() or "all"
-    cache_key = (tuple(repos), token_source, "token" if token else "no-token", branch_cache_scope)
-    ttl_seconds = _cache_ttl_seconds()
-    now = time.time()
-    wait_for_refresh: threading.Event | None = None
-    if ttl_seconds:
-        with _CACHE_LOCK:
-            cached = _CACHE.get(cache_key)
-            if cached and now - cached[0] < ttl_seconds:
-                return cached[1]
-            refresh_event = _REFRESH_EVENTS.get(cache_key)
-            if cached and refresh_event:
-                return cached[1]
-            if refresh_event:
-                wait_for_refresh = refresh_event
-            else:
-                _REFRESH_EVENTS[cache_key] = threading.Event()
-    if wait_for_refresh:
-        wait_for_refresh.wait(timeout=max(5.0, timeout_seconds * 3))
-        with _CACHE_LOCK:
-            cached = _CACHE.get(cache_key)
-            if cached:
-                return cached[1]
+def _build_org_health_snapshot(
+    repos: list[str],
+    token: str,
+    token_source: str,
+    timeout_seconds: float,
+) -> dict[str, Any]:
     summary = {
         "total_repositories": len(repos),
         "unhealthy_repositories": 0,
@@ -375,17 +459,17 @@ def read_org_health(timeout_seconds: float = 3.0) -> dict[str, Any]:
         "in_progress_workflow_runs": 0,
     }
     if not token:
-        result = {
+        return {
             "status": "unavailable",
             "provider": {"status": "unavailable", "reason": "needs_token", "source": "github_rest"},
             "summary": summary,
             "repositories": [],
         }
-        _store_cache(cache_key, result, ttl_seconds)
-        return result
+
+    deadline = time.monotonic() + _refresh_deadline_seconds()
 
     def read_repo(repo: str) -> dict[str, Any]:
-        latest_run, reasons, repo_status = _latest_run_for_repo(repo, token, timeout_seconds)
+        latest_run, reasons, repo_status = _latest_run_for_repo(repo, token, timeout_seconds, deadline)
         monitoring = latest_run.get("monitoring", {})
         problem_run = latest_run.get("problem_run", {})
         if isinstance(monitoring, dict):
@@ -413,45 +497,108 @@ def read_org_health(timeout_seconds: float = 3.0) -> dict[str, Any]:
             "signals": signals,
         }
 
-    try:
-        with ThreadPoolExecutor(max_workers=min(_worker_limit(), max(1, len(repos)))) as executor:
-            repositories = list(executor.map(read_repo, repos))
+    with ThreadPoolExecutor(max_workers=min(_worker_limit(), max(1, len(repos)))) as executor:
+        repositories = list(executor.map(read_repo, repos))
 
-        for repo_result in repositories:
-            latest_run = repo_result["latest_run"]
-            repo_status = repo_result["status"]
-            conclusion = latest_run.get("conclusion", "")
-            run_status = latest_run.get("status", "")
-            if repo_status == "unhealthy":
-                summary["unhealthy_repositories"] += 1
-            elif repo_status == "unknown":
-                summary["unknown_repositories"] += 1
-            elif repo_status == "degraded":
-                summary["degraded_repositories"] += 1
-            signals = repo_result.get("signals", {})
-            if isinstance(signals, dict):
-                summary["failed_workflow_runs"] += int(signals.get("current_failed_workflow_runs") or 0)
-                summary["in_progress_workflow_runs"] += int(signals.get("current_in_progress_workflow_runs") or 0)
-            else:
-                if conclusion in _UNHEALTHY_CONCLUSIONS:
-                    summary["failed_workflow_runs"] += 1
-                if run_status in _IN_PROGRESS_STATUSES:
-                    summary["in_progress_workflow_runs"] += 1
-
-        if summary["unhealthy_repositories"]:
-            status = "unhealthy"
-        elif summary["degraded_repositories"]:
-            status = "degraded"
-        elif summary["unknown_repositories"]:
-            status = "unknown"
+    for repo_result in repositories:
+        latest_run = repo_result["latest_run"]
+        repo_status = repo_result["status"]
+        conclusion = latest_run.get("conclusion", "")
+        run_status = latest_run.get("status", "")
+        if repo_status == "unhealthy":
+            summary["unhealthy_repositories"] += 1
+        elif repo_status == "unknown":
+            summary["unknown_repositories"] += 1
+        elif repo_status == "degraded":
+            summary["degraded_repositories"] += 1
+        signals = repo_result.get("signals", {})
+        if isinstance(signals, dict):
+            summary["failed_workflow_runs"] += int(signals.get("current_failed_workflow_runs") or 0)
+            summary["in_progress_workflow_runs"] += int(signals.get("current_in_progress_workflow_runs") or 0)
         else:
-            status = "ok"
-        result = {
-            "status": status,
-            "provider": {"status": "available", "source": "github_rest", "token_source": token_source},
-            "summary": summary,
-            "repositories": repositories,
-        }
+            if conclusion in _UNHEALTHY_CONCLUSIONS:
+                summary["failed_workflow_runs"] += 1
+            if run_status in _IN_PROGRESS_STATUSES:
+                summary["in_progress_workflow_runs"] += 1
+
+    if summary["unhealthy_repositories"]:
+        status = "unhealthy"
+    elif summary["degraded_repositories"]:
+        status = "degraded"
+    elif summary["unknown_repositories"]:
+        status = "unknown"
+    else:
+        status = "ok"
+    return {
+        "status": status,
+        "provider": {
+            "status": "available",
+            "source": "github_rest",
+            "token_source": token_source,
+            "monitored_workflows": sorted(_workflow_allowlist()) or ["all"],
+            "max_workflows_per_repo": _workflow_limit(),
+        },
+        "summary": summary,
+        "repositories": repositories,
+    }
+
+
+def _start_background_refresh(
+    cache_key: CacheKey,
+    repos: list[str],
+    token: str,
+    token_source: str,
+    ttl_seconds: float,
+    timeout_seconds: float,
+) -> None:
+    def refresh() -> None:
+        try:
+            result = _build_org_health_snapshot(repos, token, token_source, timeout_seconds)
+            _store_cache(cache_key, result, ttl_seconds)
+        except Exception:
+            _discard_refresh(cache_key, ttl_seconds)
+
+    thread = threading.Thread(target=refresh, name="org-health-refresh", daemon=True)
+    thread.start()
+
+
+def read_org_health(timeout_seconds: float = 3.0) -> dict[str, Any]:
+    """Return a GitHub Actions health snapshot for the configured repositories."""
+    repos = _repository_targets()
+    token, token_source = _github_token()
+    branch_cache_scope = os.environ.get("CODEX_AUDIT_SERVICE_ORG_HEALTH_BRANCH", "").strip() or "all"
+    cache_key = (tuple(repos), token_source, "token" if token else "no-token", branch_cache_scope)
+    ttl_seconds = _cache_ttl_seconds()
+    now = time.time()
+    wait_for_refresh: threading.Event | None = None
+    if ttl_seconds:
+        with _CACHE_LOCK:
+            cached = _CACHE.get(cache_key)
+            refresh_event = _REFRESH_EVENTS.get(cache_key)
+            if cached and now - cached[0] < ttl_seconds:
+                return cached[1]
+            if cached:
+                if not refresh_event:
+                    _REFRESH_EVENTS[cache_key] = threading.Event()
+                    _start_background_refresh(cache_key, repos, token, token_source, ttl_seconds, timeout_seconds)
+                return cached[1]
+            if refresh_event:
+                wait_for_refresh = refresh_event
+            else:
+                _REFRESH_EVENTS[cache_key] = threading.Event()
+                if _should_return_cold_placeholder(repos, token, ttl_seconds):
+                    _start_background_refresh(cache_key, repos, token, token_source, ttl_seconds, timeout_seconds)
+                    return _refreshing_snapshot(repos, token_source)
+    if wait_for_refresh:
+        if _should_return_cold_placeholder(repos, token, ttl_seconds):
+            return _refreshing_snapshot(repos, token_source)
+        wait_for_refresh.wait(timeout=max(5.0, timeout_seconds * 3))
+        with _CACHE_LOCK:
+            cached = _CACHE.get(cache_key)
+            if cached:
+                return cached[1]
+    try:
+        result = _build_org_health_snapshot(repos, token, token_source, timeout_seconds)
     except Exception:
         _discard_refresh(cache_key, ttl_seconds)
         raise

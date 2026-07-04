@@ -166,6 +166,9 @@ class RunCodexPrReviewTests(unittest.TestCase):
 class CodexPrReviewWorkflowTest(unittest.TestCase):
     def test_reusable_workflow_runs_bridge_script_against_source_checkout(self) -> None:
         workflow = Path(".github/workflows/codex_pr_review.yml").read_text(encoding="utf-8")
+        self.assertIn("pull_request_target:", workflow)
+        self.assertNotIn("  pull_request:\n    types: [opened, synchronize, reopened]", workflow)
+        self.assertIn("github.event.pull_request.head.repo.full_name == github.repository", workflow)
         self.assertIn("path: source", workflow)
         self.assertIn("path: bridge", workflow)
         self.assertIn("CODEX_AUDIT_REUSABLE_WORKFLOW_TOKEN", workflow)
@@ -175,6 +178,8 @@ class CodexPrReviewWorkflowTest(unittest.TestCase):
         self.assertIn("required: false", workflow)
         self.assertIn("job.workflow_repository", workflow)
         self.assertIn("github.event.pull_request.base.sha", workflow)
+        self.assertIn("github.event.pull_request.head.sha", workflow)
+        self.assertIn("persist-credentials: false", workflow)
         self.assertIn("job.workflow_sha", workflow)
         self.assertIn("token: ${{ secrets.CODEX_AUDIT_REUSABLE_WORKFLOW_TOKEN || github.token }}", workflow)
         self.assertNotIn("CODEX_AUDIT_DISPATCH_TOKEN", workflow)

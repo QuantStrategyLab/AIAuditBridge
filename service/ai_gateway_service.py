@@ -618,8 +618,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 _json_response(self, HTTPStatus.UNAUTHORIZED, {"status": "error", "error": str(exc)})
                 return
             org_health = read_org_health()
-            status = HTTPStatus.SERVICE_UNAVAILABLE if org_health.get("status") == "unavailable" else HTTPStatus.OK
-            _json_response(self, status, org_health)
+            _json_response(self, HTTPStatus.OK, org_health)
             return
         if request_path == "/v1/ai/quota":
             self._handle_quota_status()

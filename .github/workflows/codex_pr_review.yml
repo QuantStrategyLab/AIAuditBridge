@@ -5,7 +5,7 @@ name: Codex PR Review
 #   uses: QuantStrategyLab/AIAuditBridge/.github/workflows/codex_pr_review.yml@main
 #   secrets: inherit
 on:
-  pull_request:
+  pull_request_target:
     types: [opened, synchronize, reopened]
   workflow_call:
     inputs:
@@ -36,6 +36,7 @@ concurrency:
 
 jobs:
   review:
+    if: github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -46,6 +47,8 @@ jobs:
         uses: actions/checkout@v6
         with:
           path: source
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
 
       - name: Checkout bridge review scripts
         uses: actions/checkout@v6
@@ -88,6 +91,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: codex-pr-review-${{ github.event.pull_request.number }}-${{ github.run_id }}
+          name: codex-pr-review-${{ github.event.pull_request.number || github.run_id }}-${{ github.run_id }}
           path: source/data/output/codex_pr_review/
           if-no-files-found: warn
