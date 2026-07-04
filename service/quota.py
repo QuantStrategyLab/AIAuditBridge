@@ -76,6 +76,7 @@ class QuotaRecord:
     legacy_tokens_input: int = 0
     legacy_tokens_output: int = 0
     legacy_usage_incomplete: bool = False
+    legacy_unknown_cost_usd: float = 0.0
     codex_calls: int = 0
     total_cost_usd: float = 0.0
     api_key_cost_usd: float = 0.0
@@ -95,6 +96,7 @@ class QuotaRecord:
             "legacy_tokens_input": self.legacy_tokens_input,
             "legacy_tokens_output": self.legacy_tokens_output,
             "legacy_usage_incomplete": self.legacy_usage_incomplete,
+            "legacy_unknown_cost_usd": round(self.legacy_unknown_cost_usd, 4),
             "codex_calls": self.codex_calls,
             "total_cost_usd": round(self.total_cost_usd, 4),
             "api_key_cost_usd": round(self.api_key_cost_usd, 4),
@@ -106,13 +108,6 @@ class QuotaRecord:
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "QuotaRecord":
         total_cost_usd = float(d.get("total_cost_usd", 0.0))
-        codex_cost_usd = float(
-            d.get(
-                "codex_cost_usd",
-                min(total_cost_usd, DEFAULT_MODEL_COSTS.get("codex-cli", {}).get("flat", 0.05) * int(d.get("codex_calls", 0))),
-            )
-        )
-        api_key_cost_usd = float(d.get("api_key_cost_usd", max(0.0, total_cost_usd - codex_cost_usd)))
         has_api_calls = "api_calls" in d
         api_calls = int(d.get("api_calls", 0))
         codex_calls = int(d.get("codex_calls", 0))
@@ -125,6 +120,11 @@ class QuotaRecord:
         )
         aggregate_tokens_are_api_key = aggregate_tokens_present and codex_calls == 0
         aggregate_tokens_are_legacy_unknown = aggregate_tokens_present and not aggregate_tokens_are_api_key
+        has_cost_split = any(k in d for k in ("api_key_cost_usd", "codex_cost_usd", "legacy_unknown_cost_usd"))
+        cost_is_legacy_unknown = aggregate_tokens_are_legacy_unknown or (has_legacy_tokens and not has_split_api_tokens)
+        legacy_unknown_cost_usd = float(d.get("legacy_unknown_cost_usd", total_cost_usd if cost_is_legacy_unknown and not has_cost_split else 0.0))
+        codex_cost_usd = float(d.get("codex_cost_usd", 0.0 if legacy_unknown_cost_usd and not has_cost_split else min(total_cost_usd, DEFAULT_MODEL_COSTS.get("codex-cli", {}).get("flat", 0.05) * codex_calls)))
+        api_key_cost_usd = float(d.get("api_key_cost_usd", 0.0 if legacy_unknown_cost_usd and not has_cost_split else max(0.0, total_cost_usd - codex_cost_usd - legacy_unknown_cost_usd)))
         api_key_tokens_input = int(d.get("api_key_tokens_input", tokens_input if aggregate_tokens_are_api_key else 0))
         api_key_tokens_output = int(d.get("api_key_tokens_output", tokens_output if aggregate_tokens_are_api_key else 0))
         legacy_tokens_input = int(d.get("legacy_tokens_input", tokens_input if aggregate_tokens_are_legacy_unknown else 0))
@@ -144,6 +144,7 @@ class QuotaRecord:
             legacy_usage_incomplete=bool(
                 d.get("legacy_usage_incomplete", False) or aggregate_tokens_are_legacy_unknown
             ),
+            legacy_unknown_cost_usd=legacy_unknown_cost_usd,
             codex_calls=codex_calls,
             total_cost_usd=total_cost_usd,
             api_key_cost_usd=api_key_cost_usd,
@@ -284,6 +285,7 @@ class QuotaManager:
             record.legacy_tokens_input = 0
             record.legacy_tokens_output = 0
             record.legacy_usage_incomplete = False
+            record.legacy_unknown_cost_usd = 0.0
             record.total_cost_usd = 0.0
             record.api_calls = 0
             record.api_calls_incomplete = False
@@ -468,9 +470,10 @@ class QuotaManager:
     ) -> dict[str, Any]:
         api_key_cost = sum(float(item.get("api_key_cost_usd", 0.0)) for item in statuses.values())
         codex_cost = sum(float(item.get("codex_cost_usd", 0.0)) for item in statuses.values())
+        legacy_unknown_cost = sum(float(item.get("legacy_unknown_cost_usd", 0.0)) for item in statuses.values())
         legacy_tokens_input = sum(int(item.get("legacy_tokens_input", 0)) for item in statuses.values())
         legacy_tokens_output = sum(int(item.get("legacy_tokens_output", 0)) for item in statuses.values())
-        total_cost = api_key_cost + codex_cost
+        total_cost = api_key_cost + codex_cost + legacy_unknown_cost
         summary = {
             "quota_source": "internal_estimate",
             "combined": {
@@ -496,6 +499,7 @@ class QuotaManager:
                 "label": "历史未拆分",
                 "tokens_input": legacy_tokens_input,
                 "tokens_output": legacy_tokens_output,
+                "total_cost_usd": round(legacy_unknown_cost, 4),
                 "calls_incomplete": any(bool(item.get("legacy_usage_incomplete", False)) for item in statuses.values()),
             }
         if codex_account:

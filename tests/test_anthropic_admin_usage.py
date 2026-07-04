@@ -44,27 +44,13 @@ class TestAnthropicAdminUsage(unittest.TestCase):
         def fake_urlopen(request, timeout: float):  # type: ignore[no-untyped-def]
             requests.append((request, timeout))
             self.assertEqual(request.get_header("X-api-key"), "admin-key")
-            self.assertEqual(request.get_header("Anthropic-version"), "2023-06-01")
+            query = parse_qs(urlparse(request.full_url).query)
             if "/organizations/usage_report/messages" in request.full_url:
-                return _FakeResponse({
-                    "data": [{
-                        "results": [{
-                            "uncached_input_tokens": 100,
-                            "cache_creation_input_tokens": 20,
-                            "cache_read_input_tokens": 30,
-                            "output_tokens": 25,
-                            "num_model_requests": 3,
-                        }],
-                    }],
-                })
+                value = 50 if query.get("page") == ["u2"] else 100
+                return _FakeResponse({"has_more": "page" not in query, "next_page": "u2", "data": [{"results": [{"uncached_input_tokens": value, "cache_creation_input_tokens": 20, "cache_read_input_tokens": 30, "output_tokens": 25, "num_model_requests": 3}]}]})
             if "/organizations/cost_report" in request.full_url:
-                return _FakeResponse({
-                    "data": [{
-                        "results": [{
-                            "amount": "123.45",
-                        }],
-                    }],
-                })
+                value = "100.00" if query.get("page") == ["c2"] else "123.45"
+                return _FakeResponse({"has_more": "page" not in query, "next_page": "c2", "data": [{"results": [{"amount": value}]}]})
             raise AssertionError(request.full_url)
 
         env = {
@@ -80,13 +66,13 @@ class TestAnthropicAdminUsage(unittest.TestCase):
         self.assertEqual(snapshot["source"], "anthropic_admin_api")
         self.assertEqual(snapshot["status"], "available")
         self.assertEqual(snapshot["window_days"], 7)
-        self.assertEqual(snapshot["messages"]["input_tokens"], 150)
-        self.assertEqual(snapshot["messages"]["output_tokens"], 25)
-        self.assertEqual(snapshot["messages"]["total_tokens"], 175)
-        self.assertEqual(snapshot["messages"]["num_model_requests"], 3)
-        self.assertEqual(snapshot["costs"]["total_cost"], 1.2345)
+        self.assertEqual(snapshot["messages"]["input_tokens"], 250)
+        self.assertEqual(snapshot["messages"]["output_tokens"], 50)
+        self.assertEqual(snapshot["messages"]["total_tokens"], 300)
+        self.assertEqual(snapshot["messages"]["num_model_requests"], 6)
+        self.assertEqual(snapshot["costs"]["total_cost"], 223.45)
         self.assertEqual(snapshot["costs"]["currency"], "usd")
-        self.assertEqual(len(requests), 2)
+        self.assertEqual(len(requests), 4)
         self.assertNotIn("admin-key", json.dumps(snapshot))
 
     def test_api_key_filter_applies_to_usage_and_skips_unfiltered_costs(self) -> None:

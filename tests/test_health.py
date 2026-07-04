@@ -141,12 +141,13 @@ class TestHealthMonitor(unittest.TestCase):
         self.assertEqual(snap["status"], "degraded")
         self.assertEqual(snap["degradation_reasons"][0]["reason"], "p95_latency_ms")
 
-    def test_background_job_duration_does_not_degrade_service_health(self) -> None:
+    def test_background_job_duration_uses_separate_health_thresholds(self) -> None:
         self.monitor.record("/v1/ai/execute/jobs/run", latency=300.0, success=True)
+        self.assertEqual(self.monitor.snapshot()["status"], "healthy")
+        self.monitor.record("/v1/ai/execute/jobs/run", latency=900.0, success=True)
         snap = self.monitor.snapshot()
-        self.assertEqual(snap["status"], "healthy")
-        self.assertEqual(snap["degradation_reasons"], [])
-        self.assertFalse(snap["endpoints"][0]["latency_affects_status"])
+        self.assertEqual(snap["status"], "degraded")
+        self.assertEqual(snap["endpoints"][0]["latency_profile"], "background_job")
 
     def test_degradation_reasons_prioritize_unhealthy(self) -> None:
         self.monitor.record("/v1/ai/degraded", latency=31.0, success=True)

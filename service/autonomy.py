@@ -21,10 +21,10 @@ Decision matrix::
     Confidence →
 Risk ↓   <0.60       0.60-0.79    0.80-0.94    ≥0.95
 ───────  ─────────── ──────────── ──────────── ───────────
-low      auto_pr     auto_merge   auto_merge   auto_merge
-medium   escalate    auto_pr      auto_merge   auto_merge
-high     escalate    escalate     auto_pr      auto_merge
-critical escalate    escalate     escalate     escalate
+    low      auto_pr     auto_merge   auto_merge   auto_merge
+    medium   escalate    auto_pr      auto_pr      auto_pr
+    high     escalate    escalate     auto_pr      auto_pr
+    critical escalate    escalate     escalate     escalate
 """
 
 from __future__ import annotations
@@ -57,15 +57,13 @@ RISK_LOW = "low"
 # (risk, min_confidence) → action
 DEFAULT_DECISION_MATRIX: list[tuple[str, float, str]] = [
     # risk       min_confidence  action
-    (RISK_LOW,     0.60, ACTION_AUTO_MERGE),
-    (RISK_LOW,     0.00, ACTION_AUTO_PR),
-    (RISK_MEDIUM,  0.85, ACTION_AUTO_MERGE),
-    (RISK_MEDIUM,  0.70, ACTION_AUTO_PR),
-    (RISK_MEDIUM,  0.00, ACTION_ESCALATE),
-    (RISK_HIGH,    0.95, ACTION_AUTO_MERGE),
-    (RISK_HIGH,    0.85, ACTION_AUTO_PR),
-    (RISK_HIGH,    0.00, ACTION_ESCALATE),
-    (RISK_CRITICAL, 1.0, ACTION_ESCALATE),  # never auto
+    (RISK_LOW,      0.60, ACTION_AUTO_MERGE),
+    (RISK_LOW,      0.00, ACTION_AUTO_PR),
+    (RISK_MEDIUM,   0.70, ACTION_AUTO_PR),
+    (RISK_MEDIUM,   0.00, ACTION_ESCALATE),
+    (RISK_HIGH,     0.85, ACTION_AUTO_PR),
+    (RISK_HIGH,     0.00, ACTION_ESCALATE),
+    (RISK_CRITICAL, 0.00, ACTION_ESCALATE),  # never auto
 ]
 
 # ── file risk classification (from codex_auto_merge_policy.json) ────────
@@ -271,15 +269,13 @@ def recommended_action(
     action = decide_action(confidence, risk, config=config, repo=repo)
 
     reasons = {
-        (ACTION_ESCALATE, RISK_CRITICAL): "Critical files changed — always requires human review",
-        (ACTION_ESCALATE, RISK_HIGH): f"High-risk files with confidence {confidence:.0%} < threshold — human review required",
-        (ACTION_ESCALATE, RISK_MEDIUM): f"Medium-risk files with confidence {confidence:.0%} < threshold — human review required",
-        (ACTION_AUTO_PR, RISK_LOW): f"Low-risk files with moderate confidence {confidence:.0%} — auto PR for human approval",
-        (ACTION_AUTO_PR, RISK_MEDIUM): f"Medium-risk files with confidence {confidence:.0%} — auto PR for human approval",
-        (ACTION_AUTO_PR, RISK_HIGH): f"High-risk files with high confidence {confidence:.0%} — auto PR for human approval",
+        (ACTION_ESCALATE, RISK_CRITICAL): "Critical files changed — always escalates to human review",
+        (ACTION_ESCALATE, RISK_HIGH): f"High-risk files with confidence {confidence:.0%} below auto-pr threshold — escalate",
+        (ACTION_ESCALATE, RISK_MEDIUM): f"Medium-risk files with confidence {confidence:.0%} below auto-pr threshold — escalate",
+        (ACTION_AUTO_PR, RISK_LOW): f"Low-risk files with moderate confidence {confidence:.0%} — create PR for human approval",
+        (ACTION_AUTO_PR, RISK_MEDIUM): f"Medium-risk files with confidence {confidence:.0%} — create PR, do not auto-merge",
+        (ACTION_AUTO_PR, RISK_HIGH): f"High-risk files with confidence {confidence:.0%} — create PR, never auto-merge by default",
         (ACTION_AUTO_MERGE, RISK_LOW): f"Low-risk files with high confidence {confidence:.0%} — safe to auto-merge",
-        (ACTION_AUTO_MERGE, RISK_MEDIUM): f"Medium-risk files with high confidence {confidence:.0%} — auto-merge",
-        (ACTION_AUTO_MERGE, RISK_HIGH): f"High-risk files with very high confidence {confidence:.0%} — auto-merge",
         (ACTION_AUTO_NOTIFY, RISK_LOW): f"Low-risk files, confidence {confidence:.0%} — applied with notification",
     }
 

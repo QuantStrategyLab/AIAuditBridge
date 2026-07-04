@@ -37,6 +37,7 @@ Shadow audit loop::
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import secrets
@@ -107,6 +108,8 @@ class ChangeRecord:
     after_metrics: dict[str, float] | None = None
     effect: str = EFFECT_PENDING
     effect_detail: str = ""
+    rollback_issue_required: bool = False
+    rollback_intent: str = ""
     rollback_issue_url: str = ""
     external_url: str = ""
     issue_number: int | None = None
@@ -128,6 +131,8 @@ class ChangeRecord:
             "after_metrics": self.after_metrics,
             "effect": self.effect,
             "effect_detail": self.effect_detail,
+            "rollback_issue_required": self.rollback_issue_required,
+            "rollback_intent": self.rollback_intent,
             "rollback_issue_url": self.rollback_issue_url,
             "external_url": self.external_url,
             "issue_number": self.issue_number,
@@ -151,6 +156,8 @@ class ChangeRecord:
             after_metrics={k: float(v) for k, v in d.get("after_metrics", {}).items()} if d.get("after_metrics") else None,
             effect=str(d.get("effect", EFFECT_PENDING)),
             effect_detail=str(d.get("effect_detail", "")),
+            rollback_issue_required=bool(d.get("rollback_issue_required", False)),
+            rollback_intent=str(d.get("rollback_intent", "")),
             rollback_issue_url=str(d.get("rollback_issue_url", "")),
             external_url=str(d.get("external_url", "")),
             issue_number=int(d["issue_number"]) if d.get("issue_number") is not None else None,
@@ -265,6 +272,12 @@ def evaluate_change(change_id: str, after_metrics: dict[str, float]) -> ChangeRe
     effect, detail = compute_effect(record.before_metrics, after_metrics)
     record.effect = effect
     record.effect_detail = detail
+    if effect == EFFECT_DEGRADED:
+        record.rollback_issue_required = True
+        record.rollback_intent = detail or "rollback review required"
+    else:
+        record.rollback_issue_required = False
+        record.rollback_intent = ""
     record.evaluated_at = _now()
     write_change(record)
     return record
@@ -294,9 +307,52 @@ class ShadowDisagreement:
         }
 
 
-_SHADOW_STORE: dict[str, ShadowDisagreement] = {}
-_SHADOW_LOCK = threading.Lock()
+_SHADOW_LOCK = threading.RLock()
 SHADOW_ESCALATE_THRESHOLD = 5  # consecutive disagreements before auto-issue
+
+
+def _shadow_dir() -> Path:
+    return _registry_dir() / "shadow"
+
+
+def _shadow_key(repo: str, plugin: str) -> str:
+    return hashlib.sha256(f"{repo}:{plugin}".encode("utf-8")).hexdigest()
+
+
+def _shadow_path(repo: str, plugin: str) -> Path:
+    return _shadow_dir() / f"{_shadow_key(repo, plugin)}.json"
+
+
+def _load_shadow_disagreement(repo: str, plugin: str) -> ShadowDisagreement | None:
+    path = _shadow_path(repo, plugin)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return ShadowDisagreement(
+        repo=str(data.get("repo", repo)),
+        plugin=str(data.get("plugin", plugin)),
+        ai_verdict=str(data.get("ai_verdict", "")),
+        ai_confidence=float(data.get("ai_confidence", 0.0)),
+        deterministic_route=str(data.get("deterministic_route", "")),
+        disagreement_count=int(data.get("disagreement_count", 0)),
+        recorded_at=float(data.get("recorded_at", _now())),
+    )
+
+
+def _write_shadow_disagreement(entry: ShadowDisagreement) -> None:
+    _ensure_dir()
+    path = _shadow_path(entry.repo, entry.plugin)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    payload = json.dumps(entry.to_dict(), ensure_ascii=False, sort_keys=True).encode("utf-8")
+    tmp = path.with_suffix(".json.tmp")
+    with _SHADOW_LOCK:
+        with open(tmp, "wb") as h:
+            h.write(payload)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
 
 
 def record_shadow_disagreement(
@@ -308,21 +364,24 @@ def record_shadow_disagreement(
     Returns a dict with ``should_escalate`` flag when consecutive disagreements
     exceed the threshold.
     """
-    key = f"{repo}:{plugin}"
     with _SHADOW_LOCK:
-        prev = _SHADOW_STORE.get(key)
         if ai_verdict in {"agree"}:
             # Reset — AI agrees with deterministic
-            _SHADOW_STORE.pop(key, None)
+            path = _shadow_path(repo, plugin)
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
             return {"should_escalate": False, "disagreement_count": 0}
 
+        prev = _load_shadow_disagreement(repo, plugin)
         count = (prev.disagreement_count + 1) if prev else 1
         entry = ShadowDisagreement(
             repo=repo, plugin=plugin,
             ai_verdict=ai_verdict, ai_confidence=ai_confidence,
             deterministic_route=deterministic_route, disagreement_count=count,
         )
-        _SHADOW_STORE[key] = entry
+        _write_shadow_disagreement(entry)
 
         return {
             "should_escalate": count >= SHADOW_ESCALATE_THRESHOLD,
@@ -334,8 +393,27 @@ def record_shadow_disagreement(
 
 
 def get_shadow_disagreements() -> list[dict[str, Any]]:
+    shadow_dir = _shadow_dir()
+    if not shadow_dir.exists():
+        return []
+    records: list[dict[str, Any]] = []
     with _SHADOW_LOCK:
-        return [e.to_dict() for e in _SHADOW_STORE.values()]
+        for path in sorted(shadow_dir.glob("*.json"), reverse=True):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                records.append(ShadowDisagreement(
+                    repo=str(data.get("repo", "")),
+                    plugin=str(data.get("plugin", "")),
+                    ai_verdict=str(data.get("ai_verdict", "")),
+                    ai_confidence=float(data.get("ai_confidence", 0.0)),
+                    deterministic_route=str(data.get("deterministic_route", "")),
+                    disagreement_count=int(data.get("disagreement_count", 0)),
+                    recorded_at=float(data.get("recorded_at", _now())),
+                ).to_dict())
+            except Exception:
+                continue
+    records.sort(key=lambda item: float(item.get("recorded_at", 0.0)), reverse=True)
+    return records
 
 
 # ── effectiveness stats ─────────────────────────────────────────────────

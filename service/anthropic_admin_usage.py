@@ -43,9 +43,8 @@ def _request_json(path: str, params: dict[str, Any], admin_key: str, timeout_sec
     base_url = os.environ.get("CODEX_AUDIT_SERVICE_ANTHROPIC_ADMIN_BASE_URL", DEFAULT_ANTHROPIC_ADMIN_BASE_URL).rstrip("/")
     if urlparse(base_url).scheme != "https":
         raise ValueError("Anthropic Admin API base URL must use HTTPS")
-    query = urlencode(params, doseq=True)
     request = Request(
-        f"{base_url}{path}?{query}",
+        f"{base_url}{path}?{urlencode(params, doseq=True)}",
         headers={
             "anthropic-version": os.environ.get("ANTHROPIC_VERSION", DEFAULT_ANTHROPIC_VERSION),
             "x-api-key": admin_key,
@@ -53,11 +52,27 @@ def _request_json(path: str, params: dict[str, Any], admin_key: str, timeout_sec
         },
     )
     with urlopen(request, timeout=timeout_seconds) as response:
-        raw = response.read().decode("utf-8")
-    data = json.loads(raw)
+        data = json.loads(response.read().decode("utf-8"))
     if not isinstance(data, dict):
         raise ValueError("Anthropic Admin API response was not an object")
     return data
+
+
+def _request_pages(path: str, params: dict[str, Any], admin_key: str, timeout_seconds: float) -> list[dict[str, Any]]:
+    pages: list[dict[str, Any]] = []
+    page_token = ""
+    seen: set[str] = set()
+    while True:
+        request_params = dict(params)
+        if page_token:
+            request_params["page"] = page_token
+        page = _request_json(path, request_params, admin_key, timeout_seconds)
+        pages.append(page)
+        next_page = str(page.get("next_page") or "")
+        if not page.get("has_more") or not next_page or next_page in seen:
+            return pages
+        seen.add(next_page)
+        page_token = next_page
 
 
 def _num(value: Any) -> float:
@@ -80,7 +95,7 @@ def _result_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return items
 
 
-def _sum_usage(payload: dict[str, Any]) -> dict[str, int]:
+def _sum_usage(payloads: list[dict[str, Any]]) -> dict[str, int]:
     totals = {
         "uncached_input_tokens": 0,
         "cache_creation_input_tokens": 0,
@@ -88,12 +103,13 @@ def _sum_usage(payload: dict[str, Any]) -> dict[str, int]:
         "output_tokens": 0,
         "num_model_requests": 0,
     }
-    for result in _result_items(payload):
-        totals["uncached_input_tokens"] += int(_num(result.get("uncached_input_tokens", result.get("input_tokens"))))
-        totals["cache_creation_input_tokens"] += int(_num(result.get("cache_creation_input_tokens")))
-        totals["cache_read_input_tokens"] += int(_num(result.get("cache_read_input_tokens", result.get("cached_input_tokens"))))
-        totals["output_tokens"] += int(_num(result.get("output_tokens")))
-        totals["num_model_requests"] += int(_num(result.get("num_model_requests", result.get("request_count"))))
+    for payload in payloads:
+        for result in _result_items(payload):
+            totals["uncached_input_tokens"] += int(_num(result.get("uncached_input_tokens", result.get("input_tokens"))))
+            totals["cache_creation_input_tokens"] += int(_num(result.get("cache_creation_input_tokens")))
+            totals["cache_read_input_tokens"] += int(_num(result.get("cache_read_input_tokens", result.get("cached_input_tokens"))))
+            totals["output_tokens"] += int(_num(result.get("output_tokens")))
+            totals["num_model_requests"] += int(_num(result.get("num_model_requests", result.get("request_count"))))
     totals["input_tokens"] = (
         totals["uncached_input_tokens"] + totals["cache_creation_input_tokens"] + totals["cache_read_input_tokens"]
     )
@@ -101,21 +117,18 @@ def _sum_usage(payload: dict[str, Any]) -> dict[str, int]:
     return totals
 
 
-def _sum_costs(payload: dict[str, Any]) -> dict[str, Any]:
-    total_cents = 0.0
+def _sum_costs(payloads: list[dict[str, Any]]) -> dict[str, Any]:
+    by_currency: dict[str, float] = {}
     result_count = 0
-    for result in _result_items(payload):
-        amount = result.get("amount", result.get("cost"))
-        if isinstance(amount, dict):
-            total_cents += _num(amount.get("value"))
-        else:
-            total_cents += _num(amount)
-        result_count += 1
-    return {
-        "total_cost": round(total_cents / 100, 4),
-        "currency": "usd",
-        "result_count": result_count,
-    }
+    for payload in payloads:
+        for result in _result_items(payload):
+            amount = result.get("amount", result.get("cost"))
+            currency = str(amount.get("currency") or "usd").lower() if isinstance(amount, dict) else "usd"
+            value = amount.get("value") if isinstance(amount, dict) else amount
+            by_currency[currency] = by_currency.get(currency, 0.0) + _num(value)
+            result_count += 1
+    currency = "usd" if "usd" in by_currency else next(iter(by_currency), "usd")
+    return {"total_cost": round(by_currency.get(currency, 0.0), 4), "currency": currency, "result_count": result_count}
 
 
 def read_anthropic_admin_usage(now: int | None = None, timeout_seconds: float | None = None) -> dict[str, Any] | None:
@@ -145,12 +158,12 @@ def read_anthropic_admin_usage(now: int | None = None, timeout_seconds: float | 
     usage = None
     costs = None
     try:
-        usage = _sum_usage(_request_json("/organizations/usage_report/messages", usage_params, admin_key, timeout))
+        usage = _sum_usage(_request_pages("/organizations/usage_report/messages", usage_params, admin_key, timeout))
     except (HTTPError, OSError, TimeoutError, URLError, ValueError, json.JSONDecodeError):
         usage = None
     if not api_key_ids and not workspace_ids:
         try:
-            costs = _sum_costs(_request_json("/organizations/cost_report", params, admin_key, timeout))
+            costs = _sum_costs(_request_pages("/organizations/cost_report", params, admin_key, timeout))
         except (HTTPError, OSError, TimeoutError, URLError, ValueError, json.JSONDecodeError):
             costs = None
     if usage is None and costs is None:

@@ -87,6 +87,7 @@ class TestQuotaRecord(unittest.TestCase):
             legacy_tokens_input=25,
             legacy_tokens_output=10,
             legacy_usage_incomplete=True,
+            legacy_unknown_cost_usd=0.2,
         )
         d = record.to_dict()
         self.assertEqual(d["repo"], "owner/repo")
@@ -99,6 +100,7 @@ class TestQuotaRecord(unittest.TestCase):
         self.assertEqual(d["legacy_tokens_input"], 25)
         self.assertEqual(d["legacy_tokens_output"], 10)
         self.assertTrue(d["legacy_usage_incomplete"])
+        self.assertEqual(d["legacy_unknown_cost_usd"], 0.2)
         self.assertEqual(d["codex_calls"], 2)
         self.assertEqual(d["api_key_cost_usd"], 0.4)
         self.assertEqual(d["codex_cost_usd"], 0.1)
@@ -302,13 +304,14 @@ class TestQuotaManager(unittest.TestCase):
         })
         self.assertEqual(record.api_key_tokens_input, 0)
         self.assertEqual(record.api_key_tokens_output, 0)
-        self.assertTrue(record.api_calls_incomplete)
+        self.assertFalse(record.api_calls_incomplete)
         self.assertEqual(record.legacy_tokens_input, 1000)
         self.assertEqual(record.legacy_tokens_output, 500)
         self.assertTrue(record.legacy_usage_incomplete)
         self.assertEqual(record.codex_calls, 2)
-        self.assertAlmostEqual(record.api_key_cost_usd, 0.1)
-        self.assertAlmostEqual(record.codex_cost_usd, 0.1)
+        self.assertAlmostEqual(record.api_key_cost_usd, 0.0)
+        self.assertAlmostEqual(record.codex_cost_usd, 0.0)
+        self.assertAlmostEqual(record.legacy_unknown_cost_usd, 0.2)
 
     def test_explicit_legacy_tokens_are_preserved_as_legacy_unknown(self) -> None:
         record = QuotaRecord.from_dict({
@@ -326,8 +329,10 @@ class TestQuotaManager(unittest.TestCase):
         self.assertEqual(record.legacy_tokens_input, 1000)
         self.assertEqual(record.legacy_tokens_output, 500)
         self.assertTrue(record.legacy_usage_incomplete)
-        self.assertTrue(record.api_calls_incomplete)
-        self.assertAlmostEqual(record.api_key_cost_usd, 0.1)
+        self.assertFalse(record.api_calls_incomplete)
+        self.assertAlmostEqual(record.api_key_cost_usd, 0.0)
+        self.assertAlmostEqual(record.codex_cost_usd, 0.0)
+        self.assertAlmostEqual(record.legacy_unknown_cost_usd, 0.2)
 
     def test_zero_cost_historical_api_tokens_migrate_to_api_key_tokens(self) -> None:
         record = QuotaRecord.from_dict({
@@ -348,13 +353,19 @@ class TestQuotaManager(unittest.TestCase):
         # Create record with old timestamp (force reset)
         record = QuotaRecord(
             repo="test/repo",
-            tokens_input=5000,
-            total_cost_usd=3.0,
+            tokens_input=5000, api_key_tokens_input=100, legacy_tokens_input=50,
+            api_calls=2, api_calls_incomplete=True, legacy_usage_incomplete=True,
+            codex_calls=1, total_cost_usd=3.0, api_key_cost_usd=1.0,
+            codex_cost_usd=0.1, legacy_unknown_cost_usd=1.9,
             last_reset_daily=0,  # long ago
         )
         self.manager._records["test/repo"] = record
         remaining = self.manager.remaining_daily("test/repo")
         self.assertEqual(remaining, DEFAULT_DAILY_BUDGET_USD)
+        reset = self.manager._records["test/repo"]
+        self.assertEqual(reset.api_key_tokens_input, 0)
+        self.assertEqual(reset.legacy_tokens_input, 0)
+        self.assertEqual(reset.legacy_unknown_cost_usd, 0.0)
 
     def test_get_daily_budget_respects_repo_overrides(self) -> None:
         self.manager._repo_budgets["premium/repo"] = {"daily": 50.0}
