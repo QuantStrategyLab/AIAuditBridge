@@ -8,6 +8,21 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
   workflow_call:
+    inputs:
+      caller_concurrency_key:
+        description: "Stable caller-side key used to cancel stale review jobs for the same PR."
+        required: false
+        type: string
+    secrets:
+      CODEX_AUDIT_REUSABLE_WORKFLOW_TOKEN:
+        description: "Token that can read QuantStrategyLab/AIAuditBridge when this workflow is called from another private repo."
+        required: false
+      ANTHROPIC_API_KEY:
+        required: false
+      OPENAI_API_KEY:
+        required: false
+      CODEX_AUDIT_SERVICE_URL:
+        required: false
 
 permissions:
   contents: read
@@ -16,7 +31,7 @@ permissions:
   pull-requests: write
 
 concurrency:
-  group: codex-pr-review-${{ github.event.pull_request.number }}
+  group: codex-pr-review-${{ github.repository }}-${{ inputs.caller_concurrency_key || github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
 
 jobs:
@@ -27,8 +42,19 @@ jobs:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
     steps:
-      - name: Checkout
+      - name: Checkout review target
         uses: actions/checkout@v6
+        with:
+          path: source
+
+      - name: Checkout bridge review scripts
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ github.repository == 'QuantStrategyLab/AIAuditBridge' && 'QuantStrategyLab/AIAuditBridge' || job.workflow_repository }}
+          ref: ${{ github.repository == 'QuantStrategyLab/AIAuditBridge' && github.event.pull_request.base.sha || job.workflow_sha }}
+          path: bridge
+          token: ${{ secrets.CODEX_AUDIT_REUSABLE_WORKFLOW_TOKEN || github.token }}
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -45,12 +71,23 @@ jobs:
           OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-5.4-mini' }}
           CODEX_AUDIT_SERVICE_URL: ${{ secrets.CODEX_AUDIT_SERVICE_URL }}
           CODEX_AUDIT_SERVICE_AUDIENCE: ${{ vars.CODEX_AUDIT_SERVICE_AUDIENCE || 'quant-codex-audit' }}
-        run: python scripts/run_codex_pr_review.py
+          CODEX_PR_REVIEW_REPO_ROOT: ${{ github.workspace }}/source
+        working-directory: source
+        run: |
+          set -euo pipefail
+          bridge_script="${GITHUB_WORKSPACE}/bridge/scripts/run_codex_pr_review.py"
+          if [ -f "${bridge_script}" ]; then
+            script_path="${bridge_script}"
+          else
+            echo "::error::Trusted Codex review script not found. Ensure the bridge checkout can read QuantStrategyLab/AIAuditBridge." >&2
+            exit 1
+          fi
+          python "${script_path}"
 
       - name: Upload review diagnostics
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: codex-pr-review-${{ github.event.pull_request.number }}-${{ github.run_id }}
-          path: data/output/codex_pr_review/
+          path: source/data/output/codex_pr_review/
           if-no-files-found: warn

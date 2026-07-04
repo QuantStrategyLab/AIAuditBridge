@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import json
 import os
 import tempfile
 import unittest
@@ -17,7 +19,7 @@ class RunCodexPrReviewTests(unittest.TestCase):
         }
         path = Path(tmpdir) / "event.json"
         path.write_text(
-            __import__("json").dumps(event),
+            json.dumps(event),
             encoding="utf-8",
         )
         return str(path)
@@ -26,6 +28,22 @@ class RunCodexPrReviewTests(unittest.TestCase):
         policy = run_codex_pr_review.load_policy()
         self.assertTrue(run_codex_pr_review.changed_files_are_low_risk(["docs/guide.md", "tests/test_x.py"], policy))
         self.assertFalse(run_codex_pr_review.changed_files_are_low_risk(["src/app.py"], policy))
+
+    def test_load_policy_uses_trusted_base_ref(self) -> None:
+        trusted_policy = {
+            "version": 1,
+            "blocked_path_patterns": [],
+            "risk_policy": {
+                "low": {"prefixes": ["trusted/"], "exact": ["SAFE.md"], "reason": "trusted"},
+                "high": {"reason": "trusted high"},
+            },
+        }
+        encoded = base64.b64encode(json.dumps(trusted_policy).encode("utf-8")).decode("ascii")
+        with patch("scripts.run_codex_pr_review.github_request", return_value={"content": encoded}) as request:
+            policy = run_codex_pr_review.load_policy("token", "org/repo", "base-sha")
+
+        self.assertEqual(policy["risk_policy"]["low"]["exact"], ["SAFE.md"])
+        request.assert_called_once()
 
     def test_service_failure_falls_back_to_direct_api(self) -> None:
         with (
@@ -125,3 +143,51 @@ class RunCodexPrReviewTests(unittest.TestCase):
                 )
 
         direct_api.assert_not_called()
+
+    def test_service_review_refreshes_oidc_token_while_polling(self) -> None:
+        responses = [
+            {"job_id": "job-1"},
+            {"status": "succeeded", "output": "{}"},
+        ]
+        with (
+            patch.dict(os.environ, {"CODEX_AUDIT_SERVICE_URL": "https://service.example", "GITHUB_REPOSITORY": "org/repo"}, clear=True),
+            patch("scripts.run_codex_pr_review.request_github_oidc_token", side_effect=["submit-token", "poll-token"]) as oidc,
+            patch("scripts.run_codex_pr_review._service_request", side_effect=responses) as request,
+            patch("scripts.run_codex_pr_review.time.sleep"),
+        ):
+            output = run_codex_pr_review.run_codex_service_review("prompt", timeout_minutes=1)
+
+        self.assertEqual(output, "{}")
+        self.assertEqual(oidc.call_count, 2)
+        self.assertEqual(request.call_args_list[0].args[2], "submit-token")
+        self.assertEqual(request.call_args_list[1].args[2], "poll-token")
+
+
+class CodexPrReviewWorkflowTest(unittest.TestCase):
+    def test_reusable_workflow_runs_bridge_script_against_source_checkout(self) -> None:
+        workflow = Path(".github/workflows/codex_pr_review.yml").read_text(encoding="utf-8")
+        self.assertIn("path: source", workflow)
+        self.assertIn("path: bridge", workflow)
+        self.assertIn("CODEX_AUDIT_REUSABLE_WORKFLOW_TOKEN", workflow)
+        self.assertIn("caller_concurrency_key", workflow)
+        self.assertIn("inputs.caller_concurrency_key || github.event.pull_request.number || github.run_id", workflow)
+        self.assertNotIn("Validate bridge checkout token", workflow)
+        self.assertIn("required: false", workflow)
+        self.assertIn("job.workflow_repository", workflow)
+        self.assertIn("github.event.pull_request.base.sha", workflow)
+        self.assertIn("job.workflow_sha", workflow)
+        self.assertIn("token: ${{ secrets.CODEX_AUDIT_REUSABLE_WORKFLOW_TOKEN || github.token }}", workflow)
+        self.assertNotIn("CODEX_AUDIT_DISPATCH_TOKEN", workflow)
+        self.assertNotIn("bridge_ref", workflow)
+        self.assertIn("CODEX_PR_REVIEW_REPO_ROOT: ${{ github.workspace }}/source", workflow)
+        self.assertIn("working-directory: source", workflow)
+        self.assertIn("bridge/scripts/run_codex_pr_review.py", workflow)
+        self.assertIn("Trusted Codex review script not found", workflow)
+        self.assertNotIn("source/scripts/run_codex_pr_review.py", workflow)
+        self.assertIn("source/data/output/codex_pr_review/", workflow)
+
+    def test_repo_root_can_be_overridden_for_reusable_workflow(self) -> None:
+        source = Path("scripts/run_codex_pr_review.py").read_text(encoding="utf-8")
+        self.assertIn("CODEX_PR_REVIEW_REPO_ROOT", source)
+        self.assertIn("BRIDGE_ROOT = Path(__file__).resolve().parents[1]", source)
+        self.assertIn('PROMPT_TEMPLATE_PATH = BRIDGE_ROOT / "prompts" / "pr_review.md"', source)
