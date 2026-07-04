@@ -8,6 +8,7 @@ Exits non-zero when blocked, which fails the GitHub Actions check run.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -25,9 +26,10 @@ from typing import Any
 # ---------------------------------------------------------------------------
 
 API_BASE = "https://api.github.com"
-ROOT = Path(__file__).resolve().parents[1]
+BRIDGE_ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(os.environ.get("CODEX_PR_REVIEW_REPO_ROOT") or os.environ.get("GITHUB_WORKSPACE") or Path.cwd()).resolve()
 POLICY_PATH = ROOT / ".github" / "codex_auto_merge_policy.json"
-PROMPT_TEMPLATE_PATH = ROOT / "prompts" / "pr_review.md"
+PROMPT_TEMPLATE_PATH = BRIDGE_ROOT / "prompts" / "pr_review.md"
 DEFAULT_SERVICE_AUDIENCE = "quant-codex-audit"
 DEFAULT_TIMEOUT_MINUTES = 20
 DEFAULT_MAX_CONTEXT_LINES = 800
@@ -97,8 +99,11 @@ def parse_bool(value: str | bool | None) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def load_policy() -> dict[str, Any]:
+def load_policy(token: str = "", repo: str = "", base_ref: str = "") -> dict[str, Any]:
     """Load the risk policy, falling back to safe defaults."""
+    if token and repo and base_ref:
+        return _load_policy_from_trusted_ref(token, repo, base_ref)
+
     if not POLICY_PATH.exists():
         return _default_policy()
 
@@ -107,12 +112,34 @@ def load_policy() -> dict[str, Any]:
     except (OSError, json.JSONDecodeError):
         return _fail_closed("invalid auto-merge policy JSON")
 
+    return _validate_policy_payload(payload)
+
+
+def _load_policy_from_trusted_ref(token: str, repo: str, ref: str) -> dict[str, Any]:
+    path = urllib.parse.quote(".github/codex_auto_merge_policy.json", safe="")
+    ref_query = urllib.parse.quote(ref, safe="")
+    try:
+        payload = github_request(token, "GET", f"/repos/{repo}/contents/{path}?ref={ref_query}")
+    except ReviewError as exc:
+        if "failed: 404" in str(exc):
+            return _default_policy()
+        return _fail_closed("could not load trusted auto-merge policy")
+    if not isinstance(payload, dict):
+        return _fail_closed("invalid trusted auto-merge policy response")
+    try:
+        encoded = str(payload.get("content") or "")
+        raw = base64.b64decode(encoded).decode("utf-8")
+        policy = json.loads(raw)
+    except (ValueError, json.JSONDecodeError):
+        return _fail_closed("invalid trusted auto-merge policy JSON")
+    return _validate_policy_payload(policy)
+
+
+def _validate_policy_payload(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return _fail_closed("invalid auto-merge policy format")
-
     if payload.get("version") != 1:
         return _fail_closed("unsupported policy version")
-
     return payload
 
 
@@ -432,7 +459,7 @@ def run_codex_service_review(prompt: str, timeout_minutes: int, complexity: str 
     while time.time() < deadline:
         time.sleep(poll_interval)
         poll_interval = min(poll_interval * 2, 30)
-        job_payload = _service_request("GET", job_url, oidc_token, None)
+        job_payload = _service_request("GET", job_url, request_github_oidc_token(audience), None)
         status = job_payload.get("status")
         if status == "succeeded":
             output = job_payload.get("output")
@@ -900,8 +927,16 @@ def main() -> int:
     print(f"Changed files ({len(changed_paths)}): {', '.join(changed_paths[:10])}"
           + (f" and {len(changed_paths) - 10} more..." if len(changed_paths) > 10 else ""))
 
-    # Load policy
-    policy = load_policy()
+    # Load policy from the trusted base ref. The PR head checkout is untrusted
+    # and may include policy changes that should be reviewed as data, not used
+    # as live guardrail configuration for this same review.
+    base = pr.get("base") if isinstance(pr.get("base"), dict) else {}
+    base_repo = base.get("repo") if isinstance(base.get("repo"), dict) else {}
+    policy = load_policy(
+        token,
+        str(base_repo.get("full_name") or repo),
+        str(base.get("sha") or ""),
+    )
     if policy.get("policy_errors"):
         print(f"::warning::Policy errors: {policy['policy_errors']}")
 

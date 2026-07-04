@@ -1,3 +1,8 @@
 self-hosted-runner:
   labels:
     - codex-vps
+paths:
+  .github/workflows/codex_pr_review.yml:
+    ignore:
+      - 'workflow_repository'
+      - 'workflow_sha'

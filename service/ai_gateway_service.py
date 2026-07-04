@@ -59,6 +59,7 @@ from service.feedback import (
 )
 from service.quota import get_quota_manager
 from service.health import get_health_monitor
+from service.org_health import read_org_health
 
 # ── constants ───────────────────────────────────────────────────────────
 
@@ -609,6 +610,15 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 return
             health = get_health_monitor()
             _json_response(self, HTTPStatus.OK, {"status": "ok", **health.snapshot()})
+            return
+        if request_path == "/v1/ai/org-health":
+            try:
+                authenticate(self.headers, audience=DEFAULT_AUDIENCE)
+            except PermissionError as exc:
+                _json_response(self, HTTPStatus.UNAUTHORIZED, {"status": "error", "error": str(exc)})
+                return
+            org_health = read_org_health()
+            _json_response(self, HTTPStatus.OK, org_health)
             return
         if request_path == "/v1/ai/quota":
             self._handle_quota_status()

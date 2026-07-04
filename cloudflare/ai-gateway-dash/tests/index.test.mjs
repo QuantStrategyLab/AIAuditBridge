@@ -37,3 +37,10 @@ test("buildDashboardApiUrl rejects insecure origins", () => {
     /HTTPS/,
   );
 });
+
+test("buildDashboardApiUrl allows org health route", () => {
+  assert.equal(
+    buildDashboardApiUrl("https://origin.example", "/v1/ai/org-health", ""),
+    "https://origin.example/v1/ai/org-health",
+  );
+});
