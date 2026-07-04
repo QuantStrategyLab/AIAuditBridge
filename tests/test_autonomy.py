@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import tempfile
 import unittest
 
 from service.autonomy import (
@@ -14,6 +16,7 @@ from service.autonomy import (
     RISK_MEDIUM,
     RISK_CRITICAL,
     DEFAULT_DECISION_MATRIX,
+    load_autonomy_policy,
     recommended_action,
 )
 
@@ -55,6 +58,18 @@ class TestDefaultDecisionMatrix(unittest.TestCase):
         self.assertEqual(classify_file_risk("CHANGELOG.md", policy=policy), RISK_LOW)
         self.assertEqual(classify_file_risk("src/quant_alpha.py", policy=policy), RISK_HIGH)
         self.assertEqual(classify_file_risk("config/token.txt", policy=policy), RISK_CRITICAL)
+        self.assertEqual(classify_file_risk("config/secret.pem", policy=policy), RISK_CRITICAL)
+
+    def test_policy_load_does_not_depend_on_cwd(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            old_cwd = os.getcwd()
+            try:
+                os.chdir(tmp)
+                policy = load_autonomy_policy()
+            finally:
+                os.chdir(old_cwd)
+
+        self.assertEqual(policy.get("version"), 1)
 
     def test_degraded_health_caps_auto_merge_to_auto_pr(self) -> None:
         result = recommended_action([{"confidence": 0.99}], ["docs/runbook.md"], health_status="degraded")

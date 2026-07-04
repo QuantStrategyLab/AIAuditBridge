@@ -90,7 +90,8 @@ LOW_RISK_EXACT = frozenset({
     "LICENSE",
     ".gitignore",
 })
-DEFAULT_POLICY_PATH = Path(".github/codex_auto_merge_policy.json")
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_POLICY_PATH = REPO_ROOT / ".github" / "codex_auto_merge_policy.json"
 
 
 def load_autonomy_policy(path: Path = DEFAULT_POLICY_PATH) -> dict[str, Any]:
@@ -180,7 +181,9 @@ def _policy_matches(path: str, rule: dict[str, Any]) -> bool:
 
 def _blocked_by_policy(path: str, policy: dict[str, Any] | None) -> bool:
     patterns = (policy or {}).get("blocked_path_patterns") if isinstance(policy, dict) else None
-    raw_patterns = patterns if isinstance(patterns, list) and patterns else list(CRITICAL_PATTERNS)
+    raw_patterns = list(CRITICAL_PATTERNS)
+    if isinstance(patterns, list):
+        raw_patterns.extend(pattern for pattern in patterns if isinstance(pattern, str))
     for pattern in raw_patterns:
         if not isinstance(pattern, str) or not pattern.strip():
             continue
