@@ -75,6 +75,8 @@ class TestQuotaRecord(unittest.TestCase):
             repo="owner/repo",
             tokens_input=100,
             tokens_output=50,
+            api_key_tokens_input=100,
+            api_key_tokens_output=50,
             api_calls=1,
             codex_calls=2,
             total_cost_usd=0.5,
@@ -85,6 +87,8 @@ class TestQuotaRecord(unittest.TestCase):
         self.assertEqual(d["repo"], "owner/repo")
         self.assertEqual(d["tokens_input"], 100)
         self.assertEqual(d["tokens_output"], 50)
+        self.assertEqual(d["api_key_tokens_input"], 100)
+        self.assertEqual(d["api_key_tokens_output"], 50)
         self.assertEqual(d["api_calls"], 1)
         self.assertFalse(d["api_calls_incomplete"])
         self.assertEqual(d["codex_calls"], 2)
@@ -93,11 +97,18 @@ class TestQuotaRecord(unittest.TestCase):
         self.assertAlmostEqual(d["total_cost_usd"], 0.5)
 
     def test_from_dict_roundtrip(self) -> None:
-        original = QuotaRecord(repo="owner/repo", tokens_input=200, total_cost_usd=1.0)
+        original = QuotaRecord(
+            repo="owner/repo",
+            tokens_input=200,
+            api_key_tokens_input=200,
+            total_cost_usd=1.0,
+            api_key_cost_usd=1.0,
+        )
         d = original.to_dict()
         restored = QuotaRecord.from_dict(d)
         self.assertEqual(restored.repo, original.repo)
         self.assertEqual(restored.tokens_input, original.tokens_input)
+        self.assertEqual(restored.api_key_tokens_input, original.tokens_input)
         self.assertEqual(restored.total_cost_usd, original.total_cost_usd)
 
 
@@ -163,12 +174,19 @@ class TestQuotaManager(unittest.TestCase):
             summary["api_key"]["total_cost_usd"] + summary["codex"]["total_cost_usd"],
         )
 
-    def test_status_summary_respects_zero_budget(self) -> None:
+    def test_status_summary_does_not_invent_global_budget(self) -> None:
         self.manager._repo_budgets["blocked/repo"] = {"daily": 0.0}
         self.manager.record_execute("blocked/repo")
         status = self.manager.status()
-        self.assertEqual(status["summary"]["combined"]["daily_budget"], 0.0)
-        self.assertEqual(status["summary"]["combined"]["remaining_daily"], 0.0)
+        self.assertNotIn("daily_budget", status["summary"]["combined"])
+        self.assertNotIn("remaining_daily", status["summary"]["combined"])
+
+    def test_codex_record_does_not_count_as_api_key_tokens(self) -> None:
+        self.manager.record("test/repo", "codex-cli", "A" * 4000)
+        status = self.manager.status()
+        self.assertEqual(status["summary"]["api_key"]["calls"], 0)
+        self.assertEqual(status["summary"]["api_key"]["tokens_input"], 0)
+        self.assertEqual(status["summary"]["codex"]["calls"], 1)
 
     def test_missing_historical_api_call_count_is_marked_incomplete(self) -> None:
         record = QuotaRecord.from_dict({
@@ -182,6 +200,7 @@ class TestQuotaManager(unittest.TestCase):
         status = self.manager.status()
         self.assertTrue(status["repos"]["old/repo"]["api_calls_incomplete"])
         self.assertTrue(status["summary"]["api_key"]["calls_incomplete"])
+        self.assertEqual(status["summary"]["api_key"]["tokens_input"], 1000)
 
     def test_daily_budget_resets(self) -> None:
         """Quick test: budget resets when last_reset is old."""

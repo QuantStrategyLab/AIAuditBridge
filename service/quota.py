@@ -64,6 +64,8 @@ class QuotaRecord:
     repo: str
     tokens_input: int = 0
     tokens_output: int = 0
+    api_key_tokens_input: int = 0
+    api_key_tokens_output: int = 0
     api_calls: int = 0
     api_calls_incomplete: bool = False
     codex_calls: int = 0
@@ -78,6 +80,8 @@ class QuotaRecord:
             "repo": self.repo,
             "tokens_input": self.tokens_input,
             "tokens_output": self.tokens_output,
+            "api_key_tokens_input": self.api_key_tokens_input,
+            "api_key_tokens_output": self.api_key_tokens_output,
             "api_calls": self.api_calls,
             "api_calls_incomplete": self.api_calls_incomplete,
             "codex_calls": self.codex_calls,
@@ -101,10 +105,15 @@ class QuotaRecord:
         has_api_calls = "api_calls" in d
         api_calls = int(d.get("api_calls", 0))
         api_calls_incomplete = bool(d.get("api_calls_incomplete", False) or (not has_api_calls and api_key_cost_usd > 0))
+        tokens_input = int(d.get("tokens_input", 0))
+        tokens_output = int(d.get("tokens_output", 0))
+        legacy_api_tokens = api_key_cost_usd > 0
         return cls(
             repo=str(d.get("repo", "")),
-            tokens_input=int(d.get("tokens_input", 0)),
-            tokens_output=int(d.get("tokens_output", 0)),
+            tokens_input=tokens_input,
+            tokens_output=tokens_output,
+            api_key_tokens_input=int(d.get("api_key_tokens_input", tokens_input if legacy_api_tokens else 0)),
+            api_key_tokens_output=int(d.get("api_key_tokens_output", tokens_output if legacy_api_tokens else 0)),
             api_calls=api_calls,
             api_calls_incomplete=api_calls_incomplete,
             codex_calls=int(d.get("codex_calls", 0)),
@@ -229,6 +238,8 @@ class QuotaManager:
         if now - record.last_reset_daily > 86400:
             record.tokens_input = 0
             record.tokens_output = 0
+            record.api_key_tokens_input = 0
+            record.api_key_tokens_output = 0
             record.codex_calls = 0
             record.total_cost_usd = 0.0
             record.api_calls = 0
@@ -300,6 +311,8 @@ class QuotaManager:
                 record.codex_cost_usd += cost
             else:
                 record.api_calls += 1
+                record.api_key_tokens_input += tokens_input
+                record.api_key_tokens_output += tokens_output
                 record.api_key_cost_usd += cost
             record.total_cost_usd += cost
             self._records[repo] = record
@@ -320,7 +333,6 @@ class QuotaManager:
             self._save_records_locked()
 
     def _summary_from_statuses(self, statuses: dict[str, dict[str, Any]]) -> dict[str, Any]:
-        total_budget = sum(float(item.get("daily_budget", 0.0)) for item in statuses.values()) if statuses else self._daily_budget
         api_key_cost = sum(float(item.get("api_key_cost_usd", 0.0)) for item in statuses.values())
         codex_cost = sum(float(item.get("codex_cost_usd", 0.0)) for item in statuses.values())
         total_cost = api_key_cost + codex_cost
@@ -329,15 +341,13 @@ class QuotaManager:
             "combined": {
                 "label": "API key + Codex",
                 "total_cost_usd": round(total_cost, 4),
-                "daily_budget": round(total_budget, 4),
-                "remaining_daily": round(max(0.0, total_budget - total_cost), 4),
             },
             "api_key": {
                 "label": "API key",
                 "calls": sum(int(item.get("api_calls", 0)) for item in statuses.values()),
                 "calls_incomplete": any(bool(item.get("api_calls_incomplete", False)) for item in statuses.values()),
-                "tokens_input": sum(int(item.get("tokens_input", 0)) for item in statuses.values()),
-                "tokens_output": sum(int(item.get("tokens_output", 0)) for item in statuses.values()),
+                "tokens_input": sum(int(item.get("api_key_tokens_input", 0)) for item in statuses.values()),
+                "tokens_output": sum(int(item.get("api_key_tokens_output", 0)) for item in statuses.values()),
                 "total_cost_usd": round(api_key_cost, 4),
             },
             "codex": {
