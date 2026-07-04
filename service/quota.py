@@ -30,11 +30,14 @@ import json
 import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from service.anthropic_admin_usage import read_anthropic_admin_usage
 from service.codex_account import read_codex_rate_limits
+from service.openai_admin_usage import read_openai_admin_usage
 
 # ── constants ───────────────────────────────────────────────────────────
 
@@ -70,6 +73,9 @@ class QuotaRecord:
     api_key_tokens_output: int = 0
     api_calls: int = 0
     api_calls_incomplete: bool = False
+    legacy_tokens_input: int = 0
+    legacy_tokens_output: int = 0
+    legacy_usage_incomplete: bool = False
     codex_calls: int = 0
     total_cost_usd: float = 0.0
     api_key_cost_usd: float = 0.0
@@ -86,6 +92,9 @@ class QuotaRecord:
             "api_key_tokens_output": self.api_key_tokens_output,
             "api_calls": self.api_calls,
             "api_calls_incomplete": self.api_calls_incomplete,
+            "legacy_tokens_input": self.legacy_tokens_input,
+            "legacy_tokens_output": self.legacy_tokens_output,
+            "legacy_usage_incomplete": self.legacy_usage_incomplete,
             "codex_calls": self.codex_calls,
             "total_cost_usd": round(self.total_cost_usd, 4),
             "api_key_cost_usd": round(self.api_key_cost_usd, 4),
@@ -110,17 +119,31 @@ class QuotaRecord:
         tokens_input = int(d.get("tokens_input", 0))
         tokens_output = int(d.get("tokens_output", 0))
         has_split_api_tokens = "api_key_tokens_input" in d or "api_key_tokens_output" in d
-        aggregate_tokens_are_api = not has_split_api_tokens and codex_calls == 0 and (tokens_input > 0 or tokens_output > 0)
-        legacy_api_activity = api_key_cost_usd > 0 or aggregate_tokens_are_api
+        has_legacy_tokens = "legacy_tokens_input" in d or "legacy_tokens_output" in d
+        aggregate_tokens_present = not has_split_api_tokens and not has_legacy_tokens and (
+            tokens_input > 0 or tokens_output > 0
+        )
+        aggregate_tokens_are_api_key = aggregate_tokens_present and codex_calls == 0
+        aggregate_tokens_are_legacy_unknown = aggregate_tokens_present and not aggregate_tokens_are_api_key
+        api_key_tokens_input = int(d.get("api_key_tokens_input", tokens_input if aggregate_tokens_are_api_key else 0))
+        api_key_tokens_output = int(d.get("api_key_tokens_output", tokens_output if aggregate_tokens_are_api_key else 0))
+        legacy_tokens_input = int(d.get("legacy_tokens_input", tokens_input if aggregate_tokens_are_legacy_unknown else 0))
+        legacy_tokens_output = int(d.get("legacy_tokens_output", tokens_output if aggregate_tokens_are_legacy_unknown else 0))
+        legacy_api_activity = api_key_cost_usd > 0 or aggregate_tokens_are_api_key
         api_calls_incomplete = bool(d.get("api_calls_incomplete", False) or (not has_api_calls and legacy_api_activity))
         return cls(
             repo=str(d.get("repo", "")),
             tokens_input=tokens_input,
             tokens_output=tokens_output,
-            api_key_tokens_input=int(d.get("api_key_tokens_input", tokens_input if aggregate_tokens_are_api else 0)),
-            api_key_tokens_output=int(d.get("api_key_tokens_output", tokens_output if aggregate_tokens_are_api else 0)),
+            api_key_tokens_input=api_key_tokens_input,
+            api_key_tokens_output=api_key_tokens_output,
             api_calls=api_calls,
             api_calls_incomplete=api_calls_incomplete,
+            legacy_tokens_input=legacy_tokens_input,
+            legacy_tokens_output=legacy_tokens_output,
+            legacy_usage_incomplete=bool(
+                d.get("legacy_usage_incomplete", False) or aggregate_tokens_are_legacy_unknown
+            ),
             codex_calls=codex_calls,
             total_cost_usd=total_cost_usd,
             api_key_cost_usd=api_key_cost_usd,
@@ -180,6 +203,15 @@ class QuotaManager:
         self._codex_account_cache: dict[str, Any] | None = None
         self._codex_account_cache_ts = 0.0
         self._codex_account_attempt_ts = 0.0
+        self._codex_account_lock = threading.Lock()
+        self._openai_account_cache: dict[str, Any] | None = None
+        self._openai_account_cache_ts = 0.0
+        self._openai_account_attempt_ts = 0.0
+        self._openai_account_lock = threading.Lock()
+        self._anthropic_account_cache: dict[str, Any] | None = None
+        self._anthropic_account_cache_ts = 0.0
+        self._anthropic_account_attempt_ts = 0.0
+        self._anthropic_account_lock = threading.Lock()
         self._load_config()
         self._load_records()
 
@@ -249,6 +281,9 @@ class QuotaManager:
             record.api_key_tokens_input = 0
             record.api_key_tokens_output = 0
             record.codex_calls = 0
+            record.legacy_tokens_input = 0
+            record.legacy_tokens_output = 0
+            record.legacy_usage_incomplete = False
             record.total_cost_usd = 0.0
             record.api_calls = 0
             record.api_calls_incomplete = False
@@ -340,27 +375,101 @@ class QuotaManager:
             self._records[repo] = record
             self._save_records_locked()
 
-    def _codex_account_snapshot(self) -> dict[str, Any] | None:
-        try:
-            ttl = max(15, int(os.environ.get("CODEX_AUDIT_SERVICE_CODEX_ACCOUNT_CACHE_SECONDS", "120")))
-        except ValueError:
-            ttl = 120
-        failure_ttl = min(ttl, 60)
-        now = time.time()
-        if self._codex_account_cache and now - self._codex_account_cache_ts < ttl:
-            return self._codex_account_cache
-        if now - self._codex_account_attempt_ts < failure_ttl:
-            return None
-        self._codex_account_attempt_ts = now
-        snapshot = read_codex_rate_limits()
-        if snapshot:
-            self._codex_account_cache = snapshot
-            self._codex_account_cache_ts = now
-        return snapshot
+    def _codex_account_snapshot(self, timeout_seconds: float | None = None) -> dict[str, Any] | None:
+        with self._codex_account_lock:
+            try:
+                ttl = max(15, int(os.environ.get("CODEX_AUDIT_SERVICE_CODEX_ACCOUNT_CACHE_SECONDS", "120")))
+            except ValueError:
+                ttl = 120
+            failure_ttl = min(ttl, 60)
+            now = time.time()
+            if self._codex_account_cache and now - self._codex_account_cache_ts < ttl:
+                return self._codex_account_cache
+            if now - self._codex_account_attempt_ts < failure_ttl:
+                return None
+            self._codex_account_attempt_ts = now
+            snapshot = read_codex_rate_limits(timeout_seconds=timeout_seconds)
+            if snapshot:
+                self._codex_account_cache = snapshot
+                self._codex_account_cache_ts = now
+            return snapshot
 
-    def _summary_from_statuses(self, statuses: dict[str, dict[str, Any]], codex_account: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _openai_account_snapshot(self, timeout_seconds: float | None = None) -> dict[str, Any] | None:
+        with self._openai_account_lock:
+            try:
+                ttl = max(30, int(os.environ.get("CODEX_AUDIT_SERVICE_OPENAI_ADMIN_CACHE_SECONDS", "300")))
+            except ValueError:
+                ttl = 300
+            failure_ttl = min(ttl, 120)
+            now = time.time()
+            if self._openai_account_cache and now - self._openai_account_cache_ts < ttl:
+                return self._openai_account_cache
+            if now - self._openai_account_attempt_ts < failure_ttl:
+                return None
+            self._openai_account_attempt_ts = now
+            snapshot = read_openai_admin_usage(timeout_seconds=timeout_seconds)
+            if snapshot:
+                self._openai_account_cache = snapshot
+                self._openai_account_cache_ts = now
+            return snapshot
+
+    def _anthropic_account_snapshot(self, timeout_seconds: float | None = None) -> dict[str, Any] | None:
+        with self._anthropic_account_lock:
+            try:
+                ttl = max(30, int(os.environ.get("CODEX_AUDIT_SERVICE_ANTHROPIC_ADMIN_CACHE_SECONDS", "300")))
+            except ValueError:
+                ttl = 300
+            failure_ttl = min(ttl, 120)
+            now = time.time()
+            if self._anthropic_account_cache and now - self._anthropic_account_cache_ts < ttl:
+                return self._anthropic_account_cache
+            if now - self._anthropic_account_attempt_ts < failure_ttl:
+                return None
+            self._anthropic_account_attempt_ts = now
+            snapshot = read_anthropic_admin_usage(timeout_seconds=timeout_seconds)
+            if snapshot:
+                self._anthropic_account_cache = snapshot
+                self._anthropic_account_cache_ts = now
+            return snapshot
+
+    def _account_snapshot_status_timeout(self) -> float:
+        try:
+            value = float(os.environ.get("CODEX_AUDIT_SERVICE_ACCOUNT_SNAPSHOT_STATUS_TIMEOUT_SECONDS", "2"))
+        except ValueError:
+            value = 2.0
+        return max(0.1, min(value, 10.0))
+
+    def _account_snapshots(self) -> dict[str, dict[str, Any]]:
+        timeout = self._account_snapshot_status_timeout()
+        readers = {
+            "codex_account": lambda: self._codex_account_snapshot(timeout_seconds=timeout),
+            "openai_account": lambda: self._openai_account_snapshot(timeout_seconds=timeout),
+            "anthropic_account": lambda: self._anthropic_account_snapshot(timeout_seconds=timeout),
+        }
+        with ThreadPoolExecutor(max_workers=len(readers), thread_name_prefix="quota-account") as executor:
+            futures = {executor.submit(reader): name for name, reader in readers.items()}
+            done, _ = wait(futures)
+        snapshots: dict[str, dict[str, Any]] = {}
+        for future in done:
+            try:
+                snapshot = future.result(timeout=0)
+            except Exception:  # noqa: BLE001 - account snapshots are best-effort dashboard data.
+                continue
+            if snapshot:
+                snapshots[futures[future]] = snapshot
+        return snapshots
+
+    def _summary_from_statuses(
+        self,
+        statuses: dict[str, dict[str, Any]],
+        codex_account: dict[str, Any] | None = None,
+        openai_account: dict[str, Any] | None = None,
+        anthropic_account: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         api_key_cost = sum(float(item.get("api_key_cost_usd", 0.0)) for item in statuses.values())
         codex_cost = sum(float(item.get("codex_cost_usd", 0.0)) for item in statuses.values())
+        legacy_tokens_input = sum(int(item.get("legacy_tokens_input", 0)) for item in statuses.values())
+        legacy_tokens_output = sum(int(item.get("legacy_tokens_output", 0)) for item in statuses.values())
         total_cost = api_key_cost + codex_cost
         summary = {
             "quota_source": "internal_estimate",
@@ -382,8 +491,19 @@ class QuotaManager:
                 "total_cost_usd": round(codex_cost, 4),
             },
         }
+        if legacy_tokens_input or legacy_tokens_output:
+            summary["legacy_unknown"] = {
+                "label": "历史未拆分",
+                "tokens_input": legacy_tokens_input,
+                "tokens_output": legacy_tokens_output,
+                "calls_incomplete": any(bool(item.get("legacy_usage_incomplete", False)) for item in statuses.values()),
+            }
         if codex_account:
             summary["codex_account"] = codex_account
+        if openai_account:
+            summary["openai_account"] = openai_account
+        if anthropic_account:
+            summary["anthropic_account"] = anthropic_account
         return summary
 
     def status(self, repo: str = "") -> dict[str, Any]:
@@ -406,7 +526,10 @@ class QuotaManager:
         repos = {r: self.status(r) for r in repo_names}
         return {
             "repos": repos,
-            "summary": self._summary_from_statuses(repos, self._codex_account_snapshot()),
+            "summary": self._summary_from_statuses(
+                repos,
+                **self._account_snapshots(),
+            ),
             "default_daily_budget": default_daily_budget,
         }
 

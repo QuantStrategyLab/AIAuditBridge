@@ -105,6 +105,8 @@ CODEX_AUDIT_SERVICE_AUDIENCE=quant-codex-audit \
 CODEX_AUDIT_SERVICE_MODEL=gpt-5.4 \
 CODEX_AUDIT_SERVICE_REASONING_EFFORT=auto \
 CODEX_AUDIT_SERVICE_CODEX_ACCOUNT_USAGE=1 \
+CODEX_AUDIT_SERVICE_OPENAI_USAGE_WINDOW_DAYS=7 \
+CODEX_AUDIT_SERVICE_ANTHROPIC_USAGE_WINDOW_DAYS=7 \
 python3 -m service.ai_gateway_service
 ```
 
@@ -117,6 +119,20 @@ When `CODEX_AUDIT_SERVICE_CODEX_ACCOUNT_USAGE=1`, the dashboard reads a
 sanitized Codex rate-limit snapshot through the local authenticated Codex
 app-server; API-key rows remain internal estimates unless a platform usage
 provider is configured separately.
+Set `OPENAI_ADMIN_KEY` to an OpenAI Admin API key to add a sanitized
+GPT/OpenAI completions Usage snapshot to `/v1/ai/quota`. Optional
+`CODEX_AUDIT_SERVICE_OPENAI_ADMIN_API_KEY_IDS` can limit that snapshot to
+specific API key IDs; never store raw API keys in that filter. OpenAI
+organization-wide costs are kept in a separate `organization_costs` field and
+are not mixed into the completions usage row.
+Set `ANTHROPIC_ADMIN_KEY` to an Anthropic Admin API key to add a sanitized
+Claude organization Usage/Cost snapshot. Do not reuse the normal
+`ANTHROPIC_API_KEY`; Anthropic usage/cost reporting requires an Admin API key.
+Optional `CODEX_AUDIT_SERVICE_ANTHROPIC_ADMIN_API_KEY_IDS` and
+`CODEX_AUDIT_SERVICE_ANTHROPIC_ADMIN_WORKSPACE_IDS` filter usage by IDs; costs
+are omitted when those filters are set to avoid mixing filtered usage with an
+unfiltered cost total. The deploy script stores admin keys in a root-only
+`0600` EnvironmentFile, not directly in the systemd unit.
 
 If no custom domain is available, `cloudflare/codex-audit-proxy/` contains a minimal Cloudflare Worker that can publish a free `workers.dev` HTTPS entry point while keeping the VPS origin URL in a Cloudflare secret. The production service path is async: submit `POST /v1/codex-audit/jobs`, then poll `GET /v1/codex-audit/jobs/{job_id}`. See `docs/async_service_deployment.md` for the deployment and open-source repository checklist.
 

@@ -13,9 +13,12 @@ ALLOWED_REFS="${CODEX_AUDIT_SERVICE_ALLOWED_REFS:-refs/heads/main,refs/pull/*/me
 ALLOWED_REPOSITORY_VISIBILITIES="${CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORY_VISIBILITIES:-public}"
 ALLOWED_SOURCE_REPOSITORIES="${CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES:-QuantStrategyLab/AIAuditBridge,QuantStrategyLab/CodexAuditBridge,QuantStrategyLab/CryptoLivePoolPipelines,QuantStrategyLab/HkEquitySnapshotPipelines,QuantStrategyLab/UsEquitySnapshotPipelines,QuantStrategyLab/ResearchSignalContextPipelines}"
 JOB_DIR="${CODEX_AUDIT_SERVICE_JOB_DIR:-/var/lib/codex-audit-bridge/jobs}"
+ADMIN_ENV_FILE="${CODEX_AUDIT_SERVICE_ADMIN_ENV_FILE:-/etc/codex-audit-bridge/admin.env}"
 AUDIT_MODEL="${CODEX_AUDIT_SERVICE_MODEL:-}"
 AUDIT_REASONING_EFFORT="${CODEX_AUDIT_SERVICE_REASONING_EFFORT:-}"
 CODEX_ACCOUNT_USAGE="${CODEX_AUDIT_SERVICE_CODEX_ACCOUNT_USAGE:-1}"
+OPENAI_USAGE_WINDOW_DAYS="${CODEX_AUDIT_SERVICE_OPENAI_USAGE_WINDOW_DAYS:-7}"
+ANTHROPIC_USAGE_WINDOW_DAYS="${CODEX_AUDIT_SERVICE_ANTHROPIC_USAGE_WINDOW_DAYS:-7}"
 NGINX_CONFIG="${CODEX_AUDIT_SERVICE_NGINX_CONFIG:-}"
 
 require_sudo() {
@@ -57,7 +60,7 @@ systemctl_environment_brief() {
       | sed 's/^Environment=//' \
       | tr ' ' '\n' \
       | sed -E "s/^[\"']//; s/[\"']$//" \
-      | grep -E '^CODEX_AUDIT_SERVICE_(ALLOWED_|AUDIENCE=|HOST=|PORT=|JOB_DIR=|QUOTA_STORE=|CODEX_ACCOUNT_USAGE=|SANDBOX=|MODEL=|REASONING_EFFORT=)' \
+      | grep -E '^CODEX_AUDIT_SERVICE_(ALLOWED_|AUDIENCE=|HOST=|PORT=|JOB_DIR=|QUOTA_STORE=|CODEX_ACCOUNT_USAGE=|OPENAI_USAGE_WINDOW_DAYS=|ANTHROPIC_USAGE_WINDOW_DAYS=|SANDBOX=|MODEL=|REASONING_EFFORT=)' \
       | mask_infra || true
   fi
 }
@@ -188,6 +191,29 @@ install_service_package() {
   sudo find "${DEPLOY_DIR}/service" -type f -exec chmod 0644 {} +
 }
 
+write_admin_env_file_if_needed() {
+  if [ -z "${OPENAI_ADMIN_KEY:-}" ] && [ -z "${ANTHROPIC_ADMIN_KEY:-}" ]; then
+    sudo rm -f "$ADMIN_ENV_FILE"
+    return
+  fi
+  local tmp
+  tmp="$(mktemp)"
+  trap 'rm -f "$tmp"' RETURN
+  chmod 0600 "$tmp"
+  {
+    if [ -n "${OPENAI_ADMIN_KEY:-}" ]; then
+      printf 'OPENAI_ADMIN_KEY=%s\n' "$OPENAI_ADMIN_KEY"
+    fi
+    if [ -n "${ANTHROPIC_ADMIN_KEY:-}" ]; then
+      printf 'ANTHROPIC_ADMIN_KEY=%s\n' "$ANTHROPIC_ADMIN_KEY"
+    fi
+  } >"$tmp"
+  sudo install -d -m 0700 "$(dirname "$ADMIN_ENV_FILE")"
+  sudo install -m 0600 -o root -g root "$tmp" "$ADMIN_ENV_FILE"
+  rm -f "$tmp"
+  trap - RETURN
+}
+
 write_audit_service_unit() {
   local runner_user runner_home
   runner_user="$(id -un)"
@@ -227,7 +253,10 @@ Environment=CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES=${ALLOWED_SOURCE_REP
 Environment=CODEX_AUDIT_SERVICE_JOB_DIR=${JOB_DIR}
 Environment=CODEX_AUDIT_SERVICE_QUOTA_STORE=${JOB_DIR}/quota.json
 Environment=CODEX_AUDIT_SERVICE_CODEX_ACCOUNT_USAGE=${CODEX_ACCOUNT_USAGE}
+Environment=CODEX_AUDIT_SERVICE_OPENAI_USAGE_WINDOW_DAYS=${OPENAI_USAGE_WINDOW_DAYS}
+Environment=CODEX_AUDIT_SERVICE_ANTHROPIC_USAGE_WINDOW_DAYS=${ANTHROPIC_USAGE_WINDOW_DAYS}
 Environment=CODEX_AUDIT_SERVICE_SANDBOX=read-only
+EnvironmentFile=-${ADMIN_ENV_FILE}
 ${audit_model_line}
 ${audit_reasoning_effort_line}
 ${audit_token_line}
@@ -479,6 +508,7 @@ deploy() {
   install_file "scripts/codex_audit_service.py" "${DEPLOY_DIR}/scripts/codex_audit_service.py" "0755"
   install_service_package
   sudo install -d -m 0700 -o "$runner_user" -g "$runner_user" "$JOB_DIR"
+  write_admin_env_file_if_needed
   write_audit_service_unit
   write_managed_audit_service_dropin
   sudo systemctl daemon-reload

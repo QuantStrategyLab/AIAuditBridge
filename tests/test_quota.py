@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import os
 import tempfile
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
@@ -82,6 +84,9 @@ class TestQuotaRecord(unittest.TestCase):
             total_cost_usd=0.5,
             api_key_cost_usd=0.4,
             codex_cost_usd=0.1,
+            legacy_tokens_input=25,
+            legacy_tokens_output=10,
+            legacy_usage_incomplete=True,
         )
         d = record.to_dict()
         self.assertEqual(d["repo"], "owner/repo")
@@ -91,6 +96,9 @@ class TestQuotaRecord(unittest.TestCase):
         self.assertEqual(d["api_key_tokens_output"], 50)
         self.assertEqual(d["api_calls"], 1)
         self.assertFalse(d["api_calls_incomplete"])
+        self.assertEqual(d["legacy_tokens_input"], 25)
+        self.assertEqual(d["legacy_tokens_output"], 10)
+        self.assertTrue(d["legacy_usage_incomplete"])
         self.assertEqual(d["codex_calls"], 2)
         self.assertEqual(d["api_key_cost_usd"], 0.4)
         self.assertEqual(d["codex_cost_usd"], 0.1)
@@ -180,6 +188,68 @@ class TestQuotaManager(unittest.TestCase):
             status = self.manager.status()
         self.assertEqual(status["summary"]["codex_account"], snapshot)
 
+    def test_status_summary_can_include_live_openai_account_snapshot(self) -> None:
+        snapshot = {"source": "openai_admin_api", "status": "available", "costs": {"total_cost": 1.23}}
+        with patch("service.quota.read_openai_admin_usage", return_value=snapshot):
+            status = self.manager.status()
+        self.assertEqual(status["summary"]["openai_account"], snapshot)
+
+    def test_status_summary_can_include_live_anthropic_account_snapshot(self) -> None:
+        snapshot = {"source": "anthropic_admin_api", "status": "available", "costs": {"total_cost": 1.23}}
+        with patch("service.quota.read_anthropic_admin_usage", return_value=snapshot):
+            status = self.manager.status()
+        self.assertEqual(status["summary"]["anthropic_account"], snapshot)
+
+    def test_openai_account_failures_are_negative_cached(self) -> None:
+        with patch("service.quota.read_openai_admin_usage", return_value=None) as read_snapshot:
+            self.manager.status()
+            self.manager.status()
+        self.assertEqual(read_snapshot.call_count, 1)
+
+    def test_anthropic_account_failures_are_negative_cached(self) -> None:
+        with patch("service.quota.read_anthropic_admin_usage", return_value=None) as read_snapshot:
+            self.manager.status()
+            self.manager.status()
+        self.assertEqual(read_snapshot.call_count, 1)
+
+    def test_account_snapshot_reads_use_shared_status_timeout(self) -> None:
+        def slow_snapshot(timeout_seconds: float | None = None) -> dict[str, object]:
+            time.sleep(timeout_seconds or 0.25)
+            return {"source": "slow", "status": "available"}
+
+        env = {"CODEX_AUDIT_SERVICE_ACCOUNT_SNAPSHOT_STATUS_TIMEOUT_SECONDS": "0.05"}
+        with patch.dict(os.environ, env):
+            with (
+                patch("service.quota.read_codex_rate_limits", side_effect=slow_snapshot),
+                patch("service.quota.read_openai_admin_usage", side_effect=slow_snapshot),
+                patch("service.quota.read_anthropic_admin_usage", side_effect=slow_snapshot),
+            ):
+                started = time.monotonic()
+                status = self.manager.status()
+                elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 0.2)
+        self.assertEqual(status["summary"]["codex_account"]["source"], "slow")
+        self.assertEqual(status["summary"]["openai_account"]["source"], "slow")
+        self.assertEqual(status["summary"]["anthropic_account"]["source"], "slow")
+
+    def test_openai_account_snapshot_refresh_is_single_flight(self) -> None:
+        snapshot = {"source": "openai_admin_api", "status": "available"}
+
+        def slow_snapshot(timeout_seconds: float | None = None) -> dict[str, object]:
+            time.sleep(0.05)
+            return snapshot
+
+        def read_from_manager(_: int) -> dict[str, object] | None:
+            return self.manager._openai_account_snapshot(timeout_seconds=0.1)
+
+        with patch("service.quota.read_openai_admin_usage", side_effect=slow_snapshot) as read_usage:
+            with ThreadPoolExecutor(max_workers=3) as executor:
+                results = list(executor.map(read_from_manager, range(3)))
+
+        self.assertEqual(read_usage.call_count, 1)
+        self.assertEqual(results, [snapshot, snapshot, snapshot])
+
     def test_codex_account_failures_are_negative_cached(self) -> None:
         with patch("service.quota.read_codex_rate_limits", return_value=None) as read_snapshot:
             self.manager.status()
@@ -220,23 +290,11 @@ class TestQuotaManager(unittest.TestCase):
         self.assertTrue(status["repos"]["old/repo"]["api_calls_incomplete"])
         self.assertTrue(status["summary"]["api_key"]["calls_incomplete"])
         self.assertEqual(status["summary"]["api_key"]["tokens_input"], 1000)
+        self.assertNotIn("legacy_unknown", status["summary"])
 
-    def test_historical_codex_tokens_are_not_migrated_to_api_key(self) -> None:
+    def test_historical_tokens_with_codex_execs_remain_legacy_unknown(self) -> None:
         record = QuotaRecord.from_dict({
-            "repo": "old/codex-only",
-            "tokens_input": 1000,
-            "tokens_output": 500,
-            "codex_calls": 2,
-            "total_cost_usd": 0.1,
-        })
-        self.assertEqual(record.api_key_tokens_input, 0)
-        self.assertEqual(record.api_key_tokens_output, 0)
-        self.assertFalse(record.api_calls_incomplete)
-        self.assertEqual(record.codex_calls, 2)
-
-    def test_mixed_historical_codex_records_mark_api_calls_unknown_without_claiming_tokens(self) -> None:
-        record = QuotaRecord.from_dict({
-            "repo": "old/mixed",
+            "repo": "old/api-plus-codex-execs",
             "tokens_input": 1000,
             "tokens_output": 500,
             "codex_calls": 2,
@@ -245,9 +303,33 @@ class TestQuotaManager(unittest.TestCase):
         self.assertEqual(record.api_key_tokens_input, 0)
         self.assertEqual(record.api_key_tokens_output, 0)
         self.assertTrue(record.api_calls_incomplete)
+        self.assertEqual(record.legacy_tokens_input, 1000)
+        self.assertEqual(record.legacy_tokens_output, 500)
+        self.assertTrue(record.legacy_usage_incomplete)
+        self.assertEqual(record.codex_calls, 2)
+        self.assertAlmostEqual(record.api_key_cost_usd, 0.1)
+        self.assertAlmostEqual(record.codex_cost_usd, 0.1)
+
+    def test_explicit_legacy_tokens_are_preserved_as_legacy_unknown(self) -> None:
+        record = QuotaRecord.from_dict({
+            "repo": "old/legacy-explicit",
+            "tokens_input": 1000,
+            "tokens_output": 500,
+            "legacy_tokens_input": 1000,
+            "legacy_tokens_output": 500,
+            "legacy_usage_incomplete": True,
+            "codex_calls": 2,
+            "total_cost_usd": 0.2,
+        })
+        self.assertEqual(record.api_key_tokens_input, 0)
+        self.assertEqual(record.api_key_tokens_output, 0)
+        self.assertEqual(record.legacy_tokens_input, 1000)
+        self.assertEqual(record.legacy_tokens_output, 500)
+        self.assertTrue(record.legacy_usage_incomplete)
+        self.assertTrue(record.api_calls_incomplete)
         self.assertAlmostEqual(record.api_key_cost_usd, 0.1)
 
-    def test_zero_cost_historical_tokens_are_marked_incomplete(self) -> None:
+    def test_zero_cost_historical_api_tokens_migrate_to_api_key_tokens(self) -> None:
         record = QuotaRecord.from_dict({
             "repo": "old/zero-cost",
             "tokens_input": 1000,
@@ -259,6 +341,7 @@ class TestQuotaManager(unittest.TestCase):
         self.assertTrue(status["repos"]["old/zero-cost"]["api_calls_incomplete"])
         self.assertTrue(status["summary"]["api_key"]["calls_incomplete"])
         self.assertEqual(status["summary"]["api_key"]["tokens_input"], 1000)
+        self.assertNotIn("legacy_unknown", status["summary"])
 
     def test_daily_budget_resets(self) -> None:
         """Quick test: budget resets when last_reset is old."""

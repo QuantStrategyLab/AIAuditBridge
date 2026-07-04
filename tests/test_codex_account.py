@@ -39,15 +39,24 @@ class TestCodexAccountRateLimits(unittest.TestCase):
                     import os
                     import sys
 
-                    if os.environ.get("CODEX_AUDIT_SERVICE_TOKEN") or os.environ.get("OPENAI_API_KEY"):
+                    if (
+                        os.environ.get("CODEX_AUDIT_SERVICE_TOKEN")
+                        or os.environ.get("OPENAI_API_KEY")
+                        or os.environ.get("OPENAI_ADMIN_KEY")
+                        or os.environ.get("ANTHROPIC_ADMIN_KEY")
+                    ):
                         sys.exit(7)
 
                     for line in sys.stdin:
                         message = json.loads(line)
+                        if message.get("jsonrpc") != "2.0":
+                            sys.exit(8)
                         method = message.get("method")
                         if method == "initialize":
                             print(json.dumps({"id": message["id"], "result": {"userAgent": "fake"}}), flush=True)
                         elif method == "account/rateLimits/read":
+                            if message.get("params") is None:
+                                sys.exit(9)
                             print(json.dumps({
                                 "id": message["id"],
                                 "result": {
@@ -72,6 +81,8 @@ class TestCodexAccountRateLimits(unittest.TestCase):
                 "CODEX_AUDIT_SERVICE_CODEX_ACCOUNT_USAGE": "1",
                 "CODEX_AUDIT_SERVICE_TOKEN": "service-token-must-not-reach-codex",
                 "OPENAI_API_KEY": "openai-key-must-not-reach-codex",
+                "OPENAI_ADMIN_KEY": "admin-key-must-not-reach-codex",
+                "ANTHROPIC_ADMIN_KEY": "anthropic-admin-key-must-not-reach-codex",
                 "PATH": str(bin_dir) + os.pathsep + os.environ.get("PATH", ""),
             }
             with patch.dict(os.environ, env, clear=True):

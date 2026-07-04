@@ -64,7 +64,7 @@ def _rate_limit(raw: Any) -> dict[str, Any] | None:
 def _send(proc: subprocess.Popen[str], message: dict[str, Any]) -> None:
     if proc.stdin is None:
         raise RuntimeError("codex app-server stdin unavailable")
-    proc.stdin.write(json.dumps(message, separators=(",", ":")) + "\n")
+    proc.stdin.write(json.dumps({"jsonrpc": "2.0", **message}, separators=(",", ":")) + "\n")
     proc.stdin.flush()
 
 
@@ -129,7 +129,7 @@ def read_codex_rate_limits(timeout_seconds: float | None = None) -> dict[str, An
         )
         _read_response(proc, 1, deadline)
         _send(proc, {"method": "initialized", "params": {}})
-        _send(proc, {"method": "account/rateLimits/read", "id": 2, "params": None})
+        _send(proc, {"method": "account/rateLimits/read", "id": 2, "params": {}})
         response = _read_response(proc, 2, deadline)
         result = response.get("result") if isinstance(response, dict) else None
         if not isinstance(result, dict):
