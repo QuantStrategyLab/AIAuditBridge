@@ -45,5 +45,6 @@ jobs:
           CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES: QuantStrategyLab/AIAuditBridge,QuantStrategyLab/CodexAuditBridge,QuantStrategyLab/CryptoLivePoolPipelines,QuantStrategyLab/HkEquitySnapshotPipelines,QuantStrategyLab/UsEquitySnapshotPipelines,QuantStrategyLab/ResearchSignalContextPipelines
           CODEX_AUDIT_SERVICE_MODEL: ${{ vars.CODEX_AUDIT_SERVICE_MODEL }}
           CODEX_AUDIT_SERVICE_REASONING_EFFORT: ${{ vars.CODEX_AUDIT_SERVICE_REASONING_EFFORT }}
+          CODEX_AUDIT_SERVICE_CODEX_ACCOUNT_USAGE: "1"
           CODEX_AUDIT_SERVICE_TOKEN: ${{ secrets.CODEX_AUDIT_SERVICE_TOKEN }}
         run: bash scripts/deploy_codex_audit_service.sh "${{ inputs.mode }}"

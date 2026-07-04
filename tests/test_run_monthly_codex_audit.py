@@ -2266,6 +2266,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertIn("CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS", workflow)
         self.assertIn("CODEX_AUDIT_SERVICE_ALLOWED_REFS", workflow)
         self.assertIn("CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES", workflow)
+        self.assertIn("CODEX_AUDIT_SERVICE_CODEX_ACCOUNT_USAGE", workflow)
         self.assertIn("QuantStrategyLab/AIAuditBridge,QuantStrategyLab/CodexAuditBridge,QuantStrategyLab/CryptoLivePoolPipelines", workflow)
         self.assertIn("actions/checkout@v6.0.3", workflow)
 
@@ -2288,6 +2289,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertIn('sed -E "s/^[\\"', deploy_script)
         self.assertIn('s/[\\"\']$//"', deploy_script)
         self.assertIn("CODEX_AUDIT_SERVICE_(ALLOWED_|AUDIENCE=", deploy_script)
+        self.assertIn("CODEX_ACCOUNT_USAGE=", deploy_script)
         self.assertNotIn("^CODEX_AUDIT_SERVICE_TOKEN", deploy_script)
         self.assertNotIn("CODEX_SERVICE_ROUTER", deploy_script)
         self.assertNotIn("codex_service_router", deploy_script)

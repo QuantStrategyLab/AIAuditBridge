@@ -63,6 +63,7 @@ CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES='QuantStrategyLab/AIAuditBridge,
 CODEX_AUDIT_SERVICE_AUDIENCE=quant-codex-audit \
 CODEX_AUDIT_SERVICE_MODEL=gpt-5.4 \
 CODEX_AUDIT_SERVICE_REASONING_EFFORT=auto \
+CODEX_AUDIT_SERVICE_CODEX_ACCOUNT_USAGE=1 \
 CODEX_AUDIT_SERVICE_JOB_DIR=/var/lib/codex-audit-bridge/jobs \
 bash scripts/deploy_codex_audit_service.sh deploy
 ```
@@ -70,6 +71,10 @@ bash scripts/deploy_codex_audit_service.sh deploy
 The job directory should be owned by the service user and mode `0700`.
 The service should rely on an authenticated Codex CLI session and must not
 inject OpenAI/Codex API keys into the Codex subprocess.
+With `CODEX_AUDIT_SERVICE_CODEX_ACCOUNT_USAGE=1`, `/v1/ai/quota` includes a
+sanitized Codex account rate-limit snapshot read from the local Codex
+app-server. This does not expose Codex auth tokens and should stay behind the
+existing dashboard authentication.
 Set `CODEX_AUDIT_SERVICE_REASONING_EFFORT` only when a hard override is needed;
 unset or `auto` keeps task-complexity routing.
 

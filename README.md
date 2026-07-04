@@ -104,6 +104,7 @@ CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES='QuantStrategyLab/AIAuditBridge,
 CODEX_AUDIT_SERVICE_AUDIENCE=quant-codex-audit \
 CODEX_AUDIT_SERVICE_MODEL=gpt-5.4 \
 CODEX_AUDIT_SERVICE_REASONING_EFFORT=auto \
+CODEX_AUDIT_SERVICE_CODEX_ACCOUNT_USAGE=1 \
 python3 -m service.ai_gateway_service
 ```
 
@@ -112,6 +113,10 @@ Terminate TLS on 443 with the platform load balancer or a reverse proxy and forw
 The service host should use an authenticated Codex CLI session. It strips
 secret-like environment variables, including API keys, before spawning Codex.
 It does not inject API keys into the Codex subprocess.
+When `CODEX_AUDIT_SERVICE_CODEX_ACCOUNT_USAGE=1`, the dashboard reads a
+sanitized Codex rate-limit snapshot through the local authenticated Codex
+app-server; API-key rows remain internal estimates unless a platform usage
+provider is configured separately.
 
 If no custom domain is available, `cloudflare/codex-audit-proxy/` contains a minimal Cloudflare Worker that can publish a free `workers.dev` HTTPS entry point while keeping the VPS origin URL in a Cloudflare secret. The production service path is async: submit `POST /v1/codex-audit/jobs`, then poll `GET /v1/codex-audit/jobs/{job_id}`. See `docs/async_service_deployment.md` for the deployment and open-source repository checklist.
 
