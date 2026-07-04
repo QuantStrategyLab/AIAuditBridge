@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -44,6 +45,7 @@ ACTION_AUTO_MERGE = "auto_merge"
 
 # ordered by increasing autonomy
 ACTION_ORDER = (ACTION_ESCALATE, ACTION_AUTO_NOTIFY, ACTION_AUTO_PR, ACTION_AUTO_MERGE)
+ACTION_RANK = {action: index for index, action in enumerate(ACTION_ORDER)}
 
 # ── risk tiers ──────────────────────────────────────────────────────────
 
@@ -88,6 +90,33 @@ LOW_RISK_EXACT = frozenset({
     "LICENSE",
     ".gitignore",
 })
+CRITICAL_EXACT = frozenset({
+    ".github/codex_auto_merge_policy.json",
+})
+REPO_ROOT = Path(__file__).resolve().parents[1]
+AUTONOMY_POLICY_PATH_ENV = "CODEX_AUDIT_SERVICE_AUTONOMY_POLICY_PATH"
+
+
+def load_autonomy_policy(path: Path | None = None) -> dict[str, Any]:
+    """Load the shared autonomy policy from a trusted service-owned path.
+
+    The service must not read policy rules from the untrusted PR checkout being
+    reviewed. Set CODEX_AUDIT_SERVICE_AUTONOMY_POLICY_PATH to a deployment-owned
+    file or pass an explicit path in tests/tools. Missing or malformed files
+    fall back to the built-in conservative classifier.
+    """
+    if path is None:
+        env_path = os.environ.get(AUTONOMY_POLICY_PATH_ENV, "").strip()
+        if not env_path:
+            return {}
+        path = Path(env_path)
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 @dataclass(frozen=True)
@@ -150,17 +179,49 @@ class AutonomyConfig:
         return self.decision_matrix
 
 
-def classify_file_risk(path: str) -> str:
+def _policy_matches(path: str, rule: dict[str, Any]) -> bool:
+    exact = rule.get("exact")
+    if isinstance(exact, list) and path in {str(item) for item in exact}:
+        return True
+    prefixes = rule.get("prefixes")
+    if isinstance(prefixes, list) and any(path.startswith(str(prefix)) for prefix in prefixes):
+        return True
+    return False
+
+
+def _blocked_by_policy(path: str, policy: dict[str, Any] | None) -> bool:
+    if path in CRITICAL_EXACT:
+        return True
+    patterns = (policy or {}).get("blocked_path_patterns") if isinstance(policy, dict) else None
+    raw_patterns = list(CRITICAL_PATTERNS)
+    if isinstance(patterns, list):
+        raw_patterns.extend(pattern for pattern in patterns if isinstance(pattern, str))
+    for pattern in raw_patterns:
+        if not isinstance(pattern, str) or not pattern.strip():
+            continue
+        try:
+            if re.search(pattern, path, flags=re.IGNORECASE):
+                return True
+        except re.error:
+            continue
+    return False
+
+
+def classify_file_risk(path: str, *, policy: dict[str, Any] | None = None) -> str:
     """Classify a changed file path into a risk tier.
 
-    Mirrors the logic in codex_auto_merge_policy.json risk_policy.
+    Mirrors ``codex_auto_merge_policy.json`` when present, then falls back to
+    the built-in conservative rules.
     """
-    import re as _re
+    if _blocked_by_policy(path, policy):
+        return RISK_CRITICAL
 
-    # critical: secrets, credentials, keys
-    for pattern in CRITICAL_PATTERNS:
-        if _re.search(pattern, path):
-            return RISK_CRITICAL
+    risk_policy = (policy or {}).get("risk_policy") if isinstance(policy, dict) else None
+    if isinstance(risk_policy, dict):
+        for tier in (RISK_CRITICAL, RISK_HIGH, RISK_MEDIUM, RISK_LOW):
+            rule = risk_policy.get(tier)
+            if isinstance(rule, dict) and _policy_matches(path, rule):
+                return tier
 
     # low: exact match
     if path in LOW_RISK_EXACT:
@@ -185,14 +246,14 @@ def classify_file_risk(path: str) -> str:
     return RISK_MEDIUM
 
 
-def classify_changes_risk(changed_paths: list[str]) -> str:
+def classify_changes_risk(changed_paths: list[str], *, policy: dict[str, Any] | None = None) -> str:
     """Classify the overall risk of a set of changed file paths.
 
     Returns the highest risk tier among all changed files.
     """
     if not changed_paths:
         return RISK_LOW
-    tiers = {classify_file_risk(p) for p in changed_paths}
+    tiers = {classify_file_risk(p, policy=policy) for p in changed_paths}
     for tier in (RISK_CRITICAL, RISK_HIGH, RISK_MEDIUM, RISK_LOW):
         if tier in tiers:
             return tier
@@ -231,6 +292,45 @@ def decide_action(
     return ACTION_ESCALATE
 
 
+def _cap_action(action: str, maximum: str) -> str:
+    if ACTION_RANK.get(action, 0) > ACTION_RANK.get(maximum, 0):
+        return maximum
+    return action
+
+
+def apply_runtime_guards(
+    action: str,
+    *,
+    health_status: str | None = None,
+    quota_status: str | None = None,
+) -> tuple[str, list[str]]:
+    """Downgrade autonomy based on runtime health/quota state."""
+    guarded_action = action
+    guards: list[str] = []
+    health = (health_status or "healthy").strip().lower()
+    quota = (quota_status or "ok").strip().lower()
+
+    if health == "unhealthy":
+        guarded_action = ACTION_ESCALATE
+        guards.append("service health is unhealthy; forcing human review")
+    elif health == "degraded":
+        capped = _cap_action(guarded_action, ACTION_AUTO_PR)
+        if capped != guarded_action:
+            guards.append("service health is degraded; auto-merge capped at auto-pr")
+        guarded_action = capped
+
+    if quota in {"exhausted", "blocked"}:
+        guarded_action = ACTION_ESCALATE
+        guards.append(f"quota status is {quota}; forcing human review")
+    elif quota in {"low", "constrained"}:
+        capped = _cap_action(guarded_action, ACTION_AUTO_PR)
+        if capped != guarded_action:
+            guards.append(f"quota status is {quota}; auto-merge capped at auto-pr")
+        guarded_action = capped
+
+    return guarded_action, guards
+
+
 def extract_confidence(verdicts: list[dict[str, Any]]) -> float:
     """Extract an aggregated confidence score from a list of reviewer verdicts.
 
@@ -255,6 +355,9 @@ def recommended_action(
     *,
     config: AutonomyConfig | None = None,
     repo: str | None = None,
+    policy: dict[str, Any] | None = None,
+    health_status: str | None = None,
+    quota_status: str | None = None,
 ) -> dict[str, Any]:
     """Compute the recommended autonomous action from AI verdicts and file risks.
 
@@ -265,8 +368,10 @@ def recommended_action(
         reason: Human-readable explanation.
     """
     confidence = extract_confidence(verdicts)
-    risk = classify_changes_risk(changed_paths or [])
-    action = decide_action(confidence, risk, config=config, repo=repo)
+    active_policy = policy if policy is not None else load_autonomy_policy()
+    risk = classify_changes_risk(changed_paths or [], policy=active_policy)
+    initial_action = decide_action(confidence, risk, config=config, repo=repo)
+    action, runtime_guards = apply_runtime_guards(initial_action, health_status=health_status, quota_status=quota_status)
 
     reasons = {
         (ACTION_ESCALATE, RISK_CRITICAL): "Critical files changed — always escalates to human review",
@@ -283,7 +388,12 @@ def recommended_action(
 
     return {
         "action": action,
+        "initial_action": initial_action,
         "confidence": confidence,
         "risk": risk,
         "reason": reason,
+        "human_review_required": action == ACTION_ESCALATE,
+        "auto_merge_allowed": action == ACTION_AUTO_MERGE,
+        "runtime_guards": runtime_guards,
+        "policy_version": active_policy.get("version") if isinstance(active_policy, dict) else None,
     }

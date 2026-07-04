@@ -44,6 +44,7 @@ from service.contracts import (
 from service.adapters.llm_adapter import LlmAdapter
 from service.adapters.codex_adapter import CodexAdapter
 from service.autonomy import (
+    load_autonomy_policy,
     recommended_action as compute_recommended_action,
 )
 from service.feedback import (
@@ -905,7 +906,11 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         # Autonomy decision: confidence + file risk → recommended action
         repo = str(payload.get("source_repository") or "")
         action = compute_recommended_action(
-            results, changed_paths, repo=repo if repo else None,
+            results,
+            changed_paths,
+            repo=repo if repo else None,
+            policy=load_autonomy_policy(),
+            health_status=get_health_monitor().status,
         )
         _audit_log("review_completed", consensus=consensus, all_success=all_ok,
                    action=action["action"], confidence=action["confidence"], risk=action["risk"])
