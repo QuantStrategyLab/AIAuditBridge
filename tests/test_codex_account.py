@@ -36,7 +36,11 @@ class TestCodexAccountRateLimits(unittest.TestCase):
                     """
                     #!/usr/bin/env python3
                     import json
+                    import os
                     import sys
+
+                    if os.environ.get("CODEX_AUDIT_SERVICE_TOKEN") or os.environ.get("OPENAI_API_KEY"):
+                        sys.exit(7)
 
                     for line in sys.stdin:
                         message = json.loads(line)
@@ -66,6 +70,8 @@ class TestCodexAccountRateLimits(unittest.TestCase):
             fake_codex.chmod(0o700)
             env = {
                 "CODEX_AUDIT_SERVICE_CODEX_ACCOUNT_USAGE": "1",
+                "CODEX_AUDIT_SERVICE_TOKEN": "service-token-must-not-reach-codex",
+                "OPENAI_API_KEY": "openai-key-must-not-reach-codex",
                 "PATH": str(bin_dir) + os.pathsep + os.environ.get("PATH", ""),
             }
             with patch.dict(os.environ, env, clear=True):

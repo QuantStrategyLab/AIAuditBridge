@@ -10,6 +10,8 @@ import subprocess
 import time
 from typing import Any
 
+from service.adapters.codex_adapter import _codex_env
+
 
 def _bool_env(name: str, default: bool = False) -> bool:
     value = os.environ.get(name, "").strip().lower()
@@ -108,6 +110,7 @@ def read_codex_rate_limits(timeout_seconds: float | None = None) -> dict[str, An
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
+            env=_codex_env(),
         )
         _send(
             proc,
@@ -153,6 +156,10 @@ def read_codex_rate_limits(timeout_seconds: float | None = None) -> dict[str, An
                     proc.wait(timeout=0.5)
                 except subprocess.TimeoutExpired:
                     proc.kill()
+                    try:
+                        proc.wait(timeout=0.5)
+                    except subprocess.TimeoutExpired:
+                        pass
             for stream in (proc.stdin, proc.stdout):
                 if stream is not None:
                     stream.close()
