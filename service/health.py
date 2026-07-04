@@ -28,6 +28,12 @@ ERROR_RATE_DEGRADED = 0.10   # >10% errors → degraded
 ERROR_RATE_UNHEALTHY = 0.30  # >30% errors → unhealthy
 LATENCY_P95_DEGRADED = 30.0  # p95 > 30s → degraded
 LATENCY_P95_UNHEALTHY = 120.0  # p95 > 120s → unhealthy
+BACKGROUND_JOB_LATENCY_PATHS = {"/v1/ai/execute/jobs/run"}
+
+
+def latency_affects_status(path: str) -> bool:
+    """Whether endpoint latency should affect service health status."""
+    return path not in BACKGROUND_JOB_LATENCY_PATHS
 
 
 @dataclass
@@ -100,6 +106,7 @@ class EndpointMetrics:
             "p50_ms": round(self.p50_latency * 1000, 1),
             "p95_ms": round(self.p95_latency * 1000, 1),
             "p99_ms": round(self.p99_latency * 1000, 1),
+            "latency_affects_status": latency_affects_status(self.path),
         }
 
 
@@ -148,12 +155,12 @@ class HealthMonitor:
         for m in all_metrics:
             if m.recent_error_rate >= ERROR_RATE_UNHEALTHY:
                 return "unhealthy"
-            if m.p95_latency >= LATENCY_P95_UNHEALTHY:
+            if latency_affects_status(m.path) and m.p95_latency >= LATENCY_P95_UNHEALTHY:
                 return "unhealthy"
         for m in all_metrics:
             if m.recent_error_rate >= ERROR_RATE_DEGRADED:
                 return "degraded"
-            if m.p95_latency >= LATENCY_P95_DEGRADED:
+            if latency_affects_status(m.path) and m.p95_latency >= LATENCY_P95_DEGRADED:
                 return "degraded"
         return "healthy"
 
@@ -178,6 +185,8 @@ class HealthMonitor:
                     "value": round(m.recent_error_rate, 4),
                     "threshold": ERROR_RATE_DEGRADED,
                 })
+            if not latency_affects_status(m.path):
+                continue
             if m.p95_latency >= LATENCY_P95_UNHEALTHY:
                 reasons.append({
                     "path": m.path,
