@@ -377,4 +377,3 @@ AIAuditBridge 是 QuantStrategyLab 的 AI 审计控制面，负责：
 2. 再补一份“自治边界表”，把自动 / 人工 / 禁止 三类动作列清楚。
 3. 然后补指标持久化和 dashboard 视图。
 4. 最后再决定是否扩大 auto-merge 覆盖面。
-
