@@ -106,20 +106,22 @@ class QuotaRecord:
         api_key_cost_usd = float(d.get("api_key_cost_usd", max(0.0, total_cost_usd - codex_cost_usd)))
         has_api_calls = "api_calls" in d
         api_calls = int(d.get("api_calls", 0))
+        codex_calls = int(d.get("codex_calls", 0))
         tokens_input = int(d.get("tokens_input", 0))
         tokens_output = int(d.get("tokens_output", 0))
         has_split_api_tokens = "api_key_tokens_input" in d or "api_key_tokens_output" in d
-        legacy_api_activity = api_key_cost_usd > 0 or (not has_split_api_tokens and (tokens_input > 0 or tokens_output > 0))
+        aggregate_tokens_are_api = not has_split_api_tokens and codex_calls == 0 and (tokens_input > 0 or tokens_output > 0)
+        legacy_api_activity = api_key_cost_usd > 0 or aggregate_tokens_are_api
         api_calls_incomplete = bool(d.get("api_calls_incomplete", False) or (not has_api_calls and legacy_api_activity))
         return cls(
             repo=str(d.get("repo", "")),
             tokens_input=tokens_input,
             tokens_output=tokens_output,
-            api_key_tokens_input=int(d.get("api_key_tokens_input", tokens_input if legacy_api_activity else 0)),
-            api_key_tokens_output=int(d.get("api_key_tokens_output", tokens_output if legacy_api_activity else 0)),
+            api_key_tokens_input=int(d.get("api_key_tokens_input", tokens_input if aggregate_tokens_are_api else 0)),
+            api_key_tokens_output=int(d.get("api_key_tokens_output", tokens_output if aggregate_tokens_are_api else 0)),
             api_calls=api_calls,
             api_calls_incomplete=api_calls_incomplete,
-            codex_calls=int(d.get("codex_calls", 0)),
+            codex_calls=codex_calls,
             total_cost_usd=total_cost_usd,
             api_key_cost_usd=api_key_cost_usd,
             codex_cost_usd=codex_cost_usd,
@@ -177,6 +179,7 @@ class QuotaManager:
         self._repo_budgets: dict[str, dict[str, float]] = {}
         self._codex_account_cache: dict[str, Any] | None = None
         self._codex_account_cache_ts = 0.0
+        self._codex_account_attempt_ts = 0.0
         self._load_config()
         self._load_records()
 
@@ -342,16 +345,20 @@ class QuotaManager:
             ttl = max(15, int(os.environ.get("CODEX_AUDIT_SERVICE_CODEX_ACCOUNT_CACHE_SECONDS", "120")))
         except ValueError:
             ttl = 120
+        failure_ttl = min(ttl, 60)
         now = time.time()
         if self._codex_account_cache and now - self._codex_account_cache_ts < ttl:
             return self._codex_account_cache
+        if now - self._codex_account_attempt_ts < failure_ttl:
+            return None
+        self._codex_account_attempt_ts = now
         snapshot = read_codex_rate_limits()
         if snapshot:
             self._codex_account_cache = snapshot
             self._codex_account_cache_ts = now
         return snapshot
 
-    def _summary_from_statuses(self, statuses: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    def _summary_from_statuses(self, statuses: dict[str, dict[str, Any]], codex_account: dict[str, Any] | None = None) -> dict[str, Any]:
         api_key_cost = sum(float(item.get("api_key_cost_usd", 0.0)) for item in statuses.values())
         codex_cost = sum(float(item.get("codex_cost_usd", 0.0)) for item in statuses.values())
         total_cost = api_key_cost + codex_cost
@@ -375,7 +382,6 @@ class QuotaManager:
                 "total_cost_usd": round(codex_cost, 4),
             },
         }
-        codex_account = self._codex_account_snapshot()
         if codex_account:
             summary["codex_account"] = codex_account
         return summary
@@ -395,12 +401,14 @@ class QuotaManager:
                     "weekly_budget": self.get_weekly_budget(repo),
                     "remaining_daily": self.remaining_daily(repo),
                 }
-            repos = {r: self.status(r) for r in self._records}
-            return {
-                "repos": repos,
-                "summary": self._summary_from_statuses(repos),
-                "default_daily_budget": self._daily_budget,
-            }
+            repo_names = list(self._records)
+            default_daily_budget = self._daily_budget
+        repos = {r: self.status(r) for r in repo_names}
+        return {
+            "repos": repos,
+            "summary": self._summary_from_statuses(repos, self._codex_account_snapshot()),
+            "default_daily_budget": default_daily_budget,
+        }
 
 
 # Singleton

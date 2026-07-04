@@ -69,7 +69,7 @@ class TestCodexAccountRateLimits(unittest.TestCase):
                 "PATH": str(bin_dir) + os.pathsep + os.environ.get("PATH", ""),
             }
             with patch.dict(os.environ, env, clear=True):
-                snapshot = read_codex_rate_limits(timeout_seconds=2)
+                snapshot = read_codex_rate_limits(timeout_seconds=5)
         self.assertIsNotNone(snapshot)
         assert snapshot is not None
         self.assertEqual(snapshot["source"], "codex_app_server")

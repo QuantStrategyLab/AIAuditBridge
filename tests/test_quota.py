@@ -180,6 +180,12 @@ class TestQuotaManager(unittest.TestCase):
             status = self.manager.status()
         self.assertEqual(status["summary"]["codex_account"], snapshot)
 
+    def test_codex_account_failures_are_negative_cached(self) -> None:
+        with patch("service.quota.read_codex_rate_limits", return_value=None) as read_snapshot:
+            self.manager.status()
+            self.manager.status()
+        self.assertEqual(read_snapshot.call_count, 1)
+
     def test_invalid_codex_account_cache_ttl_does_not_break_status(self) -> None:
         snapshot = {"source": "codex_app_server", "status": "available", "rate_limits": {"plan_type": "pro"}}
         with patch.dict(os.environ, {"CODEX_AUDIT_SERVICE_CODEX_ACCOUNT_CACHE_SECONDS": "invalid"}):
@@ -214,6 +220,32 @@ class TestQuotaManager(unittest.TestCase):
         self.assertTrue(status["repos"]["old/repo"]["api_calls_incomplete"])
         self.assertTrue(status["summary"]["api_key"]["calls_incomplete"])
         self.assertEqual(status["summary"]["api_key"]["tokens_input"], 1000)
+
+    def test_historical_codex_tokens_are_not_migrated_to_api_key(self) -> None:
+        record = QuotaRecord.from_dict({
+            "repo": "old/codex-only",
+            "tokens_input": 1000,
+            "tokens_output": 500,
+            "codex_calls": 2,
+            "total_cost_usd": 0.1,
+        })
+        self.assertEqual(record.api_key_tokens_input, 0)
+        self.assertEqual(record.api_key_tokens_output, 0)
+        self.assertFalse(record.api_calls_incomplete)
+        self.assertEqual(record.codex_calls, 2)
+
+    def test_mixed_historical_codex_records_mark_api_calls_unknown_without_claiming_tokens(self) -> None:
+        record = QuotaRecord.from_dict({
+            "repo": "old/mixed",
+            "tokens_input": 1000,
+            "tokens_output": 500,
+            "codex_calls": 2,
+            "total_cost_usd": 0.2,
+        })
+        self.assertEqual(record.api_key_tokens_input, 0)
+        self.assertEqual(record.api_key_tokens_output, 0)
+        self.assertTrue(record.api_calls_incomplete)
+        self.assertAlmostEqual(record.api_key_cost_usd, 0.1)
 
     def test_zero_cost_historical_tokens_are_marked_incomplete(self) -> None:
         record = QuotaRecord.from_dict({
