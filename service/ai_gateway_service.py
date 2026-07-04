@@ -947,6 +947,8 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 "status": "ok",
                 "effect": record.effect,
                 "effect_detail": record.effect_detail,
+                "rollback_issue_required": record.rollback_issue_required,
+                "rollback_intent": record.rollback_intent,
             })
         except FileNotFoundError:
             _json_response(self, HTTPStatus.NOT_FOUND, {"status": "error", "error": "change_id not found"})

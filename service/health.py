@@ -28,6 +28,24 @@ ERROR_RATE_DEGRADED = 0.10   # >10% errors → degraded
 ERROR_RATE_UNHEALTHY = 0.30  # >30% errors → unhealthy
 LATENCY_P95_DEGRADED = 30.0  # p95 > 30s → degraded
 LATENCY_P95_UNHEALTHY = 120.0  # p95 > 120s → unhealthy
+BACKGROUND_JOB_LATENCY_P95_DEGRADED = 600.0  # background jobs can legitimately run for minutes
+BACKGROUND_JOB_LATENCY_P95_UNHEALTHY = 1800.0
+BACKGROUND_JOB_LATENCY_PATHS = {"/v1/ai/execute/jobs/run"}
+
+
+def latency_profile(path: str) -> str:
+    return "background_job" if path in BACKGROUND_JOB_LATENCY_PATHS else "online"
+
+
+def latency_thresholds(path: str) -> tuple[float, float]:
+    if latency_profile(path) == "background_job":
+        return BACKGROUND_JOB_LATENCY_P95_DEGRADED, BACKGROUND_JOB_LATENCY_P95_UNHEALTHY
+    return LATENCY_P95_DEGRADED, LATENCY_P95_UNHEALTHY
+
+
+def latency_affects_status(path: str) -> bool:
+    """Whether endpoint latency should affect service health status."""
+    return True
 
 
 @dataclass
@@ -100,6 +118,8 @@ class EndpointMetrics:
             "p50_ms": round(self.p50_latency * 1000, 1),
             "p95_ms": round(self.p95_latency * 1000, 1),
             "p99_ms": round(self.p99_latency * 1000, 1),
+            "latency_affects_status": latency_affects_status(self.path),
+            "latency_profile": latency_profile(self.path),
         }
 
 
@@ -146,16 +166,59 @@ class HealthMonitor:
             return "healthy"
         # Check error rates
         for m in all_metrics:
+            degraded_threshold, unhealthy_threshold = latency_thresholds(m.path)
             if m.recent_error_rate >= ERROR_RATE_UNHEALTHY:
                 return "unhealthy"
-            if m.p95_latency >= LATENCY_P95_UNHEALTHY:
+            if m.p95_latency >= unhealthy_threshold:
                 return "unhealthy"
         for m in all_metrics:
+            degraded_threshold, _ = latency_thresholds(m.path)
             if m.recent_error_rate >= ERROR_RATE_DEGRADED:
                 return "degraded"
-            if m.p95_latency >= LATENCY_P95_DEGRADED:
+            if m.p95_latency >= degraded_threshold:
                 return "degraded"
         return "healthy"
+
+    @property
+    def degradation_reasons(self) -> list[dict[str, Any]]:
+        """Structured reasons explaining degraded or unhealthy status."""
+        reasons: list[dict[str, Any]] = []
+        for m in list(self._metrics.values()):
+            if m.recent_error_rate >= ERROR_RATE_UNHEALTHY:
+                reasons.append({
+                    "path": m.path,
+                    "reason": "error_rate",
+                    "severity": "unhealthy",
+                    "value": round(m.recent_error_rate, 4),
+                    "threshold": ERROR_RATE_UNHEALTHY,
+                })
+            elif m.recent_error_rate >= ERROR_RATE_DEGRADED:
+                reasons.append({
+                    "path": m.path,
+                    "reason": "error_rate",
+                    "severity": "degraded",
+                    "value": round(m.recent_error_rate, 4),
+                    "threshold": ERROR_RATE_DEGRADED,
+                })
+            degraded_threshold, unhealthy_threshold = latency_thresholds(m.path)
+            if m.p95_latency >= unhealthy_threshold:
+                reasons.append({
+                    "path": m.path,
+                    "reason": "p95_latency_ms",
+                    "severity": "unhealthy",
+                    "value": round(m.p95_latency * 1000, 1),
+                    "threshold": round(unhealthy_threshold * 1000, 1),
+                })
+            elif m.p95_latency >= degraded_threshold:
+                reasons.append({
+                    "path": m.path,
+                    "reason": "p95_latency_ms",
+                    "severity": "degraded",
+                    "value": round(m.p95_latency * 1000, 1),
+                    "threshold": round(degraded_threshold * 1000, 1),
+                })
+        severity_rank = {"unhealthy": 0, "degraded": 1}
+        return sorted(reasons, key=lambda item: (severity_rank.get(str(item.get("severity")), 9), str(item.get("path", ""))))
 
     @property
     def uptime_seconds(self) -> float:
@@ -179,6 +242,7 @@ class HealthMonitor:
             "status": self.status,
             "uptime_seconds": self.uptime_seconds,
             "endpoints": endpoints,
+            "degradation_reasons": self.degradation_reasons,
             "last_error": self.last_error,
         }
 

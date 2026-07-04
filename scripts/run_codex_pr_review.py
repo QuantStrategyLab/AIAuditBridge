@@ -193,6 +193,11 @@ def classify_file_risk(
     return ("high", "source code change")
 
 
+def changed_files_are_low_risk(paths: list[str], policy: dict[str, Any]) -> bool:
+    """Return True when every changed path is low-risk under the policy."""
+    return bool(paths) and all(classify_file_risk(path, policy)[0] == TASK_COMPLEXITY_LOW for path in paths)
+
+
 # ---------------------------------------------------------------------------
 # PR diff fetching
 # ---------------------------------------------------------------------------
@@ -901,9 +906,7 @@ def main() -> int:
         print(f"::warning::Policy errors: {policy['policy_errors']}")
 
     # First pass: classify files. If all files are low-risk, skip review.
-    all_low_risk = all(
-        classify_file_risk(p, policy)[0] == "low" for p in changed_paths
-    )
+    all_low_risk = changed_files_are_low_risk(changed_paths, policy)
     if all_low_risk and changed_paths:
         print("All changed files are low-risk (docs/tests). Skipping Codex review.")
         decision = {
@@ -936,16 +939,27 @@ def main() -> int:
         )
     except ReviewError as exc:
         print(f"::error::Codex review failed: {exc}", file=sys.stderr)
-        # Don't block on review failures — post a warning comment
+        if all_low_risk:
+            # Don't block low-risk docs/tests when the review infra is unavailable.
+            warning_body = (
+                "<!-- codex-pr-review -->\n"
+                "## 🤖 Codex PR Review\n\n"
+                "⚠️ **Review skipped**: The Codex review could not be completed.\n\n"
+                f"```\n{exc}\n```\n"
+            )
+            upsert_pr_comment(token, repo, pr_number, warning_body)
+            return 0
+
+        # High-risk changes should not fail open on review infrastructure errors.
         warning_body = (
             "<!-- codex-pr-review -->\n"
             "## 🤖 Codex PR Review\n\n"
-            "⚠️ **Review skipped**: The Codex review could not be completed.\n\n"
+            "⚠️ **Human review required**: The Codex review could not be completed.\n\n"
             f"```\n{exc}\n```\n\n"
             "Please ensure a human reviewer checks this PR before merging.\n"
         )
         upsert_pr_comment(token, repo, pr_number, warning_body)
-        return 0  # Don't block on infrastructure failures
+        return 1
 
     print(f"Codex output: {len(output)} chars")
 

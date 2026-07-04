@@ -63,6 +63,9 @@ CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES='QuantStrategyLab/AIAuditBridge,
 CODEX_AUDIT_SERVICE_AUDIENCE=quant-codex-audit \
 CODEX_AUDIT_SERVICE_MODEL=gpt-5.4 \
 CODEX_AUDIT_SERVICE_REASONING_EFFORT=auto \
+CODEX_AUDIT_SERVICE_CODEX_ACCOUNT_USAGE=1 \
+CODEX_AUDIT_SERVICE_OPENAI_USAGE_WINDOW_DAYS=7 \
+CODEX_AUDIT_SERVICE_ANTHROPIC_USAGE_WINDOW_DAYS=7 \
 CODEX_AUDIT_SERVICE_JOB_DIR=/var/lib/codex-audit-bridge/jobs \
 bash scripts/deploy_codex_audit_service.sh deploy
 ```
@@ -70,6 +73,24 @@ bash scripts/deploy_codex_audit_service.sh deploy
 The job directory should be owned by the service user and mode `0700`.
 The service should rely on an authenticated Codex CLI session and must not
 inject OpenAI/Codex API keys into the Codex subprocess.
+With `CODEX_AUDIT_SERVICE_CODEX_ACCOUNT_USAGE=1`, `/v1/ai/quota` includes a
+sanitized Codex account rate-limit snapshot read from the local Codex
+app-server. This does not expose Codex auth tokens and should stay behind the
+existing dashboard authentication.
+With `OPENAI_ADMIN_KEY` set, `/v1/ai/quota` also includes a sanitized OpenAI
+completions Usage snapshot. Store the Admin API key only as a secret;
+the deploy script writes it to a root-only `0600` EnvironmentFile instead of
+embedding it in the public systemd unit. Use `CODEX_AUDIT_SERVICE_OPENAI_ADMIN_API_KEY_IDS`
+only for API key IDs, not raw API keys. OpenAI organization-wide costs are kept
+in a separate `organization_costs` field and are not mixed into the completions
+usage row.
+With `ANTHROPIC_ADMIN_KEY` set, `/v1/ai/quota` also includes a sanitized Claude
+organization Usage/Cost snapshot. Store it separately from the normal
+`ANTHROPIC_API_KEY`; the usage/cost endpoints require an Admin API key. Use
+`CODEX_AUDIT_SERVICE_ANTHROPIC_ADMIN_API_KEY_IDS` and
+`CODEX_AUDIT_SERVICE_ANTHROPIC_ADMIN_WORKSPACE_IDS` only for IDs, never raw API
+keys. When those filters are set, costs are omitted to avoid mixing filtered
+usage with an unfiltered cost total.
 Set `CODEX_AUDIT_SERVICE_REASONING_EFFORT` only when a hard override is needed;
 unset or `auto` keeps task-complexity routing.
 
