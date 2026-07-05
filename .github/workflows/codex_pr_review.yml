@@ -13,6 +13,11 @@ on:
         description: "Stable caller-side key used to cancel stale review jobs for the same PR."
         required: false
         type: string
+      allow_unconfigured_backend:
+        description: "Allow the review job to pass with a human-review note when no AI backend is configured in the caller repository."
+        required: false
+        type: boolean
+        default: false
     secrets:
       CODEX_AUDIT_REUSABLE_WORKFLOW_TOKEN:
         description: "Token that can read QuantStrategyLab/AIAuditBridge when this workflow is called from another private repo."
@@ -75,6 +80,7 @@ jobs:
           CODEX_AUDIT_SERVICE_URL: ${{ secrets.CODEX_AUDIT_SERVICE_URL }}
           CODEX_AUDIT_SERVICE_AUDIENCE: ${{ vars.CODEX_AUDIT_SERVICE_AUDIENCE || 'quant-codex-audit' }}
           CODEX_PR_REVIEW_REPO_ROOT: ${{ github.workspace }}/source
+          CODEX_PR_REVIEW_ALLOW_UNCONFIGURED_BACKEND: ${{ inputs.allow_unconfigured_backend || 'false' }}
         working-directory: source
         run: |
           set -euo pipefail

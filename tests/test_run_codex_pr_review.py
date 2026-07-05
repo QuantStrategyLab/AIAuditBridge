@@ -65,6 +65,27 @@ class RunCodexPrReviewTests(unittest.TestCase):
         self.assertEqual(output, "api review")
         direct_api.assert_called_once_with("Review this PR.", complexity="high")
 
+
+    def test_service_fallback_without_api_keys_preserves_service_failure(self) -> None:
+        with (
+            patch.dict(os.environ, {"CODEX_AUDIT_SERVICE_URL": "https://service.example"}, clear=True),
+            patch(
+                "scripts.run_codex_pr_review.run_codex_service_review",
+                side_effect=ReviewError("HTTP 429 Too Many Requests"),
+            ),
+        ):
+            with self.assertRaises(ReviewError) as raised:
+                run_codex_review_with_fallback(
+                    "Review this PR.",
+                    timeout_minutes=20,
+                    complexity="high",
+                    changed_file_count=3,
+                    changed_line_count=120,
+                )
+
+        self.assertIn("Codex service review failed", str(raised.exception))
+        self.assertFalse(run_codex_pr_review._review_backend_is_unconfigured(raised.exception))
+
     def test_service_auth_failure_does_not_fall_back_to_direct_api(self) -> None:
         with (
             patch.dict(os.environ, {"CODEX_AUDIT_SERVICE_URL": "https://service.example"}, clear=True),
@@ -124,6 +145,51 @@ class RunCodexPrReviewTests(unittest.TestCase):
 
         comment.assert_called_once()
 
+
+    def test_main_allows_unconfigured_backend_with_explicit_opt_in(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            event_path = self._write_event(tmpdir, ["scripts/run_codex_pr_review.py"])
+            env = {
+                "GH_TOKEN": "token",
+                "GITHUB_REPOSITORY": "org/repo",
+                "GITHUB_EVENT_PATH": event_path,
+                "GITHUB_EVENT_NAME": "pull_request",
+                "CODEX_PR_REVIEW_ALLOW_UNCONFIGURED_BACKEND": "true",
+            }
+            with (
+                patch.dict(os.environ, env, clear=True),
+                patch("scripts.run_codex_pr_review.fetch_pr_files", return_value=[{"filename": "scripts/run_codex_pr_review.py"}]),
+                patch("scripts.run_codex_pr_review.fetch_pr_diff", return_value="diff --git a/scripts/run_codex_pr_review.py b/scripts/run_codex_pr_review.py"),
+                patch("scripts.run_codex_pr_review.run_codex_review_with_fallback", side_effect=ReviewError(run_codex_pr_review.NO_REVIEW_BACKEND_CONFIGURED)),
+                patch("scripts.run_codex_pr_review.upsert_pr_comment") as comment,
+            ):
+                self.assertEqual(run_codex_pr_review.main(), 0)
+
+        comment.assert_called_once()
+        self.assertIn("Human review required", comment.call_args.args[3])
+
+
+    def test_main_fails_closed_on_unconfigured_backend_without_opt_in(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            event_path = self._write_event(tmpdir, ["scripts/run_codex_pr_review.py"])
+            env = {
+                "GH_TOKEN": "token",
+                "GITHUB_REPOSITORY": "org/repo",
+                "GITHUB_EVENT_PATH": event_path,
+                "GITHUB_EVENT_NAME": "pull_request",
+            }
+            with (
+                patch.dict(os.environ, env, clear=True),
+                patch("scripts.run_codex_pr_review.fetch_pr_files", return_value=[{"filename": "scripts/run_codex_pr_review.py"}]),
+                patch("scripts.run_codex_pr_review.fetch_pr_diff", return_value="diff --git a/scripts/run_codex_pr_review.py b/scripts/run_codex_pr_review.py"),
+                patch("scripts.run_codex_pr_review.run_codex_review_with_fallback", side_effect=ReviewError(run_codex_pr_review.NO_REVIEW_BACKEND_CONFIGURED)),
+                patch("scripts.run_codex_pr_review.upsert_pr_comment") as comment,
+            ):
+                self.assertEqual(run_codex_pr_review.main(), 1)
+
+        comment.assert_called_once()
+        self.assertIn("Human review required", comment.call_args.args[3])
+
     def test_service_timeout_does_not_fall_back_to_direct_api(self) -> None:
         with (
             patch.dict(os.environ, {"CODEX_AUDIT_SERVICE_URL": "https://service.example"}, clear=True),
@@ -173,6 +239,8 @@ class CodexPrReviewWorkflowTest(unittest.TestCase):
         self.assertIn("path: bridge", workflow)
         self.assertIn("CODEX_AUDIT_REUSABLE_WORKFLOW_TOKEN", workflow)
         self.assertIn("caller_concurrency_key", workflow)
+        self.assertIn("allow_unconfigured_backend", workflow)
+        self.assertIn("CODEX_PR_REVIEW_ALLOW_UNCONFIGURED_BACKEND", workflow)
         self.assertIn("inputs.caller_concurrency_key || github.event.pull_request.number || github.run_id", workflow)
         self.assertNotIn("Validate bridge checkout token", workflow)
         self.assertIn("required: false", workflow)

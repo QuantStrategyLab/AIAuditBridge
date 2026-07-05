@@ -43,6 +43,10 @@ CODEX_SERVICE_FALLBACK_SIGNALS = (
     "rate limit",
     "quota",
 )
+NO_REVIEW_BACKEND_CONFIGURED = (
+    "No Codex service URL or API key configured. "
+    "Set CODEX_AUDIT_SERVICE_URL, ANTHROPIC_API_KEY, or OPENAI_API_KEY."
+)
 
 # Risk → block mapping
 BLOCK_SEVERITIES = frozenset({"critical", "high"})
@@ -480,6 +484,14 @@ def _service_review_should_fallback(exc: ReviewError) -> bool:
     return any(signal in message for signal in CODEX_SERVICE_FALLBACK_SIGNALS)
 
 
+def _review_backend_is_unconfigured(exc: ReviewError) -> bool:
+    return str(exc).strip() == NO_REVIEW_BACKEND_CONFIGURED
+
+
+def _allow_unconfigured_backend() -> bool:
+    return parse_bool(env_value("CODEX_PR_REVIEW_ALLOW_UNCONFIGURED_BACKEND"))
+
+
 def run_codex_review_with_fallback(
     prompt: str,
     timeout_minutes: int,
@@ -490,6 +502,7 @@ def run_codex_review_with_fallback(
     # env_value() returns "" when CODEX_AUDIT_SERVICE_URL is unset, so this
     # guard keeps the direct-API path intact without special error handling.
     service_url = env_value("CODEX_AUDIT_SERVICE_URL")
+    service_failure: Exception | None = None
     if service_url:
         try:
             print(f"Running Codex review via service: {service_url}")
@@ -503,12 +516,21 @@ def run_codex_review_with_fallback(
         except ReviewError as exc:
             if not _service_review_should_fallback(exc):
                 raise
+            service_failure = exc
             print(f"::warning::Codex service review failed; falling back to direct API: {exc}")
         except (json.JSONDecodeError, OSError, urllib.error.URLError) as exc:
+            service_failure = exc
             print(f"::error::Codex service review failed; falling back to direct API: {exc}")
 
     print("Running Codex review via direct API")
-    return run_direct_api_review(prompt, complexity=complexity)
+    try:
+        return run_direct_api_review(prompt, complexity=complexity)
+    except ReviewError as exc:
+        if service_failure is not None and _review_backend_is_unconfigured(exc):
+            raise ReviewError(
+                f"Codex service review failed and no direct API fallback is configured: {service_failure}"
+            ) from exc
+        raise
 
 
 def _service_request(
@@ -570,10 +592,7 @@ def run_direct_api_review(prompt: str, complexity: str = "") -> str:
                 model=_direct_api_model_for_complexity(provider, normalized),
             )
 
-    raise ReviewError(
-        "No Codex service URL or API key configured. "
-        "Set CODEX_AUDIT_SERVICE_URL, ANTHROPIC_API_KEY, or OPENAI_API_KEY."
-    )
+    raise ReviewError(NO_REVIEW_BACKEND_CONFIGURED)
 
 
 def _run_anthropic_review(prompt: str, api_key: str, model: str = "") -> str:
@@ -985,7 +1004,10 @@ def main() -> int:
             upsert_pr_comment(token, repo, pr_number, warning_body)
             return 0
 
-        # High-risk changes should not fail open on review infrastructure errors.
+        # Caller repositories may not have the central AI backend secrets configured.
+        # In that case, leave an explicit human-review note but do not create
+        # persistent red workflow runs. Other high-risk review infrastructure
+        # failures still fail closed.
         warning_body = (
             "<!-- codex-pr-review -->\n"
             "## 🤖 Codex PR Review\n\n"
@@ -994,6 +1016,9 @@ def main() -> int:
             "Please ensure a human reviewer checks this PR before merging.\n"
         )
         upsert_pr_comment(token, repo, pr_number, warning_body)
+        if _review_backend_is_unconfigured(exc) and _allow_unconfigured_backend():
+            print("::warning::Codex review backend is not configured; leaving human-review note without failing the workflow.")
+            return 0
         return 1
 
     print(f"Codex output: {len(output)} chars")
