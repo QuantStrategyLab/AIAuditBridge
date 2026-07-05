@@ -151,6 +151,23 @@ class TestQuotaManager(unittest.TestCase):
         remaining = self.manager.remaining_daily("test/repo")
         self.assertLess(remaining, DEFAULT_DAILY_BUDGET_USD)
 
+    def test_runtime_status_reflects_daily_budget_pressure(self) -> None:
+        self.assertEqual(self.manager.runtime_status("test/repo")["status"], "ok")
+        self.manager._repo_budgets["test/repo"] = {"daily": 0.06, "weekly": 1.0}
+        self.manager.record_execute("test/repo")
+        self.assertEqual(self.manager.runtime_status("test/repo")["status"], "low")
+        self.manager.record_execute("test/repo")
+        self.assertEqual(self.manager.runtime_status("test/repo")["status"], "exhausted")
+
+    def test_runtime_status_boundary_ratios(self) -> None:
+        self.manager._repo_budgets["low/repo"] = {"daily": 1.0, "weekly": 1.0}
+        self.manager._records["low/repo"] = QuotaRecord(repo="low/repo", total_cost_usd=0.75)
+        self.assertEqual(self.manager.runtime_status("low/repo")["status"], "low")
+        self.manager._records["low/repo"] = QuotaRecord(repo="low/repo", total_cost_usd=0.96)
+        self.assertEqual(self.manager.runtime_status("low/repo")["status"], "exhausted")
+        self.manager._repo_budgets["zero/repo"] = {"daily": 0.0, "weekly": 1.0}
+        self.assertEqual(self.manager.runtime_status("zero/repo")["status"], "ok")
+
     def test_status_returns_repo_info(self) -> None:
         self.manager.record("test/repo", "claude-sonnet-4-6", "prompt")
         status = self.manager.status("test/repo")

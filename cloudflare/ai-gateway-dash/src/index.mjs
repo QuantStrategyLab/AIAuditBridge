@@ -231,7 +231,7 @@ function riskClass(risk){return risk==="critical"||risk==="high"?"err":risk==="m
 function requiresHumanAudit(c){const action=String(c.action||""),risk=String(c.risk||""),effect=String(c.effect||"");return action==="escalate"||action==="manual"||risk==="critical"||risk==="high"||effect==="degraded"||Boolean(c.rollback_issue_url)}
 function renderChangePanels(items){renderAutonomy(items);renderHumanAudit(items);renderChanges(items.slice(0,15))}
 function renderAutonomy(items){setUpdated("autonomy-updated");const target=document.getElementById("autonomy"),autoMerge=items.filter(c=>c.action==="auto_merge").length,autoPr=items.filter(c=>c.action==="auto_pr").length,manual=items.filter(requiresHumanAudit).length,highRisk=items.filter(c=>["critical","high"].includes(String(c.risk||""))).length,pending=items.filter(c=>(c.effect||"pending")==="pending").length;clear(target);if(!items.length){empty(target,"暂无自治动作","最近 7 天没有登记 AI 自治变更；后续会展示自动 PR、自动合并与升级人工的比例。");return}append(target,append(el("div","metric-line"),el("div","big blue",fmtNum(items.length)),el("span","delta info","已登记")),append(el("div",""),statRow("自动合并",autoMerge,autoMerge?"ok":"info"),statRow("自动 PR",autoPr,"info"),statRow("需人工审计",manual,manual?"warn":"ok"),statRow("高风险/关键",highRisk,highRisk?"err":"ok"),statRow("待效果评估",pending,pending?"warn":"ok")))}
-function renderHumanAudit(items){setUpdated("human-audit-updated");const target=document.getElementById("human-audit"),all=items.filter(requiresHumanAudit),queue=all.slice(0,5);clear(target);if(!all.length){empty(target,"暂无待人工审计","低风险自治动作可由系统继续跟进；高风险、退化或升级人工的变更会进入这里。");return}append(target,append(el("div","metric-line"),el("div","big ",fmtNum(all.length)),el("span","delta warn","待审计")));for(const c of queue){const repo=String(c.repo||c.source_repo||"").split("/").pop()||"—",row=el("div","stat-row"),value=el("span","stat-value "+riskClass(c.risk));append(value,badge(riskClass(c.risk),riskText(c.risk)),document.createTextNode(" "+actionText(c.action)));append(row,el("span","stat-label",repo),value);target.appendChild(row)}}
+function renderHumanAudit(items){setUpdated("human-audit-updated");const target=document.getElementById("human-audit"),all=items.filter(requiresHumanAudit),queue=all.slice(0,5);clear(target);if(!all.length){empty(target,"暂无待人工审计","低风险自治动作可由系统继续跟进；高风险、退化或升级人工的变更会进入这里。");return}append(target,append(el("div","metric-line"),el("div","big ",fmtNum(all.length)),el("span","delta warn","待审计")));for(const c of queue){const repo=String(c.repo||c.source_repo||"").split("/").pop()||"—",row=el("div","stat-row"),value=el("span","stat-value "+riskClass(c.risk));append(value,badge(riskClass(c.risk),riskText(c.risk)),document.createTextNode(" "+actionText(c.action)));if(c.external_url){const a=el("a","",repo);a.href=c.external_url;a.target="_blank";a.rel="noreferrer";a.style.color="#93c5fd";a.style.textDecoration="none";append(row,append(el("span","stat-label"),a),value)}else append(row,el("span","stat-label",repo),value);target.appendChild(row)}}
 function renderChanges(items){setUpdated("changes-updated");const target=document.getElementById("changes");clear(target);if(!items.length){empty(target,"暂无变更记录","最近 7 天没有登记的 AI 变更；后续通过反馈接口登记后会在这里形成报告。");return}const table=el("table",""),thead=el("thead",""),tr=el("tr","");for(const h of ["仓库","操作","风险","效果","置信度","时间"])tr.appendChild(el("th","",h));thead.appendChild(tr);const tbody=el("tbody","");for(const c of items){const effect=c.effect||"pending",effectClass=effect==="improved"?"ok":effect==="degraded"?"err":"info",actionClass=c.action==="auto_merge"?"ok":c.action==="auto_pr"?"info":c.action?"violet":"warn",dt=c.created_at?new Date(c.created_at*1000).toLocaleDateString():"—",row=el("tr",""),repoName=String(c.repo||"").split("/").pop()||"—",repoCell=el("td","mono");if(c.external_url){const a=el("a","",repoName);a.href=c.external_url;a.target="_blank";a.rel="noreferrer";a.style.color="#93c5fd";a.style.textDecoration="none";repoCell.appendChild(a)}else repoCell.textContent=repoName;append(row,repoCell,append(el("td",""),badge(actionClass,actionText(c.action))),append(el("td",""),badge(riskClass(c.risk),riskText(c.risk))),el("td","stat-value "+effectClass,effectText(effect)),el("td","mono",fmtPct(c.confidence||0)),el("td","mono",dt));tbody.appendChild(row)}append(table,thead,tbody);target.appendChild(table)}
 function safeAvatarUrl(value){try{const u=new URL(value);return u.protocol==="https:"?u.toString():""}catch(e){return ""}}
 async function loadUser(){try{const r=await fetch("/api/user");if(r.ok){const u=await r.json(),img=document.getElementById("avatar"),avatar=safeAvatarUrl(u.avatar_url);document.getElementById("username").textContent=u.login||"";if(avatar){img.src=avatar;img.style.display="block"}else{img.removeAttribute("src");img.style.display="none"}}}catch(e){}}
@@ -334,31 +334,67 @@ function generateSessionToken() {
   return result;
 }
 
+function sessionKV(env) {
+  const kv = env && env.DASHBOARD_SESSION_KV;
+  return kv && typeof kv.get === "function" && typeof kv.put === "function" && typeof kv.delete === "function" ? kv : null;
+}
+
+function sessionKVKey(jti) {
+  return "dash_session:" + jti;
+}
+
+async function parseSignedSession(token, env) {
+  const secret = sessionSecret(env);
+  if (!secret) return null;
+  const [payload, signature] = String(token || "").split(".");
+  if (!payload || !signature) return null;
+  const expected = await hmacSha256(secret, payload);
+  if (!constantTimeEqual(signature, expected)) return null;
+  const session = JSON.parse(base64UrlDecode(payload));
+  if (!session || Number(session.exp) < Date.now()) return null;
+  return session;
+}
+
 async function createSession(user, env) {
   const secret = sessionSecret(env);
   if (!secret) throw new Error("Dashboard session secret not configured");
-  const payload = base64UrlEncode(JSON.stringify({
+  const jti = generateSessionToken();
+  const session = {
     login: user.login,
     avatar_url: user.avatar_url,
+    jti,
     exp: Date.now() + COOKIE_MAX_AGE * 1000,
-  }));
+  };
+  const kv = sessionKV(env);
+  if (kv) {
+    await kv.put(sessionKVKey(jti), JSON.stringify({ login: session.login, exp: session.exp }), { expirationTtl: COOKIE_MAX_AGE });
+  }
+  const payload = base64UrlEncode(JSON.stringify(session));
   return payload + "." + await hmacSha256(secret, payload);
 }
 
 async function getSession(token, env) {
   try {
-    const secret = sessionSecret(env);
-    if (!secret) return null;
-    const [payload, signature] = String(token || "").split(".");
-    if (!payload || !signature) return null;
-    const expected = await hmacSha256(secret, payload);
-    if (!constantTimeEqual(signature, expected)) return null;
-    const session = JSON.parse(base64UrlDecode(payload));
-    if (!session || Number(session.exp) < Date.now()) return null;
-    return { login: String(session.login || ""), avatar_url: String(session.avatar_url || "") };
+    const session = await parseSignedSession(token, env);
+    if (!session) return null;
+    const kv = sessionKV(env);
+    if (kv) {
+      const active = await kv.get(sessionKVKey(String(session.jti || "")));
+      if (!active) return null;
+    }
+    return { login: String(session.login || ""), avatar_url: String(session.avatar_url || ""), jti: String(session.jti || "") };
   } catch (e) {
     return null;
   }
+}
+
+async function revokeSession(token, env) {
+  try {
+    const kv = sessionKV(env);
+    if (!kv) return;
+    const session = await parseSignedSession(token, env);
+    if (session && session.jti) await kv.delete(sessionKVKey(String(session.jti)));
+  } catch (e) {}
 }
 
 // ── API proxy ──────────────────────────────────────────────────────────
@@ -481,6 +517,7 @@ export default {
 
     // ── Logout ─────────────────────────────────────────────────────
     if (path === "/logout") {
+      await revokeSession(getCookie(request, COOKIE_NAME), env);
       return new Response(null, {
         status: 302,
         headers: {

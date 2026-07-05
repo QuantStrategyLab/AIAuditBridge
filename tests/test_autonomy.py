@@ -120,3 +120,18 @@ class TestDefaultDecisionMatrix(unittest.TestCase):
         self.assertEqual(result["initial_action"], ACTION_AUTO_MERGE)
         self.assertEqual(result["action"], ACTION_ESCALATE)
         self.assertTrue(result["human_review_required"])
+
+    def test_low_quota_caps_auto_merge_to_auto_pr(self) -> None:
+        result = recommended_action([{"confidence": 0.99}], ["docs/runbook.md"], quota_status="low")
+
+        self.assertEqual(result["initial_action"], ACTION_AUTO_MERGE)
+        self.assertEqual(result["action"], ACTION_AUTO_PR)
+        self.assertFalse(result["auto_merge_allowed"])
+        self.assertTrue(any("quota status is low" in guard for guard in result["runtime_guards"]))
+
+    def test_exhausted_quota_forces_human_review(self) -> None:
+        result = recommended_action([{"confidence": 0.99}], ["docs/runbook.md"], quota_status="exhausted")
+
+        self.assertEqual(result["initial_action"], ACTION_AUTO_MERGE)
+        self.assertEqual(result["action"], ACTION_ESCALATE)
+        self.assertTrue(result["human_review_required"])

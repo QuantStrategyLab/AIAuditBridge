@@ -47,6 +47,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from service.task_state import change_requires_human_review, change_task_state
+
 # ── effect constants ────────────────────────────────────────────────────
 
 EFFECT_IMPROVED = "improved"
@@ -140,6 +142,8 @@ class ChangeRecord:
             "created_at": self.created_at,
             "evaluated_at": self.evaluated_at,
             "source_repo": self.source_repo,
+            "state": change_task_state(self),
+            "human_review_required": change_requires_human_review(self),
         }
 
     @classmethod
@@ -431,11 +435,25 @@ def effectiveness_report(repo: str = "", days: int = 90) -> dict[str, Any]:
     neutral = sum(1 for c in evaluated if c.effect == EFFECT_NEUTRAL)
 
     by_action: dict[str, dict[str, int]] = {}
+    by_risk: dict[str, dict[str, int]] = {}
+    by_state: dict[str, int] = {}
+    for c in changes:
+        state = change_task_state(c)
+        by_state[state] = by_state.get(state, 0) + 1
     for c in evaluated:
         if c.action not in by_action:
             by_action[c.action] = {"improved": 0, "degraded": 0, "neutral": 0, "total": 0}
         by_action[c.action][c.effect] += 1
         by_action[c.action]["total"] += 1
+        if c.risk not in by_risk:
+            by_risk[c.risk] = {"improved": 0, "degraded": 0, "neutral": 0, "total": 0}
+        by_risk[c.risk][c.effect] += 1
+        by_risk[c.risk]["total"] += 1
+
+    auto_actions = {"auto_merge", "auto_pr", "auto_notify"}
+    auto_total = sum(1 for c in changes if c.action in auto_actions)
+    human_review_required = sum(1 for c in changes if change_requires_human_review(c))
+    rollback_required = sum(1 for c in changes if c.rollback_issue_required or c.rollback_issue_url)
 
     return {
         "period_days": days,
@@ -446,5 +464,10 @@ def effectiveness_report(repo: str = "", days: int = 90) -> dict[str, Any]:
         "degraded": degraded,
         "neutral": neutral,
         "improvement_rate": improved / total_evaluated if total_evaluated > 0 else 0,
+        "auto_actions": auto_total,
+        "human_review_required": human_review_required,
+        "rollback_required": rollback_required,
         "by_action": by_action,
+        "by_risk": by_risk,
+        "by_state": by_state,
     }

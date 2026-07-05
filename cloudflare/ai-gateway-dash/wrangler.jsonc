@@ -6,5 +6,11 @@
   "workers_dev": true,
   "observability": {
     "enabled": true
-  }
+  },
+  "kv_namespaces": [
+    {
+      "binding": "DASHBOARD_SESSION_KV",
+      "id": "69089919967146229b5d27b264307295"
+    }
+  ]
 }

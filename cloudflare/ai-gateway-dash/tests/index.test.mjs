@@ -1,6 +1,24 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+class FakeKV {
+  constructor() {
+    this.store = new Map();
+  }
+
+  async get(key) {
+    return this.store.get(key) || null;
+  }
+
+  async put(key, value) {
+    this.store.set(key, value);
+  }
+
+  async delete(key) {
+    this.store.delete(key);
+  }
+}
+
 import worker, {
   REQUIRED_ORG,
   buildDashboardApiUrl,
@@ -95,6 +113,7 @@ test("authenticated dashboard html ships codex remaining quota display", async (
     ["GITHUB_OAUTH_CLIENT_ID", "client"],
     ["GITHUB_OAUTH_CLIENT_SECRET", "oauth-client-test-value"],
     ["DASHBOARD_SESSION_SECRET", "test-session-signing-value"],
+    ["DASHBOARD_SESSION_KV", new FakeKV()],
   ]);
   const callback = await worker.fetch(
     new Request("https://dash.example/callback?code=code&state=state", {
@@ -127,6 +146,18 @@ test("authenticated dashboard html ships codex remaining quota display", async (
     env,
   );
   assert.equal(tampered.status, 401);
+
+  const logout = await worker.fetch(
+    new Request("https://dash.example/logout", { headers: { Cookie: "dash_session=" + session } }),
+    env,
+  );
+  assert.equal(logout.status, 302);
+
+  const revoked = await worker.fetch(
+    new Request("https://dash.example/api/user", { headers: { Cookie: "dash_session=" + session } }),
+    env,
+  );
+  assert.equal(revoked.status, 401, "logout revokes the active signed session when KV is bound");
 });
 
 test("dashboard callback requires dedicated session signing secret", async (t) => {
@@ -161,4 +192,52 @@ test("dashboard callback requires dedicated session signing secret", async (t) =
   assert.equal(callback.status, 302);
   assert.match(callback.headers.get("location") || "", /error=/);
   assert.doesNotMatch(callback.headers.get("set-cookie") || "", /dash_session=/);
+});
+
+
+test("sessions issued before KV binding require re-login", async (t) => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url.includes("/login/oauth/access_token")) {
+      return Response.json(Object.fromEntries([["access_token", "github-token"]]));
+    }
+    if (url.endsWith("/user")) {
+      return Response.json({ login: "operator", avatar_url: "https://example.test/avatar.png" });
+    }
+    if (url.endsWith("/user/orgs")) {
+      return Response.json([{ login: REQUIRED_ORG }]);
+    }
+    throw new Error("unexpected fetch " + url);
+  };
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const baseEnv = Object.fromEntries([
+    ["GITHUB_OAUTH_CLIENT_ID", "client"],
+    ["GITHUB_OAUTH_CLIENT_SECRET", "oauth-client-test-value"],
+    ["DASHBOARD_SESSION_SECRET", "test-session-signing-value"],
+  ]);
+  const callback = await worker.fetch(
+    new Request("https://dash.example/callback?code=code&state=state", {
+      headers: { Cookie: "dash_oauth_state=state" },
+    }),
+    baseEnv,
+  );
+  const session = /dash_session=([^;]+)/.exec(callback.headers.get("set-cookie") || "")?.[1];
+  assert.ok(session);
+
+  const beforeKv = await worker.fetch(
+    new Request("https://dash.example/api/user", { headers: { Cookie: "dash_session=" + session } }),
+    baseEnv,
+  );
+  assert.equal(beforeKv.status, 200);
+
+  const kvEnv = Object.fromEntries([...Object.entries(baseEnv), ["DASHBOARD_SESSION_KV", new FakeKV()]]);
+  const afterKv = await worker.fetch(
+    new Request("https://dash.example/api/user", { headers: { Cookie: "dash_session=" + session } }),
+    kvEnv,
+  );
+  assert.equal(afterKv.status, 401);
 });
