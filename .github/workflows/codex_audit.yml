@@ -26,8 +26,9 @@ on:
         description: "Audit provider"
         required: false
         type: choice
-        default: "auto"
+        default: "task_default"
         options:
+          - task_default
           - auto
           - api
           - anthropic
@@ -68,7 +69,7 @@ jobs:
       ISSUE_NUMBER: ${{ github.event.client_payload.issue_number || inputs.issue_number }}
       SOURCE_REF: ${{ github.event.client_payload.source_ref || inputs.source_ref || 'main' }}
       CODEX_AUDIT_MODE: ${{ github.event.client_payload.mode || inputs.mode || 'review_and_fix' }}
-      CODEX_AUDIT_PROVIDER: ${{ github.event.client_payload.provider || inputs.provider || 'auto' }}
+      CODEX_AUDIT_PROVIDER: ${{ github.event.client_payload.provider || inputs.provider || 'task_default' }}
       CODEX_AUDIT_CODEX_BACKEND: service
       CODEX_AUDIT_TASK: ${{ github.event.client_payload.task || inputs.task || 'monthly_snapshot_audit' }}
       CODEX_AUDIT_AUTO_MERGE: ${{ github.event.client_payload.auto_merge || inputs.auto_merge || 'false' }}
