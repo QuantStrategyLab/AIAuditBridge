@@ -34,6 +34,18 @@ def _normalize_status(value: Any, default: str = "") -> str:
     return str(value or default).strip().lower()
 
 
+def _normalize_quota_status(value: Any, default: str = "ok") -> str:
+    if isinstance(value, dict) and isinstance(value.get("quota"), dict):
+        nested_status = _normalize_status(value["quota"])
+        if nested_status:
+            return nested_status
+    return _normalize_status(value, default)
+
+
+def _is_omitted(value: Any) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
 def suggest_control_action(
     service_health: Any = "healthy",
     quota_status: Any = "ok",
@@ -41,7 +53,7 @@ def suggest_control_action(
 ) -> dict[str, Any]:
     """Convert health/quota/org-health signals into a control action."""
     health = _normalize_status(service_health, "healthy")
-    quota = _normalize_status(quota_status, "ok")
+    quota = _normalize_quota_status(quota_status, "ok")
     org_health = _normalize_status(org_health_status, "ok")
 
     reasons: list[str] = []
@@ -128,7 +140,7 @@ class AutomationRunLedger:
             "task_state": str(task_state or "").strip().lower(),
             "suggested_action": str(suggested_action or "").strip().lower(),
             "service_health": _normalize_status(service_health),
-            "quota_status": _normalize_status(quota_status, "ok"),
+            "quota_status": _normalize_quota_status(quota_status, "ok"),
             "org_health_status": _normalize_status(org_health_status, "ok"),
             "metadata": dict(metadata or {}),
             "updated_at": now,
@@ -145,6 +157,14 @@ class AutomationRunLedger:
                     entry["task_name"] = str(current.get("task_name", ""))
                 if not entry["metadata"]:
                     entry["metadata"] = dict(current.get("metadata", {}))
+                if not entry["suggested_action"]:
+                    entry["suggested_action"] = str(current.get("suggested_action", ""))
+                if _is_omitted(service_health):
+                    entry["service_health"] = str(current.get("service_health", ""))
+                if _is_omitted(quota_status):
+                    entry["quota_status"] = str(current.get("quota_status", "ok"))
+                if _is_omitted(org_health_status):
+                    entry["org_health_status"] = str(current.get("org_health_status", "ok"))
             entry["events"].append(
                 {
                     "task_state": entry["task_state"],

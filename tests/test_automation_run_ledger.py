@@ -36,6 +36,15 @@ class TestSuggestControlAction(unittest.TestCase):
         self.assertEqual(result["action"], CONTROL_PAUSE_AUTO_FIX)
         self.assertIn("quota status is low", result["reasons"])
 
+    def test_nested_quota_snapshot_controls_action(self) -> None:
+        result = suggest_control_action(
+            "healthy",
+            {"status": "ok", "quota": {"status": "exhausted"}},
+            "ok",
+        )
+        self.assertEqual(result["action"], CONTROL_ESCALATE)
+        self.assertFalse(result["auto_fix_allowed"])
+
     def test_unhealthy_signals_escalate(self) -> None:
         result = suggest_control_action("healthy", "ok", {"status": "unhealthy"})
         self.assertEqual(result["action"], CONTROL_ESCALATE)
@@ -104,6 +113,23 @@ class TestAutomationRunLedger(unittest.TestCase):
         snapshot = ledger.snapshot(limit=None)
         self.assertEqual(snapshot["summary"]["total_runs"], 2)
         self.assertEqual({run["run_id"] for run in snapshot["runs"]}, {"run-2", "run-3"})
+
+    def test_update_preserves_control_fields_when_omitted(self) -> None:
+        self.ledger.record(
+            "run-1",
+            "queued",
+            suggested_action=CONTROL_PAUSE_AUTO_FIX,
+            service_health="degraded",
+            quota_status="low",
+            org_health_status="ok",
+        )
+
+        updated = self.ledger.record("run-1", "running")
+
+        self.assertEqual(updated["suggested_action"], CONTROL_PAUSE_AUTO_FIX)
+        self.assertEqual(updated["service_health"], "degraded")
+        self.assertEqual(updated["quota_status"], "low")
+        self.assertEqual(updated["events"][-1]["suggested_action"], CONTROL_PAUSE_AUTO_FIX)
 
     def test_record_rejects_blank_run_id(self) -> None:
         with self.assertRaises(ValueError):
