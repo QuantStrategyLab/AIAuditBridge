@@ -26,6 +26,7 @@ CONTROL_ACTIONS = frozenset(
 
 DEFAULT_MAX_RUNS = 500
 DEFAULT_MAX_EVENTS_PER_RUN = 50
+INTERNAL_ENTRY_KEYS = frozenset({"_ledger_sequence"})
 
 QUOTA_STATUS_SEVERITY = {
     "ok": 0,
@@ -119,6 +120,7 @@ class AutomationRunLedger:
         self._runs: dict[str, dict[str, Any]] = {}
         self._max_runs = max(1, int(max_runs))
         self._max_events_per_run = max(1, int(max_events_per_run))
+        self._sequence = 0
 
     def _evict_old_runs_locked(self) -> None:
         overflow = len(self._runs) - self._max_runs
@@ -126,10 +128,21 @@ class AutomationRunLedger:
             return
         ordered = sorted(
             self._runs.values(),
-            key=lambda item: (float(item.get("updated_at", 0.0)), str(item.get("run_id", ""))),
+            key=lambda item: (
+                float(item.get("updated_at", 0.0)),
+                int(item.get("_ledger_sequence", 0)),
+            ),
         )
         for entry in ordered[:overflow]:
-            self._runs.pop(str(entry.get("run_id", "")), None)
+            self._runs.pop(str(entry["run_id"]))
+
+    @staticmethod
+    def _public_entry(entry: dict[str, Any], *, include_events: bool = True) -> dict[str, Any]:
+        return {
+            key: deepcopy(value)
+            for key, value in entry.items()
+            if key not in INTERNAL_ENTRY_KEYS and (include_events or key != "events")
+        }
 
     def record(
         self,
@@ -162,6 +175,7 @@ class AutomationRunLedger:
         with self._lock:
             current = self._runs.get(run_id)
             if current:
+                entry["_ledger_sequence"] = current.get("_ledger_sequence", 0)
                 old_events = list(current.get("events", []))
                 entry["events"] = (
                     old_events[-(self._max_events_per_run - 1) :] if self._max_events_per_run > 1 else []
@@ -178,6 +192,9 @@ class AutomationRunLedger:
                     entry["quota_status"] = str(current.get("quota_status", ""))
                 if _is_omitted(org_health_status):
                     entry["org_health_status"] = str(current.get("org_health_status", ""))
+            else:
+                self._sequence += 1
+                entry["_ledger_sequence"] = self._sequence
             entry["events"].append(
                 {
                     "task_state": entry["task_state"],
@@ -191,23 +208,21 @@ class AutomationRunLedger:
             )
             self._runs[run_id] = entry
             self._evict_old_runs_locked()
-            return deepcopy(entry)
+            return self._public_entry(self._runs[run_id])
 
     def get(self, run_id: str) -> dict[str, Any] | None:
         with self._lock:
             entry = self._runs.get(run_id)
-            return deepcopy(entry) if entry else None
+            return self._public_entry(entry) if entry else None
 
     def snapshot(self, *, limit: int | None = 100, include_events: bool = False) -> dict[str, Any]:
         with self._lock:
             retained_runs = [
-                {
-                    key: deepcopy(value)
-                    for key, value in entry.items()
-                    if include_events or key != "events"
-                }
+                self._public_entry(entry, include_events=include_events)
                 for entry in self._runs.values()
             ]
+            max_runs = self._max_runs
+            max_events_per_run = self._max_events_per_run
 
         task_states = Counter(str(run.get("task_state", "")).strip().lower() for run in retained_runs if run.get("task_state"))
         suggested_actions = Counter(
@@ -234,8 +249,8 @@ class AutomationRunLedger:
                 "task_states": dict(task_states),
                 "suggested_actions": dict(suggested_actions),
                 "retention": {
-                    "max_runs": self._max_runs,
-                    "max_events_per_run": self._max_events_per_run,
+                    "max_runs": max_runs,
+                    "max_events_per_run": max_events_per_run,
                     "events_included": include_events,
                 },
             },

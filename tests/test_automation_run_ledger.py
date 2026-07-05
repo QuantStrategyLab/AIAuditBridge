@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from service.automation_run_ledger import (
     AutomationRunLedger,
@@ -97,6 +98,7 @@ class TestAutomationRunLedger(unittest.TestCase):
 
         self.assertEqual(first["task_state"], "queued")
         self.assertEqual(second["task_state"], "running")
+        self.assertNotIn("_ledger_sequence", second)
         self.assertEqual(len(second["events"]), 2)
         self.assertEqual(second["events"][0]["task_state"], "queued")
         self.assertEqual(second["events"][1]["suggested_action"], CONTROL_CONTINUE)
@@ -133,6 +135,15 @@ class TestAutomationRunLedger(unittest.TestCase):
         snapshot = ledger.snapshot(limit=None)
         self.assertEqual(snapshot["summary"]["total_runs"], 2)
         self.assertEqual({run["run_id"] for run in snapshot["runs"]}, {"run-2", "run-3"})
+
+    def test_ledger_eviction_keeps_new_run_when_timestamps_match(self) -> None:
+        ledger = AutomationRunLedger(max_runs=1)
+        with patch("service.automation_run_ledger.time.time", return_value=123.0):
+            ledger.record("run-1", "queued")
+            ledger.record("run-2", "queued")
+
+        snapshot = ledger.snapshot(limit=None)
+        self.assertEqual([run["run_id"] for run in snapshot["runs"]], ["run-2"])
 
     def test_update_preserves_control_fields_when_omitted(self) -> None:
         self.ledger.record(

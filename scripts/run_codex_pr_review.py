@@ -493,7 +493,7 @@ def _allow_unconfigured_backend() -> bool:
 
 
 def _api_fallback_enabled() -> bool:
-    return parse_bool(env_value("CODEX_PR_REVIEW_API_FALLBACK_ENABLED") or "true")
+    return parse_bool(env_value("CODEX_PR_REVIEW_API_FALLBACK_ENABLED"))
 
 
 def run_codex_review_with_fallback(
@@ -524,10 +524,10 @@ def run_codex_review_with_fallback(
             service_failure = exc
             print(f"::error::Codex service review failed: {exc}")
 
-    if service_url and service_failure is not None and not _api_fallback_enabled():
-        raise ReviewError(
-            f"Codex service review failed and direct API fallback is disabled: {service_failure}"
-        )
+    if service_failure is not None and not _api_fallback_enabled():
+        raise ReviewError(f"Codex service review failed and direct API fallback is disabled: {service_failure}")
+    if not service_url and not _api_fallback_enabled():
+        raise ReviewError(NO_REVIEW_BACKEND_CONFIGURED)
 
     print("Running Codex review via direct API")
     try:

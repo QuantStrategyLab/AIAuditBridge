@@ -86,7 +86,7 @@ jobs:
           CODEX_AUDIT_SERVICE_AUDIENCE: ${{ vars.CODEX_AUDIT_SERVICE_AUDIENCE || 'quant-codex-audit' }}
           CODEX_PR_REVIEW_REPO_ROOT: ${{ github.workspace }}/source
           CODEX_PR_REVIEW_ALLOW_UNCONFIGURED_BACKEND: ${{ inputs.allow_unconfigured_backend || 'false' }}
-          CODEX_PR_REVIEW_API_FALLBACK_ENABLED: ${{ inputs.api_fallback_enabled || vars.CODEX_PR_REVIEW_API_FALLBACK_ENABLED || 'false' }}
+          CODEX_PR_REVIEW_API_FALLBACK_ENABLED: ${{ github.event_name == 'workflow_call' && (inputs.api_fallback_enabled && 'true' || 'false') || vars.CODEX_PR_REVIEW_API_FALLBACK_ENABLED || 'false' }}
         working-directory: source
         run: |
           set -euo pipefail
