@@ -231,8 +231,9 @@ function riskClass(risk){return risk==="critical"||risk==="high"?"err":risk==="m
 function requiresHumanAudit(c){const action=String(c.action||""),risk=String(c.risk||""),effect=String(c.effect||"");return action==="escalate"||action==="manual"||risk==="critical"||risk==="high"||effect==="degraded"||Boolean(c.rollback_issue_url)}
 function renderChangePanels(items){renderAutonomy(items);renderHumanAudit(items);renderChanges(items.slice(0,15))}
 function renderAutonomy(items){setUpdated("autonomy-updated");const target=document.getElementById("autonomy"),autoMerge=items.filter(c=>c.action==="auto_merge").length,autoPr=items.filter(c=>c.action==="auto_pr").length,manual=items.filter(requiresHumanAudit).length,highRisk=items.filter(c=>["critical","high"].includes(String(c.risk||""))).length,pending=items.filter(c=>(c.effect||"pending")==="pending").length;clear(target);if(!items.length){empty(target,"暂无自治动作","最近 7 天没有登记 AI 自治变更；后续会展示自动 PR、自动合并与升级人工的比例。");return}append(target,append(el("div","metric-line"),el("div","big blue",fmtNum(items.length)),el("span","delta info","已登记")),append(el("div",""),statRow("自动合并",autoMerge,autoMerge?"ok":"info"),statRow("自动 PR",autoPr,"info"),statRow("需人工审计",manual,manual?"warn":"ok"),statRow("高风险/关键",highRisk,highRisk?"err":"ok"),statRow("待效果评估",pending,pending?"warn":"ok")))}
-function renderHumanAudit(items){setUpdated("human-audit-updated");const target=document.getElementById("human-audit"),all=items.filter(requiresHumanAudit),queue=all.slice(0,5);clear(target);if(!all.length){empty(target,"暂无待人工审计","低风险自治动作可由系统继续跟进；高风险、退化或升级人工的变更会进入这里。");return}append(target,append(el("div","metric-line"),el("div","big ",fmtNum(all.length)),el("span","delta warn","待审计")));for(const c of queue){const repo=String(c.repo||c.source_repo||"").split("/").pop()||"—",row=el("div","stat-row"),value=el("span","stat-value "+riskClass(c.risk));append(value,badge(riskClass(c.risk),riskText(c.risk)),document.createTextNode(" "+actionText(c.action)));if(c.external_url){const a=el("a","",repo);a.href=c.external_url;a.target="_blank";a.rel="noreferrer";a.style.color="#93c5fd";a.style.textDecoration="none";append(row,append(el("span","stat-label"),a),value)}else append(row,el("span","stat-label",repo),value);target.appendChild(row)}}
-function renderChanges(items){setUpdated("changes-updated");const target=document.getElementById("changes");clear(target);if(!items.length){empty(target,"暂无变更记录","最近 7 天没有登记的 AI 变更；后续通过反馈接口登记后会在这里形成报告。");return}const table=el("table",""),thead=el("thead",""),tr=el("tr","");for(const h of ["仓库","操作","风险","效果","置信度","时间"])tr.appendChild(el("th","",h));thead.appendChild(tr);const tbody=el("tbody","");for(const c of items){const effect=c.effect||"pending",effectClass=effect==="improved"?"ok":effect==="degraded"?"err":"info",actionClass=c.action==="auto_merge"?"ok":c.action==="auto_pr"?"info":c.action?"violet":"warn",dt=c.created_at?new Date(c.created_at*1000).toLocaleDateString():"—",row=el("tr",""),repoName=String(c.repo||"").split("/").pop()||"—",repoCell=el("td","mono");if(c.external_url){const a=el("a","",repoName);a.href=c.external_url;a.target="_blank";a.rel="noreferrer";a.style.color="#93c5fd";a.style.textDecoration="none";repoCell.appendChild(a)}else repoCell.textContent=repoName;append(row,repoCell,append(el("td",""),badge(actionClass,actionText(c.action))),append(el("td",""),badge(riskClass(c.risk),riskText(c.risk))),el("td","stat-value "+effectClass,effectText(effect)),el("td","mono",fmtPct(c.confidence||0)),el("td","mono",dt));tbody.appendChild(row)}append(table,thead,tbody);target.appendChild(table)}
+function renderHumanAudit(items){setUpdated("human-audit-updated");const target=document.getElementById("human-audit"),all=items.filter(requiresHumanAudit),queue=all.slice(0,5);clear(target);if(!all.length){empty(target,"暂无待人工审计","低风险自治动作可由系统继续跟进；高风险、退化或升级人工的变更会进入这里。");return}append(target,append(el("div","metric-line"),el("div","big ",fmtNum(all.length)),el("span","delta warn","待审计")));for(const c of queue){const repo=String(c.repo||c.source_repo||"").split("/").pop()||"—",row=el("div","stat-row"),value=el("span","stat-value "+riskClass(c.risk)),url=safeExternalUrl(c.external_url);append(value,badge(riskClass(c.risk),riskText(c.risk)),document.createTextNode(" "+actionText(c.action)));if(url){const a=el("a","",repo);a.href=url;a.target="_blank";a.rel="noreferrer";a.style.color="#93c5fd";a.style.textDecoration="none";append(row,append(el("span","stat-label"),a),value)}else append(row,el("span","stat-label",repo),value);target.appendChild(row)}}
+function renderChanges(items){setUpdated("changes-updated");const target=document.getElementById("changes");clear(target);if(!items.length){empty(target,"暂无变更记录","最近 7 天没有登记的 AI 变更；后续通过反馈接口登记后会在这里形成报告。");return}const table=el("table",""),thead=el("thead",""),tr=el("tr","");for(const h of ["仓库","操作","风险","效果","置信度","时间"])tr.appendChild(el("th","",h));thead.appendChild(tr);const tbody=el("tbody","");for(const c of items){const effect=c.effect||"pending",effectClass=effect==="improved"?"ok":effect==="degraded"?"err":"info",actionClass=c.action==="auto_merge"?"ok":c.action==="auto_pr"?"info":c.action?"violet":"warn",dt=c.created_at?new Date(c.created_at*1000).toLocaleDateString():"—",row=el("tr",""),repoName=String(c.repo||"").split("/").pop()||"—",repoCell=el("td","mono"),url=safeExternalUrl(c.external_url);if(url){const a=el("a","",repoName);a.href=url;a.target="_blank";a.rel="noreferrer";a.style.color="#93c5fd";a.style.textDecoration="none";repoCell.appendChild(a)}else repoCell.textContent=repoName;append(row,repoCell,append(el("td",""),badge(actionClass,actionText(c.action))),append(el("td",""),badge(riskClass(c.risk),riskText(c.risk))),el("td","stat-value "+effectClass,effectText(effect)),el("td","mono",fmtPct(c.confidence||0)),el("td","mono",dt));tbody.appendChild(row)}append(table,thead,tbody);target.appendChild(table)}
+function safeExternalUrl(value){try{const u=new URL(value);return u.protocol==="https:"?u.toString():""}catch(e){return ""}}
 function safeAvatarUrl(value){try{const u=new URL(value);return u.protocol==="https:"?u.toString():""}catch(e){return ""}}
 async function loadUser(){try{const r=await fetch("/api/user");if(r.ok){const u=await r.json(),img=document.getElementById("avatar"),avatar=safeAvatarUrl(u.avatar_url);document.getElementById("username").textContent=u.login||"";if(avatar){img.src=avatar;img.style.display="block"}else{img.removeAttribute("src");img.style.display="none"}}}catch(e){}}
 document.getElementById("health").innerHTML=loading("加载中…","正在获取服务健康数据");document.getElementById("org-health").innerHTML=loading("加载中…","正在获取组织健康数据");document.getElementById("quota").innerHTML=loading("加载中…","正在获取配额消耗数据");document.getElementById("effectiveness").innerHTML=loading("加载中…","正在获取有效性报告");document.getElementById("shadow").innerHTML=loading("加载中…","正在获取影子审计分歧数据");document.getElementById("autonomy").innerHTML=loading("加载中…","正在获取自治决策数据");document.getElementById("human-audit").innerHTML=loading("加载中…","正在获取人工审计队列");document.getElementById("changes").innerHTML=loading("加载中…","正在获取最近变更数据");loadUser();refresh();refreshTimer=setInterval(refresh,30000);
@@ -392,12 +393,10 @@ async function getSession(token, env) {
 }
 
 async function revokeSession(token, env) {
-  try {
-    const kv = sessionKV(env);
-    if (!kv) return;
-    const session = await parseSignedSession(token, env);
-    if (session && session.jti) await kv.delete(sessionKVKey(String(session.jti)));
-  } catch (e) {}
+  const kv = sessionKV(env);
+  if (!kv) return;
+  const session = await parseSignedSession(token, env);
+  if (session && session.jti) await kv.delete(sessionKVKey(String(session.jti)));
 }
 
 // ── API proxy ──────────────────────────────────────────────────────────
@@ -520,7 +519,11 @@ export default {
 
     // ── Logout ─────────────────────────────────────────────────────
     if (path === "/logout") {
-      await revokeSession(getCookie(request, COOKIE_NAME), env);
+      try {
+        await revokeSession(getCookie(request, COOKIE_NAME), env);
+      } catch (e) {
+        return json({ error: "session_revocation_failed" }, 503);
+      }
       return new Response(null, {
         status: 302,
         headers: {

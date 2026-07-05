@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 class FakeKV {
-  constructor() {
+  constructor(options = {}) {
     this.store = new Map();
+    this.failDelete = Boolean(options.failDelete);
   }
 
   async get(key) {
@@ -15,6 +16,7 @@ class FakeKV {
   }
 
   async delete(key) {
+    if (this.failDelete) throw new Error("delete failed");
     this.store.delete(key);
   }
 }
@@ -287,4 +289,52 @@ test("revocable sessions fail closed when KV binding is removed", async (t) => {
     baseEnv,
   );
   assert.equal(withoutKv.status, 401);
+});
+
+test("logout surfaces KV revocation failures", async (t) => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url.includes("/login/oauth/access_token")) {
+      return Response.json(Object.fromEntries([["access_token", "github-token"]]));
+    }
+    if (url.endsWith("/user")) {
+      return Response.json({ login: "operator", avatar_url: "https://example.test/avatar.png" });
+    }
+    if (url.endsWith("/user/orgs")) {
+      return Response.json([{ login: REQUIRED_ORG }]);
+    }
+    throw new Error("unexpected fetch " + url);
+  };
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const env = Object.fromEntries([
+    ["GITHUB_OAUTH_CLIENT_ID", "client"],
+    ["GITHUB_OAUTH_CLIENT_SECRET", "oauth-client-test-value"],
+    ["DASHBOARD_SESSION_SECRET", "test-session-signing-value"],
+    ["DASHBOARD_SESSION_KV", new FakeKV({ failDelete: true })],
+  ]);
+  const callback = await worker.fetch(
+    new Request("https://dash.example/callback?code=code&state=state", {
+      headers: { Cookie: "dash_oauth_state=state" },
+    }),
+    env,
+  );
+  const session = /dash_session=([^;]+)/.exec(callback.headers.get("set-cookie") || "")?.[1];
+  assert.ok(session);
+
+  const logout = await worker.fetch(
+    new Request("https://dash.example/logout", { headers: { Cookie: "dash_session=" + session } }),
+    env,
+  );
+  assert.equal(logout.status, 503);
+  assert.equal((await logout.json()).error, "session_revocation_failed");
+
+  const stillActive = await worker.fetch(
+    new Request("https://dash.example/api/user", { headers: { Cookie: "dash_session=" + session } }),
+    env,
+  );
+  assert.equal(stillActive.status, 200);
 });

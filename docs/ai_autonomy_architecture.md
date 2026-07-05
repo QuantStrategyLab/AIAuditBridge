@@ -216,6 +216,9 @@ AIAuditBridge 是 QuantStrategyLab 的 AI 审计控制面，负责：
 - `waiting_for_ci`
 - `auto_merge_requested`
 - `human_review_required`
+- `human_review_pr_opened`
+- `human_review_waiting_for_ci`
+- `human_review_auto_merge_requested`
 - `merged`
 - `failed`
 - `blocked`

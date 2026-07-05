@@ -11,11 +11,24 @@ STATE_PR_OPENED = "pr_opened"
 STATE_WAITING_FOR_CI = "waiting_for_ci"
 STATE_AUTO_MERGE_REQUESTED = "auto_merge_requested"
 STATE_HUMAN_REVIEW_REQUIRED = "human_review_required"
+STATE_HUMAN_REVIEW_PR_OPENED = "human_review_pr_opened"
+STATE_HUMAN_REVIEW_WAITING_FOR_CI = "human_review_waiting_for_ci"
+STATE_HUMAN_REVIEW_AUTO_MERGE_REQUESTED = "human_review_auto_merge_requested"
 STATE_MERGED = "merged"
 STATE_FAILED = "failed"
 STATE_BLOCKED = "blocked"
 
-TERMINAL_STATES = frozenset({STATE_MERGED, STATE_FAILED, STATE_BLOCKED, STATE_HUMAN_REVIEW_REQUIRED})
+TERMINAL_STATES = frozenset(
+    {
+        STATE_MERGED,
+        STATE_FAILED,
+        STATE_BLOCKED,
+        STATE_HUMAN_REVIEW_REQUIRED,
+        STATE_HUMAN_REVIEW_PR_OPENED,
+        STATE_HUMAN_REVIEW_WAITING_FOR_CI,
+        STATE_HUMAN_REVIEW_AUTO_MERGE_REQUESTED,
+    }
+)
 
 
 def _get(source: Any, key: str, default: Any = None) -> Any:
@@ -64,13 +77,14 @@ def change_task_state(change: Any) -> str:
     pr_number = _get(change, "pr_number", None)
     external_url = str(_get(change, "external_url", "") or "")
     effect = str(_get(change, "effect", "") or "").strip().lower()
+    needs_human_review = change_requires_human_review(change)
     if action == "auto_merge" and pr_number:
-        return STATE_AUTO_MERGE_REQUESTED
+        return STATE_HUMAN_REVIEW_AUTO_MERGE_REQUESTED if needs_human_review else STATE_AUTO_MERGE_REQUESTED
     if pr_number:
-        return STATE_WAITING_FOR_CI
+        return STATE_HUMAN_REVIEW_WAITING_FOR_CI if needs_human_review else STATE_WAITING_FOR_CI
     if external_url:
-        return STATE_PR_OPENED
-    if change_requires_human_review(change):
+        return STATE_HUMAN_REVIEW_PR_OPENED if needs_human_review else STATE_PR_OPENED
+    if needs_human_review:
         return STATE_HUMAN_REVIEW_REQUIRED
     if effect and effect != "pending":
         return STATE_REVIEWED
