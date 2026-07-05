@@ -60,8 +60,8 @@ export function codexRemainingClass(raw) {
 
 export function requiresHumanAudit(change) {
   if (!change || typeof change !== "object") return false;
-  if (Object.prototype.hasOwnProperty.call(change, "human_review_required")) {
-    return Boolean(change.human_review_required);
+  if (typeof change.human_review_required === "boolean") {
+    return change.human_review_required;
   }
   const state = String(change.state || "");
   if ([

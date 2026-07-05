@@ -97,6 +97,8 @@ test("codex quota severity is based on low remaining quota", () => {
 test("human audit display trusts backend decision fields", () => {
   assert.equal(requiresHumanAudit({ human_review_required: false, risk: "critical" }), false);
   assert.equal(requiresHumanAudit({ human_review_required: true, risk: "low" }), true);
+  assert.equal(requiresHumanAudit({ human_review_required: "false", risk: "low" }), false);
+  assert.equal(requiresHumanAudit({ human_review_required: null, risk: "critical" }), true);
   assert.equal(requiresHumanAudit({ state: "human_review_waiting_for_ci" }), true);
   assert.equal(requiresHumanAudit({ risk: "high" }), true);
   assert.equal(requiresHumanAudit({ risk: "low" }), false);
