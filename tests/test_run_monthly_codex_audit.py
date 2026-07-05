@@ -69,6 +69,7 @@ from scripts.run_monthly_codex_audit import (
     validate_provider,
     validate_repo,
     validate_task,
+    default_provider_for_task,
     write_codex_context,
 )
 from scripts.codex_audit_service import CodexAuditServiceRequestHandler, _codex_env
@@ -145,6 +146,8 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
 
     def test_validate_provider_accepts_supported_values(self) -> None:
         self.assertEqual(validate_provider(""), "auto")
+        self.assertEqual(validate_provider("", task="long_horizon_signal_shadow"), "codex")
+        self.assertEqual(validate_provider("task_default", task="long_horizon_signal_shadow"), "codex")
         self.assertEqual(validate_provider("codex"), "codex")
         self.assertEqual(validate_provider("OPENAI"), "openai")
         self.assertEqual(validate_provider("anthropic"), "anthropic")
@@ -152,6 +155,11 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertEqual(validate_provider("auto"), "auto")
         with self.assertRaises(Exception):
             validate_provider("claude")
+
+    def test_default_provider_for_task_is_task_specific(self) -> None:
+        self.assertEqual(default_provider_for_task("monthly_snapshot_audit"), "auto")
+        self.assertEqual(default_provider_for_task("long_horizon_signal_shadow"), "codex")
+        self.assertEqual(default_provider_for_task("unknown_task"), "auto")
 
     def test_api_fallback_allowlist_requires_explicit_configuration(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
@@ -824,6 +832,56 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         patch_remediation.assert_called_once()
         self.assertIs(patch_remediation.call_args.kwargs["workspace"], workspace)
+
+    def test_main_defaults_long_horizon_task_to_codex_provider(self) -> None:
+        issue = {
+            "number": 19,
+            "title": "Shadow",
+            "html_url": "https://example.test/issues/19",
+            "body": "Body",
+            "labels": [],
+        }
+        env = {
+            "SOURCE_REPO": "QuantStrategyLab/ResearchSignalContextPipelines",
+            "SOURCE_REF": "main",
+            "ISSUE_NUMBER": "19",
+            "CODEX_AUDIT_GH_TOKEN": "token",
+            "CODEX_AUDIT_TASK": "long_horizon_signal_shadow",
+            "CODEX_AUDIT_MODE": "review_and_fix",
+            "CODEX_AUDIT_CODEX_BACKEND": "service",
+            "CODEX_AUDIT_API_FALLBACK_ALLOWED_SOURCE_REPOSITORIES": (
+                "QuantStrategyLab/ResearchSignalContextPipelines"
+            ),
+            "CODEX_AUDIT_API_FALLBACK_ALLOW_FIX": "true",
+        }
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch("scripts.run_monthly_codex_audit.github_request", return_value=issue),
+            patch("scripts.run_monthly_codex_audit.fetch_issue_comments", return_value=[]),
+            patch("scripts.run_monthly_codex_audit.prepare_remediation_workspace") as prepare,
+            patch(
+                "scripts.run_monthly_codex_audit.run_codex_backend",
+                return_value=(1, "Codex audit service job failed [quota_or_capacity_failure]: budget", ""),
+            ),
+            patch("scripts.run_monthly_codex_audit.run_auto_provider_fallback") as patch_fallback,
+            patch("scripts.run_monthly_codex_audit.post_issue_comment") as post_comment,
+        ):
+            workspace = RemediationWorkspace(
+                repo_dir=Path("/tmp/source"),
+                branch_name="codex/long-horizon-signal-issue-19-test",
+                baseline_auto_merge_policy=dict(DEFAULT_GUARDED_AUTO_MERGE_POLICY),
+                feedback_retry_pr=None,
+                stale_auto_merge_label=GUARDED_AUTO_MERGE_LABEL,
+                stale_auto_merge_label_skip_reason="",
+                stale_auto_merge_label_removed=False,
+                prompt="prompt",
+            )
+            prepare.return_value = workspace
+            exit_code = run_audit_main()
+
+        self.assertEqual(exit_code, 1)
+        patch_fallback.assert_not_called()
+        post_comment.assert_called_once()
 
     def test_main_codex_quota_failure_uses_api_fallback_for_auto_provider(self) -> None:
         issue = {
@@ -2247,6 +2305,9 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         workflow = Path(".github/workflows/codex_audit.yml").read_text(encoding="utf-8")
 
         self.assertIn("runs-on: ubuntu-latest", workflow)
+        self.assertIn('default: "task_default"', workflow)
+        self.assertIn("          - task_default", workflow)
+        self.assertIn("CODEX_AUDIT_PROVIDER: ${{ github.event.client_payload.provider || inputs.provider || 'task_default' }}", workflow)
         self.assertIn("CODEX_AUDIT_CODEX_BACKEND: service", workflow)
         self.assertIn("CODEX_AUDIT_SERVICE_URL: ${{ secrets.CODEX_AUDIT_SERVICE_URL }}", workflow)
         self.assertNotIn("codex_backend:", workflow)

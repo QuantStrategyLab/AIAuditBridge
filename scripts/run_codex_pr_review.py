@@ -492,6 +492,10 @@ def _allow_unconfigured_backend() -> bool:
     return parse_bool(env_value("CODEX_PR_REVIEW_ALLOW_UNCONFIGURED_BACKEND"))
 
 
+def _api_fallback_enabled() -> bool:
+    return parse_bool(env_value("CODEX_PR_REVIEW_API_FALLBACK_ENABLED"))
+
+
 def run_codex_review_with_fallback(
     prompt: str,
     timeout_minutes: int,
@@ -499,8 +503,6 @@ def run_codex_review_with_fallback(
     changed_file_count: int = 0,
     changed_line_count: int = 0,
 ) -> str:
-    # env_value() returns "" when CODEX_AUDIT_SERVICE_URL is unset, so this
-    # guard keeps the direct-API path intact without special error handling.
     service_url = env_value("CODEX_AUDIT_SERVICE_URL")
     service_failure: Exception | None = None
     if service_url:
@@ -517,10 +519,17 @@ def run_codex_review_with_fallback(
             if not _service_review_should_fallback(exc):
                 raise
             service_failure = exc
-            print(f"::warning::Codex service review failed; falling back to direct API: {exc}")
+            print(f"::warning::Codex service review failed: {exc}")
         except (json.JSONDecodeError, OSError, urllib.error.URLError) as exc:
             service_failure = exc
-            print(f"::error::Codex service review failed; falling back to direct API: {exc}")
+            print(f"::error::Codex service review failed: {exc}")
+
+    if not _api_fallback_enabled():
+        if service_failure is not None:
+            raise ReviewError(
+                f"Codex service review failed and direct API fallback is disabled: {service_failure}"
+            )
+        raise ReviewError(NO_REVIEW_BACKEND_CONFIGURED)
 
     print("Running Codex review via direct API")
     try:

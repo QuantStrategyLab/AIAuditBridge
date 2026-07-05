@@ -73,10 +73,15 @@ Configure these values in `QuantStrategyLab/AIAuditBridge`:
   `openai,anthropic`.
 - Repository variable `OPENAI_MODEL` for OpenAI API fallback.
 - Repository variable `ANTHROPIC_MODEL` for Anthropic API fallback.
+- Monthly audits default to `provider=auto` for `monthly_snapshot_audit` and
+  `provider=codex` for `long_horizon_signal_shadow`; override with
+  `CODEX_AUDIT_PROVIDER` when you need a specific provider. Workflow dispatch
+  uses `task_default` to defer provider selection to the task policy.
 - Monthly audits with `CODEX_AUDIT_PROVIDER=auto` fall back to the configured
   API reviewers when the Codex service hits quota/capacity failures.
 - PR review workflows fall back to direct API review on recoverable Codex
-  service failures.
+  service failures only when the caller explicitly sets
+  repository variable `CODEX_PR_REVIEW_API_FALLBACK_ENABLED=true`.
 - Repository variable `CODEX_AUDIT_SERVICE_MODEL` for the VPS Codex service primary
   path; `VPS Codex Service Ops` deploy writes it into the systemd unit.
 - Optional repository variable `CODEX_AUDIT_SERVICE_REASONING_EFFORT` for a

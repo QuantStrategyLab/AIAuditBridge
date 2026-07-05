@@ -38,12 +38,17 @@ REPO_TASKS = SOURCE_REPO_TASKS
 DEFAULT_TASK = "monthly_snapshot_audit"
 DEFAULT_MODE = "review_and_fix"
 DEFAULT_PROVIDER = "auto"
+TASK_DEFAULT_PROVIDER = "task_default"
+TASK_DEFAULT_PROVIDERS = {
+    "monthly_snapshot_audit": "auto",
+    "long_horizon_signal_shadow": "codex",
+}
 API_PATCH_SYSTEM_PROMPT = (
     "You are AIAuditBridge's API fallback patch provider. "
     "Return exactly one JSON object that matches the service patch contract. "
     "Do not wrap the JSON in markdown fences or add surrounding prose."
 )
-SUPPORTED_PROVIDERS = frozenset({"api", "anthropic", "codex", "openai", "auto"})
+SUPPORTED_PROVIDERS = frozenset({"api", "anthropic", "codex", "openai", "auto", TASK_DEFAULT_PROVIDER})
 DEFAULT_CODEX_BACKEND = "service"
 SUPPORTED_CODEX_BACKENDS = frozenset({"service"})
 GUARDED_AUTO_MERGE_LABEL = "auto-merge-ok"
@@ -384,11 +389,17 @@ def validate_task(task: str, source_repo: str) -> str:
     return normalized
 
 
-def validate_provider(provider: str) -> str:
-    normalized = (provider or DEFAULT_PROVIDER).strip().lower()
+def validate_provider(provider: str, task: str = DEFAULT_TASK) -> str:
+    normalized = (provider or TASK_DEFAULT_PROVIDER).strip().lower()
+    if normalized == TASK_DEFAULT_PROVIDER:
+        return default_provider_for_task(task)
     if normalized not in SUPPORTED_PROVIDERS:
         raise BridgeError(f"Unsupported CODEX_AUDIT_PROVIDER: {provider!r}")
     return normalized
+
+
+def default_provider_for_task(task: str) -> str:
+    return TASK_DEFAULT_PROVIDERS.get(task, DEFAULT_PROVIDER)
 
 
 def api_fallback_allowed_source_repos() -> frozenset[str]:
@@ -2772,7 +2783,7 @@ def main() -> int:
     mode = env_value("CODEX_AUDIT_MODE", DEFAULT_MODE)
     if mode not in {"review_only", "review_and_fix"}:
         raise BridgeError(f"Unsupported CODEX_AUDIT_MODE: {mode}")
-    provider = validate_provider(env_value("CODEX_AUDIT_PROVIDER", DEFAULT_PROVIDER))
+    provider = validate_provider(env_value("CODEX_AUDIT_PROVIDER", TASK_DEFAULT_PROVIDER), task=task)
     codex_backend = validate_codex_backend(env_value("CODEX_AUDIT_CODEX_BACKEND", DEFAULT_CODEX_BACKEND))
     issue_number_raw = env_value("ISSUE_NUMBER")
     if not issue_number_raw.isdigit():
