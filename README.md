@@ -79,9 +79,11 @@ Configure these values in `QuantStrategyLab/AIAuditBridge`:
   uses `task_default` to defer provider selection to the task policy.
 - Monthly audits with `CODEX_AUDIT_PROVIDER=auto` fall back to the configured
   API reviewers when the Codex service hits quota/capacity failures.
-- PR review workflows fall back to direct API review on recoverable Codex
-  service failures only when the caller explicitly sets
-  repository variable `CODEX_PR_REVIEW_API_FALLBACK_ENABLED=true`.
+- PR review workflows can fall back to direct API review on recoverable Codex
+  service failures through `CODEX_PR_REVIEW_API_FALLBACK_ENABLED=true` or the
+  reusable workflow input `api_fallback_enabled`. The reusable workflow input
+  defaults to `true` for compatibility; Codex-only callers should pass
+  `api_fallback_enabled: false`.
 - Repository variable `CODEX_AUDIT_SERVICE_MODEL` for the VPS Codex service primary
   path; `VPS Codex Service Ops` deploy writes it into the systemd unit.
 - Optional repository variable `CODEX_AUDIT_SERVICE_REASONING_EFFORT` for a

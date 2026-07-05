@@ -89,7 +89,7 @@ def suggest_control_action(
             reasons.append(f"quota status is {quota}")
         if org_health == "degraded":
             reasons.append("org health is degraded")
-    elif health == "healthy" and quota == "ok" and org_health in {"ok", "healthy"}:
+    elif health in {"healthy", "ok"} and quota == "ok" and org_health in {"ok", "healthy"}:
         action = CONTROL_CONTINUE
         reasons.append("all runtime signals are healthy")
     else:
@@ -155,7 +155,7 @@ class AutomationRunLedger:
             "service_health": _normalize_status(service_health),
             "quota_status": _normalize_quota_status(quota_status),
             "org_health_status": _normalize_status(org_health_status),
-            "metadata": dict(metadata or {}),
+            "metadata": deepcopy(metadata or {}),
             "updated_at": now,
             "events": [],
         }
@@ -169,7 +169,7 @@ class AutomationRunLedger:
                 if not entry["task_name"]:
                     entry["task_name"] = str(current.get("task_name", ""))
                 if not entry["metadata"]:
-                    entry["metadata"] = dict(current.get("metadata", {}))
+                    entry["metadata"] = deepcopy(current.get("metadata", {}))
                 if not entry["suggested_action"]:
                     entry["suggested_action"] = str(current.get("suggested_action", ""))
                 if _is_omitted(service_health):
@@ -185,7 +185,7 @@ class AutomationRunLedger:
                     "service_health": entry["service_health"],
                     "quota_status": entry["quota_status"],
                     "org_health_status": entry["org_health_status"],
-                    "metadata": dict(entry["metadata"]),
+                    "metadata": deepcopy(entry["metadata"]),
                     "recorded_at": now,
                 }
             )

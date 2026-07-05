@@ -18,6 +18,11 @@ on:
         required: false
         type: boolean
         default: false
+      api_fallback_enabled:
+        description: "Allow direct API review fallback after a recoverable Codex service failure. Defaults to true for backward-compatible reusable callers."
+        required: false
+        type: boolean
+        default: true
     secrets:
       CODEX_AUDIT_REUSABLE_WORKFLOW_TOKEN:
         description: "Token that can read QuantStrategyLab/AIAuditBridge when this workflow is called from another private repo."
@@ -81,7 +86,7 @@ jobs:
           CODEX_AUDIT_SERVICE_AUDIENCE: ${{ vars.CODEX_AUDIT_SERVICE_AUDIENCE || 'quant-codex-audit' }}
           CODEX_PR_REVIEW_REPO_ROOT: ${{ github.workspace }}/source
           CODEX_PR_REVIEW_ALLOW_UNCONFIGURED_BACKEND: ${{ inputs.allow_unconfigured_backend || 'false' }}
-          CODEX_PR_REVIEW_API_FALLBACK_ENABLED: ${{ vars.CODEX_PR_REVIEW_API_FALLBACK_ENABLED || 'false' }}
+          CODEX_PR_REVIEW_API_FALLBACK_ENABLED: ${{ inputs.api_fallback_enabled || vars.CODEX_PR_REVIEW_API_FALLBACK_ENABLED || 'false' }}
         working-directory: source
         run: |
           set -euo pipefail

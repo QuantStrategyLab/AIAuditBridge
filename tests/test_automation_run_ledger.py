@@ -20,6 +20,11 @@ class TestSuggestControlAction(unittest.TestCase):
         self.assertEqual(result["action"], CONTROL_CONTINUE)
         self.assertTrue(result["auto_fix_allowed"])
 
+    def test_ok_service_health_is_healthy(self) -> None:
+        result = suggest_control_action({"status": "ok"}, {"status": "ok"}, {"status": "ok"})
+        self.assertEqual(result["action"], CONTROL_CONTINUE)
+        self.assertTrue(result["auto_fix_allowed"])
+
     def test_unknown_org_health_falls_back_to_review_only(self) -> None:
         result = suggest_control_action("healthy", "ok", {"status": "unavailable"})
         self.assertEqual(result["action"], CONTROL_REVIEW_ONLY)
@@ -145,6 +150,17 @@ class TestAutomationRunLedger(unittest.TestCase):
         self.assertEqual(updated["service_health"], "degraded")
         self.assertEqual(updated["quota_status"], "low")
         self.assertEqual(updated["events"][-1]["suggested_action"], CONTROL_PAUSE_AUTO_FIX)
+
+    def test_record_deep_copies_metadata(self) -> None:
+        metadata = {"repos": ["QuantStrategyLab/AIAuditBridge"]}
+        recorded = self.ledger.record("run-1", "queued", metadata=metadata)
+        metadata["repos"].append("mutated")
+
+        stored = self.ledger.get("run-1")
+
+        self.assertEqual(recorded["metadata"]["repos"], ["QuantStrategyLab/AIAuditBridge"])
+        self.assertEqual(stored["metadata"]["repos"], ["QuantStrategyLab/AIAuditBridge"])
+        self.assertEqual(stored["events"][0]["metadata"]["repos"], ["QuantStrategyLab/AIAuditBridge"])
 
     def test_record_rejects_blank_run_id(self) -> None:
         with self.assertRaises(ValueError):
