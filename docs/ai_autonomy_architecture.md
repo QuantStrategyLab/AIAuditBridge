@@ -228,6 +228,7 @@ AIAuditBridge 是 QuantStrategyLab 的 AI 审计控制面，负责：
 - 哪个 provider / model 组合最稳定；
 - 哪类变更最适合直接走 API fallback；
 - 哪些 low-risk 规则需要升级或收紧。
+- 有效性报告属于反馈回路指标，只能帮助判断历史改动是否改善，不应单独作为自动合并或策略放行依据。
 
 #### 3.6 Dashboard / org-health 还缺“决策联动”
 

@@ -94,6 +94,8 @@ usage with an unfiltered cost total.
 Set `CODEX_AUDIT_SERVICE_REASONING_EFFORT` only when a hard override is needed;
 unset or `auto` keeps task-complexity routing.
 
+Dashboard health panels intentionally separate online service health, organization workflow health, background job status, and artifact/content evidence. See [`health_taxonomy.md`](health_taxonomy.md) before treating a dashboard status as an automation gate.
+
 ### 2. Deploy the Cloudflare Worker
 
 ```bash

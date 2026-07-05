@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildDashboardApiUrl } from "../src/index.mjs";
+import worker, {
+  REQUIRED_ORG,
+  buildDashboardApiUrl,
+  codexRemainingClass,
+  codexRemainingPercent,
+  codexWindowDisplay,
+} from "../src/index.mjs";
 
 test("buildDashboardApiUrl preserves query strings for allowed read routes", () => {
   assert.equal(
@@ -43,4 +49,116 @@ test("buildDashboardApiUrl allows org health route", () => {
     buildDashboardApiUrl("https://origin.example", "/v1/ai/org-health", ""),
     "https://origin.example/v1/ai/org-health",
   );
+});
+
+test("codex window display shows remaining quota instead of used percent", () => {
+  assert.equal(
+    codexWindowDisplay({ used_percent: 44, window_duration_mins: 300 }),
+    "5h 剩余 56%",
+  );
+});
+
+test("codex window display prefers explicit remaining percent", () => {
+  assert.equal(
+    codexRemainingPercent({ used_percent: 44, remaining_percent: 57 }),
+    57,
+  );
+  assert.equal(codexRemainingPercent({ used_percent: 44, remaining_percent: null }), 56);
+});
+
+test("codex quota severity is based on low remaining quota", () => {
+  assert.equal(codexRemainingClass({ remaining_percent: 57 }), "ok");
+  assert.equal(codexRemainingClass({ remaining_percent: 30 }), "warn");
+  assert.equal(codexRemainingClass({ remaining_percent: 8 }), "err");
+});
+
+test("authenticated dashboard html ships codex remaining quota display", async (t) => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url.includes("/login/oauth/access_token")) {
+      return Response.json(Object.fromEntries([["access_token", "github-token"]]));
+    }
+    if (url.endsWith("/user")) {
+      return Response.json({ login: "operator", avatar_url: "https://example.test/avatar.png" });
+    }
+    if (url.endsWith("/user/orgs")) {
+      return Response.json([{ login: REQUIRED_ORG }]);
+    }
+    throw new Error("unexpected fetch " + url);
+  };
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const env = Object.fromEntries([
+    ["GITHUB_OAUTH_CLIENT_ID", "client"],
+    ["GITHUB_OAUTH_CLIENT_SECRET", "oauth-client-test-value"],
+    ["DASHBOARD_SESSION_SECRET", "test-session-signing-value"],
+  ]);
+  const callback = await worker.fetch(
+    new Request("https://dash.example/callback?code=code&state=state", {
+      headers: { Cookie: "dash_oauth_state=state" },
+    }),
+    env,
+  );
+  const session = /dash_session=([^;]+)/.exec(callback.headers.get("set-cookie") || "")?.[1];
+  assert.ok(session);
+
+  const user = await worker.fetch(
+    new Request("https://dash.example/api/user", { headers: { Cookie: "dash_session=" + session } }),
+    env,
+  );
+  assert.equal(user.status, 200);
+  assert.equal((await user.json()).login, "operator");
+
+  const dashboard = await worker.fetch(
+    new Request("https://dash.example/", { headers: { Cookie: "dash_session=" + session } }),
+    env,
+  );
+  const html = await dashboard.text();
+  assert.equal(dashboard.status, 200);
+  assert.match(html, /function codexRemainingPercent/);
+  assert.match(html, /Codex 账户/);
+  assert.match(html, /剩余/);
+
+  const tampered = await worker.fetch(
+    new Request("https://dash.example/api/user", { headers: { Cookie: "dash_session=" + session + "x" } }),
+    env,
+  );
+  assert.equal(tampered.status, 401);
+});
+
+test("dashboard callback requires dedicated session signing secret", async (t) => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url.includes("/login/oauth/access_token")) {
+      return Response.json(Object.fromEntries([["access_token", "github-token"]]));
+    }
+    if (url.endsWith("/user")) {
+      return Response.json({ login: "operator", avatar_url: "https://example.test/avatar.png" });
+    }
+    if (url.endsWith("/user/orgs")) {
+      return Response.json([{ login: REQUIRED_ORG }]);
+    }
+    throw new Error("unexpected fetch " + url);
+  };
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const env = Object.fromEntries([
+    ["GITHUB_OAUTH_CLIENT_ID", "client"],
+    ["GITHUB_OAUTH_CLIENT_SECRET", "oauth-client-test-value"],
+  ]);
+  const callback = await worker.fetch(
+    new Request("https://dash.example/callback?code=code&state=state", {
+      headers: { Cookie: "dash_oauth_state=state" },
+    }),
+    env,
+  );
+  assert.equal(callback.status, 302);
+  assert.match(callback.headers.get("location") || "", /error=/);
+  assert.doesNotMatch(callback.headers.get("set-cookie") || "", /dash_session=/);
 });
