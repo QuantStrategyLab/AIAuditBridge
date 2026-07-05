@@ -123,16 +123,22 @@ class RunCodexPrReviewTests(unittest.TestCase):
         self.assertEqual(output, "api review")
         direct_api.assert_called_once_with("Review this PR.", complexity="high")
 
-    def test_direct_api_is_blocked_when_service_url_unset_and_fallback_disabled(self) -> None:
+    def test_direct_api_runs_when_service_url_unset_even_if_service_fallback_disabled(self) -> None:
         with (
-            patch.dict(os.environ, {"CODEX_PR_REVIEW_API_FALLBACK_ENABLED": "false"}, clear=True),
-            patch("scripts.run_codex_pr_review.run_direct_api_review") as direct_api,
+            patch.dict(
+                os.environ,
+                {
+                    "OPENAI_API_KEY": "test-key",
+                    "CODEX_PR_REVIEW_API_FALLBACK_ENABLED": "false",
+                },
+                clear=True,
+            ),
+            patch("scripts.run_codex_pr_review.run_direct_api_review", return_value="api review") as direct_api,
         ):
-            with self.assertRaises(ReviewError) as raised:
-                run_codex_review_with_fallback("Review this PR.", timeout_minutes=20)
+            output = run_codex_review_with_fallback("Review this PR.", timeout_minutes=20)
 
-        self.assertEqual(str(raised.exception), run_codex_pr_review.NO_REVIEW_BACKEND_CONFIGURED)
-        direct_api.assert_not_called()
+        self.assertEqual(output, "api review")
+        direct_api.assert_called_once()
 
 
     def test_service_fallback_without_api_keys_preserves_service_failure(self) -> None:

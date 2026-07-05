@@ -26,6 +26,8 @@ CONTROL_ACTIONS = frozenset(
 
 DEFAULT_MAX_RUNS = 500
 DEFAULT_MAX_EVENTS_PER_RUN = 50
+MAX_EVENT_METADATA_FIELDS = 10
+MAX_EVENT_METADATA_VALUE_LENGTH = 200
 INTERNAL_ENTRY_KEYS = frozenset({"_ledger_sequence"})
 
 QUOTA_STATUS_SEVERITY = {
@@ -60,6 +62,24 @@ def _is_omitted(value: Any) -> bool:
     return value is None or (isinstance(value, str) and not value.strip())
 
 
+def _event_metadata_snapshot(metadata: dict[str, Any]) -> dict[str, Any]:
+    snapshot: dict[str, Any] = {}
+    omitted = 0
+    for key, value in metadata.items():
+        if len(snapshot) >= MAX_EVENT_METADATA_FIELDS:
+            omitted += 1
+            continue
+        if not isinstance(value, str | int | float | bool | type(None)):
+            omitted += 1
+            continue
+        if isinstance(value, str) and len(value) > MAX_EVENT_METADATA_VALUE_LENGTH:
+            value = value[:MAX_EVENT_METADATA_VALUE_LENGTH] + "…"
+        snapshot[str(key)] = value
+    if omitted:
+        snapshot["_omitted_fields"] = omitted
+    return snapshot
+
+
 def suggest_control_action(
     service_health: Any = "",
     quota_status: Any = "",
@@ -90,7 +110,7 @@ def suggest_control_action(
             reasons.append(f"quota status is {quota}")
         if org_health == "degraded":
             reasons.append("org health is degraded")
-    elif health in {"healthy", "ok"} and quota == "ok" and org_health in {"ok", "healthy"}:
+    elif health in {"healthy", "ok"} and quota in {"ok", "healthy"} and org_health in {"ok", "healthy"}:
         action = CONTROL_CONTINUE
         reasons.append("all runtime signals are healthy")
     else:
@@ -202,7 +222,7 @@ class AutomationRunLedger:
                     "service_health": entry["service_health"],
                     "quota_status": entry["quota_status"],
                     "org_health_status": entry["org_health_status"],
-                    "metadata": deepcopy(entry["metadata"]),
+                    "metadata": _event_metadata_snapshot(entry["metadata"]),
                     "recorded_at": now,
                 }
             )

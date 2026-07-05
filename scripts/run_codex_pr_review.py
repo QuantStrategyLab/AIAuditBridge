@@ -526,8 +526,6 @@ def run_codex_review_with_fallback(
 
     if service_failure is not None and not _api_fallback_enabled():
         raise ReviewError(f"Codex service review failed and direct API fallback is disabled: {service_failure}")
-    if not service_url and not _api_fallback_enabled():
-        raise ReviewError(NO_REVIEW_BACKEND_CONFIGURED)
 
     print("Running Codex review via direct API")
     try:

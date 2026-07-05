@@ -26,6 +26,11 @@ class TestSuggestControlAction(unittest.TestCase):
         self.assertEqual(result["action"], CONTROL_CONTINUE)
         self.assertTrue(result["auto_fix_allowed"])
 
+    def test_healthy_quota_status_is_healthy(self) -> None:
+        result = suggest_control_action({"status": "ok"}, {"status": "healthy"}, {"status": "ok"})
+        self.assertEqual(result["action"], CONTROL_CONTINUE)
+        self.assertTrue(result["auto_fix_allowed"])
+
     def test_unknown_org_health_falls_back_to_review_only(self) -> None:
         result = suggest_control_action("healthy", "ok", {"status": "unavailable"})
         self.assertEqual(result["action"], CONTROL_REVIEW_ONLY)
@@ -171,7 +176,8 @@ class TestAutomationRunLedger(unittest.TestCase):
 
         self.assertEqual(recorded["metadata"]["repos"], ["QuantStrategyLab/AIAuditBridge"])
         self.assertEqual(stored["metadata"]["repos"], ["QuantStrategyLab/AIAuditBridge"])
-        self.assertEqual(stored["events"][0]["metadata"]["repos"], ["QuantStrategyLab/AIAuditBridge"])
+        self.assertNotIn("repos", stored["events"][0]["metadata"])
+        self.assertEqual(stored["events"][0]["metadata"]["_omitted_fields"], 1)
 
     def test_record_rejects_blank_run_id(self) -> None:
         with self.assertRaises(ValueError):
