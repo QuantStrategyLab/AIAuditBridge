@@ -59,6 +59,7 @@ from service.feedback import (
     _new_change_id,
 )
 from service.quota import get_quota_manager
+from service.task_state import job_task_state
 from service.health import get_health_monitor
 from service.org_health import read_org_health
 
@@ -414,6 +415,7 @@ def _public_job_payload(job: dict[str, Any]) -> dict[str, object]:
         "updated_at": float(job.get("updated_at") or 0),
         "source_repository": str(job.get("source_repository") or ""),
         "task": str(job.get("task") or ""),
+        "task_state": job_task_state(job),
     }
     if job.get("status") == "succeeded":
         payload["output"] = str(job.get("output") or "")
@@ -905,12 +907,14 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
 
         # Autonomy decision: confidence + file risk → recommended action
         repo = str(payload.get("source_repository") or "")
+        quota_status = get_quota_manager().runtime_status(repo or "unknown").get("status", "ok")
         action = compute_recommended_action(
             results,
             changed_paths,
             repo=repo if repo else None,
             policy=load_autonomy_policy(),
             health_status=get_health_monitor().status,
+            quota_status=str(quota_status),
         )
         _audit_log("review_completed", consensus=consensus, all_success=all_ok,
                    action=action["action"], confidence=action["confidence"], risk=action["risk"])

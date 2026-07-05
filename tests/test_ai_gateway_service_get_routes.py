@@ -78,6 +78,8 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
                     self.assertEqual(changes[0]["repo"], "local/repo")
                     self.assertEqual(changes[0]["external_url"], "https://example.test/pr/12")
                     self.assertEqual(changes[0]["pr_number"], 12)
+                    self.assertEqual(changes[0]["state"], "waiting_for_ci")
+                    self.assertFalse(changes[0]["human_review_required"])
                 finally:
                     server.shutdown()
                     server.server_close()

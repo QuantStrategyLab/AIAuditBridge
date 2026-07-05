@@ -317,6 +317,32 @@ class QuotaManager:
                 return self.get_weekly_budget(repo)
             return max(0, self.get_weekly_budget(repo) - record.total_cost_usd)
 
+    def runtime_status(self, repo: str = "") -> dict[str, Any]:
+        """Classify quota pressure for autonomy runtime guards.
+
+        This uses internal daily budget state only, so it is fast and safe to
+        call while making review/auto-merge decisions. Provider account
+        snapshots remain dashboard data and are intentionally not fetched here.
+        """
+        target = repo or "unknown"
+        daily_budget = self.get_daily_budget(target)
+        remaining = self.remaining_daily(target)
+        if daily_budget <= 0:
+            return {"status": "ok", "remaining_daily": remaining, "daily_budget": daily_budget}
+        ratio = remaining / daily_budget
+        if remaining <= 0 or ratio <= 0.05:
+            status = "exhausted"
+        elif ratio <= 0.25:
+            status = "low"
+        else:
+            status = "ok"
+        return {
+            "status": status,
+            "remaining_daily": remaining,
+            "daily_budget": daily_budget,
+            "remaining_ratio": ratio,
+        }
+
     def check(self, repo: str, model: str, prompt: str = "", estimated_output_tokens: int = 0) -> dict[str, Any]:
         """Check if the repo has enough quota remaining. Returns approval dict."""
         tokens_input = estimate_tokens(prompt)

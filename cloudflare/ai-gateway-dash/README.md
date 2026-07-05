@@ -13,15 +13,15 @@ Cloudflare Worker that serves an operations dashboard for the AiGateway service.
 |--------|---------|
 | `GITHUB_OAUTH_CLIENT_ID` | GitHub OAuth App client ID |
 | `GITHUB_OAUTH_CLIENT_SECRET` | GitHub OAuth App client secret |
-| `DASHBOARD_SESSION_SECRET` | Required dedicated HMAC secret for stateless dashboard sessions |
+| `DASHBOARD_SESSION_SECRET` | Required dedicated HMAC secret for signed dashboard sessions |
+| `DASHBOARD_SESSION_KV` | Optional Workers KV binding used to revoke signed sessions on logout |
 | `AI_GATEWAY_ORIGIN_URL` | VPS origin URL (e.g. `https://43.156.238.238.sslip.io`) |
 | `DASHBOARD_API_TOKEN` | Static token for read-only API access |
 
 `DASHBOARD_API_TOKEN` must match the VPS service `CODEX_AUDIT_SERVICE_TOKEN`
 so the dashboard can read `/v1/ai/*` endpoints.
 Dashboard sessions are signed cookies, not Worker in-memory state, so they
-survive Worker cold starts and edge isolate changes. `DASHBOARD_SESSION_SECRET`
-must be independent from GitHub OAuth and provider API secrets.
+survive Worker cold starts and edge isolate changes. When `DASHBOARD_SESSION_KV` is bound, logout revokes the session ID server-side. Revocable sessions fail closed if the KV binding is removed. Enabling the KV binding invalidates sessions issued before the binding existed; users should sign in again after rollout. `DASHBOARD_SESSION_SECRET` must be independent from GitHub OAuth and provider API secrets.
 
 ## Display semantics
 
