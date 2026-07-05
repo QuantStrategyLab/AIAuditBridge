@@ -27,6 +27,17 @@ CONTROL_ACTIONS = frozenset(
 DEFAULT_MAX_RUNS = 500
 DEFAULT_MAX_EVENTS_PER_RUN = 50
 
+QUOTA_STATUS_SEVERITY = {
+    "ok": 0,
+    "healthy": 0,
+    "unknown": 1,
+    "unavailable": 1,
+    "low": 2,
+    "constrained": 2,
+    "exhausted": 3,
+    "blocked": 3,
+}
+
 
 def _normalize_status(value: Any, default: str = "") -> str:
     if isinstance(value, dict):
@@ -34,12 +45,14 @@ def _normalize_status(value: Any, default: str = "") -> str:
     return str(value or default).strip().lower()
 
 
-def _normalize_quota_status(value: Any, default: str = "ok") -> str:
+def _normalize_quota_status(value: Any, default: str = "") -> str:
+    statuses = [_normalize_status(value)]
     if isinstance(value, dict) and isinstance(value.get("quota"), dict):
-        nested_status = _normalize_status(value["quota"])
-        if nested_status:
-            return nested_status
-    return _normalize_status(value, default)
+        statuses.append(_normalize_status(value["quota"]))
+    normalized = [status for status in statuses if status]
+    if not normalized:
+        return default
+    return max(normalized, key=lambda status: QUOTA_STATUS_SEVERITY.get(status, 1))
 
 
 def _is_omitted(value: Any) -> bool:
@@ -47,14 +60,14 @@ def _is_omitted(value: Any) -> bool:
 
 
 def suggest_control_action(
-    service_health: Any = "healthy",
-    quota_status: Any = "ok",
-    org_health_status: Any = "ok",
+    service_health: Any = "",
+    quota_status: Any = "",
+    org_health_status: Any = "",
 ) -> dict[str, Any]:
     """Convert health/quota/org-health signals into a control action."""
-    health = _normalize_status(service_health, "healthy")
-    quota = _normalize_quota_status(quota_status, "ok")
-    org_health = _normalize_status(org_health_status, "ok")
+    health = _normalize_status(service_health, "unknown")
+    quota = _normalize_quota_status(quota_status, "unknown")
+    org_health = _normalize_status(org_health_status, "unknown")
 
     reasons: list[str] = []
     action = CONTROL_REVIEW_ONLY
@@ -140,8 +153,8 @@ class AutomationRunLedger:
             "task_state": str(task_state or "").strip().lower(),
             "suggested_action": str(suggested_action or "").strip().lower(),
             "service_health": _normalize_status(service_health),
-            "quota_status": _normalize_quota_status(quota_status, "ok"),
-            "org_health_status": _normalize_status(org_health_status, "ok"),
+            "quota_status": _normalize_quota_status(quota_status),
+            "org_health_status": _normalize_status(org_health_status),
             "metadata": dict(metadata or {}),
             "updated_at": now,
             "events": [],
@@ -162,9 +175,9 @@ class AutomationRunLedger:
                 if _is_omitted(service_health):
                     entry["service_health"] = str(current.get("service_health", ""))
                 if _is_omitted(quota_status):
-                    entry["quota_status"] = str(current.get("quota_status", "ok"))
+                    entry["quota_status"] = str(current.get("quota_status", ""))
                 if _is_omitted(org_health_status):
-                    entry["org_health_status"] = str(current.get("org_health_status", "ok"))
+                    entry["org_health_status"] = str(current.get("org_health_status", ""))
             entry["events"].append(
                 {
                     "task_state": entry["task_state"],

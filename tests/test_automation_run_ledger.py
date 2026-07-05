@@ -26,6 +26,12 @@ class TestSuggestControlAction(unittest.TestCase):
         self.assertFalse(result["auto_fix_allowed"])
         self.assertTrue(result["requires_human_review"])
 
+    def test_missing_signals_fall_back_to_review_only(self) -> None:
+        result = suggest_control_action()
+        self.assertEqual(result["action"], CONTROL_REVIEW_ONLY)
+        self.assertFalse(result["auto_fix_allowed"])
+        self.assertIn("runtime signals are incomplete", result["reasons"])
+
     def test_degraded_signals_pause_auto_fix(self) -> None:
         result = suggest_control_action("degraded", "ok", "ok")
         self.assertEqual(result["action"], CONTROL_PAUSE_AUTO_FIX)
@@ -44,6 +50,15 @@ class TestSuggestControlAction(unittest.TestCase):
         )
         self.assertEqual(result["action"], CONTROL_ESCALATE)
         self.assertFalse(result["auto_fix_allowed"])
+
+    def test_quota_snapshot_keeps_most_severe_status(self) -> None:
+        result = suggest_control_action(
+            "healthy",
+            {"status": "blocked", "quota": {"status": "ok"}},
+            "ok",
+        )
+        self.assertEqual(result["action"], CONTROL_ESCALATE)
+        self.assertEqual(result["quota_status"], "blocked")
 
     def test_unhealthy_signals_escalate(self) -> None:
         result = suggest_control_action("healthy", "ok", {"status": "unhealthy"})
