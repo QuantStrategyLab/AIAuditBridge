@@ -27,6 +27,7 @@ import worker, {
   codexRemainingClass,
   codexRemainingPercent,
   codexWindowDisplay,
+  requiresHumanAudit,
 } from "../src/index.mjs";
 
 test("buildDashboardApiUrl preserves query strings for allowed read routes", () => {
@@ -90,6 +91,17 @@ test("codex quota severity is based on low remaining quota", () => {
   assert.equal(codexRemainingClass({ remaining_percent: 57 }), "ok");
   assert.equal(codexRemainingClass({ remaining_percent: 30 }), "warn");
   assert.equal(codexRemainingClass({ remaining_percent: 8 }), "err");
+});
+
+
+test("human audit display trusts backend decision fields", () => {
+  assert.equal(requiresHumanAudit({ human_review_required: false, risk: "critical" }), false);
+  assert.equal(requiresHumanAudit({ human_review_required: true, risk: "low" }), true);
+  assert.equal(requiresHumanAudit({ human_review_required: "false", risk: "low" }), false);
+  assert.equal(requiresHumanAudit({ human_review_required: null, risk: "critical" }), true);
+  assert.equal(requiresHumanAudit({ state: "human_review_waiting_for_ci" }), true);
+  assert.equal(requiresHumanAudit({ risk: "high" }), true);
+  assert.equal(requiresHumanAudit({ risk: "low" }), false);
 });
 
 test("authenticated dashboard html ships codex remaining quota display", async (t) => {
