@@ -358,16 +358,15 @@ async function parseSignedSession(token, env) {
 async function createSession(user, env) {
   const secret = sessionSecret(env);
   if (!secret) throw new Error("Dashboard session secret not configured");
-  const jti = generateSessionToken();
+  const kv = sessionKV(env);
   const session = {
     login: user.login,
     avatar_url: user.avatar_url,
-    jti,
     exp: Date.now() + COOKIE_MAX_AGE * 1000,
   };
-  const kv = sessionKV(env);
   if (kv) {
-    await kv.put(sessionKVKey(jti), JSON.stringify({ login: session.login, exp: session.exp }), { expirationTtl: COOKIE_MAX_AGE });
+    session.jti = generateSessionToken();
+    await kv.put(sessionKVKey(session.jti), JSON.stringify({ login: session.login, exp: session.exp }), { expirationTtl: COOKIE_MAX_AGE });
   }
   const payload = base64UrlEncode(JSON.stringify(session));
   return payload + "." + await hmacSha256(secret, payload);
@@ -378,11 +377,15 @@ async function getSession(token, env) {
     const session = await parseSignedSession(token, env);
     if (!session) return null;
     const kv = sessionKV(env);
-    if (kv) {
-      const active = await kv.get(sessionKVKey(String(session.jti || "")));
+    const jti = String(session.jti || "");
+    if (jti) {
+      if (!kv) return null;
+      const active = await kv.get(sessionKVKey(jti));
       if (!active) return null;
+    } else if (kv) {
+      return null;
     }
-    return { login: String(session.login || ""), avatar_url: String(session.avatar_url || ""), jti: String(session.jti || "") };
+    return { login: String(session.login || ""), avatar_url: String(session.avatar_url || ""), jti };
   } catch (e) {
     return null;
   }

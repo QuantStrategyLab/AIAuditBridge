@@ -241,3 +241,50 @@ test("sessions issued before KV binding require re-login", async (t) => {
   );
   assert.equal(afterKv.status, 401);
 });
+
+test("revocable sessions fail closed when KV binding is removed", async (t) => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url.includes("/login/oauth/access_token")) {
+      return Response.json(Object.fromEntries([["access_token", "github-token"]]));
+    }
+    if (url.endsWith("/user")) {
+      return Response.json({ login: "operator", avatar_url: "https://example.test/avatar.png" });
+    }
+    if (url.endsWith("/user/orgs")) {
+      return Response.json([{ login: REQUIRED_ORG }]);
+    }
+    throw new Error("unexpected fetch " + url);
+  };
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const baseEnv = Object.fromEntries([
+    ["GITHUB_OAUTH_CLIENT_ID", "client"],
+    ["GITHUB_OAUTH_CLIENT_SECRET", "oauth-client-test-value"],
+    ["DASHBOARD_SESSION_SECRET", "test-session-signing-value"],
+  ]);
+  const kvEnv = Object.fromEntries([...Object.entries(baseEnv), ["DASHBOARD_SESSION_KV", new FakeKV()]]);
+  const callback = await worker.fetch(
+    new Request("https://dash.example/callback?code=code&state=state", {
+      headers: { Cookie: "dash_oauth_state=state" },
+    }),
+    kvEnv,
+  );
+  const session = /dash_session=([^;]+)/.exec(callback.headers.get("set-cookie") || "")?.[1];
+  assert.ok(session);
+
+  const withKv = await worker.fetch(
+    new Request("https://dash.example/api/user", { headers: { Cookie: "dash_session=" + session } }),
+    kvEnv,
+  );
+  assert.equal(withKv.status, 200);
+
+  const withoutKv = await worker.fetch(
+    new Request("https://dash.example/api/user", { headers: { Cookie: "dash_session=" + session } }),
+    baseEnv,
+  );
+  assert.equal(withoutKv.status, 401);
+});

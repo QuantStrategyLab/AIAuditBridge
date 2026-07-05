@@ -60,8 +60,6 @@ def change_task_state(change: Any) -> str:
     merged_at = _get(change, "merged_at", "")
     if merged_at:
         return STATE_MERGED
-    if change_requires_human_review(change):
-        return STATE_HUMAN_REVIEW_REQUIRED
     action = str(_get(change, "action", "") or "").strip().lower()
     pr_number = _get(change, "pr_number", None)
     external_url = str(_get(change, "external_url", "") or "")
@@ -72,6 +70,8 @@ def change_task_state(change: Any) -> str:
         return STATE_WAITING_FOR_CI
     if external_url:
         return STATE_PR_OPENED
+    if change_requires_human_review(change):
+        return STATE_HUMAN_REVIEW_REQUIRED
     if effect and effect != "pending":
         return STATE_REVIEWED
     return STATE_REVIEWED
