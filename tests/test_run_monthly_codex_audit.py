@@ -2271,7 +2271,8 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertIn("CODEX_AUDIT_SERVICE_ANTHROPIC_USAGE_WINDOW_DAYS", workflow)
         self.assertIn("OPENAI_ADMIN_KEY: ${{ secrets.OPENAI_ADMIN_KEY }}", workflow)
         self.assertIn("ANTHROPIC_ADMIN_KEY: ${{ secrets.ANTHROPIC_ADMIN_KEY }}", workflow)
-        self.assertIn("QuantStrategyLab/AIAuditBridge,QuantStrategyLab/CodexAuditBridge,QuantStrategyLab/CryptoLivePoolPipelines", workflow)
+        self.assertIn("QuantStrategyLab/AIAuditBridge,QuantStrategyLab/CryptoLivePoolPipelines", workflow)
+        self.assertNotIn("QuantStrategyLab/CodexAuditBridge", workflow)
         self.assertIn("actions/checkout@v6.0.3", workflow)
 
     def test_vps_deploy_adds_nginx_audit_route_without_router_service(self) -> None:
@@ -2282,7 +2283,8 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertIn("CODEX_AUDIT_SERVICE_JOB_DIR", deploy_script)
         self.assertIn("codex_pr_review.yml@refs/pull/*/merge", deploy_script)
         self.assertIn("refs/pull/*/merge", deploy_script)
-        self.assertIn("QuantStrategyLab/AIAuditBridge,QuantStrategyLab/CodexAuditBridge,QuantStrategyLab/CryptoLivePoolPipelines", deploy_script)
+        self.assertIn("QuantStrategyLab/AIAuditBridge,QuantStrategyLab/CryptoLivePoolPipelines", deploy_script)
+        self.assertNotIn("QuantStrategyLab/CodexAuditBridge", deploy_script)
         self.assertIn("proxy_pass http://127.0.0.1:{port}", deploy_script)
         self.assertIn('"# CodexAuditBridge route start" not in block', deploy_script)
         self.assertIn("audit service did not become healthy", deploy_script)
