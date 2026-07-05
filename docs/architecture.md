@@ -40,7 +40,7 @@ operations: **Analyze**, **Execute**, and **Review**.
 |---|---|
 | `ai_gateway_service.py` | HTTP request routing, rate limiting, auth, CORS |
 | `contracts.py` | Request/response schemas (Analyze, Execute, Review) |
-| `health.py` | Endpoint metrics, error rates, latency tracking |
+| `health.py` | Online endpoint metrics, error rates, latency tracking |
 | `quota.py` | Per-repo budget enforcement, model cost estimation |
 | `autonomy.py` | Confidence scoring, change risk classification |
 | `feedback.py` | Closed-loop change tracking and evaluation |
@@ -63,14 +63,16 @@ operations: **Analyze**, **Execute**, and **Review**.
 | Path | Method | Description | Rate Limited |
 |---|---|---|---|
 | `/v1/ai/analyze` | POST | Single LLM completion via LlmAdapter | Yes (30/min) |
-| `/v1/ai/execute/jobs` | POST | Async Codex execution | No |
-| `/v1/ai/execute/jobs/{id}` | GET | Poll async job status | No |
+| `/v1/ai/execute/jobs` | POST | Submit async Codex background job | No |
+| `/v1/ai/execute/jobs/{id}` | GET | Poll background job status | No |
 | `/v1/ai/execute` | POST | Sync Codex execution (legacy) | No |
 | `/v1/ai/review` | POST | Multi-model parallel review | Yes (30/min) |
-| `/v1/ai/health` | GET | Detailed health snapshot | No |
+| `/v1/ai/health` | GET | Online service health snapshot | No |
 | `/healthz` | GET | Liveness check | No |
-| `/v1/ai/quota` | GET | Per-repo quota status | No |
+| `/v1/ai/quota` | GET | Provider usage, Codex account limits, and internal estimates | No |
 | `/v1/ai/feedback/*` | GET/POST | Change tracking and evaluation | No |
+
+Health status vocabulary is defined in [`health_taxonomy.md`](health_taxonomy.md). Do not use `/v1/ai/health` as a substitute for monthly audit results, artifact freshness, or strategy-level health evidence.
 
 Backward-compatible aliases:
 - `/v1/codex-audit` → `/v1/ai/execute`

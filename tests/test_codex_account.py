@@ -93,7 +93,9 @@ class TestCodexAccountRateLimits(unittest.TestCase):
         self.assertEqual(snapshot["status"], "available")
         self.assertEqual(snapshot["rate_limits"]["plan_type"], "pro")
         self.assertEqual(snapshot["rate_limits"]["primary"]["used_percent"], 14)
+        self.assertEqual(snapshot["rate_limits"]["primary"]["remaining_percent"], 86)
         self.assertEqual(snapshot["rate_limits"]["secondary"]["window_duration_mins"], 10080)
+        self.assertEqual(snapshot["rate_limits"]["secondary"]["remaining_percent"], 73)
         self.assertEqual(snapshot["rate_limits"]["credits"]["balance"], "0")
 
 

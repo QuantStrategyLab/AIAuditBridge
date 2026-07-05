@@ -27,11 +27,19 @@ def _int_or_none(value: Any) -> int | None:
         return None
 
 
+def _remaining_percent(used_percent: int | None) -> int | None:
+    if used_percent is None:
+        return None
+    return max(0, min(100, 100 - used_percent))
+
+
 def _window(raw: Any) -> dict[str, int | None] | None:
     if not isinstance(raw, dict):
         return None
+    used_percent = _int_or_none(raw.get("usedPercent"))
     return {
-        "used_percent": _int_or_none(raw.get("usedPercent")),
+        "used_percent": used_percent,
+        "remaining_percent": _remaining_percent(used_percent),
         "window_duration_mins": _int_or_none(raw.get("windowDurationMins")),
         "resets_at": _int_or_none(raw.get("resetsAt")),
     }

@@ -13,7 +13,7 @@ const GITHUB_OAUTH_AUTHORIZE = "https://github.com/login/oauth/authorize";
 const GITHUB_OAUTH_ACCESS_TOKEN = "https://github.com/login/oauth/access_token";
 const GITHUB_API_USER = "https://api.github.com/user";
 const GITHUB_API_ORGS = "https://api.github.com/user/orgs";
-const REQUIRED_ORG = "QuantStrategyLab";
+export const REQUIRED_ORG = "QuantStrategyLab";
 const COOKIE_NAME = "dash_session";
 const STATE_COOKIE_NAME = "dash_oauth_state";
 const COOKIE_MAX_AGE = 86400; // 24h
@@ -26,6 +26,37 @@ const DASHBOARD_API_ROUTES = new Set([
   "/v1/ai/changes/effectiveness",
   "/v1/ai/feedback/shadow",
 ]);
+
+export function codexRemainingPercent(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  if (raw.remaining_percent !== null && raw.remaining_percent !== undefined) {
+    const explicit = Number(raw.remaining_percent);
+    if (Number.isFinite(explicit)) return Math.max(0, Math.min(100, Math.round(explicit)));
+  }
+  const used = Number(raw.used_percent);
+  if (!Number.isFinite(used)) return null;
+  return Math.max(0, Math.min(100, Math.round(100 - used)));
+}
+
+export function codexWindowLabel(raw) {
+  const mins = Number(raw && raw.window_duration_mins) || 0;
+  if (!mins) return "窗口";
+  if (mins % 1440 === 0) return Math.round(mins / 1440) + "d";
+  if (mins % 60 === 0) return Math.round(mins / 60) + "h";
+  return mins + "m";
+}
+
+export function codexWindowDisplay(raw) {
+  const remaining = codexRemainingPercent(raw);
+  if (remaining === null) return "";
+  return codexWindowLabel(raw) + " 剩余 " + remaining + "%";
+}
+
+export function codexRemainingClass(raw) {
+  const remaining = codexRemainingPercent(raw);
+  if (remaining === null) return "ok";
+  return remaining < 20 ? "err" : remaining < 50 ? "warn" : "ok";
+}
 
 // ── HTML templates ─────────────────────────────────────────────────────
 
@@ -178,7 +209,11 @@ function orgReasonText(reason){return reason==="latest_run_in_progress"?"最新 
 function renderOrgHealth(h){setUpdated("org-health-updated");const target=document.getElementById("org-health"),provider=h.provider||{},summary=h.summary||{},repos=h.repositories||[];clear(target);if(provider.status==="unavailable"){empty(target,"组织健康未连接","配置 CODEX_AUDIT_SERVICE_GITHUB_TOKEN 后，会显示组织仓库 Actions 健康。",);return}const unhealthy=Number(summary.unhealthy_repositories)||0,unknown=Number(summary.unknown_repositories)||0,degraded=Number(summary.degraded_repositories)||0,failed=Number(summary.failed_workflow_runs)||0,running=Number(summary.in_progress_workflow_runs)||0,total=Number(summary.total_repositories)||repos.length,problemRepos=repos.filter(r=>r.status!=="healthy").slice(0,5),statusClass=unhealthy?"err":degraded||unknown?"warn":"ok";append(target,append(el("div","metric-line"),el("div","big ",unhealthy?"异常":degraded?"关注":unknown?"未知":"健康"),el("span","delta "+statusClass,fmtNum(total)+" repos")));const details=el("div","");append(details,statRow("异常仓库",unhealthy,unhealthy?"err":"ok"),statRow("未知仓库",unknown,unknown?"warn":"ok"),statRow("需关注仓库",degraded,degraded?"warn":"ok"),statRow("失败 workflow",failed,failed?"err":"ok"),statRow("运行中",running,running?"info":"ok"));append(target,details);if(problemRepos.length){const list=el("div","");for(const r of problemRepos){const latest=r.latest_run||{},problem=r.problem_run||{},repoName=String(r.repo||"").split("/").pop()||"—",label=(problem.name||latest.name||orgReasonText((r.reasons||[])[0])),runUrl=problem.url||latest.url;const row=el("div","stat-row"),value=el("span","stat-value "+clsStatus(r.status));if(runUrl){const a=el("a","",label);a.href=runUrl;a.target="_blank";a.rel="noreferrer";a.style.color="inherit";a.style.textDecoration="none";value.appendChild(a)}else value.textContent=label;append(row,el("span","stat-label",repoName),value);list.appendChild(row)}target.appendChild(quotaSection("需要处理",list))}}
 
 function quotaTotalRow(label,d){const row=el("div","stat-row"),used=Number(d&&d.total_cost_usd)||0;append(row,el("span","stat-label",label),el("span","stat-value info",fmtUSD(used)));return row}
-function codexAccountRow(d){const row=el("div","stat-row"),r=d&&d.rate_limits||{},p=r.primary||{},s=r.secondary||{},credits=r.credits||{},parts=[];if(p.used_percent!==null&&p.used_percent!==undefined)parts.push((p.window_duration_mins?Math.round(p.window_duration_mins/60)+"h":"主窗口")+" "+p.used_percent+"%");if(s.used_percent!==null&&s.used_percent!==undefined)parts.push((s.window_duration_mins?Math.round(s.window_duration_mins/1440)+"d":"次窗口")+" "+s.used_percent+"%");if(r.plan_type)parts.push(String(r.plan_type));if(credits.balance!==null&&credits.balance!==undefined)parts.push("credits "+credits.balance);append(row,el("span","stat-label","Codex 账户"),el("span","stat-value "+(Number(p.used_percent)>80?"err":Number(p.used_percent)>50?"warn":"ok"),parts.join(" · ")||"实时可用"));return row}
+${codexRemainingPercent.toString()}
+${codexWindowLabel.toString()}
+${codexWindowDisplay.toString()}
+${codexRemainingClass.toString()}
+function codexAccountRow(d){const row=el("div","stat-row"),r=d&&d.rate_limits||{},p=r.primary||{},s=r.secondary||{},credits=r.credits||{},parts=[],primary=codexWindowDisplay(p),secondary=codexWindowDisplay(s);if(primary)parts.push(primary);if(secondary)parts.push(secondary);if(r.plan_type)parts.push(String(r.plan_type));if(credits.balance!==null&&credits.balance!==undefined)parts.push("credits "+credits.balance);append(row,el("span","stat-label","Codex 账户"),el("span","stat-value "+codexRemainingClass(p),parts.join(" · ")||"实时可用"));return row}
 function providerUsageBreakdown(u){const input=Number(u&&u.input_tokens)||0,output=Number(u&&u.output_tokens)||0,uncached=Number(u&&u.uncached_input_tokens)||0,cached=Number(u&&u.input_cached_tokens)||0,parts=[];if(input||output||uncached)parts.push("in "+fmtNum(input||uncached)+" / out "+fmtNum(output));if(cached)parts.push("cached "+fmtNum(cached));return parts.join(" · ")}
 function providerAccountRow(label,d,usageKey){const row=el("div","stat-row"),c=d&&d.costs||{},u=d&&d[usageKey]||{},days=Number(d&&d.window_days)||7,currency=String(c.currency||"usd").toUpperCase(),cost=Number(c.total_cost)||0,textTokens=(Number(u.input_tokens)||0)+(Number(u.output_tokens)||0),audioTokens=(Number(u.input_audio_tokens)||0)+(Number(u.output_audio_tokens)||0),tokens=Number(u.total_tokens)||(textTokens+audioTokens),cached=Number(u.input_cached_tokens)||0,requests=Number(u.num_model_requests)||0,breakdown=providerUsageBreakdown(u),parts=[days+"d"];if(c.total_cost!==null&&c.total_cost!==undefined)parts.push(currency==="USD"?fmtUSD(cost):cost.toFixed(2)+" "+currency);if(requests)parts.push(fmtNum(requests)+" req");if(tokens)parts.push(fmtNum(tokens)+" tokens");if(breakdown)parts.push(breakdown);if(audioTokens)parts.push(fmtNum(audioTokens)+" audio");if(cached&&!breakdown)parts.push(fmtNum(cached)+" cached");if(d&&d.usage_surface)parts.push(String(d.usage_surface));if(d&&d.filtered_project_count)parts.push(fmtNum(d.filtered_project_count)+" project");if(d&&d.filtered_api_key_count)parts.push(fmtNum(d.filtered_api_key_count)+" key");if(d&&d.filtered_workspace_count)parts.push(fmtNum(d.filtered_workspace_count)+" workspace");append(row,el("span","stat-label",label),el("span","stat-value info",parts.join(" · ")||"实时可用"));return row}
 function providerCostRow(label,d,days){if(!d||d.total_cost===null||d.total_cost===undefined)return statRow(label,(Number(days)||7)+"d 成本暂不可用 · Usage API 已连接","warn");const row=el("div","stat-row"),currency=String(d.currency||"usd").toUpperCase(),cost=Number(d.total_cost)||0,parts=[(Number(days)||7)+"d "+(currency==="USD"?fmtUSD(cost):cost.toFixed(2)+" "+currency)];append(row,el("span","stat-label",label),el("span","stat-value info",parts.join(" · ")));return row}
@@ -240,6 +275,48 @@ function clearCookieValue(name) {
   return name + "=; Path=/; Secure; SameSite=Lax; HttpOnly; Max-Age=0";
 }
 
+const encoder = new TextEncoder();
+const decoder = new TextDecoder();
+
+function base64UrlEncode(value) {
+  const bytes = typeof value === "string" ? encoder.encode(value) : new Uint8Array(value);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function base64UrlDecode(value) {
+  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = normalized + "=".repeat((4 - normalized.length % 4) % 4);
+  const binary = atob(padded);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return decoder.decode(bytes);
+}
+
+function constantTimeEqual(a, b) {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+function sessionSecret(env) {
+  return String(env.DASHBOARD_SESSION_SECRET || "").trim();
+}
+
+async function hmacSha256(secret, data) {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(data));
+  return base64UrlEncode(signature);
+}
+
 async function githubAPI(path, token) {
   const resp = await fetch("https://api.github.com" + path, {
     headers: { Authorization: "Bearer " + token, "User-Agent": "AiGatewayDashboard", Accept: "application/vnd.github+json" },
@@ -257,31 +334,31 @@ function generateSessionToken() {
   return result;
 }
 
-// ── Session store (in-memory, resets on Worker deploy) ────────────────
-
-const sessions = new Map(); // sessionToken → { login, avatar_url, orgs, expires }
-
-function createSession(user) {
-  const token = generateSessionToken();
-  sessions.set(token, {
+async function createSession(user, env) {
+  const secret = sessionSecret(env);
+  if (!secret) throw new Error("Dashboard session secret not configured");
+  const payload = base64UrlEncode(JSON.stringify({
     login: user.login,
     avatar_url: user.avatar_url,
-    expires: Date.now() + COOKIE_MAX_AGE * 1000,
-  });
-  // Clean expired sessions
-  for (const [k, v] of sessions) {
-    if (v.expires < Date.now()) sessions.delete(k);
-  }
-  return token;
+    exp: Date.now() + COOKIE_MAX_AGE * 1000,
+  }));
+  return payload + "." + await hmacSha256(secret, payload);
 }
 
-function getSession(token) {
-  const s = sessions.get(token);
-  if (!s || s.expires < Date.now()) {
-    sessions.delete(token);
+async function getSession(token, env) {
+  try {
+    const secret = sessionSecret(env);
+    if (!secret) return null;
+    const [payload, signature] = String(token || "").split(".");
+    if (!payload || !signature) return null;
+    const expected = await hmacSha256(secret, payload);
+    if (!constantTimeEqual(signature, expected)) return null;
+    const session = JSON.parse(base64UrlDecode(payload));
+    if (!session || Number(session.exp) < Date.now()) return null;
+    return { login: String(session.login || ""), avatar_url: String(session.avatar_url || "") };
+  } catch (e) {
     return null;
   }
-  return s;
 }
 
 // ── API proxy ──────────────────────────────────────────────────────────
@@ -376,7 +453,7 @@ export default {
         }
 
         // Create session
-        const sessionToken = createSession(user);
+        const sessionToken = await createSession(user, env);
         const headers = new Headers({ Location: "/" });
         headers.append("Set-Cookie", cookieValue(COOKIE_NAME, sessionToken, COOKIE_MAX_AGE));
         headers.append("Set-Cookie", clearCookieValue(STATE_COOKIE_NAME));
@@ -404,8 +481,6 @@ export default {
 
     // ── Logout ─────────────────────────────────────────────────────
     if (path === "/logout") {
-      const token = getCookie(request, COOKIE_NAME);
-      if (token) sessions.delete(token);
       return new Response(null, {
         status: 302,
         headers: {
@@ -418,7 +493,7 @@ export default {
     // ── User info (for dashboard header) ───────────────────────────
     if (path === "/api/user") {
       const token = getCookie(request, COOKIE_NAME);
-      const session = getSession(token);
+      const session = await getSession(token, env);
       if (!session) return json({ error: "unauthorized" }, 401);
       return json({ login: session.login, avatar_url: session.avatar_url });
     }
@@ -426,7 +501,7 @@ export default {
     // ── API proxy (requires session) ───────────────────────────────
     if (path.startsWith("/api/")) {
       const token = getCookie(request, COOKIE_NAME);
-      const session = getSession(token);
+      const session = await getSession(token, env);
       if (!session) return json({ status: "error", error: "unauthorized" }, 401);
 
       const apiPath = path.slice(4);
@@ -440,7 +515,7 @@ export default {
     // ── Dashboard HTML (requires session) ──────────────────────────
     if (path === "/" || path === "") {
       const token = getCookie(request, COOKIE_NAME);
-      const session = getSession(token);
+      const session = await getSession(token, env);
       if (!session) return html(LOGIN_HTML);
       return html(DASHBOARD_HTML);
     }
