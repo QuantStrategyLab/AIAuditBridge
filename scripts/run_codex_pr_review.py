@@ -493,7 +493,7 @@ def _allow_unconfigured_backend() -> bool:
 
 
 def _api_fallback_enabled() -> bool:
-    return parse_bool(env_value("CODEX_PR_REVIEW_API_FALLBACK_ENABLED"))
+    return parse_bool(env_value("CODEX_PR_REVIEW_API_FALLBACK_ENABLED", "true"))
 
 
 def _direct_api_primary_enabled() -> bool:

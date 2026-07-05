@@ -336,18 +336,18 @@ class CodexPrReviewWorkflowTest(unittest.TestCase):
         self.assertIn("allow_unconfigured_backend", workflow)
         self.assertIn("api_fallback_enabled", workflow)
         self.assertIn("direct_api_primary_enabled", workflow)
-        self.assertIn("Defaults to true for backward-compatible reusable callers", workflow)
+        self.assertIn("Empty defers to repository variables", workflow)
         self.assertIn("default: false", workflow)
-        self.assertIn("default: true", workflow)
+        self.assertIn('default: ""', workflow)
         self.assertIn("CODEX_PR_REVIEW_ALLOW_UNCONFIGURED_BACKEND", workflow)
         self.assertIn("CODEX_PR_REVIEW_API_FALLBACK_ENABLED", workflow)
         self.assertIn("CODEX_PR_REVIEW_DIRECT_API_PRIMARY_ENABLED", workflow)
         self.assertIn(
-            "github.event_name == 'workflow_call' && (inputs.api_fallback_enabled && 'true' || 'false') || vars.CODEX_PR_REVIEW_API_FALLBACK_ENABLED || 'true'",
+            "github.event_name == 'workflow_call' && inputs.api_fallback_enabled != '' && inputs.api_fallback_enabled || vars.CODEX_PR_REVIEW_API_FALLBACK_ENABLED || 'true'",
             workflow,
         )
         self.assertIn(
-            "github.event_name == 'workflow_call' && (inputs.direct_api_primary_enabled && 'true' || 'false')",
+            "github.event_name == 'workflow_call' && inputs.direct_api_primary_enabled != '' && inputs.direct_api_primary_enabled || vars.CODEX_PR_REVIEW_DIRECT_API_PRIMARY_ENABLED || 'true'",
             workflow,
         )
         self.assertIn("inputs.caller_concurrency_key || github.event.pull_request.number || github.run_id", workflow)
