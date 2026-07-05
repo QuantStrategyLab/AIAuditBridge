@@ -85,4 +85,3 @@ class TestAutomationRunLedger(unittest.TestCase):
     def test_record_rejects_blank_run_id(self) -> None:
         with self.assertRaises(ValueError):
             self.ledger.record(" ", "queued")
-

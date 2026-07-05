@@ -159,4 +159,3 @@ class AutomationRunLedger:
                 "suggested_actions": dict(suggested_actions),
             },
         }
-
