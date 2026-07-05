@@ -58,6 +58,31 @@ export function codexRemainingClass(raw) {
   return remaining < 20 ? "err" : remaining < 50 ? "warn" : "ok";
 }
 
+export function requiresHumanAudit(change) {
+  if (!change || typeof change !== "object") return false;
+  if (Object.prototype.hasOwnProperty.call(change, "human_review_required")) {
+    return Boolean(change.human_review_required);
+  }
+  const state = String(change.state || "");
+  if ([
+    "human_review_required",
+    "human_review_pr_opened",
+    "human_review_waiting_for_ci",
+    "human_review_auto_merge_requested",
+  ].includes(state)) return true;
+  const action = String(change.action || "");
+  const risk = String(change.risk || "");
+  const effect = String(change.effect || "");
+  return (
+    action === "escalate"
+    || action === "manual"
+    || risk === "critical"
+    || risk === "high"
+    || effect === "degraded"
+    || Boolean(change.rollback_issue_url)
+  );
+}
+
 // ── HTML templates ─────────────────────────────────────────────────────
 
 const LOGIN_HTML = `<!DOCTYPE html>
@@ -228,7 +253,7 @@ function effectText(effect){return effect==="improved"?"改善":effect==="degrad
 function actionText(action){return action==="auto_merge"?"自动合并":action==="auto_pr"?"自动 PR":action==="auto_notify"?"自动通知":action==="escalate"?"升级人工":action==="manual"?"人工处理":action||"变更"}
 function riskText(risk){return risk==="critical"?"关键":risk==="high"?"高":risk==="medium"?"中":risk==="low"?"低":risk||"未知"}
 function riskClass(risk){return risk==="critical"||risk==="high"?"err":risk==="medium"?"warn":risk==="low"?"ok":"info"}
-function requiresHumanAudit(c){const action=String(c.action||""),risk=String(c.risk||""),effect=String(c.effect||"");return action==="escalate"||action==="manual"||risk==="critical"||risk==="high"||effect==="degraded"||Boolean(c.rollback_issue_url)}
+${requiresHumanAudit.toString()}
 function renderChangePanels(items){renderAutonomy(items);renderHumanAudit(items);renderChanges(items.slice(0,15))}
 function renderAutonomy(items){setUpdated("autonomy-updated");const target=document.getElementById("autonomy"),autoMerge=items.filter(c=>c.action==="auto_merge").length,autoPr=items.filter(c=>c.action==="auto_pr").length,manual=items.filter(requiresHumanAudit).length,highRisk=items.filter(c=>["critical","high"].includes(String(c.risk||""))).length,pending=items.filter(c=>(c.effect||"pending")==="pending").length;clear(target);if(!items.length){empty(target,"暂无自治动作","最近 7 天没有登记 AI 自治变更；后续会展示自动 PR、自动合并与升级人工的比例。");return}append(target,append(el("div","metric-line"),el("div","big blue",fmtNum(items.length)),el("span","delta info","已登记")),append(el("div",""),statRow("自动合并",autoMerge,autoMerge?"ok":"info"),statRow("自动 PR",autoPr,"info"),statRow("需人工审计",manual,manual?"warn":"ok"),statRow("高风险/关键",highRisk,highRisk?"err":"ok"),statRow("待效果评估",pending,pending?"warn":"ok")))}
 function renderHumanAudit(items){setUpdated("human-audit-updated");const target=document.getElementById("human-audit"),all=items.filter(requiresHumanAudit),queue=all.slice(0,5);clear(target);if(!all.length){empty(target,"暂无待人工审计","低风险自治动作可由系统继续跟进；高风险、退化或升级人工的变更会进入这里。");return}append(target,append(el("div","metric-line"),el("div","big ",fmtNum(all.length)),el("span","delta warn","待审计")));for(const c of queue){const repo=String(c.repo||c.source_repo||"").split("/").pop()||"—",row=el("div","stat-row"),value=el("span","stat-value "+riskClass(c.risk)),url=safeExternalUrl(c.external_url);append(value,badge(riskClass(c.risk),riskText(c.risk)),document.createTextNode(" "+actionText(c.action)));if(url){const a=el("a","",repo);a.href=url;a.target="_blank";a.rel="noreferrer";a.style.color="#93c5fd";a.style.textDecoration="none";append(row,append(el("span","stat-label"),a),value)}else append(row,el("span","stat-label",repo),value);target.appendChild(row)}}
