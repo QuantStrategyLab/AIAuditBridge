@@ -524,12 +524,10 @@ def run_codex_review_with_fallback(
             service_failure = exc
             print(f"::error::Codex service review failed: {exc}")
 
-    if not _api_fallback_enabled():
-        if service_failure is not None:
-            raise ReviewError(
-                f"Codex service review failed and direct API fallback is disabled: {service_failure}"
-            )
-        raise ReviewError(NO_REVIEW_BACKEND_CONFIGURED)
+    if service_url and not _api_fallback_enabled():
+        raise ReviewError(
+            f"Codex service review failed and direct API fallback is disabled: {service_failure}"
+        )
 
     print("Running Codex review via direct API")
     try:

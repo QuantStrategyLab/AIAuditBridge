@@ -93,6 +93,22 @@ class RunCodexPrReviewTests(unittest.TestCase):
         self.assertIn("direct API fallback is disabled", str(raised.exception))
         direct_api.assert_not_called()
 
+    def test_direct_api_runs_when_service_url_is_unset(self) -> None:
+        with (
+            patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=True),
+            patch("scripts.run_codex_pr_review.run_direct_api_review", return_value="api review") as direct_api,
+        ):
+            output = run_codex_review_with_fallback(
+                "Review this PR.",
+                timeout_minutes=20,
+                complexity="high",
+                changed_file_count=3,
+                changed_line_count=120,
+            )
+
+        self.assertEqual(output, "api review")
+        direct_api.assert_called_once_with("Review this PR.", complexity="high")
+
 
     def test_service_fallback_without_api_keys_preserves_service_failure(self) -> None:
         with (
