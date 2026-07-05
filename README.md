@@ -83,7 +83,11 @@ Configure these values in `QuantStrategyLab/AIAuditBridge`:
   service failures through `CODEX_PR_REVIEW_API_FALLBACK_ENABLED=true` or the
   reusable workflow input `api_fallback_enabled`. The reusable workflow input
   defaults to `true` for compatibility; Codex-only callers should pass
-  `api_fallback_enabled: false`.
+  `api_fallback_enabled: false`. API-only PR review when no service URL is
+  configured is controlled separately by
+  `CODEX_PR_REVIEW_DIRECT_API_PRIMARY_ENABLED` or reusable workflow input
+  `direct_api_primary_enabled`; this also defaults to `true` for compatibility
+  and should be set to `false` for Codex-only callers.
 - Repository variable `CODEX_AUDIT_SERVICE_MODEL` for the VPS Codex service primary
   path; `VPS Codex Service Ops` deploy writes it into the systemd unit.
 - Optional repository variable `CODEX_AUDIT_SERVICE_REASONING_EFFORT` for a

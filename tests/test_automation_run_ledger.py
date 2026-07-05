@@ -167,15 +167,23 @@ class TestAutomationRunLedger(unittest.TestCase):
         self.assertEqual(updated["quota_status"], "low")
         self.assertEqual(updated["events"][-1]["suggested_action"], CONTROL_PAUSE_AUTO_FIX)
 
-    def test_record_deep_copies_metadata(self) -> None:
-        metadata = {"repos": ["QuantStrategyLab/AIAuditBridge"]}
+    def test_record_sanitizes_metadata(self) -> None:
+        metadata = {
+            "repo": "QuantStrategyLab/AIAuditBridge",
+            "repos": ["QuantStrategyLab/AIAuditBridge"],
+            "note": "x" * 600,
+        }
         recorded = self.ledger.record("run-1", "queued", metadata=metadata)
         metadata["repos"].append("mutated")
 
         stored = self.ledger.get("run-1")
 
-        self.assertEqual(recorded["metadata"]["repos"], ["QuantStrategyLab/AIAuditBridge"])
-        self.assertEqual(stored["metadata"]["repos"], ["QuantStrategyLab/AIAuditBridge"])
+        self.assertEqual(recorded["metadata"]["repo"], "QuantStrategyLab/AIAuditBridge")
+        self.assertNotIn("repos", recorded["metadata"])
+        self.assertEqual(recorded["metadata"]["_omitted_fields"], 1)
+        self.assertTrue(recorded["metadata"]["note"].endswith("…"))
+        self.assertEqual(stored["metadata"], recorded["metadata"])
+        self.assertEqual(stored["events"][0]["metadata"]["repo"], "QuantStrategyLab/AIAuditBridge")
         self.assertNotIn("repos", stored["events"][0]["metadata"])
         self.assertEqual(stored["events"][0]["metadata"]["_omitted_fields"], 1)
 

@@ -26,6 +26,8 @@ CONTROL_ACTIONS = frozenset(
 
 DEFAULT_MAX_RUNS = 500
 DEFAULT_MAX_EVENTS_PER_RUN = 50
+MAX_RUN_METADATA_FIELDS = 20
+MAX_RUN_METADATA_VALUE_LENGTH = 500
 MAX_EVENT_METADATA_FIELDS = 10
 MAX_EVENT_METADATA_VALUE_LENGTH = 200
 INTERNAL_ENTRY_KEYS = frozenset({"_ledger_sequence"})
@@ -62,22 +64,43 @@ def _is_omitted(value: Any) -> bool:
     return value is None or (isinstance(value, str) and not value.strip())
 
 
-def _event_metadata_snapshot(metadata: dict[str, Any]) -> dict[str, Any]:
+def _metadata_snapshot(
+    metadata: dict[str, Any],
+    *,
+    max_fields: int,
+    max_value_length: int,
+) -> dict[str, Any]:
     snapshot: dict[str, Any] = {}
     omitted = 0
     for key, value in metadata.items():
-        if len(snapshot) >= MAX_EVENT_METADATA_FIELDS:
+        if len(snapshot) >= max_fields:
             omitted += 1
             continue
         if not isinstance(value, str | int | float | bool | type(None)):
             omitted += 1
             continue
-        if isinstance(value, str) and len(value) > MAX_EVENT_METADATA_VALUE_LENGTH:
-            value = value[:MAX_EVENT_METADATA_VALUE_LENGTH] + "…"
+        if isinstance(value, str) and len(value) > max_value_length:
+            value = value[:max_value_length] + "…"
         snapshot[str(key)] = value
     if omitted:
         snapshot["_omitted_fields"] = omitted
     return snapshot
+
+
+def _run_metadata_snapshot(metadata: dict[str, Any]) -> dict[str, Any]:
+    return _metadata_snapshot(
+        metadata,
+        max_fields=MAX_RUN_METADATA_FIELDS,
+        max_value_length=MAX_RUN_METADATA_VALUE_LENGTH,
+    )
+
+
+def _event_metadata_snapshot(metadata: dict[str, Any]) -> dict[str, Any]:
+    return _metadata_snapshot(
+        metadata,
+        max_fields=MAX_EVENT_METADATA_FIELDS,
+        max_value_length=MAX_EVENT_METADATA_VALUE_LENGTH,
+    )
 
 
 def suggest_control_action(
@@ -188,7 +211,7 @@ class AutomationRunLedger:
             "service_health": _normalize_status(service_health),
             "quota_status": _normalize_quota_status(quota_status),
             "org_health_status": _normalize_status(org_health_status),
-            "metadata": deepcopy(metadata or {}),
+            "metadata": _run_metadata_snapshot(metadata or {}),
             "updated_at": now,
             "events": [],
         }

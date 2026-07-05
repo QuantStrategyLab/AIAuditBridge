@@ -496,6 +496,10 @@ def _api_fallback_enabled() -> bool:
     return parse_bool(env_value("CODEX_PR_REVIEW_API_FALLBACK_ENABLED"))
 
 
+def _direct_api_primary_enabled() -> bool:
+    return parse_bool(env_value("CODEX_PR_REVIEW_DIRECT_API_PRIMARY_ENABLED", "true"))
+
+
 def run_codex_review_with_fallback(
     prompt: str,
     timeout_minutes: int,
@@ -526,6 +530,8 @@ def run_codex_review_with_fallback(
 
     if service_failure is not None and not _api_fallback_enabled():
         raise ReviewError(f"Codex service review failed and direct API fallback is disabled: {service_failure}")
+    if not service_url and not _direct_api_primary_enabled():
+        raise ReviewError(NO_REVIEW_BACKEND_CONFIGURED)
 
     print("Running Codex review via direct API")
     try:

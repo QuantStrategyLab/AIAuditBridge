@@ -130,6 +130,7 @@ class RunCodexPrReviewTests(unittest.TestCase):
                 {
                     "OPENAI_API_KEY": "test-key",
                     "CODEX_PR_REVIEW_API_FALLBACK_ENABLED": "false",
+                    "CODEX_PR_REVIEW_DIRECT_API_PRIMARY_ENABLED": "true",
                 },
                 clear=True,
             ),
@@ -139,6 +140,24 @@ class RunCodexPrReviewTests(unittest.TestCase):
 
         self.assertEqual(output, "api review")
         direct_api.assert_called_once()
+
+    def test_direct_api_is_blocked_when_service_url_unset_and_primary_disabled(self) -> None:
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "OPENAI_API_KEY": "test-key",
+                    "CODEX_PR_REVIEW_DIRECT_API_PRIMARY_ENABLED": "false",
+                },
+                clear=True,
+            ),
+            patch("scripts.run_codex_pr_review.run_direct_api_review") as direct_api,
+        ):
+            with self.assertRaises(ReviewError) as raised:
+                run_codex_review_with_fallback("Review this PR.", timeout_minutes=20)
+
+        self.assertEqual(str(raised.exception), run_codex_pr_review.NO_REVIEW_BACKEND_CONFIGURED)
+        direct_api.assert_not_called()
 
 
     def test_service_fallback_without_api_keys_preserves_service_failure(self) -> None:
@@ -316,13 +335,19 @@ class CodexPrReviewWorkflowTest(unittest.TestCase):
         self.assertIn("caller_concurrency_key", workflow)
         self.assertIn("allow_unconfigured_backend", workflow)
         self.assertIn("api_fallback_enabled", workflow)
+        self.assertIn("direct_api_primary_enabled", workflow)
         self.assertIn("Defaults to true for backward-compatible reusable callers", workflow)
         self.assertIn("default: false", workflow)
         self.assertIn("default: true", workflow)
         self.assertIn("CODEX_PR_REVIEW_ALLOW_UNCONFIGURED_BACKEND", workflow)
         self.assertIn("CODEX_PR_REVIEW_API_FALLBACK_ENABLED", workflow)
+        self.assertIn("CODEX_PR_REVIEW_DIRECT_API_PRIMARY_ENABLED", workflow)
         self.assertIn(
-            "github.event_name == 'workflow_call' && (inputs.api_fallback_enabled && 'true' || 'false')",
+            "github.event_name == 'workflow_call' && (inputs.api_fallback_enabled && 'true' || 'false') || vars.CODEX_PR_REVIEW_API_FALLBACK_ENABLED || 'true'",
+            workflow,
+        )
+        self.assertIn(
+            "github.event_name == 'workflow_call' && (inputs.direct_api_primary_enabled && 'true' || 'false')",
             workflow,
         )
         self.assertIn("inputs.caller_concurrency_key || github.event.pull_request.number || github.run_id", workflow)
