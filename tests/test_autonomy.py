@@ -11,6 +11,7 @@ from service.autonomy import (
     ACTION_AUTO_MERGE,
     ACTION_AUTO_PR,
     ACTION_ESCALATE,
+    AutonomyConfig,
     classify_file_risk,
     RISK_HIGH,
     RISK_LOW,
@@ -21,6 +22,18 @@ from service.autonomy import (
     load_autonomy_policy,
     recommended_action,
 )
+
+LIVE_EQUIVALENT_EVIDENCE = {
+    "change_class": "live_equivalent_optimization",
+    "baseline_profile_runtime_enabled": True,
+    "strategy_family_unchanged": True,
+    "public_contract_unchanged": True,
+    "broker_permission_unchanged": True,
+    "risk_limits_not_increased": True,
+    "backtest_passed": True,
+    "shadow_or_regression_passed": True,
+    "rollback_ready": True,
+}
 
 
 class TestDefaultDecisionMatrix(unittest.TestCase):
@@ -135,3 +148,81 @@ class TestDefaultDecisionMatrix(unittest.TestCase):
         self.assertEqual(result["initial_action"], ACTION_AUTO_MERGE)
         self.assertEqual(result["action"], ACTION_ESCALATE)
         self.assertTrue(result["human_review_required"])
+
+    def test_live_equivalent_optimization_stays_bounded_by_default_policy(self) -> None:
+        result = recommended_action(
+            [{"confidence": 0.99}],
+            ["src/quant_strategy.py"],
+            trusted_automation_metadata=LIVE_EQUIVALENT_EVIDENCE,
+        )
+
+        self.assertEqual(result["risk"], RISK_HIGH)
+        self.assertEqual(result["action"], ACTION_AUTO_PR)
+        self.assertTrue(result["human_review_required"])
+
+    def test_live_equivalent_optimization_can_auto_merge_when_policy_allows(self) -> None:
+        config = AutonomyConfig(
+            decision_matrix=[
+                (RISK_HIGH, 0.95, ACTION_AUTO_MERGE),
+                (RISK_HIGH, 0.00, ACTION_ESCALATE),
+            ]
+        )
+        result = recommended_action(
+            [{"confidence": 0.99}],
+            ["src/quant_strategy.py"],
+            config=config,
+            trusted_automation_metadata=LIVE_EQUIVALENT_EVIDENCE,
+        )
+
+        self.assertEqual(result["action"], ACTION_AUTO_MERGE)
+        self.assertFalse(result["human_review_required"])
+
+    def test_live_equivalent_optimization_missing_evidence_stays_review_gated(self) -> None:
+        result = recommended_action(
+            [{"confidence": 0.99}],
+            ["src/quant_strategy.py"],
+            trusted_automation_metadata={"change_class": "live_equivalent_optimization"},
+        )
+
+        self.assertEqual(result["action"], ACTION_AUTO_PR)
+        self.assertTrue(result["human_review_required"])
+        self.assertIn("backtest_passed", result["automation_authority"]["missing_evidence"])
+
+    def test_live_equivalent_metadata_cannot_override_critical_paths(self) -> None:
+        result = recommended_action(
+            [{"confidence": 0.99}],
+            [".github/workflows/deploy.yml"],
+            trusted_automation_metadata=LIVE_EQUIVALENT_EVIDENCE,
+        )
+
+        self.assertEqual(result["action"], ACTION_ESCALATE)
+        self.assertTrue(result["human_review_required"])
+
+    def test_untrusted_live_equivalent_metadata_cannot_auto_merge_strategy_code(self) -> None:
+        result = recommended_action(
+            [{"confidence": 0.99}],
+            ["src/quant_strategy.py"],
+            automation_metadata=LIVE_EQUIVALENT_EVIDENCE,
+        )
+
+        self.assertEqual(result["action"], ACTION_AUTO_PR)
+        self.assertTrue(result["human_review_required"])
+
+    def test_live_equivalent_auto_merge_blocked_by_org_health_guard(self) -> None:
+        config = AutonomyConfig(
+            decision_matrix=[
+                (RISK_HIGH, 0.95, ACTION_AUTO_MERGE),
+                (RISK_HIGH, 0.00, ACTION_ESCALATE),
+            ]
+        )
+        result = recommended_action(
+            [{"confidence": 0.99}],
+            ["src/quant_strategy.py"],
+            config=config,
+            trusted_automation_metadata=LIVE_EQUIVALENT_EVIDENCE,
+            org_health_status="degraded",
+        )
+
+        self.assertEqual(result["action"], ACTION_AUTO_PR)
+        self.assertTrue(result["runtime_guards"])
+        self.assertFalse(result["auto_merge_allowed"])

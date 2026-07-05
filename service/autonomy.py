@@ -303,6 +303,7 @@ def apply_runtime_guards(
     *,
     health_status: str | None = None,
     quota_status: str | None = None,
+    org_health_status: str | None = None,
 ) -> tuple[str, list[str]]:
     """Downgrade autonomy based on runtime health/quota state."""
     guarded_action = action
@@ -326,6 +327,16 @@ def apply_runtime_guards(
         capped = _cap_action(guarded_action, ACTION_AUTO_PR)
         if capped != guarded_action:
             guards.append(f"quota status is {quota}; auto-merge capped at auto-pr")
+        guarded_action = capped
+
+    org_health = str(org_health_status or "").strip().lower()
+    if org_health == "unhealthy":
+        guarded_action = ACTION_ESCALATE
+        guards.append("org health is unhealthy; forcing human review")
+    elif org_health and org_health not in {"healthy", "ok"}:
+        capped = _cap_action(guarded_action, ACTION_AUTO_PR)
+        if capped != guarded_action:
+            guards.append(f"org health is {org_health}; auto-merge capped at auto-pr")
         guarded_action = capped
 
     return guarded_action, guards
@@ -356,8 +367,11 @@ def recommended_action(
     config: AutonomyConfig | None = None,
     repo: str | None = None,
     policy: dict[str, Any] | None = None,
+    automation_metadata: dict[str, Any] | None = None,
+    trusted_automation_metadata: dict[str, Any] | None = None,
     health_status: str | None = None,
     quota_status: str | None = None,
+    org_health_status: str | None = None,
 ) -> dict[str, Any]:
     """Compute the recommended autonomous action from AI verdicts and file risks.
 
@@ -371,7 +385,22 @@ def recommended_action(
     active_policy = policy if policy is not None else load_autonomy_policy()
     risk = classify_changes_risk(changed_paths or [], policy=active_policy)
     initial_action = decide_action(confidence, risk, config=config, repo=repo)
-    action, runtime_guards = apply_runtime_guards(initial_action, health_status=health_status, quota_status=quota_status)
+    from service.automation_authority import evaluate_automation_authority
+
+    authority = evaluate_automation_authority(
+        changed_paths or [],
+        metadata=automation_metadata or {},
+        trusted_metadata=trusted_automation_metadata or {},
+        proposed_action=initial_action,
+    )
+    action = str(authority["final_action"])
+    action, runtime_guards = apply_runtime_guards(
+        action,
+        health_status=health_status,
+        quota_status=quota_status,
+        org_health_status=org_health_status,
+    )
+    authority["final_action"] = action
 
     reasons = {
         (ACTION_ESCALATE, RISK_CRITICAL): "Critical files changed — always escalates to human review",
@@ -392,8 +421,9 @@ def recommended_action(
         "confidence": confidence,
         "risk": risk,
         "reason": reason,
-        "human_review_required": action == ACTION_ESCALATE,
+        "human_review_required": action in {ACTION_ESCALATE, ACTION_AUTO_PR} or bool(authority["human_review_required"]),
         "auto_merge_allowed": action == ACTION_AUTO_MERGE,
         "runtime_guards": runtime_guards,
+        "automation_authority": authority,
         "policy_version": active_policy.get("version") if isinstance(active_policy, dict) else None,
     }
