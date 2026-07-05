@@ -48,7 +48,7 @@ API_PATCH_SYSTEM_PROMPT = (
     "Return exactly one JSON object that matches the service patch contract. "
     "Do not wrap the JSON in markdown fences or add surrounding prose."
 )
-SUPPORTED_PROVIDERS = frozenset({"api", "anthropic", "codex", "openai", "auto", TASK_DEFAULT_PROVIDER})
+SUPPORTED_PROVIDERS = frozenset({"api", "anthropic", "codex", "openai", "auto"})
 DEFAULT_CODEX_BACKEND = "service"
 SUPPORTED_CODEX_BACKENDS = frozenset({"service"})
 GUARDED_AUTO_MERGE_LABEL = "auto-merge-ok"

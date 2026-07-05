@@ -72,9 +72,16 @@ class RunCodexPrReviewTests(unittest.TestCase):
         self.assertEqual(output, "api review")
         direct_api.assert_called_once_with("Review this PR.", complexity="high")
 
-    def test_service_failure_does_not_fallback_to_direct_api_by_default(self) -> None:
+    def test_service_failure_does_not_fallback_to_direct_api_when_disabled(self) -> None:
         with (
-            patch.dict(os.environ, {"CODEX_AUDIT_SERVICE_URL": "https://service.example"}, clear=True),
+            patch.dict(
+                os.environ,
+                {
+                    "CODEX_AUDIT_SERVICE_URL": "https://service.example",
+                    "CODEX_PR_REVIEW_API_FALLBACK_ENABLED": "false",
+                },
+                clear=True,
+            ),
             patch(
                 "scripts.run_codex_pr_review.run_codex_service_review",
                 side_effect=ReviewError("HTTP 429 Too Many Requests"),

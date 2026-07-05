@@ -162,9 +162,9 @@ class AutomationRunLedger:
         with self._lock:
             current = self._runs.get(run_id)
             if current:
-                event_history_limit = self._max_events_per_run - 1
+                old_events = list(current.get("events", []))
                 entry["events"] = (
-                    list(current.get("events", []))[-event_history_limit:] if event_history_limit else []
+                    old_events[-(self._max_events_per_run - 1) :] if self._max_events_per_run > 1 else []
                 )
                 if not entry["task_name"]:
                     entry["task_name"] = str(current.get("task_name", ""))
@@ -200,33 +200,30 @@ class AutomationRunLedger:
 
     def snapshot(self, *, limit: int | None = 100, include_events: bool = False) -> dict[str, Any]:
         with self._lock:
-            retained_runs = list(self._runs.values())
-            task_states = Counter(
-                str(run.get("task_state", "")).strip().lower() for run in retained_runs if run.get("task_state")
-            )
-            suggested_actions = Counter(
-                str(run.get("suggested_action", "")).strip().lower()
-                for run in retained_runs
-                if run.get("suggested_action")
-            )
-            terminal_runs = sum(
-                1 for run in retained_runs if str(run.get("task_state", "")).strip().lower() in TERMINAL_STATES
-            )
-            ordered_runs = sorted(
-                retained_runs,
-                key=lambda item: (float(item.get("updated_at", 0.0)), str(item.get("run_id", ""))),
-                reverse=True,
-            )
-            if limit is not None:
-                ordered_runs = ordered_runs[: max(0, int(limit))]
-            runs = []
-            for entry in ordered_runs:
-                run = {
+            retained_runs = [
+                {
                     key: deepcopy(value)
                     for key, value in entry.items()
                     if include_events or key != "events"
                 }
-                runs.append(run)
+                for entry in self._runs.values()
+            ]
+
+        task_states = Counter(str(run.get("task_state", "")).strip().lower() for run in retained_runs if run.get("task_state"))
+        suggested_actions = Counter(
+            str(run.get("suggested_action", "")).strip().lower()
+            for run in retained_runs
+            if run.get("suggested_action")
+        )
+        terminal_runs = sum(1 for run in retained_runs if str(run.get("task_state", "")).strip().lower() in TERMINAL_STATES)
+        ordered_runs = sorted(
+            retained_runs,
+            key=lambda item: (float(item.get("updated_at", 0.0)), str(item.get("run_id", ""))),
+            reverse=True,
+        )
+        if limit is not None:
+            ordered_runs = ordered_runs[: max(0, int(limit))]
+        runs = ordered_runs
         return {
             "runs": runs,
             "summary": {
