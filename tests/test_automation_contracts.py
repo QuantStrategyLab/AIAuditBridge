@@ -158,18 +158,26 @@ class TestAutomationContracts(unittest.TestCase):
         allowed_task = AutomationTask(
             trigger=trigger,
             evidence=evidence,
-            proposed_action=ProposedAction("act", "lane", "target", "why"),
-            gate_decision=GateDecision(True, "ok"),
+            proposed_action=ProposedAction("act", "lane", "target", "why", requires_human_review=False),
+            gate_decision=GateDecision(True, "ok", human_review_required=False),
         )
         blocked_task = AutomationTask(
             trigger=trigger,
             evidence=evidence,
-            proposed_action=ProposedAction("act", "lane", "target", "why"),
-            gate_decision=GateDecision(False, "blocked"),
+            proposed_action=ProposedAction("act", "lane", "target", "why", requires_human_review=False),
+            gate_decision=GateDecision(False, "blocked", human_review_required=False),
+        )
+
+        human_review_task = AutomationTask(
+            trigger=trigger,
+            evidence=evidence,
+            proposed_action=ProposedAction("act", "lane", "target", "why", requires_human_review=True),
+            gate_decision=GateDecision(True, "ok", human_review_required=True),
         )
 
         self.assertTrue(allowed_task.is_actionable)
         self.assertFalse(blocked_task.is_actionable)
+        self.assertFalse(human_review_task.is_actionable)
 
 
 if __name__ == "__main__":

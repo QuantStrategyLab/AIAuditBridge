@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from service.strategy_watch import evaluate_strategy_watch, finding_to_automation_task, issue_for_task  # noqa: E402
+from service.strategy_watch import evaluate_strategy_watch, finding_to_automation_task, issue_for_task, watcher_issue_key  # noqa: E402
 
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
@@ -93,16 +93,17 @@ def list_open_issue_urls(repo: str) -> dict[str, str]:
         for issue in issues:
             if not isinstance(issue, dict) or "pull_request" in issue:
                 continue
-            title = str(issue.get("title") or "")
-            if title and title not in open_issues:
-                open_issues[title] = str(issue.get("html_url") or issue.get("url") or "")
+            body = str(issue.get("body") or "")
+            match = re.search(r"<!--\s*strategy-optimization-watcher:([A-Za-z0-9_-]{8,64})\s*-->", body)
+            if match and match.group(1) not in open_issues:
+                open_issues[match.group(1)] = str(issue.get("html_url") or issue.get("url") or "")
         if len(issues) < 100:
             return open_issues
         page += 1
 
 
-def find_existing_open_issue(repo: str, title: str) -> str:
-    return list_open_issue_urls(repo).get(title, "")
+def find_existing_open_issue(repo: str, issue_key: str) -> str:
+    return list_open_issue_urls(repo).get(issue_key, "")
 
 
 def task_public_summary(task: Any) -> dict[str, Any]:
@@ -191,6 +192,10 @@ def run_watcher(
     comment_issue: Callable[[str, str, str], str] = comment_github_issue,
     list_issues: Callable[[str], dict[str, str]] = list_open_issue_urls,
 ) -> dict[str, Any]:
+    if not dry_run and not source_repo:
+        raise ValueError("source_repo is required for non-dry-run strategy watcher runs")
+    if source_repo and not REPO_RE.fullmatch(source_repo):
+        raise ValueError("source_repo must be in owner/name form")
     watch_payload = _payload_for_source_repo(payload, source_repo)
     findings = evaluate_strategy_watch(watch_payload)
     issues: list[dict[str, Any]] = []
@@ -198,11 +203,13 @@ def run_watcher(
     for finding in findings:
         task = finding_to_automation_task(finding)
         issue = issue_for_task(task)
+        issue_key = watcher_issue_key(task)
         repo = source_repo or finding.snapshot.repo
         issue_result: dict[str, Any] = {
             "repo": repo,
             "title": issue["title"],
             "task": task_public_summary(task),
+            "watcher_issue_key": issue_key,
             "created": False,
         }
         if dry_run:
@@ -211,7 +218,7 @@ def run_watcher(
             try:
                 if repo not in open_issue_cache:
                     open_issue_cache[repo] = list_issues(repo)
-                existing_url = open_issue_cache[repo].get(issue["title"], "")
+                existing_url = open_issue_cache[repo].get(issue_key, "")
                 if existing_url:
                     issue_result["existing_url"] = existing_url
                     issue_result["comment_url"] = comment_issue(repo, existing_url, issue["body"])
@@ -219,7 +226,7 @@ def run_watcher(
                     issue_result["skipped_reason"] = "open issue already exists; appended watcher update"
                 else:
                     issue_result["url"] = create_issue(repo, issue["title"], issue["body"])
-                    open_issue_cache[repo][issue["title"]] = str(issue_result["url"])
+                    open_issue_cache[repo][issue_key] = str(issue_result["url"])
                     issue_result["created"] = True
             except (ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
                 issue_result["error"] = str(exc)

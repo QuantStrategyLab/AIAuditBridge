@@ -171,6 +171,14 @@ def finding_to_automation_task(finding: StrategyWatchFinding) -> AutomationTask:
     )
 
 
+def watcher_issue_key(task: AutomationTask) -> str:
+    payload = task.to_dict()
+    trigger = payload.get("trigger") if isinstance(payload.get("trigger"), dict) else {}
+    subject = str(trigger.get("subject") or "")
+    raw = json.dumps({"subject": subject}, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:16]
+
+
 def issue_for_task(task: AutomationTask) -> dict[str, str]:
     """Build a GitHub issue title/body for a strategy optimization task."""
     payload = task.to_dict()
@@ -178,12 +186,14 @@ def issue_for_task(task: AutomationTask) -> dict[str, str]:
     evidence = payload["evidence"]
     action = payload["proposed_action"]
     event_key = str(payload.get("metadata", {}).get("event_key") or "")
+    issue_key = watcher_issue_key(task)
     title = f"AI strategy optimization proposal: {trigger.get('subject') or action.get('target') or 'strategy profile'}"
     signals = "\n".join(f"- {item}" for item in trigger.get("evidence", [])) or "- Strategy metrics degraded."
     checks = "\n".join(f"- [ ] {item}" for item in payload["gate_decision"].get("required_checks", []))
     risks = "\n".join(f"- {item}" for item in evidence.get("risks", []))
     body = "\n".join(
         [
+            f"<!-- strategy-optimization-watcher:{issue_key} -->",
             "## Summary",
             str(evidence.get("summary") or "Strategy optimization watcher opened this issue."),
             "",

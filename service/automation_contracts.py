@@ -109,7 +109,12 @@ class AutomationTask:
 
     @property
     def is_actionable(self) -> bool:
-        return self.gate_decision.allowed and bool(self.proposed_action.action.strip())
+        return (
+            self.gate_decision.allowed
+            and bool(self.proposed_action.action.strip())
+            and not self.gate_decision.human_review_required
+            and not self.proposed_action.requires_human_review
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {

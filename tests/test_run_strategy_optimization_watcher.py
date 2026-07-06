@@ -61,14 +61,16 @@ class RunStrategyOptimizationWatcherTest(unittest.TestCase):
             "current_metrics": {"sharpe": 0.5},
             "baseline_metrics": {"sharpe": 1.0},
         }
-        title = run_watcher(payload, dry_run=True)["issues"][0]["title"]
+        dry_result = run_watcher(payload, dry_run=True)
+        issue_key = dry_result["issues"][0]["watcher_issue_key"]
 
         result = run_watcher(
             payload,
+            source_repo="QuantStrategyLab/TestStrategies",
             dry_run=False,
             create_issue=lambda repo, title, body: calls.append((repo, title, body)) or "https://example.test/new",
             comment_issue=lambda repo, url, body: "https://example.test/comment",
-            list_issues=lambda repo: {title: "https://example.test/existing"},
+            list_issues=lambda repo: {issue_key: "https://example.test/existing"},
         )
 
         self.assertFalse(result["issues"][0]["created"])
@@ -92,8 +94,8 @@ class RunStrategyOptimizationWatcherTest(unittest.TestCase):
 
     def test_find_existing_open_issue_paginates_until_exact_match(self) -> None:
         calls: list[list[str]] = []
-        first_page = [{"title": f"other-{i}", "html_url": f"https://example.test/{i}"} for i in range(100)]
-        second_page = [{"title": "target", "html_url": "https://example.test/target"}]
+        first_page = [{"title": f"other-{i}", "body": "", "html_url": f"https://example.test/{i}"} for i in range(100)]
+        second_page = [{"title": "target", "body": "<!-- strategy-optimization-watcher:abc12345 -->", "html_url": "https://example.test/target"}]
 
         def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
             calls.append(cmd)
@@ -104,10 +106,21 @@ class RunStrategyOptimizationWatcherTest(unittest.TestCase):
         with patch("scripts.run_strategy_optimization_watcher.subprocess.run", fake_run):
             issues = list_open_issue_urls("QuantStrategyLab/TestStrategies")
 
-        self.assertEqual(issues["target"], "https://example.test/target")
+        self.assertEqual(issues["abc12345"], "https://example.test/target")
         self.assertEqual(len(calls), 2)
         self.assertIn("--method", calls[0])
         self.assertIn("GET", calls[0])
+
+    def test_run_watcher_requires_source_repo_for_non_dry_run(self) -> None:
+        with self.assertRaises(ValueError):
+            run_watcher(
+                {
+                    "repo": "QuantStrategyLab/TestStrategies",
+                    "current_metrics": {"sharpe": 0.5},
+                    "baseline_metrics": {"sharpe": 1.0},
+                },
+                dry_run=False,
+            )
 
     def test_run_watcher_rejects_mismatched_source_repo_payload(self) -> None:
         with self.assertRaises(ValueError):
@@ -146,6 +159,7 @@ class RunStrategyOptimizationWatcherTest(unittest.TestCase):
 
         result = run_watcher(
             payload,
+            source_repo="QuantStrategyLab/TestStrategies",
             dry_run=False,
             create_issue=lambda repo, title, body: (_ for _ in ()).throw(RuntimeError("boom")) if ":a" in title else "https://example.test/new",
             comment_issue=lambda repo, url, body: "https://example.test/comment",
@@ -168,6 +182,7 @@ class RunStrategyOptimizationWatcherTest(unittest.TestCase):
 
         result = run_watcher(
             payload,
+            source_repo="QuantStrategyLab/TestStrategies",
             dry_run=False,
             create_issue=lambda repo, title, body: create_calls.append((repo, title, body)) or "https://example.test/new",
             comment_issue=lambda repo, url, body: "https://example.test/comment",
@@ -191,6 +206,7 @@ class RunStrategyOptimizationWatcherTest(unittest.TestCase):
 
         result = run_watcher(
             payload,
+            source_repo="QuantStrategyLab/TestStrategies",
             dry_run=False,
             create_issue=lambda repo, title, body: create_calls.append((repo, title, body)) or "https://example.test/new",
             list_issues=lambda repo: list_calls.append(repo) or {},
