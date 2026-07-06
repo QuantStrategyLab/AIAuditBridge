@@ -128,11 +128,22 @@ class TestAutomationDecision(unittest.TestCase):
             {
                 "task_name": "monthly",
                 "task_state": "failed",
-                "metadata": {"source_repository": "QuantStrategyLab/AIAuditBridge"},
+                "metadata": {"origin": "service_job", "source_repository": "QuantStrategyLab/AIAuditBridge"},
             },
         ]
 
         self.assertEqual(consecutive_failure_count(runs, repo="quantstrategylab/aiauditbridge", task_name="monthly"), 1)
+
+    def test_external_workflow_failures_do_not_force_repo_failure_streak(self) -> None:
+        runs = [
+            {
+                "task_name": "monthly",
+                "task_state": "failed",
+                "metadata": {"origin": "external_workflow", "source_repository": "QuantStrategyLab/AIAuditBridge"},
+            },
+        ]
+
+        self.assertEqual(consecutive_failure_count(runs, repo="QuantStrategyLab/AIAuditBridge"), 0)
 
     def test_invalid_repo_autonomy_fails_closed(self) -> None:
         result = decide_automation_execution(
@@ -154,12 +165,12 @@ class TestAutomationDecision(unittest.TestCase):
             {
                 "task_name": "monthly",
                 "task_state": "failed",
-                "metadata": {"source_repository": "QuantStrategyLab/AIAuditBridge"},
+                "metadata": {"origin": "service_job", "source_repository": "QuantStrategyLab/AIAuditBridge"},
             },
             {
-                "task_name": "monthly",
+                "task_name": "runtime-health",
                 "task_state": "failed",
-                "metadata": {"source_repository": "QuantStrategyLab/AIAuditBridge"},
+                "metadata": {"origin": "service_job", "source_repository": "QuantStrategyLab/AIAuditBridge"},
             },
         ]
 
@@ -184,12 +195,12 @@ class TestAutomationDecision(unittest.TestCase):
             {
                 "task_name": "monthly",
                 "task_state": "running",
-                "metadata": {"source_repository": "QuantStrategyLab/AIAuditBridge"},
+                "metadata": {"origin": "service_job", "source_repository": "QuantStrategyLab/AIAuditBridge"},
             },
             {
                 "task_name": "monthly",
                 "task_state": "failed",
-                "metadata": {"source_repository": "QuantStrategyLab/AIAuditBridge"},
+                "metadata": {"origin": "service_job", "source_repository": "QuantStrategyLab/AIAuditBridge"},
             },
         ]
 

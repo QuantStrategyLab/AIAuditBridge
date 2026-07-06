@@ -87,7 +87,7 @@ class TestAutomationControlSnapshot(unittest.TestCase):
             {
                 "task_name": f"other-{index}",
                 "task_state": "merged",
-                "metadata": {"source_repository": f"QuantStrategyLab/Other{index}"},
+                "metadata": {"origin": "service_job", "source_repository": f"QuantStrategyLab/Other{index}"},
             }
             for index in range(20)
         ]
@@ -96,12 +96,12 @@ class TestAutomationControlSnapshot(unittest.TestCase):
                 {
                     "task_name": "monthly",
                     "task_state": "failed",
-                    "metadata": {"source_repository": "QuantStrategyLab/TargetRepo"},
+                    "metadata": {"origin": "service_job", "source_repository": "QuantStrategyLab/TargetRepo"},
                 },
                 {
                     "task_name": "monthly",
                     "task_state": "failed",
-                    "metadata": {"source_repository": "QuantStrategyLab/TargetRepo"},
+                    "metadata": {"origin": "service_job", "source_repository": "QuantStrategyLab/TargetRepo"},
                 },
             ]
         )
@@ -137,7 +137,7 @@ class TestAutomationControlSnapshot(unittest.TestCase):
                 "run_id": "previous-run",
                 "task_name": "monthly",
                 "task_state": "failed",
-                "metadata": {"source_repository": "QuantStrategyLab/TargetRepo"},
+                "metadata": {"origin": "service_job", "source_repository": "QuantStrategyLab/TargetRepo"},
             }
         ]
         health = type("Health", (), {"status": "healthy"})()
@@ -147,7 +147,7 @@ class TestAutomationControlSnapshot(unittest.TestCase):
             "run_id": "current-run",
             "task_name": "monthly",
             "task_state": "failed",
-            "metadata": {"source_repository": "QuantStrategyLab/TargetRepo"},
+            "metadata": {"origin": "service_job", "source_repository": "QuantStrategyLab/TargetRepo"},
         }
 
         with (
@@ -174,7 +174,7 @@ class TestAutomationControlSnapshot(unittest.TestCase):
                 "run_id": "current-run",
                 "task_name": "monthly",
                 "task_state": "failed",
-                "metadata": {"source_repository": "QuantStrategyLab/TargetRepo"},
+                "metadata": {"origin": "service_job", "source_repository": "QuantStrategyLab/TargetRepo"},
             }
         ]
         health = type("Health", (), {"status": "healthy"})()
@@ -184,7 +184,7 @@ class TestAutomationControlSnapshot(unittest.TestCase):
             "run_id": "current-run",
             "task_name": "monthly",
             "task_state": "failed",
-            "metadata": {"source_repository": "QuantStrategyLab/TargetRepo"},
+            "metadata": {"origin": "service_job", "source_repository": "QuantStrategyLab/TargetRepo"},
         }
 
         with (

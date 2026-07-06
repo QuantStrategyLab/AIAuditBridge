@@ -30,6 +30,7 @@ DEFAULT_MAX_CONSECUTIVE_FAILURES = 3
 DEFAULT_LOW_COST_MODEL = "gpt-5.4-mini"
 EXECUTION_POLICY_PATH_ENV = "CODEX_AUDIT_SERVICE_EXECUTION_POLICY_PATH"
 POLICY_LOAD_ERROR_KEY = "_load_error"
+TRUSTED_FAILURE_ORIGINS = frozenset({"service_job"})
 QUOTA_STATUS_SEVERITY = {
     "ok": 0,
     "healthy": 0,
@@ -154,15 +155,16 @@ def consecutive_failure_count(
     repo: str,
     task_name: str = "",
 ) -> int:
-    """Count latest consecutive failed runs for one repo/task from newest-first runs."""
+    """Count latest consecutive trusted failed runs for one repo from newest-first runs."""
     count = 0
     normalized_repo = _normalize_repo_id(repo)
     for run in runs:
         if not isinstance(run, dict):
             continue
-        if normalized_repo and _normalize_repo_id(_repo_from_run(run)) != normalized_repo:
+        metadata = run.get("metadata") if isinstance(run.get("metadata"), dict) else {}
+        if str(metadata.get("origin") or "") not in TRUSTED_FAILURE_ORIGINS:
             continue
-        if task_name and str(run.get("task_name") or "") != task_name:
+        if normalized_repo and _normalize_repo_id(_repo_from_run(run)) != normalized_repo:
             continue
         state = str(run.get("task_state") or "").strip().lower()
         if state == "failed":
