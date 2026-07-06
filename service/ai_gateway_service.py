@@ -513,7 +513,7 @@ def _automation_control_snapshot(
     repo: str,
     *,
     task_name: str = "",
-    requested_mode: str = MODE_REVIEW_ONLY,
+    requested_mode: str = MODE_REVIEW_AND_FIX,
     pending_run: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     try:
@@ -530,34 +530,35 @@ def _automation_control_snapshot(
         recent_runs = ledger_snapshot["runs"]
         ledger_summary = ledger_snapshot.get("summary") if isinstance(ledger_snapshot.get("summary"), dict) else {}
         retention = ledger_summary.get("retention") if isinstance(ledger_summary.get("retention"), dict) else {}
-        evicted_by_repo = (
-            retention.get("evicted_runs_by_repo") if isinstance(retention.get("evicted_runs_by_repo"), dict) else {}
-        )
-        try:
-            repo_evictions = int(evicted_by_repo.get(str(repo or "unknown").strip().lower(), 0) or 0)
-        except (TypeError, ValueError):
-            repo_evictions = 0
-        normalized_repo = str(repo or "unknown").strip().lower()
-        repo_history_has_terminal_boundary = any(
-            str(run.get("task_state") or "").strip().lower() not in {"failed", "queued", "running", "pending", "in_progress"}
-            and _automation_run_owner_repository(run).strip().lower() == normalized_repo
-            for run in recent_runs
-            if isinstance(run, dict)
-        )
-        failure_history_complete = (
-            not bool(retention.get("history_completeness_unknown"))
-            and (repo_evictions <= 0 or repo_history_has_terminal_boundary)
-        )
         ledger_unavailable = False
     except Exception:
         recent_runs = []
-        failure_history_complete = False
+        retention = {}
         ledger_unavailable = True
     if pending_run is not None:
         pending_run_id = str(pending_run.get("run_id") or "")
         if pending_run_id:
             recent_runs = [run for run in recent_runs if str(run.get("run_id") or "") != pending_run_id]
         recent_runs = [pending_run, *recent_runs]
+    evicted_by_repo = (
+        retention.get("evicted_runs_by_repo") if isinstance(retention.get("evicted_runs_by_repo"), dict) else {}
+    )
+    try:
+        repo_evictions = int(evicted_by_repo.get(str(repo or "unknown").strip().lower(), 0) or 0)
+    except (TypeError, ValueError):
+        repo_evictions = 0
+    normalized_repo = str(repo or "unknown").strip().lower()
+    repo_history_has_terminal_boundary = any(
+        str(run.get("task_state") or "").strip().lower() not in {"failed", "queued", "running", "pending", "in_progress"}
+        and _automation_run_owner_repository(run).strip().lower() == normalized_repo
+        for run in recent_runs
+        if isinstance(run, dict)
+    )
+    failure_history_complete = (
+        not ledger_unavailable
+        and not bool(retention.get("history_completeness_unknown"))
+        and (repo_evictions <= 0 or repo_history_has_terminal_boundary)
+    )
     execution = decide_automation_execution(
         repo=repo or "unknown",
         task_name=task_name,
@@ -627,7 +628,7 @@ def _automation_triage_snapshot(
     repo: str,
     *,
     task: str = "",
-    requested_mode: str = MODE_REVIEW_ONLY,
+    requested_mode: str = MODE_REVIEW_AND_FIX,
     failure_category: str = "",
     error: str = "",
     changed_paths: list[str] | None = None,
@@ -1534,7 +1535,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             else:
                 repo = claims_repo
         repo = repo or "unknown"
-        mode = _normalize_control_mode_param(str(params.get("mode", [MODE_REVIEW_ONLY])[0] or MODE_REVIEW_ONLY))
+        mode = _normalize_control_mode_param(str(params.get("mode", [MODE_REVIEW_AND_FIX])[0] or MODE_REVIEW_AND_FIX))
         if not mode:
             _json_response(self, HTTPStatus.BAD_REQUEST, {"status": "error", "error": "invalid mode"})
             return
@@ -1552,8 +1553,8 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         params = parse_qs(parsed.query)
         repo = str(payload.get("source_repository") or params.get("repo", [""])[0] or claims.get("repository") or "unknown")
         task = str(payload.get("task") or params.get("task", [""])[0] or "")
-        raw_mode = payload.get("mode") if "mode" in payload else params.get("mode", [MODE_REVIEW_ONLY])[0]
-        requested_mode = _normalize_control_mode_param(str(raw_mode or MODE_REVIEW_ONLY))
+        raw_mode = payload.get("mode") if "mode" in payload else params.get("mode", [MODE_REVIEW_AND_FIX])[0]
+        requested_mode = _normalize_control_mode_param(str(raw_mode or MODE_REVIEW_AND_FIX))
         if not requested_mode:
             _json_response(self, HTTPStatus.BAD_REQUEST, {"status": "error", "error": "invalid mode"})
             return
@@ -1646,7 +1647,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             if mode_from_payload
             else existing_metadata.get("requested_mode") or existing_metadata.get("mode")
         )
-        default_mode = MODE_REVIEW_ONLY
+        default_mode = MODE_REVIEW_AND_FIX
         requested_mode = _normalize_control_mode_param(str(raw_mode or default_mode))
         if mode_from_payload and not requested_mode:
             raise ValueError("invalid mode")
