@@ -48,7 +48,10 @@ from service.adapters.codex_adapter import CodexAdapter
 from service.autonomy import (
     ACTION_AUTO_PR,
     ACTION_RANK,
+    RISK_CRITICAL,
     RISK_HIGH,
+    RISK_LOW,
+    RISK_MEDIUM,
     classify_file_risk,
     load_autonomy_policy,
     recommended_action as compute_recommended_action,
@@ -62,9 +65,14 @@ from service.automation_authority import (
     evaluate_automation_authority,
 )
 from service.automation_run_ledger import (
+    CONTROL_CONTINUE,
+    CONTROL_ESCALATE,
+    CONTROL_PAUSE_AUTO_FIX,
+    CONTROL_REVIEW_ONLY,
     get_automation_run_ledger,
     suggest_control_action,
 )
+from scripts.run_monthly_codex_audit import service_failure_category
 from service.strategy_automation_registry import (
     apply_strategy_registry_guard,
     summarize_strategy_registry_context,
@@ -461,6 +469,132 @@ def _automation_control_snapshot(repo: str) -> dict[str, Any]:
     except Exception:
         quota_status = {"status": "unavailable"}
     return suggest_control_action(get_health_monitor().status, quota_status, org_health)
+
+
+def _highest_changed_path_risk(changed_paths: list[str], policy: dict[str, Any]) -> str:
+    if not changed_paths:
+        return RISK_LOW
+    rank = {RISK_LOW: 0, RISK_MEDIUM: 1, RISK_HIGH: 2, RISK_CRITICAL: 3}
+    highest = RISK_LOW
+    for path in changed_paths:
+        risk = classify_file_risk(path, policy=policy)
+        if rank.get(risk, 1) > rank.get(highest, 0):
+            highest = risk
+    return highest
+
+
+def _automation_triage_snapshot(
+    repo: str,
+    *,
+    task: str = "",
+    failure_category: str = "",
+    error: str = "",
+    changed_paths: list[str] | None = None,
+    run_id: str = "",
+) -> dict[str, Any]:
+    control = _automation_control_snapshot(repo)
+    policy = load_autonomy_policy()
+    normalized_paths = [
+        normalized
+        for path in (changed_paths or [])
+        if isinstance(path, str)
+        for normalized in (_normalize_changed_path(path),)
+        if normalized
+    ]
+    path_risk = _highest_changed_path_risk(normalized_paths, policy)
+    category = str(failure_category or "").strip().lower()
+    if not category and error:
+        category = service_failure_category(error)
+
+    control_action = str(control.get("action") or CONTROL_REVIEW_ONLY)
+    retry_allowed = False
+    deploy_allowed = False
+    auto_fix_allowed = False
+    human_review_required = bool(control.get("requires_human_review"))
+    incident_class = "investigate"
+    recommended_action = "open_issue"
+    next_step = "open_issue"
+
+    if category in {"auth_or_config_failure", "patch_contract_failure"}:
+        incident_class = "blocked"
+        recommended_action = "open_issue"
+        next_step = "fix_config_or_contract"
+    elif category == "quota_or_capacity_failure":
+        incident_class = "retryable"
+        retry_allowed = True
+        recommended_action = "retry_later"
+        next_step = "retry_after_quota_recovers"
+    elif category == "transient_service_failure":
+        incident_class = "retryable"
+        retry_allowed = True
+        recommended_action = "retry"
+        next_step = "retry"
+    else:
+        if path_risk in {RISK_CRITICAL, RISK_HIGH} or control_action == CONTROL_ESCALATE:
+            incident_class = "blocked"
+            recommended_action = "escalate"
+            next_step = "escalate"
+        elif control_action == CONTROL_PAUSE_AUTO_FIX:
+            incident_class = "degraded"
+            recommended_action = "open_issue"
+            next_step = "pause_auto_fix"
+        elif control_action == CONTROL_CONTINUE:
+            incident_class = "investigate"
+            recommended_action = "open_fix_pr" if path_risk in {RISK_LOW, RISK_MEDIUM} else "open_issue"
+            next_step = "open_fix_pr" if path_risk in {RISK_LOW, RISK_MEDIUM} else "open_issue"
+        else:
+            incident_class = "review"
+            recommended_action = "open_issue"
+            next_step = "open_issue"
+
+    if control_action == CONTROL_CONTINUE and category == "" and path_risk in {RISK_LOW, RISK_MEDIUM}:
+        auto_fix_allowed = True
+        deploy_allowed = True
+    if path_risk in {RISK_HIGH, RISK_CRITICAL}:
+        human_review_required = True
+        deploy_allowed = False
+        auto_fix_allowed = False
+    if category:
+        deploy_allowed = False
+        auto_fix_allowed = False
+        human_review_required = True
+
+    summary_bits = [
+        f"repo={repo or 'unknown'}",
+        f"task={task or 'unknown'}",
+        f"failure_category={category or 'none'}",
+        f"control={control_action}",
+        f"file_risk={path_risk}",
+    ]
+    if run_id:
+        summary_bits.append(f"run_id={run_id}")
+
+    error_excerpt = ""
+    if error:
+        error_excerpt = error.replace("`", "'").replace("\r", " ").replace("\n", " ")[:240]
+
+    return {
+        "repo": repo or "unknown",
+        "task": task or "",
+        "failure_category": category,
+        "incident_class": incident_class,
+        "file_risk": path_risk,
+        "control": control,
+        "auto_fix_allowed": auto_fix_allowed,
+        "retry_allowed": retry_allowed,
+        "deploy_allowed": deploy_allowed,
+        "human_review_required": human_review_required,
+        "recommended_action": recommended_action,
+        "next_step": next_step,
+        "summary": "; ".join(summary_bits),
+        "evidence": {
+            "service_health": str(get_health_monitor().status or ""),
+            "quota_status": str(control.get("quota_status") or ""),
+            "org_health_status": str(control.get("org_health_status") or ""),
+            "error_excerpt": error_excerpt,
+            "changed_paths": normalized_paths,
+        },
+    }
 
 
 def _record_job_automation_run(job: dict[str, Any]) -> None:
@@ -975,6 +1109,9 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             elif self.path in {"/v1/ai/automation/authority"}:
                 _assert_write_authz(claims, self.path)
                 self._handle_automation_authority(claims, payload)
+            elif self.path in {"/v1/ai/automation/triage"}:
+                _assert_write_authz(claims, self.path)
+                self._handle_automation_triage(claims, payload)
             elif self.path in {"/v1/ai/execute", "/v1/codex-audit"}:
                 _assert_write_authz(claims, self.path)
                 self._handle_execute_sync(claims, payload)
@@ -1242,6 +1379,34 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 repo = claims_repo
         repo = repo or "unknown"
         _json_response(self, HTTPStatus.OK, {"status": "ok", "control": _automation_control_snapshot(repo)})
+
+    def _handle_automation_triage(self, claims: dict[str, Any], payload: dict[str, Any]) -> None:
+        from urllib.parse import parse_qs, urlparse
+
+        source_repo = str(payload.get("source_repository") or "")
+        if source_repo:
+            _validate_source_repo(source_repo)
+            if not _automation_operator_claims(claims):
+                _validate_source_repo_org(claims, source_repo)
+        parsed = urlparse(self.path)
+        params = parse_qs(parsed.query)
+        repo = str(payload.get("source_repository") or params.get("repo", [""])[0] or claims.get("repository") or "unknown")
+        task = str(payload.get("task") or params.get("task", [""])[0] or "")
+        failure_category = str(payload.get("failure_category") or params.get("failure_category", [""])[0] or "")
+        error = str(payload.get("error") or params.get("error", [""])[0] or "")
+        run_id = str(payload.get("run_id") or params.get("run_id", [""])[0] or "")
+        changed_paths_raw = payload.get("changed_paths")
+        if not isinstance(changed_paths_raw, list):
+            changed_paths_raw = []
+        triage = _automation_triage_snapshot(
+            repo,
+            task=task,
+            failure_category=failure_category,
+            error=error,
+            changed_paths=[str(item) for item in changed_paths_raw if isinstance(item, str)],
+            run_id=run_id,
+        )
+        _json_response(self, HTTPStatus.OK, {"status": "ok", "triage": triage})
 
     def _handle_list_automation_runs(self) -> None:
         from urllib.parse import parse_qs, urlparse
