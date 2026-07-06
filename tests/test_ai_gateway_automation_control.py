@@ -182,6 +182,24 @@ class TestAutomationControlSnapshot(unittest.TestCase):
         self.assertEqual(control["execution"]["action"], "human_review")
         self.assertEqual(control["execution"]["consecutive_failures"], 2)
 
+    def test_control_snapshot_downgrades_legacy_action_when_auto_merge_is_capped(self) -> None:
+        health = type("Health", (), {"status": "healthy"})()
+        quota = type("Quota", (), {"runtime_status": lambda self, repo: {"status": "ok"}})()
+        ledger = type("Ledger", (), {"snapshot": lambda self, limit=None: {"runs": []}})()
+
+        with (
+            patch("service.ai_gateway_service.read_org_health", return_value={"status": "ok"}),
+            patch("service.ai_gateway_service.get_health_monitor", return_value=health),
+            patch("service.ai_gateway_service.get_quota_manager", return_value=quota),
+            patch("service.ai_gateway_service.get_automation_run_ledger", return_value=ledger),
+            patch("service.ai_gateway_service.load_execution_policy", return_value={"default": {"max_autonomy": "auto_pr"}}),
+        ):
+            control = _automation_control_snapshot("QuantStrategyLab/TargetRepo", requested_mode="auto_merge")
+
+        self.assertEqual(control["action"], "review_only")
+        self.assertFalse(control["auto_fix_allowed"])
+        self.assertFalse(control["execution"]["auto_merge_allowed"])
+
     def test_control_snapshot_deduplicates_pending_run_by_run_id(self) -> None:
         runs = [
             {

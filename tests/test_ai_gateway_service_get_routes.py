@@ -587,6 +587,17 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
                     self.assertEqual(recorded["run"]["quota_status"], recorded["control"]["quota_status"])
                     self.assertEqual(recorded["run"]["org_health_status"], recorded["control"]["org_health_status"])
 
+                    invalid_mode_payload = {**payload, "run_id": "platform-health-run-invalid", "mode": "bad"}
+                    invalid_mode_request = urllib.request.Request(
+                        f"{base_url}/v1/ai/automation/runs",
+                        data=json.dumps(invalid_mode_payload).encode("utf-8"),
+                        method="POST",
+                        headers={"Content-Type": "application/json"},
+                    )
+                    with self.assertRaises(urllib.error.HTTPError) as ctx:
+                        urllib.request.urlopen(invalid_mode_request, timeout=5)
+                    self.assertEqual(ctx.exception.code, 400)
+
                     with urllib.request.urlopen(f"{base_url}/v1/ai/automation/runs?include_events=true", timeout=5) as response:
                         ledger = json.loads(response.read().decode("utf-8"))["ledger"]
                     self.assertEqual(ledger["summary"]["total_runs"], 1)

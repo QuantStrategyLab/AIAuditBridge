@@ -572,6 +572,8 @@ def _automation_control_snapshot(
         strict_action = CONTROL_REVIEW_ONLY
     elif execution.get("action") == EXECUTION_DEFER:
         strict_action = CONTROL_PAUSE_AUTO_FIX
+    elif execution.get("requested_autonomy") != execution.get("effective_autonomy") and strict_action == CONTROL_CONTINUE:
+        strict_action = CONTROL_REVIEW_ONLY
     elif (
         execution.get("requested_mode") == MODE_REVIEW_AND_FIX
         and execution.get("effective_mode") == MODE_REVIEW_ONLY
@@ -583,7 +585,7 @@ def _automation_control_snapshot(
         reasons = control.get("reasons") if isinstance(control.get("reasons"), list) else []
         reasons.append("capped by execution decision")
         control["reasons"] = reasons
-    control["auto_fix_allowed"] = bool(execution.get("auto_fix_allowed"))
+    control["auto_fix_allowed"] = bool(execution.get("auto_fix_allowed")) and strict_action == CONTROL_CONTINUE
     control["requires_human_review"] = bool(execution.get("human_review_required"))
     control["execution"] = execution
     return control
@@ -1620,6 +1622,9 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             _assert_automation_run_access(existing, claims)
         task_name = str(payload.get("task") or payload.get("task_name") or "")
         task_state = str(payload.get("task_state") or payload.get("state") or "running")
+        requested_mode = _normalize_control_mode_param(str(payload.get("mode") or MODE_REVIEW_ONLY))
+        if not requested_mode:
+            raise ValueError("invalid mode")
         run_metadata = {
             **metadata,
             "origin": "external_workflow",
@@ -1630,7 +1635,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         control = _automation_control_snapshot(
             repo,
             task_name=task_name,
-            requested_mode=str(payload.get("mode") or MODE_REVIEW_AND_FIX),
+            requested_mode=requested_mode,
             pending_run={
                 "run_id": run_id,
                 "task_name": task_name,
