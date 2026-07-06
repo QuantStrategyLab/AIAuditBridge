@@ -49,7 +49,7 @@ class TestAutomationDecision(unittest.TestCase):
 
         self.assertEqual(result["effective_mode"], MODE_REVIEW_ONLY)
         self.assertFalse(result["auto_fix_allowed"])
-        self.assertTrue(result["human_review_required"])
+        self.assertFalse(result["human_review_required"])
 
     def test_exhausted_quota_defers_execution_without_stronger_guard(self) -> None:
         result = decide_automation_execution(
@@ -137,7 +137,7 @@ class TestAutomationDecision(unittest.TestCase):
         )
 
         self.assertEqual(result["effective_mode"], MODE_REVIEW_ONLY)
-        self.assertTrue(result["human_review_required"])
+        self.assertFalse(result["human_review_required"])
         self.assertFalse(result["auto_fix_allowed"])
 
     def test_failure_streak_matching_is_case_insensitive(self) -> None:
@@ -221,7 +221,7 @@ class TestAutomationDecision(unittest.TestCase):
             },
         ]
 
-        self.assertEqual(consecutive_failure_count(runs, repo="QuantStrategyLab/AIAuditBridge"), 0)
+        self.assertEqual(consecutive_failure_count(runs, repo="QuantStrategyLab/AIAuditBridge"), 1)
 
     def test_invalid_failure_threshold_falls_back_safely(self) -> None:
         result = decide_automation_execution(

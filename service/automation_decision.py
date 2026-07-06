@@ -210,6 +210,8 @@ def consecutive_failure_count(
         if state == "failed":
             count += 1
             continue
+        if state in {"queued", "running", "pending", "in_progress"}:
+            continue
         break
     return count
 
@@ -252,7 +254,6 @@ def decide_automation_execution(
 
     if AUTONOMY_RANK[max_autonomy] <= AUTONOMY_RANK[AUTONOMY_REVIEW_ONLY]:
         effective_mode = MODE_REVIEW_ONLY
-        human_review_required = True
         reasons.append(f"repo max autonomy is {max_autonomy}")
     if autonomy_config_error:
         reasons.append(autonomy_config_error)
@@ -260,6 +261,7 @@ def decide_automation_execution(
         reasons.append(policy_load_error)
     if max_autonomy == AUTONOMY_MANUAL:
         action = EXECUTION_HUMAN_REVIEW
+        human_review_required = True
 
     if failures >= max_failures:
         action = EXECUTION_HUMAN_REVIEW
@@ -269,14 +271,13 @@ def decide_automation_execution(
 
     if control_action in {CONTROL_REVIEW_ONLY, CONTROL_PAUSE_AUTO_FIX, CONTROL_ESCALATE}:
         effective_mode = MODE_REVIEW_ONLY
-        human_review_required = True
         reasons.append(f"runtime control action is {control_action}")
     if control_action == CONTROL_ESCALATE:
         action = EXECUTION_HUMAN_REVIEW
+        human_review_required = True
 
     if service == "degraded" or org_health == "degraded":
         effective_mode = MODE_REVIEW_ONLY
-        human_review_required = True
         reasons.append("health degraded; forcing review_only")
     if service == "unhealthy" or org_health == "unhealthy":
         action = EXECUTION_HUMAN_REVIEW
@@ -292,7 +293,6 @@ def decide_automation_execution(
                 action = EXECUTION_DEFER
                 defer = True
             effective_mode = MODE_REVIEW_ONLY
-            human_review_required = True
             reasons.append(f"quota status is {quota}; deferring automation")
         else:
             effective_model = low_cost_model or recommend_model(0.0)
@@ -306,7 +306,7 @@ def decide_automation_execution(
         else:
             reasons.append(f"quota status is {quota}; execution already blocked")
         effective_mode = MODE_REVIEW_ONLY
-        human_review_required = True
+    human_review_required = action == EXECUTION_HUMAN_REVIEW
 
     return {
         "action": action,
