@@ -67,14 +67,13 @@ from service.automation_authority import (
 )
 from service.automation_run_ledger import (
     CONTROL_CONTINUE,
-    CONTROL_DEFER,
     CONTROL_ESCALATE,
     CONTROL_PAUSE_AUTO_FIX,
     CONTROL_REVIEW_ONLY,
     get_automation_run_ledger,
     suggest_control_action,
 )
-from service.automation_decision import EXECUTION_DEFER, EXECUTION_HUMAN_REVIEW, decide_automation_execution, load_execution_policy
+from service.automation_decision import EXECUTION_HUMAN_REVIEW, decide_automation_execution, load_execution_policy
 from service.strategy_automation_registry import (
     apply_strategy_registry_guard,
     summarize_strategy_registry_context,
@@ -514,7 +513,7 @@ def _automation_control_snapshot(
     repo: str,
     *,
     task_name: str = "",
-    requested_mode: str = MODE_REVIEW_ONLY,
+    requested_mode: str = MODE_REVIEW_AND_FIX,
     pending_run: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     try:
@@ -560,8 +559,6 @@ def _automation_control_snapshot(
     strict_action = original_action
     if execution.get("action") == EXECUTION_HUMAN_REVIEW:
         strict_action = CONTROL_ESCALATE
-    elif execution.get("action") == EXECUTION_DEFER:
-        strict_action = CONTROL_DEFER
     elif (
         execution.get("requested_mode") == MODE_REVIEW_AND_FIX
         and execution.get("effective_mode") == MODE_REVIEW_ONLY
@@ -571,7 +568,7 @@ def _automation_control_snapshot(
     if strict_action != original_action:
         control["action"] = strict_action
         control["auto_fix_allowed"] = False
-        control["requires_human_review"] = execution.get("action") != EXECUTION_DEFER
+        control["requires_human_review"] = True
         reasons = control.get("reasons") if isinstance(control.get("reasons"), list) else []
         reasons.append("capped by execution decision")
         control["reasons"] = reasons
@@ -1499,7 +1496,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             else:
                 repo = claims_repo
         repo = repo or "unknown"
-        mode = str(params.get("mode", [MODE_REVIEW_ONLY])[0] or MODE_REVIEW_ONLY)
+        mode = str(params.get("mode", [MODE_REVIEW_AND_FIX])[0] or MODE_REVIEW_AND_FIX)
         _json_response(self, HTTPStatus.OK, {"status": "ok", "control": _automation_control_snapshot(repo, requested_mode=mode)})
 
     def _handle_automation_triage(self, claims: dict[str, Any], payload: dict[str, Any]) -> None:
@@ -1604,7 +1601,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         control = _automation_control_snapshot(
             repo,
             task_name=task_name,
-            requested_mode=str(payload.get("mode") or MODE_REVIEW_ONLY),
+            requested_mode=str(payload.get("mode") or MODE_REVIEW_AND_FIX),
             pending_run={
                 "run_id": run_id,
                 "task_name": task_name,
