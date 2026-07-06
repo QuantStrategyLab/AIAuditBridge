@@ -672,7 +672,7 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
                     self.assertTrue(triage["retry_allowed"])
                     self.assertEqual(triage["recommended_action"], "retry")
                     self.assertEqual(triage["file_risk"], "low")
-                    self.assertEqual(triage["control"]["execution"]["action"], "human_review")
+                    self.assertEqual(triage["control"]["execution"]["action"], "review_only")
                     self.assertIn("run_id=incident-123", triage["summary"])
                 finally:
                     server.shutdown()

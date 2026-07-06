@@ -9,7 +9,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from service.ai_gateway_service import _automation_control_snapshot
+from service.ai_gateway_service import _automation_control_snapshot, _automation_triage_snapshot
 
 
 class TestAutomationControlSnapshot(unittest.TestCase):
@@ -304,6 +304,29 @@ class TestAutomationControlSnapshot(unittest.TestCase):
         self.assertEqual(control["execution"]["action"], "run")
         self.assertTrue(control["execution"]["auto_fix_allowed"])
         self.assertFalse(control["execution"]["auto_merge_allowed"])
+
+    def test_triage_does_not_allow_auto_fix_when_execution_disallows_it(self) -> None:
+        control = {
+            "action": "continue",
+            "auto_fix_allowed": False,
+            "requires_human_review": False,
+            "service_health": "healthy",
+            "quota_status": "ok",
+            "org_health_status": "ok",
+            "execution": {"auto_fix_allowed": False},
+        }
+
+        with patch("service.ai_gateway_service._automation_control_snapshot", return_value=control):
+            triage = _automation_triage_snapshot(
+                "QuantStrategyLab/TargetRepo",
+                task="monthly",
+                changed_paths=["docs/runbook.md"],
+            )
+
+        self.assertFalse(triage["auto_fix_allowed"])
+        self.assertFalse(triage["deploy_allowed"])
+        self.assertEqual(triage["recommended_action"], "open_issue")
+        self.assertEqual(triage["next_step"], "open_issue")
 
     def test_control_snapshot_deduplicates_pending_run_by_run_id(self) -> None:
         runs = [

@@ -640,6 +640,8 @@ def _automation_triage_snapshot(
         category = service_failure_category(error)
 
     control_action = str(control.get("action") or CONTROL_REVIEW_ONLY)
+    execution = control.get("execution") if isinstance(control.get("execution"), dict) else {}
+    execution_auto_fix_allowed = bool(control.get("auto_fix_allowed")) and bool(execution.get("auto_fix_allowed"))
     retry_allowed = False
     deploy_allowed = False
     auto_fix_allowed = False
@@ -671,7 +673,7 @@ def _automation_triage_snapshot(
             incident_class = "degraded"
             recommended_action = "open_issue"
             next_step = "pause_auto_fix"
-        elif control_action == CONTROL_CONTINUE:
+        elif control_action == CONTROL_CONTINUE and execution_auto_fix_allowed:
             incident_class = "investigate"
             recommended_action = "open_fix_pr" if path_risk in {RISK_LOW, RISK_MEDIUM} else "open_issue"
             next_step = "open_fix_pr" if path_risk in {RISK_LOW, RISK_MEDIUM} else "open_issue"
@@ -680,7 +682,7 @@ def _automation_triage_snapshot(
             recommended_action = "open_issue"
             next_step = "open_issue"
 
-    if control_action == CONTROL_CONTINUE and category == "" and path_risk in {RISK_LOW, RISK_MEDIUM}:
+    if execution_auto_fix_allowed and category == "" and path_risk in {RISK_LOW, RISK_MEDIUM}:
         auto_fix_allowed = True
         deploy_allowed = True
     if path_risk in {RISK_HIGH, RISK_CRITICAL}:

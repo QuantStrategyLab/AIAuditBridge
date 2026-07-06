@@ -248,9 +248,19 @@ class TestAutomationRunLedger(unittest.TestCase):
 
         self.assertTrue(snapshot["summary"]["retention"]["history_completeness_unknown"])
 
-    def test_missing_persisted_ledger_marks_history_completeness_unknown(self) -> None:
+    def test_fresh_missing_persisted_ledger_starts_as_complete_empty_history(self) -> None:
         with TemporaryDirectory() as tmp:
             ledger = AutomationRunLedger(max_runs=2, storage_path=Path(tmp) / "missing.json")
+            snapshot = ledger.snapshot(limit=None)
+
+        self.assertFalse(snapshot["summary"]["retention"]["history_completeness_unknown"])
+
+    def test_disappeared_persisted_ledger_marks_history_completeness_unknown(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "automation_runs.json"
+            ledger = AutomationRunLedger(max_runs=2, storage_path=path)
+            ledger.record("run-1", "queued", metadata={"source_repository": "QuantStrategyLab/RepoA"})
+            path.unlink()
             snapshot = ledger.snapshot(limit=None)
 
         self.assertTrue(snapshot["summary"]["retention"]["history_completeness_unknown"])

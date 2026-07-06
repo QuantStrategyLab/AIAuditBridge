@@ -221,6 +221,7 @@ class AutomationRunLedger:
         self._evicted_runs_count = 0
         self._evicted_runs_by_repo: dict[str, int] = {}
         self._history_completeness_unknown = False
+        self._storage_file_seen = False
         self._storage_path = storage_path
         self._load_from_disk()
 
@@ -228,10 +229,10 @@ class AutomationRunLedger:
         if self._storage_path is None:
             return
         if not self._storage_path.exists():
-            self._history_completeness_unknown = True
             return
         runs, sequence, evicted_runs, evicted_runs_by_repo, history_unknown = self._read_from_disk_unlocked()
         with self._lock:
+            self._storage_file_seen = True
             self._runs = runs
             self._sequence = sequence
             self._evicted_runs_count = evicted_runs
@@ -241,7 +242,7 @@ class AutomationRunLedger:
 
     def _read_from_disk_unlocked(self) -> tuple[dict[str, dict[str, Any]], int, int, dict[str, int], bool]:
         if self._storage_path is None or not self._storage_path.exists():
-            return {}, 0, 0, {}, self._storage_path is not None
+            return {}, 0, 0, {}, self._storage_file_seen
         try:
             payload = json.loads(self._storage_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -284,7 +285,8 @@ class AutomationRunLedger:
         if self._storage_path is None:
             return
         if not self._storage_path.exists():
-            self._history_completeness_unknown = True
+            if self._storage_file_seen:
+                self._history_completeness_unknown = True
             return
         lock_handle = None
         try:
@@ -299,6 +301,7 @@ class AutomationRunLedger:
                 disk_evicted_runs_by_repo,
                 disk_history_unknown,
             ) = self._read_from_disk_unlocked()
+            self._storage_file_seen = True
             self._drop_runs_evicted_on_disk_locked(disk_runs)
             for run_id, disk_entry in disk_runs.items():
                 current = self._runs.get(run_id)
@@ -340,6 +343,7 @@ class AutomationRunLedger:
                 disk_evicted_runs_by_repo,
                 disk_history_unknown,
             ) = self._read_from_disk_unlocked()
+            self._storage_file_seen = True
             if guard_run_id and owner_repository:
                 disk_entry = disk_runs.get(guard_run_id)
                 disk_owner = _entry_owner_repository(disk_entry) if isinstance(disk_entry, dict) else ""
@@ -383,6 +387,7 @@ class AutomationRunLedger:
         except OSError:
             pass
         os.replace(tmp, self._storage_path)
+        self._storage_file_seen = True
 
     def _merge_entry_locked(self, current: dict[str, Any], disk_entry: dict[str, Any]) -> dict[str, Any]:
         current_terminal = _is_terminal_task_state(current.get("task_state"))
@@ -477,6 +482,7 @@ class AutomationRunLedger:
             previous_evicted_runs_count = self._evicted_runs_count
             previous_evicted_runs_by_repo = dict(self._evicted_runs_by_repo)
             previous_history_completeness_unknown = self._history_completeness_unknown
+            previous_storage_file_seen = self._storage_file_seen
             current = self._runs.get(run_id)
             if current:
                 current_owner = _entry_owner_repository(current)
@@ -531,6 +537,7 @@ class AutomationRunLedger:
                 self._evicted_runs_count = previous_evicted_runs_count
                 self._evicted_runs_by_repo = previous_evicted_runs_by_repo
                 self._history_completeness_unknown = previous_history_completeness_unknown
+                self._storage_file_seen = previous_storage_file_seen
                 raise
             return self._public_entry(self._runs[run_id])
 
