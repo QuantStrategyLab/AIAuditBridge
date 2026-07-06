@@ -574,7 +574,7 @@ def _automation_control_snapshot(
     strict_action = original_action
     if execution.get("action") == EXECUTION_HUMAN_REVIEW:
         strict_action = CONTROL_ESCALATE
-    elif execution.get("action") == EXECUTION_REVIEW_ONLY:
+    elif execution.get("action") == EXECUTION_REVIEW_ONLY and strict_action != CONTROL_PAUSE_AUTO_FIX:
         strict_action = CONTROL_REVIEW_ONLY
     elif execution.get("action") == EXECUTION_DEFER:
         strict_action = CONTROL_PAUSE_AUTO_FIX
@@ -1636,7 +1636,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             if mode_from_payload
             else existing_metadata.get("requested_mode") or existing_metadata.get("mode")
         )
-        default_mode = MODE_REVIEW_ONLY if existing is not None else MODE_REVIEW_AND_FIX
+        default_mode = MODE_REVIEW_AND_FIX
         requested_mode = _normalize_control_mode_param(str(raw_mode or default_mode))
         if mode_from_payload and not requested_mode:
             raise ValueError("invalid mode")
