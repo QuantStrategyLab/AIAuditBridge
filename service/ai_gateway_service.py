@@ -73,7 +73,7 @@ from service.automation_run_ledger import (
     get_automation_run_ledger,
     suggest_control_action,
 )
-from service.automation_decision import EXECUTION_DEFER, EXECUTION_HUMAN_REVIEW, decide_automation_execution, load_execution_policy
+from service.automation_decision import EXECUTION_DEFER, EXECUTION_HUMAN_REVIEW, EXECUTION_REVIEW_ONLY, decide_automation_execution, load_execution_policy
 from service.strategy_automation_registry import (
     apply_strategy_registry_guard,
     summarize_strategy_registry_context,
@@ -560,6 +560,8 @@ def _automation_control_snapshot(
     strict_action = original_action
     if execution.get("action") == EXECUTION_HUMAN_REVIEW:
         strict_action = CONTROL_ESCALATE
+    elif execution.get("action") == EXECUTION_REVIEW_ONLY:
+        strict_action = CONTROL_REVIEW_ONLY
     elif execution.get("action") == EXECUTION_DEFER:
         strict_action = CONTROL_PAUSE_AUTO_FIX
     elif (
@@ -602,12 +604,13 @@ def _automation_triage_snapshot(
     repo: str,
     *,
     task: str = "",
+    requested_mode: str = MODE_REVIEW_ONLY,
     failure_category: str = "",
     error: str = "",
     changed_paths: list[str] | None = None,
     run_id: str = "",
 ) -> dict[str, Any]:
-    control = _automation_control_snapshot(repo, task_name=task)
+    control = _automation_control_snapshot(repo, task_name=task, requested_mode=requested_mode)
     policy = load_autonomy_policy()
     normalized_paths = [
         normalized
@@ -1524,6 +1527,10 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         params = parse_qs(parsed.query)
         repo = str(payload.get("source_repository") or params.get("repo", [""])[0] or claims.get("repository") or "unknown")
         task = str(payload.get("task") or params.get("task", [""])[0] or "")
+        requested_mode = _normalize_control_mode_param(str(payload.get("mode") or params.get("mode", [MODE_REVIEW_ONLY])[0] or MODE_REVIEW_ONLY))
+        if not requested_mode:
+            _json_response(self, HTTPStatus.BAD_REQUEST, {"status": "error", "error": "invalid mode"})
+            return
         failure_category = str(payload.get("failure_category") or params.get("failure_category", [""])[0] or "")
         error = str(payload.get("error") or params.get("error", [""])[0] or "")
         run_id = str(payload.get("run_id") or params.get("run_id", [""])[0] or "")
@@ -1533,6 +1540,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         triage = _automation_triage_snapshot(
             repo,
             task=task,
+            requested_mode=requested_mode,
             failure_category=failure_category,
             error=error,
             changed_paths=[str(item) for item in changed_paths_raw if isinstance(item, str)],

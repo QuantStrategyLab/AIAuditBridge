@@ -78,6 +78,8 @@ def _normalize_requested_autonomy(value: str) -> str:
         return AUTONOMY_AUTO_MERGE
     if mode in {MODE_REVIEW_AND_FIX, AUTONOMY_AUTO_PR}:
         return AUTONOMY_AUTO_PR
+    if mode == AUTONOMY_MANUAL:
+        return AUTONOMY_MANUAL
     return AUTONOMY_REVIEW_ONLY
 
 
@@ -360,9 +362,13 @@ def decide_automation_execution(
         reasons.append(autonomy_config_error)
     if policy_load_error:
         reasons.append(policy_load_error)
-    if effective_autonomy == AUTONOMY_MANUAL:
+    if max_autonomy == AUTONOMY_MANUAL:
         action = EXECUTION_HUMAN_REVIEW
         human_review_required = True
+    elif requested_autonomy == AUTONOMY_MANUAL:
+        action = EXECUTION_REVIEW_ONLY
+        effective_mode = MODE_REVIEW_ONLY
+        reasons.append("manual mode requested; forcing review_only")
 
     if failures >= max_failures:
         action = EXECUTION_HUMAN_REVIEW

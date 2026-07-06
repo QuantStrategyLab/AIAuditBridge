@@ -607,10 +607,26 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
 
     def test_automation_triage_reports_retryable_incident(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
+            policy_path = os.path.join(tmp, "execution_policy.json")
+            with open(policy_path, "w", encoding="utf-8") as handle:
+                json.dump(
+                    {
+                        "default": {
+                            "max_autonomy": "auto_pr",
+                            "max_consecutive_failures": 3,
+                            "low_cost_model": "gpt-5.4-mini",
+                            "low_cost_provider": "openai",
+                        },
+                        "repositories": {},
+                    },
+                    handle,
+                )
             env = {
                 "CODEX_AUDIT_SERVICE_AUTH": "none",
                 "CODEX_AUDIT_SERVICE_ALLOW_NO_AUTH_FOR_LOCAL_TESTS": "true",
                 "CODEX_AUDIT_SERVICE_JOB_DIR": tmp,
+                "CODEX_AUDIT_SERVICE_EXECUTION_POLICY_PATH": policy_path,
+                "CODEX_AUDIT_SERVICE_EXECUTION_POLICY_OWNER": f"{os.getuid()}:{os.getgid()}",
                 "CODEX_AUDIT_SERVICE_AUTOMATION_OPERATOR_REPOSITORIES": "local",
             }
             with patch.dict(os.environ, env, clear=False):
@@ -626,6 +642,7 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
                         "error": "codex service timed out waiting for a background job",
                         "changed_paths": ["docs/runbook.md"],
                         "run_id": "incident-123",
+                        "mode": "manual",
                     }
                     request = urllib.request.Request(
                         f"{base_url}/v1/ai/automation/triage",
@@ -643,6 +660,7 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
                     self.assertTrue(triage["retry_allowed"])
                     self.assertEqual(triage["recommended_action"], "retry")
                     self.assertEqual(triage["file_risk"], "low")
+                    self.assertEqual(triage["control"]["execution"]["action"], "review_only")
                     self.assertIn("run_id=incident-123", triage["summary"])
                 finally:
                     server.shutdown()

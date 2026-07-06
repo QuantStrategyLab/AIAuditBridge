@@ -12,6 +12,7 @@ from unittest.mock import patch
 from service.automation_decision import (
     EXECUTION_DEFER,
     EXECUTION_HUMAN_REVIEW,
+    EXECUTION_REVIEW_ONLY,
     EXECUTION_RUN,
     MODE_REVIEW_AND_FIX,
     MODE_REVIEW_ONLY,
@@ -39,7 +40,7 @@ class TestAutomationDecision(unittest.TestCase):
 
     def test_legacy_autonomy_modes_are_normalized(self) -> None:
         cases = {
-            "manual": (MODE_REVIEW_ONLY, "review_only", "review_only", False),
+            "manual": (MODE_REVIEW_ONLY, "manual", "manual", False),
             "auto_pr": (MODE_REVIEW_AND_FIX, "auto_pr", "auto_pr", False),
             "auto_merge": (MODE_REVIEW_AND_FIX, "auto_merge", "auto_pr", False),
         }
@@ -57,6 +58,15 @@ class TestAutomationDecision(unittest.TestCase):
             self.assertEqual(result["effective_autonomy"], effective_autonomy)
             self.assertEqual(result["auto_merge_allowed"], auto_merge_allowed)
             self.assertFalse(result["human_review_required"])
+        manual_result = decide_automation_execution(
+            repo="QuantStrategyLab/AIAuditBridge",
+            requested_mode="manual",
+            control_action=CONTROL_CONTINUE,
+            service_health="healthy",
+            quota_status="ok",
+            org_health_status="ok",
+        )
+        self.assertEqual(manual_result["action"], EXECUTION_REVIEW_ONLY)
 
     def test_auto_merge_requires_matching_repo_autonomy(self) -> None:
         result = decide_automation_execution(
