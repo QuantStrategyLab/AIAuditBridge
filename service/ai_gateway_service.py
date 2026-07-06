@@ -571,8 +571,6 @@ def _automation_control_snapshot(
         strict_action = CONTROL_REVIEW_ONLY
     elif execution.get("action") == EXECUTION_DEFER:
         strict_action = CONTROL_PAUSE_AUTO_FIX
-    elif execution.get("requested_autonomy") != execution.get("effective_autonomy") and strict_action == CONTROL_CONTINUE:
-        strict_action = CONTROL_REVIEW_ONLY
     elif (
         execution.get("requested_mode") == MODE_REVIEW_AND_FIX
         and execution.get("effective_mode") == MODE_REVIEW_ONLY
@@ -585,6 +583,7 @@ def _automation_control_snapshot(
         reasons.append("capped by execution decision")
         control["reasons"] = reasons
     control["auto_fix_allowed"] = bool(execution.get("auto_fix_allowed")) and strict_action == CONTROL_CONTINUE
+    control["auto_merge_allowed"] = bool(execution.get("auto_merge_allowed")) and strict_action == CONTROL_CONTINUE
     control["requires_human_review"] = bool(execution.get("human_review_required"))
     control["execution"] = execution
     return control

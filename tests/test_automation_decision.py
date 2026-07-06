@@ -252,15 +252,10 @@ class TestAutomationDecision(unittest.TestCase):
         self.assertEqual(result["action"], EXECUTION_HUMAN_REVIEW)
         self.assertEqual(result["effective_mode"], MODE_REVIEW_ONLY)
 
-    def test_truncated_failure_history_uses_retained_failure_streak(self) -> None:
+    def test_truncated_failure_history_fails_closed(self) -> None:
         runs = [
             {
                 "task_name": "monthly",
-                "task_state": "failed",
-                "metadata": {"origin": "service_job", "source_repository": "QuantStrategyLab/AIAuditBridge"},
-            },
-            {
-                "task_name": "runtime-health",
                 "task_state": "failed",
                 "metadata": {"origin": "service_job", "source_repository": "QuantStrategyLab/AIAuditBridge"},
             },
@@ -278,7 +273,7 @@ class TestAutomationDecision(unittest.TestCase):
             policy={"default": {"max_consecutive_failures": 2}},
         )
 
-        self.assertEqual(consecutive_failure_count(runs, repo="QuantStrategyLab/AIAuditBridge"), 2)
+        self.assertEqual(consecutive_failure_count(runs, repo="QuantStrategyLab/AIAuditBridge"), 1)
         self.assertEqual(result["action"], EXECUTION_HUMAN_REVIEW)
 
     def test_running_state_does_not_clear_failure_streak(self) -> None:

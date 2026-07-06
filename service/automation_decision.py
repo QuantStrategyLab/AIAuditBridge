@@ -380,7 +380,10 @@ def decide_automation_execution(
         human_review_required = True
         reasons.append(f"consecutive failures reached {failures}/{max_failures}")
     elif not failure_history_complete:
-        reasons.append("failure history may be truncated; using retained failure streak")
+        action = EXECUTION_HUMAN_REVIEW
+        effective_mode = MODE_REVIEW_ONLY
+        human_review_required = True
+        reasons.append("failure history may be truncated; forcing human review")
 
     if control_action in {CONTROL_REVIEW_ONLY, CONTROL_PAUSE_AUTO_FIX, CONTROL_ESCALATE}:
         effective_mode = MODE_REVIEW_ONLY

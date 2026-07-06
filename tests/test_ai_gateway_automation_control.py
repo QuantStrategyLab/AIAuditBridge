@@ -182,14 +182,8 @@ class TestAutomationControlSnapshot(unittest.TestCase):
         self.assertEqual(control["execution"]["action"], "human_review")
         self.assertEqual(control["execution"]["consecutive_failures"], 2)
 
-    def test_control_snapshot_enforces_retained_failures_after_ledger_eviction(self) -> None:
+    def test_control_snapshot_fails_closed_after_ledger_eviction(self) -> None:
         runs = [
-            {
-                "run_id": "failed-2",
-                "task_name": "monthly",
-                "task_state": "failed",
-                "metadata": {"origin": "service_job", "source_repository": "QuantStrategyLab/TargetRepo"},
-            },
             {
                 "run_id": "failed-1",
                 "task_name": "monthly",
@@ -222,9 +216,9 @@ class TestAutomationControlSnapshot(unittest.TestCase):
         self.assertEqual(control["action"], "escalate")
         self.assertEqual(control["execution"]["action"], "human_review")
         self.assertFalse(control["execution"]["failure_history_complete"])
-        self.assertEqual(control["execution"]["consecutive_failures"], 2)
+        self.assertEqual(control["execution"]["consecutive_failures"], 1)
 
-    def test_control_snapshot_downgrades_legacy_action_when_auto_merge_is_capped(self) -> None:
+    def test_control_snapshot_preserves_legacy_continue_when_auto_merge_is_capped(self) -> None:
         health = type("Health", (), {"status": "healthy"})()
         quota = type("Quota", (), {"runtime_status": lambda self, repo: {"status": "ok"}})()
         ledger = type("Ledger", (), {"snapshot": lambda self, limit=None: {"runs": []}})()
@@ -238,8 +232,9 @@ class TestAutomationControlSnapshot(unittest.TestCase):
         ):
             control = _automation_control_snapshot("QuantStrategyLab/TargetRepo", requested_mode="auto_merge")
 
-        self.assertEqual(control["action"], "review_only")
-        self.assertFalse(control["auto_fix_allowed"])
+        self.assertEqual(control["action"], "continue")
+        self.assertTrue(control["auto_fix_allowed"])
+        self.assertFalse(control["auto_merge_allowed"])
         self.assertEqual(control["execution"]["requested_autonomy"], "auto_merge")
         self.assertEqual(control["execution"]["effective_autonomy"], "auto_pr")
         self.assertEqual(control["execution"]["action"], "run")
