@@ -583,10 +583,39 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
                         recorded = json.loads(response.read().decode("utf-8"))
                     self.assertEqual(recorded["run"]["run_id"], "platform-health-run-1")
                     self.assertEqual(recorded["run"]["suggested_action"], recorded["control"]["action"])
-                    self.assertEqual(recorded["control"]["execution"]["requested_mode"], "review_and_fix")
+                    self.assertEqual(recorded["control"]["execution"]["requested_mode"], "review_only")
+                    self.assertEqual(recorded["run"]["metadata"]["requested_mode"], "review_only")
                     self.assertEqual(recorded["run"]["service_health"], recorded["control"]["service_health"])
                     self.assertEqual(recorded["run"]["quota_status"], recorded["control"]["quota_status"])
                     self.assertEqual(recorded["run"]["org_health_status"], recorded["control"]["org_health_status"])
+
+                    manual_payload = {**payload, "run_id": "platform-health-run-manual", "mode": "manual"}
+                    manual_request = urllib.request.Request(
+                        f"{base_url}/v1/ai/automation/runs",
+                        data=json.dumps(manual_payload).encode("utf-8"),
+                        method="POST",
+                        headers={"Content-Type": "application/json"},
+                    )
+                    with urllib.request.urlopen(manual_request, timeout=5) as response:
+                        manual_recorded = json.loads(response.read().decode("utf-8"))
+                    self.assertEqual(manual_recorded["control"]["execution"]["requested_mode"], "review_only")
+                    self.assertEqual(manual_recorded["run"]["metadata"]["requested_mode"], "manual")
+
+                    manual_update_payload = {
+                        **payload,
+                        "run_id": "platform-health-run-manual",
+                        "task_state": "failed",
+                    }
+                    manual_update_request = urllib.request.Request(
+                        f"{base_url}/v1/ai/automation/runs",
+                        data=json.dumps(manual_update_payload).encode("utf-8"),
+                        method="POST",
+                        headers={"Content-Type": "application/json"},
+                    )
+                    with urllib.request.urlopen(manual_update_request, timeout=5) as response:
+                        manual_updated = json.loads(response.read().decode("utf-8"))
+                    self.assertEqual(manual_updated["control"]["execution"]["requested_mode"], "review_only")
+                    self.assertEqual(manual_updated["run"]["metadata"]["requested_mode"], "manual")
 
                     invalid_mode_payload = {**payload, "run_id": "platform-health-run-invalid", "mode": "bad"}
                     invalid_mode_request = urllib.request.Request(
@@ -601,7 +630,7 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
 
                     with urllib.request.urlopen(f"{base_url}/v1/ai/automation/runs?include_events=true", timeout=5) as response:
                         ledger = json.loads(response.read().decode("utf-8"))["ledger"]
-                    self.assertEqual(ledger["summary"]["total_runs"], 1)
+                    self.assertEqual(ledger["summary"]["total_runs"], 2)
                     self.assertEqual(ledger["runs"][0]["task_name"], "platform-health")
                     self.assertIn("events", ledger["runs"][0])
 

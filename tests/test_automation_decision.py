@@ -364,6 +364,14 @@ class TestAutomationDecision(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(load_execution_policy()["default"]["max_autonomy"], "manual")
 
+    def test_load_execution_policy_fails_closed_for_relative_env_path(self) -> None:
+        env = {
+            "CODEX_AUDIT_SERVICE_EXECUTION_POLICY_PATH": "policy.json",
+            "CODEX_AUDIT_SERVICE_EXECUTION_POLICY_OWNER": f"{os.getuid()}:{os.getgid()}",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(load_execution_policy()["default"]["max_autonomy"], "manual")
+
     def test_load_execution_policy_fails_closed_for_untrusted_env_path(self) -> None:
         with TemporaryDirectory() as tmp:
             path = Path(tmp) / "policy.json"

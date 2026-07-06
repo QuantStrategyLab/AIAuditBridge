@@ -247,6 +247,8 @@ def load_execution_policy(path: Path | None = None) -> dict[str, Any]:
         if not configured:
             return _fail_closed_policy("execution policy path is not configured")
         path = Path(configured).expanduser()
+        if not path.is_absolute():
+            return _fail_closed_policy("execution policy path must be absolute")
     if require_trusted_path:
         raw, read_error = _read_trusted_policy_file(path)
         if read_error:

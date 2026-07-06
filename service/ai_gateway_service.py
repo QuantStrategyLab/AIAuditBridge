@@ -578,11 +578,7 @@ def _automation_control_snapshot(
         strict_action = CONTROL_REVIEW_ONLY
     elif execution.get("action") == EXECUTION_DEFER:
         strict_action = CONTROL_PAUSE_AUTO_FIX
-    elif (
-        execution.get("requested_mode") == MODE_REVIEW_AND_FIX
-        and execution.get("effective_mode") == MODE_REVIEW_ONLY
-        and strict_action == CONTROL_CONTINUE
-    ):
+    elif execution.get("effective_mode") == MODE_REVIEW_ONLY and strict_action == CONTROL_CONTINUE:
         strict_action = CONTROL_REVIEW_ONLY
     if strict_action != original_action:
         control["action"] = strict_action
@@ -1629,8 +1625,15 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             _assert_automation_run_access(existing, claims)
         task_name = str(payload.get("task") or payload.get("task_name") or "")
         task_state = str(payload.get("task_state") or payload.get("state") or "running")
-        requested_mode = _normalize_control_mode_param(str(payload.get("mode") or MODE_REVIEW_AND_FIX))
-        if not requested_mode:
+        existing_metadata = existing.get("metadata") if isinstance(existing, dict) and isinstance(existing.get("metadata"), dict) else {}
+        mode_from_payload = "mode" in payload
+        raw_mode = (
+            payload.get("mode")
+            if mode_from_payload
+            else existing_metadata.get("requested_mode") or existing_metadata.get("mode")
+        )
+        requested_mode = _normalize_control_mode_param(str(raw_mode or MODE_REVIEW_ONLY))
+        if mode_from_payload and not requested_mode:
             raise ValueError("invalid mode")
         run_metadata = {
             **metadata,
@@ -1638,6 +1641,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             "repository": repo,
             "source_repository": source_repo,
             "caller_repository": str(claims.get("repository") or ""),
+            "requested_mode": requested_mode,
         }
         control = _automation_control_snapshot(
             repo,
