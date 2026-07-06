@@ -1,5 +1,14 @@
 # Quant AI Audit Bridge
 
+
+## QSL architecture role
+
+- **Layer**: `ops-tooling`.
+- **Responsibility**: AI audit and review automation bridge.
+- **Owns**: audit prompts, service policy, workflow health terminology.
+- **Consumes**: QuantStrategyLab repositories, PR/workflow metadata, Codex/API providers.
+- **Must not**: submit broker orders or mutate live allocations.
+
 [Chinese README](README.zh-CN.md)
 
 > Investing involves risk. This project does not provide investment advice and is for education, research, and engineering review only.
