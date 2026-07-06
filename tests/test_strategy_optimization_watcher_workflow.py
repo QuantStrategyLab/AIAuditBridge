@@ -25,6 +25,7 @@ class StrategyOptimizationWatcherWorkflowTest(unittest.TestCase):
 
         self.assertIn("SOURCE_REPO", text)
         self.assertIn("QuantStrategyLab/CryptoLivePoolPipelines", text)
+        self.assertIn("STRATEGY_WATCH_ALLOWED_SOURCE_REPOS", text)
         self.assertNotIn("vars.STRATEGY_WATCH_SOURCE_REPO || github.repository", text)
         self.assertIn("METRICS_PATH", text)
         self.assertIn("path: source", text)
@@ -41,6 +42,7 @@ class StrategyOptimizationWatcherWorkflowTest(unittest.TestCase):
         self.assertIn("Verify Source Repository Token", text)
         self.assertIn("${SOURCE_REPO}" + '" != "' + "${GITHUB_REPOSITORY}", text)
         self.assertIn("Cross-repository strategy watcher requires", text)
+        self.assertIn("SOURCE_REPO is not allowed", text)
         self.assertIn("owner=${owner}", text)
         self.assertIn("owner: ${{ steps.source_repo.outputs.owner }}", text)
 

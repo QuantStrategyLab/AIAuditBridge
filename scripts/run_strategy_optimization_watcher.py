@@ -71,10 +71,11 @@ def load_payload(path: str | Path) -> dict[str, Any]:
     return payload
 
 
-def find_existing_open_issue(repo: str, title: str) -> str:
+def list_open_issue_urls(repo: str) -> dict[str, str]:
     if not REPO_RE.fullmatch(repo):
         raise ValueError("repository must be in owner/name form")
     page = 1
+    open_issues: dict[str, str] = {}
     while True:
         result = subprocess.run(
             ["gh", "api", f"/repos/{repo}/issues", "-f", "state=open", "-f", "per_page=100", "-f", f"page={page}"],
@@ -85,17 +86,22 @@ def find_existing_open_issue(repo: str, title: str) -> str:
         try:
             issues = json.loads(result.stdout or "[]")
         except json.JSONDecodeError:
-            return ""
+            return open_issues
         if not isinstance(issues, list) or not issues:
-            return ""
+            return open_issues
         for issue in issues:
             if not isinstance(issue, dict) or "pull_request" in issue:
                 continue
-            if issue.get("title") == title:
-                return str(issue.get("html_url") or issue.get("url") or "")
+            title = str(issue.get("title") or "")
+            if title and title not in open_issues:
+                open_issues[title] = str(issue.get("html_url") or issue.get("url") or "")
         if len(issues) < 100:
-            return ""
+            return open_issues
         page += 1
+
+
+def find_existing_open_issue(repo: str, title: str) -> str:
+    return list_open_issue_urls(repo).get(title, "")
 
 
 def create_github_issue(repo: str, title: str, body: str) -> str:
@@ -116,10 +122,11 @@ def run_watcher(
     source_repo: str = "",
     dry_run: bool = True,
     create_issue: Callable[[str, str, str], str] = create_github_issue,
-    find_issue: Callable[[str, str], str] = find_existing_open_issue,
+    list_issues: Callable[[str], dict[str, str]] = list_open_issue_urls,
 ) -> dict[str, Any]:
     findings = evaluate_strategy_watch(payload)
     issues: list[dict[str, Any]] = []
+    open_issue_cache: dict[str, dict[str, str]] = {}
     for finding in findings:
         task = finding_to_automation_task(finding)
         issue = issue_for_task(task)
@@ -133,7 +140,9 @@ def run_watcher(
         if dry_run:
             issue_result["dry_run"] = True
         else:
-            existing_url = find_issue(repo, issue["title"])
+            if repo not in open_issue_cache:
+                open_issue_cache[repo] = list_issues(repo)
+            existing_url = open_issue_cache[repo].get(issue["title"], "")
             if existing_url:
                 issue_result["existing_url"] = existing_url
                 issue_result["skipped_reason"] = "open issue already exists"
@@ -165,7 +174,14 @@ def main() -> int:
     if not input_path.exists():
         print(json.dumps({"status": "error", "error": "strategy metrics input not found"}, sort_keys=True))
         return 2
-    payload = load_payload(input_path)
+    if not input_path.is_file():
+        print(json.dumps({"status": "error", "error": "strategy metrics input is not a file"}, sort_keys=True))
+        return 2
+    try:
+        payload = load_payload(input_path)
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        print(json.dumps({"status": "error", "error": str(exc)}, sort_keys=True))
+        return 2
     try:
         dry_run = parse_bool(os.environ.get("STRATEGY_WATCH_DRY_RUN"), default=True)
     except ValueError as exc:

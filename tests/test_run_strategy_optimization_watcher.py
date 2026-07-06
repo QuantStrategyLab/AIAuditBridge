@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from scripts.run_strategy_optimization_watcher import find_existing_open_issue, parse_bool, resolve_input_path, run_watcher
+from scripts.run_strategy_optimization_watcher import list_open_issue_urls, parse_bool, resolve_input_path, run_watcher
 
 
 class RunStrategyOptimizationWatcherTest(unittest.TestCase):
@@ -22,7 +22,7 @@ class RunStrategyOptimizationWatcherTest(unittest.TestCase):
             },
             dry_run=True,
             create_issue=lambda repo, title, body: calls.append((repo, title, body)) or "https://example.test/1",
-            find_issue=lambda repo, title: "",
+            list_issues=lambda repo: {},
         )
 
         self.assertEqual(result["findings"], 1)
@@ -42,7 +42,7 @@ class RunStrategyOptimizationWatcherTest(unittest.TestCase):
             source_repo="QuantStrategyLab/IssueRepo",
             dry_run=False,
             create_issue=lambda repo, title, body: calls.append((repo, title, body)) or "https://example.test/issue/1",
-            find_issue=lambda repo, title: "",
+            list_issues=lambda repo: {},
         )
 
         self.assertTrue(result["issues"][0]["created"])
@@ -61,7 +61,7 @@ class RunStrategyOptimizationWatcherTest(unittest.TestCase):
             },
             dry_run=False,
             create_issue=lambda repo, title, body: calls.append((repo, title, body)) or "https://example.test/new",
-            find_issue=lambda repo, title: "https://example.test/existing",
+            list_issues=lambda repo: {"AI strategy optimization proposal: QuantStrategyLab/TestStrategies:live": "https://example.test/existing"},
         )
 
         self.assertFalse(result["issues"][0]["created"])
@@ -93,10 +93,32 @@ class RunStrategyOptimizationWatcherTest(unittest.TestCase):
             return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(payload), stderr="")
 
         with patch("scripts.run_strategy_optimization_watcher.subprocess.run", fake_run):
-            result = find_existing_open_issue("QuantStrategyLab/TestStrategies", "target")
+            issues = list_open_issue_urls("QuantStrategyLab/TestStrategies")
 
-        self.assertEqual(result, "https://example.test/target")
+        self.assertEqual(issues["target"], "https://example.test/target")
         self.assertEqual(len(calls), 2)
+
+    def test_run_watcher_caches_open_issues_per_repo(self) -> None:
+        list_calls: list[str] = []
+        create_calls: list[tuple[str, str, str]] = []
+        payload = {
+            "repo": "QuantStrategyLab/TestStrategies",
+            "snapshots": [
+                {"profile": "a", "current_metrics": {"sharpe": 0.5}, "baseline_metrics": {"sharpe": 1.0}},
+                {"profile": "b", "current_metrics": {"sharpe": 0.4}, "baseline_metrics": {"sharpe": 1.0}},
+            ],
+        }
+
+        result = run_watcher(
+            payload,
+            dry_run=False,
+            create_issue=lambda repo, title, body: create_calls.append((repo, title, body)) or "https://example.test/new",
+            list_issues=lambda repo: list_calls.append(repo) or {},
+        )
+
+        self.assertEqual(result["findings"], 2)
+        self.assertEqual(list_calls, ["QuantStrategyLab/TestStrategies"])
+        self.assertEqual(len(create_calls), 2)
 
     def test_parse_bool_defaults_safely(self) -> None:
         self.assertTrue(parse_bool("true"))
