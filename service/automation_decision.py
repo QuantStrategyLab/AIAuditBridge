@@ -72,6 +72,17 @@ def _normalize_mode(value: str) -> str:
     return MODE_REVIEW_ONLY
 
 
+def _normalize_requested_autonomy(value: str) -> str:
+    mode = str(value or "").strip().lower()
+    if mode == AUTONOMY_AUTO_MERGE:
+        return AUTONOMY_AUTO_MERGE
+    if mode in {MODE_REVIEW_AND_FIX, AUTONOMY_AUTO_PR}:
+        return AUTONOMY_AUTO_PR
+    if mode == AUTONOMY_MANUAL:
+        return AUTONOMY_MANUAL
+    return AUTONOMY_REVIEW_ONLY
+
+
 def _normalize_repo_id(value: Any) -> str:
     return str(value or "").strip().lower()
 
@@ -279,11 +290,18 @@ def decide_automation_execution(
     low_cost_provider = str(repo_policy.get("low_cost_provider") or DEFAULT_LOW_COST_PROVIDER).strip().lower()
     quota_low_behavior = str(repo_policy.get("quota_low_behavior") or "low_cost_model").strip().lower()
 
+    reasons: list[str] = []
+    requested_autonomy = _normalize_requested_autonomy(requested_mode)
+    effective_autonomy = requested_autonomy
+    if AUTONOMY_RANK[effective_autonomy] > AUTONOMY_RANK[max_autonomy]:
+        effective_autonomy = max_autonomy
+        reasons.append(f"requested autonomy {requested_autonomy} exceeds repo max autonomy {max_autonomy}; capping")
     effective_mode = _normalize_mode(requested_mode)
+    if AUTONOMY_RANK[effective_autonomy] <= AUTONOMY_RANK[AUTONOMY_REVIEW_ONLY]:
+        effective_mode = MODE_REVIEW_ONLY
     effective_provider = str(requested_provider or "auto").strip().lower() or "auto"
     effective_model = str(requested_model or "").strip()
     action = EXECUTION_RUN
-    reasons: list[str] = []
     human_review_required = False
     defer = False
 
@@ -299,7 +317,7 @@ def decide_automation_execution(
         reasons.append(autonomy_config_error)
     if policy_load_error:
         reasons.append(policy_load_error)
-    if max_autonomy == AUTONOMY_MANUAL:
+    if effective_autonomy == AUTONOMY_MANUAL:
         action = EXECUTION_HUMAN_REVIEW
         human_review_required = True
 
@@ -354,6 +372,8 @@ def decide_automation_execution(
         "task_name": task_name,
         "requested_mode": _normalize_mode(requested_mode),
         "effective_mode": effective_mode,
+        "requested_autonomy": requested_autonomy,
+        "effective_autonomy": effective_autonomy,
         "requested_provider": requested_provider,
         "effective_provider": effective_provider,
         "requested_model": requested_model,
@@ -363,6 +383,7 @@ def decide_automation_execution(
         "max_consecutive_failures": max_failures,
         "human_review_required": human_review_required,
         "auto_fix_allowed": action == EXECUTION_RUN and effective_mode == MODE_REVIEW_AND_FIX and not human_review_required,
+        "auto_merge_allowed": action == EXECUTION_RUN and effective_autonomy == AUTONOMY_AUTO_MERGE and not human_review_required,
         "defer": defer,
         "reasons": reasons or ["execution allowed"],
     }

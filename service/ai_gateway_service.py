@@ -581,10 +581,8 @@ def _automation_control_snapshot(
 
 def _normalize_control_mode_param(value: str) -> str:
     mode = str(value or "").strip().lower()
-    if mode in {MODE_REVIEW_ONLY, "manual"}:
-        return MODE_REVIEW_ONLY
-    if mode in {MODE_REVIEW_AND_FIX, "auto_pr", "auto_merge"}:
-        return MODE_REVIEW_AND_FIX
+    if mode in {MODE_REVIEW_ONLY, MODE_REVIEW_AND_FIX, "manual", "auto_pr", "auto_merge"}:
+        return mode
     return ""
 
 

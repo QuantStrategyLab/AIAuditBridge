@@ -38,11 +38,12 @@ class TestAutomationDecision(unittest.TestCase):
         self.assertTrue(result["auto_fix_allowed"])
 
     def test_legacy_autonomy_modes_are_normalized(self) -> None:
-        for requested_mode, expected_mode in {
-            "manual": MODE_REVIEW_ONLY,
-            "auto_pr": MODE_REVIEW_AND_FIX,
-            "auto_merge": MODE_REVIEW_AND_FIX,
-        }.items():
+        cases = {
+            "manual": (MODE_REVIEW_ONLY, "manual", "manual", False),
+            "auto_pr": (MODE_REVIEW_AND_FIX, "auto_pr", "auto_pr", False),
+            "auto_merge": (MODE_REVIEW_AND_FIX, "auto_merge", "auto_pr", False),
+        }
+        for requested_mode, (expected_mode, requested_autonomy, effective_autonomy, auto_merge_allowed) in cases.items():
             result = decide_automation_execution(
                 repo="QuantStrategyLab/AIAuditBridge",
                 requested_mode=requested_mode,
@@ -52,6 +53,23 @@ class TestAutomationDecision(unittest.TestCase):
                 org_health_status="ok",
             )
             self.assertEqual(result["requested_mode"], expected_mode)
+            self.assertEqual(result["requested_autonomy"], requested_autonomy)
+            self.assertEqual(result["effective_autonomy"], effective_autonomy)
+            self.assertEqual(result["auto_merge_allowed"], auto_merge_allowed)
+
+    def test_auto_merge_requires_matching_repo_autonomy(self) -> None:
+        result = decide_automation_execution(
+            repo="QuantStrategyLab/AIAuditBridge",
+            requested_mode="auto_merge",
+            control_action=CONTROL_CONTINUE,
+            service_health="healthy",
+            quota_status="ok",
+            org_health_status="ok",
+            policy={"default": {"max_autonomy": "auto_merge"}},
+        )
+
+        self.assertEqual(result["effective_autonomy"], "auto_merge")
+        self.assertTrue(result["auto_merge_allowed"])
 
     def test_degraded_health_forces_review_only(self) -> None:
         result = decide_automation_execution(
