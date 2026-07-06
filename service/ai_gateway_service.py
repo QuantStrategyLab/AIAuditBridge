@@ -537,7 +537,17 @@ def _automation_control_snapshot(
             repo_evictions = int(evicted_by_repo.get(str(repo or "unknown").strip().lower(), 0) or 0)
         except (TypeError, ValueError):
             repo_evictions = 0
-        failure_history_complete = repo_evictions <= 0 and not bool(retention.get("history_completeness_unknown"))
+        normalized_repo = str(repo or "unknown").strip().lower()
+        repo_history_has_terminal_boundary = any(
+            str(run.get("task_state") or "").strip().lower() not in {"failed", "queued", "running", "pending", "in_progress"}
+            and _automation_run_owner_repository(run).strip().lower() == normalized_repo
+            for run in recent_runs
+            if isinstance(run, dict)
+        )
+        failure_history_complete = (
+            not bool(retention.get("history_completeness_unknown"))
+            and (repo_evictions <= 0 or repo_history_has_terminal_boundary)
+        )
         ledger_unavailable = False
     except Exception:
         recent_runs = []

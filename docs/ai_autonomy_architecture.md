@@ -337,7 +337,6 @@ AIAuditBridge 是 QuantStrategyLab 的 AI 审计控制面，负责：
 - 健康驱动的执行降级策略；
 - repo 级别自治阈值。
 
-
 ### Phase 4：扩大自动修复，但只扩大低风险面
 
 目标：提升无人值守覆盖率，但不放松安全门。

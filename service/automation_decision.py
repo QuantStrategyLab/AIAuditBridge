@@ -141,10 +141,7 @@ def _policy_metadata_trust_error(info: os.stat_result, *, kind: str) -> str:
 
 def _policy_parent_trust_error(path: Path) -> str:
     expected_uid, expected_gid = _expected_policy_owner()
-    parents = [path.parent]
-    if expected_uid == 0 and expected_gid == 0:
-        parents.extend(path.parent.parents)
-    for parent in parents:
+    for index, parent in enumerate([path.parent, *path.parent.parents]):
         try:
             info = parent.lstat()
         except FileNotFoundError:
@@ -155,9 +152,16 @@ def _policy_parent_trust_error(path: Path) -> str:
             return "execution policy parent directory is a symlink"
         if not stat.S_ISDIR(info.st_mode):
             return "execution policy parent path is not a directory"
-        trust_error = _policy_metadata_trust_error(info, kind="parent directory")
-        if trust_error:
-            return trust_error
+        if index == 0:
+            trust_error = _policy_metadata_trust_error(info, kind="parent directory")
+            if trust_error:
+                return trust_error
+            continue
+        owner_ok = (info.st_uid, info.st_gid) == (expected_uid, expected_gid) or info.st_uid == 0
+        if not owner_ok:
+            return "execution policy parent directory owner is invalid"
+        if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            return "execution policy parent directory permissions are too broad"
     return ""
 
 

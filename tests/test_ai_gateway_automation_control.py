@@ -31,24 +31,6 @@ class TestAutomationControlSnapshot(unittest.TestCase):
         self.assertEqual(control["execution"]["effective_mode"], "review_and_fix")
         self.assertTrue(control["execution"]["auto_fix_allowed"])
 
-    def test_control_snapshot_preserves_continue_for_explicit_review_and_fix_mode(self) -> None:
-        health = type("Health", (), {"status": "healthy"})()
-        quota = type("Quota", (), {"runtime_status": lambda self, repo: {"status": "ok"}})()
-        ledger = type("Ledger", (), {"snapshot": lambda self, limit=None: {"runs": []}})()
-
-        with (
-            patch("service.ai_gateway_service.read_org_health", return_value={"status": "ok"}),
-            patch("service.ai_gateway_service.get_health_monitor", return_value=health),
-            patch("service.ai_gateway_service.get_quota_manager", return_value=quota),
-            patch("service.ai_gateway_service.get_automation_run_ledger", return_value=ledger),
-            patch("service.ai_gateway_service.load_execution_policy", return_value={}),
-        ):
-            control = _automation_control_snapshot("QuantStrategyLab/TargetRepo", requested_mode="review_and_fix")
-
-        self.assertEqual(control["action"], "continue")
-        self.assertEqual(control["execution"]["effective_mode"], "review_and_fix")
-        self.assertTrue(control["execution"]["auto_fix_allowed"])
-
     def test_control_snapshot_downgrades_legacy_action_for_review_only_mode(self) -> None:
         health = type("Health", (), {"status": "healthy"})()
         quota = type("Quota", (), {"runtime_status": lambda self, repo: {"status": "ok"}})()
@@ -69,7 +51,7 @@ class TestAutomationControlSnapshot(unittest.TestCase):
         self.assertFalse(control["auto_fix_allowed"])
 
     def test_control_snapshot_applies_service_owned_execution_policy(self) -> None:
-        with TemporaryDirectory() as tmp:
+        with TemporaryDirectory(dir=".") as tmp:
             policy_path = Path(tmp) / "execution_policy.json"
             policy_path.write_text(
                 json.dumps(

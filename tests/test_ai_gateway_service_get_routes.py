@@ -184,7 +184,7 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
         self.assertEqual([run["run_id"] for run in filtered["runs"]], ["run-a"])
 
     def test_automation_run_update_rejects_owner_mismatch_even_for_operator(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(dir=".") as tmp:
             env = {
                 "CODEX_AUDIT_SERVICE_AUTH": "none",
                 "CODEX_AUDIT_SERVICE_ALLOW_NO_AUTH_FOR_LOCAL_TESTS": "true",
@@ -647,7 +647,7 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
                     server.server_close()
 
     def test_automation_triage_reports_retryable_incident(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(dir=".") as tmp:
             policy_path = os.path.join(tmp, "execution_policy.json")
             with open(policy_path, "w", encoding="utf-8") as handle:
                 json.dump(
