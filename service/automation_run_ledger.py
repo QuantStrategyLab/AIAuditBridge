@@ -225,7 +225,10 @@ class AutomationRunLedger:
         self._load_from_disk()
 
     def _load_from_disk(self) -> None:
-        if self._storage_path is None or not self._storage_path.exists():
+        if self._storage_path is None:
+            return
+        if not self._storage_path.exists():
+            self._history_completeness_unknown = True
             return
         runs, sequence, evicted_runs, evicted_runs_by_repo, history_unknown = self._read_from_disk_unlocked()
         with self._lock:
@@ -238,14 +241,14 @@ class AutomationRunLedger:
 
     def _read_from_disk_unlocked(self) -> tuple[dict[str, dict[str, Any]], int, int, dict[str, int], bool]:
         if self._storage_path is None or not self._storage_path.exists():
-            return {}, 0, 0, {}, False
+            return {}, 0, 0, {}, self._storage_path is not None
         try:
             payload = json.loads(self._storage_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
-            return {}, 0, 0, {}, False
+            return {}, 0, 0, {}, True
         runs = payload.get("runs") if isinstance(payload, dict) else None
         if not isinstance(runs, dict):
-            return {}, 0, 0, {}, False
+            return {}, 0, 0, {}, True
         clean_runs = {str(key): value for key, value in runs.items() if isinstance(value, dict)}
         sequence = _safe_int(payload.get("sequence"), len(clean_runs))
         history_unknown = "evicted_runs" not in payload or "evicted_runs_by_repo" not in payload
@@ -278,7 +281,10 @@ class AutomationRunLedger:
         self._persist_with_owner_guard_locked()
 
     def _refresh_from_disk_locked(self) -> None:
-        if self._storage_path is None or not self._storage_path.exists():
+        if self._storage_path is None:
+            return
+        if not self._storage_path.exists():
+            self._history_completeness_unknown = True
             return
         lock_handle = None
         try:

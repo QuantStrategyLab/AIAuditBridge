@@ -82,6 +82,22 @@ class TestAutomationDecision(unittest.TestCase):
         self.assertEqual(result["effective_autonomy"], "auto_merge")
         self.assertTrue(result["auto_merge_allowed"])
 
+    def test_auto_merge_is_disabled_when_effective_mode_is_review_only(self) -> None:
+        result = decide_automation_execution(
+            repo="QuantStrategyLab/AIAuditBridge",
+            requested_mode="auto_merge",
+            control_action=CONTROL_CONTINUE,
+            service_health="degraded",
+            quota_status="ok",
+            org_health_status="ok",
+            policy={"default": {"max_autonomy": "auto_merge"}},
+        )
+
+        self.assertEqual(result["action"], EXECUTION_RUN)
+        self.assertEqual(result["effective_mode"], MODE_REVIEW_ONLY)
+        self.assertFalse(result["auto_fix_allowed"])
+        self.assertFalse(result["auto_merge_allowed"])
+
     def test_degraded_health_forces_review_only(self) -> None:
         result = decide_automation_execution(
             repo="QuantStrategyLab/AIAuditBridge",

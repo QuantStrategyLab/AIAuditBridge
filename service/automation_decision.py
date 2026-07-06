@@ -442,7 +442,12 @@ def decide_automation_execution(
         "failure_history_complete": failure_history_complete,
         "human_review_required": human_review_required,
         "auto_fix_allowed": action == EXECUTION_RUN and effective_mode == MODE_REVIEW_AND_FIX and not human_review_required,
-        "auto_merge_allowed": action == EXECUTION_RUN and effective_autonomy == AUTONOMY_AUTO_MERGE and not human_review_required,
+        "auto_merge_allowed": (
+            action == EXECUTION_RUN
+            and effective_mode == MODE_REVIEW_AND_FIX
+            and effective_autonomy == AUTONOMY_AUTO_MERGE
+            and not human_review_required
+        ),
         "defer": defer,
         "reasons": reasons or ["execution allowed"],
     }

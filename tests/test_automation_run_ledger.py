@@ -248,6 +248,22 @@ class TestAutomationRunLedger(unittest.TestCase):
 
         self.assertTrue(snapshot["summary"]["retention"]["history_completeness_unknown"])
 
+    def test_missing_persisted_ledger_marks_history_completeness_unknown(self) -> None:
+        with TemporaryDirectory() as tmp:
+            ledger = AutomationRunLedger(max_runs=2, storage_path=Path(tmp) / "missing.json")
+            snapshot = ledger.snapshot(limit=None)
+
+        self.assertTrue(snapshot["summary"]["retention"]["history_completeness_unknown"])
+
+    def test_corrupt_persisted_ledger_marks_history_completeness_unknown(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "automation_runs.json"
+            path.write_text("{not-json", encoding="utf-8")
+            ledger = AutomationRunLedger(max_runs=2, storage_path=path)
+            snapshot = ledger.snapshot(limit=None)
+
+        self.assertTrue(snapshot["summary"]["retention"]["history_completeness_unknown"])
+
     def test_update_preserves_control_fields_when_omitted(self) -> None:
         self.ledger.record(
             "run-1",
