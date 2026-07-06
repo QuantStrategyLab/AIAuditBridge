@@ -2343,7 +2343,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertIn("location ^~ /v1/codex-audit/", deploy_script)
         self.assertIn("CODEX_AUDIT_SERVICE_JOB_DIR", deploy_script)
         self.assertIn("CODEX_AUDIT_SERVICE_EXECUTION_POLICY_PATH", deploy_script)
-        self.assertIn("/var/lib/codex-audit-bridge/policy/execution_policy.json", deploy_script)
+        self.assertIn("/etc/codex-audit-bridge-policy/execution_policy.json", deploy_script)
         self.assertIn("write_default_execution_policy_if_missing", deploy_script)
         self.assertIn("O_NOFOLLOW", deploy_script)
         self.assertIn('"max_consecutive_failures": 3', deploy_script)

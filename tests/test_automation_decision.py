@@ -39,7 +39,7 @@ class TestAutomationDecision(unittest.TestCase):
 
     def test_legacy_autonomy_modes_are_normalized(self) -> None:
         cases = {
-            "manual": (MODE_REVIEW_ONLY, "manual", "manual", False),
+            "manual": (MODE_REVIEW_ONLY, "review_only", "review_only", False),
             "auto_pr": (MODE_REVIEW_AND_FIX, "auto_pr", "auto_pr", False),
             "auto_merge": (MODE_REVIEW_AND_FIX, "auto_merge", "auto_pr", False),
         }
@@ -56,6 +56,7 @@ class TestAutomationDecision(unittest.TestCase):
             self.assertEqual(result["requested_autonomy"], requested_autonomy)
             self.assertEqual(result["effective_autonomy"], effective_autonomy)
             self.assertEqual(result["auto_merge_allowed"], auto_merge_allowed)
+            self.assertFalse(result["human_review_required"])
 
     def test_auto_merge_requires_matching_repo_autonomy(self) -> None:
         result = decide_automation_execution(

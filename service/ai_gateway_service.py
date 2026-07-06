@@ -1506,7 +1506,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             else:
                 repo = claims_repo
         repo = repo or "unknown"
-        mode = _normalize_control_mode_param(str(params.get("mode", [MODE_REVIEW_ONLY])[0] or MODE_REVIEW_ONLY))
+        mode = _normalize_control_mode_param(str(params.get("mode", [MODE_REVIEW_AND_FIX])[0] or MODE_REVIEW_AND_FIX))
         if not mode:
             _json_response(self, HTTPStatus.BAD_REQUEST, {"status": "error", "error": "invalid mode"})
             return

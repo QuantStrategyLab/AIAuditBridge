@@ -78,8 +78,6 @@ def _normalize_requested_autonomy(value: str) -> str:
         return AUTONOMY_AUTO_MERGE
     if mode in {MODE_REVIEW_AND_FIX, AUTONOMY_AUTO_PR}:
         return AUTONOMY_AUTO_PR
-    if mode == AUTONOMY_MANUAL:
-        return AUTONOMY_MANUAL
     return AUTONOMY_REVIEW_ONLY
 
 
@@ -140,17 +138,25 @@ def _policy_metadata_trust_error(info: os.stat_result, *, kind: str) -> str:
 
 
 def _policy_parent_trust_error(path: Path) -> str:
-    try:
-        info = path.parent.lstat()
-    except FileNotFoundError:
-        return "execution policy parent directory is unavailable"
-    except OSError:
-        return "execution policy parent directory is unreadable"
-    if stat.S_ISLNK(info.st_mode):
-        return "execution policy parent directory is a symlink"
-    if not stat.S_ISDIR(info.st_mode):
-        return "execution policy parent path is not a directory"
-    return _policy_metadata_trust_error(info, kind="parent directory")
+    expected_uid, expected_gid = _expected_policy_owner()
+    parents = [path.parent]
+    if expected_uid == 0 and expected_gid == 0:
+        parents.extend(path.parent.parents)
+    for parent in parents:
+        try:
+            info = parent.lstat()
+        except FileNotFoundError:
+            return "execution policy parent directory is unavailable"
+        except OSError:
+            return "execution policy parent directory is unreadable"
+        if stat.S_ISLNK(info.st_mode):
+            return "execution policy parent directory is a symlink"
+        if not stat.S_ISDIR(info.st_mode):
+            return "execution policy parent path is not a directory"
+        trust_error = _policy_metadata_trust_error(info, kind="parent directory")
+        if trust_error:
+            return trust_error
+    return ""
 
 
 def _read_trusted_policy_file(path: Path) -> tuple[str, str]:

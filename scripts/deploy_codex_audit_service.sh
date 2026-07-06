@@ -14,7 +14,7 @@ ALLOWED_REPOSITORY_VISIBILITIES="${CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORY_VISIBI
 ALLOWED_SOURCE_REPOSITORIES="${CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES:-QuantStrategyLab/AIAuditBridge,QuantStrategyLab/CryptoLivePoolPipelines,QuantStrategyLab/HkEquitySnapshotPipelines,QuantStrategyLab/UsEquitySnapshotPipelines,QuantStrategyLab/ResearchSignalContextPipelines}"
 JOB_DIR="${CODEX_AUDIT_SERVICE_JOB_DIR:-/var/lib/codex-audit-bridge/jobs}"
 ADMIN_ENV_FILE="${CODEX_AUDIT_SERVICE_ADMIN_ENV_FILE:-/etc/codex-audit-bridge/admin.env}"
-EXECUTION_POLICY_FILE="${CODEX_AUDIT_SERVICE_EXECUTION_POLICY_PATH:-/var/lib/codex-audit-bridge/policy/execution_policy.json}"
+EXECUTION_POLICY_FILE="${CODEX_AUDIT_SERVICE_EXECUTION_POLICY_PATH:-/etc/codex-audit-bridge-policy/execution_policy.json}"
 AUDIT_MODEL="${CODEX_AUDIT_SERVICE_MODEL:-}"
 AUDIT_REASONING_EFFORT="${CODEX_AUDIT_SERVICE_REASONING_EFFORT:-}"
 CODEX_ACCOUNT_USAGE="${CODEX_AUDIT_SERVICE_CODEX_ACCOUNT_USAGE:-1}"
@@ -217,6 +217,12 @@ write_admin_env_file_if_needed() {
 
 write_default_execution_policy_if_missing() {
   local policy_path="${EXECUTION_POLICY_FILE}"
+  local policy_dir
+  policy_dir="$(dirname "$policy_path")"
+  if [ -L "$policy_dir" ]; then
+    echo "refusing to write execution policy under symlinked directory: $policy_dir" >&2
+    exit 1
+  fi
   if [ -L "$policy_path" ]; then
     echo "refusing to write execution policy through symlink: $policy_path" >&2
     exit 1
@@ -224,7 +230,7 @@ write_default_execution_policy_if_missing() {
   if [ -e "$policy_path" ]; then
     return
   fi
-  sudo install -d -m 0755 -o root -g root "$(dirname "$policy_path")"
+  sudo install -d -m 0755 -o root -g root "$policy_dir"
   sudo python3 - "$policy_path" <<'PY'
 import os
 import sys

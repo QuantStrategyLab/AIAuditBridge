@@ -72,7 +72,7 @@ bash scripts/deploy_codex_audit_service.sh deploy
 
 The job directory should be owned by the service user and mode `0700`.
 The deploy script points `CODEX_AUDIT_SERVICE_EXECUTION_POLICY_PATH` to
-`/var/lib/codex-audit-bridge/policy/execution_policy.json` by default and creates
+`/etc/codex-audit-bridge-policy/execution_policy.json` by default and creates
 a conservative default file if it is missing. This admin-owned, service-readable
 policy file sits outside the service-user-writable job workspace and can cap repo
 autonomy without trusting the reviewed checkout:

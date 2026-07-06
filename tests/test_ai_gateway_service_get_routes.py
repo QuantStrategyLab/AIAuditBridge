@@ -375,7 +375,7 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
                     control = json.loads(response.read().decode("utf-8"))["control"]
                 self.assertIn("execution", control)
                 self.assertEqual(control["execution"]["repo"], "QuantStrategyLab/TargetRepo")
-                self.assertEqual(control["execution"]["requested_mode"], "review_only")
+                self.assertEqual(control["execution"]["requested_mode"], "review_and_fix")
                 self.assertEqual(control["execution"]["effective_mode"], "review_only")
                 self.assertFalse(control["execution"]["auto_fix_allowed"])
 
