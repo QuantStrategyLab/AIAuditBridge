@@ -73,7 +73,7 @@ from service.automation_run_ledger import (
     get_automation_run_ledger,
     suggest_control_action,
 )
-from service.automation_decision import EXECUTION_HUMAN_REVIEW, decide_automation_execution, load_execution_policy
+from service.automation_decision import EXECUTION_DEFER, EXECUTION_HUMAN_REVIEW, decide_automation_execution, load_execution_policy
 from service.strategy_automation_registry import (
     apply_strategy_registry_guard,
     summarize_strategy_registry_context,
@@ -552,6 +552,7 @@ def _automation_control_snapshot(
         execution["effective_mode"] = MODE_REVIEW_ONLY
         execution["human_review_required"] = True
         execution["auto_fix_allowed"] = False
+        execution["defer"] = False
         reasons = execution.get("reasons") if isinstance(execution.get("reasons"), list) else []
         reasons.append("automation ledger unavailable; forcing human review")
         execution["reasons"] = reasons
@@ -559,6 +560,8 @@ def _automation_control_snapshot(
     strict_action = original_action
     if execution.get("action") == EXECUTION_HUMAN_REVIEW:
         strict_action = CONTROL_ESCALATE
+    elif execution.get("action") == EXECUTION_DEFER:
+        strict_action = CONTROL_PAUSE_AUTO_FIX
     elif (
         execution.get("requested_mode") == MODE_REVIEW_AND_FIX
         and execution.get("effective_mode") == MODE_REVIEW_ONLY
