@@ -248,7 +248,7 @@ class TestAutomationRunLedger(unittest.TestCase):
 
         self.assertTrue(snapshot["summary"]["retention"]["history_completeness_unknown"])
 
-    def test_pre_migration_ledger_recovers_after_schema_rewrite(self) -> None:
+    def test_pre_migration_ledger_keeps_history_unknown_after_schema_rewrite(self) -> None:
         with TemporaryDirectory() as tmp:
             path = Path(tmp) / "automation_runs.json"
             path.write_text(
@@ -274,8 +274,25 @@ class TestAutomationRunLedger(unittest.TestCase):
             ledger.record("run-2", "queued", metadata={"source_repository": "QuantStrategyLab/RepoA"})
             snapshot = AutomationRunLedger(max_runs=3, storage_path=path).snapshot(limit=None)
 
-        self.assertFalse(snapshot["summary"]["retention"]["history_completeness_unknown"])
+        self.assertTrue(snapshot["summary"]["retention"]["history_completeness_unknown"])
         self.assertEqual({run["run_id"] for run in snapshot["runs"]}, {"run-1", "run-2"})
+
+    def test_stale_update_cannot_resurrect_run_evicted_on_disk(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "automation_runs.json"
+            ledger_a = AutomationRunLedger(max_runs=2, storage_path=path)
+            with patch("service.automation_run_ledger.time.time", side_effect=[1.0, 2.0]):
+                ledger_a.record("run-1", "queued", metadata={"source_repository": "QuantStrategyLab/RepoA"})
+                ledger_a.record("run-2", "queued", metadata={"source_repository": "QuantStrategyLab/RepoA"})
+            ledger_b = AutomationRunLedger(max_runs=2, storage_path=path)
+            with patch("service.automation_run_ledger.time.time", return_value=3.0):
+                ledger_a.record("run-3", "queued", metadata={"source_repository": "QuantStrategyLab/RepoA"})
+            with patch("service.automation_run_ledger.time.time", return_value=4.0):
+                with self.assertRaises(ValueError):
+                    ledger_b.record("run-1", "failed", metadata={"source_repository": "QuantStrategyLab/RepoA"})
+            snapshot = AutomationRunLedger(max_runs=2, storage_path=path).snapshot(limit=None)
+
+        self.assertEqual({run["run_id"] for run in snapshot["runs"]}, {"run-2", "run-3"})
 
     def test_fresh_missing_persisted_ledger_starts_as_complete_empty_history(self) -> None:
         with TemporaryDirectory() as tmp:
