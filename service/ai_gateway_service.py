@@ -72,7 +72,6 @@ from service.automation_run_ledger import (
     get_automation_run_ledger,
     suggest_control_action,
 )
-from scripts.run_monthly_codex_audit import service_failure_category
 from service.strategy_automation_registry import (
     apply_strategy_registry_guard,
     summarize_strategy_registry_context,
@@ -119,6 +118,8 @@ TASK_COMPLEXITY_LEVELS = (TASK_COMPLEXITY_LOW, TASK_COMPLEXITY_MEDIUM, TASK_COMP
 _RATE_LIMIT_WINDOW_SECONDS = 60
 _RATE_LIMIT_MAX_REQUESTS = 30
 _analyze_timestamps: list[float] = []
+
+SERVICE_FAILURE_CATEGORY_PATTERN = re.compile(r"\[([a-z_]+_failure)\]")
 
 # structured audit logger — writes JSON lines to stderr
 _audit = logging.getLogger("ai_gateway.audit")
@@ -254,6 +255,54 @@ def _check_rate_limit(max_per_window: int = _RATE_LIMIT_MAX_REQUESTS, window: fl
             f"rate limit exceeded: {max_per_window} requests per {window:.0f}s"
         )
     _analyze_timestamps.append(now)
+
+
+def _classify_service_failure(message: str) -> str:
+    text = message.lower()
+    auth_config_signals = (
+        "auth",
+        "oidc",
+        "token",
+        "secret",
+        "credential",
+        "permission denied",
+        "forbidden",
+        "not authorized",
+        "invalid audience",
+        "invalid token",
+        "signature verification failed",
+        "bearer token is required",
+        "service bearer token is required",
+        "workflow ref is not allowlisted",
+        "repository is not allowlisted",
+        "workflow repository is not allowlisted",
+        "source repository is not allowlisted",
+        "service repo is not allowlisted",
+        "service ref is not allowlisted",
+        "source repository is missing",
+        "trusted automation proof is missing",
+        "source_repository is required",
+        "service token is missing",
+        "service bearer token is missing",
+        "secret is missing",
+        "secret not configured",
+    )
+    if any(signal in text for signal in auth_config_signals):
+        return "auth_or_config_failure"
+    if any(word in text for word in ("quota", "rate limit", "too many active", "budget")):
+        return "quota_or_capacity_failure"
+    if any(word in text for word in ("timeout", "timed out", "temporarily", "unavailable", "connection", "network")):
+        return "transient_service_failure"
+    if any(word in text for word in ("json", "contract", "parse", "patch")):
+        return "patch_contract_failure"
+    return "unknown_failure"
+
+
+def service_failure_category(message: str) -> str:
+    match = SERVICE_FAILURE_CATEGORY_PATTERN.search(message)
+    if match:
+        return match.group(1)
+    return _classify_service_failure(message)
 
 
 # ── source_repository validation ───────────────────────────────────────
