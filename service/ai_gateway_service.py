@@ -615,7 +615,7 @@ def _automation_triage_snapshot(
     repo: str,
     *,
     task: str = "",
-    requested_mode: str = MODE_REVIEW_ONLY,
+    requested_mode: str = MODE_REVIEW_AND_FIX,
     failure_category: str = "",
     error: str = "",
     changed_paths: list[str] | None = None,
@@ -1540,7 +1540,8 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         params = parse_qs(parsed.query)
         repo = str(payload.get("source_repository") or params.get("repo", [""])[0] or claims.get("repository") or "unknown")
         task = str(payload.get("task") or params.get("task", [""])[0] or "")
-        requested_mode = _normalize_control_mode_param(str(payload.get("mode") or params.get("mode", [MODE_REVIEW_ONLY])[0] or MODE_REVIEW_ONLY))
+        raw_mode = payload.get("mode") if "mode" in payload else params.get("mode", [MODE_REVIEW_AND_FIX])[0]
+        requested_mode = _normalize_control_mode_param(str(raw_mode or MODE_REVIEW_AND_FIX))
         if not requested_mode:
             _json_response(self, HTTPStatus.BAD_REQUEST, {"status": "error", "error": "invalid mode"})
             return

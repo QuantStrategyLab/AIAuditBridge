@@ -221,6 +221,7 @@ class AutomationRunLedger:
         self._evicted_runs_count = 0
         self._evicted_runs_by_repo: dict[str, int] = {}
         self._history_completeness_unknown = False
+        self._history_completeness_unknown_from_legacy_schema = False
         self._storage_file_seen = False
         self._storage_path = storage_path
         self._load_from_disk()
@@ -246,13 +247,19 @@ class AutomationRunLedger:
         try:
             payload = json.loads(self._storage_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
+            self._history_completeness_unknown_from_legacy_schema = False
             return {}, 0, 0, {}, True
         runs = payload.get("runs") if isinstance(payload, dict) else None
         if not isinstance(runs, dict):
+            self._history_completeness_unknown_from_legacy_schema = False
             return {}, 0, 0, {}, True
         clean_runs = {str(key): value for key, value in runs.items() if isinstance(value, dict)}
         sequence = _safe_int(payload.get("sequence"), len(clean_runs))
-        history_unknown = "evicted_runs" not in payload or "evicted_runs_by_repo" not in payload
+        legacy_retention_metadata_missing = "evicted_runs" not in payload or "evicted_runs_by_repo" not in payload
+        self._history_completeness_unknown_from_legacy_schema = (
+            legacy_retention_metadata_missing and "history_completeness_unknown" not in payload
+        )
+        history_unknown = legacy_retention_metadata_missing
         evicted_runs = _safe_int(payload.get("evicted_runs"), 0)
         raw_evicted_by_repo = payload.get("evicted_runs_by_repo")
         evicted_by_repo = {
@@ -287,6 +294,7 @@ class AutomationRunLedger:
         if not self._storage_path.exists():
             if self._storage_file_seen:
                 self._history_completeness_unknown = True
+                self._history_completeness_unknown_from_legacy_schema = False
             return
         lock_handle = None
         try:
@@ -372,6 +380,9 @@ class AutomationRunLedger:
     def _write_to_disk_locked(self) -> None:
         if self._storage_path is None:
             return
+        if self._history_completeness_unknown_from_legacy_schema:
+            self._history_completeness_unknown = False
+            self._history_completeness_unknown_from_legacy_schema = False
         payload = {
             "schema_version": "automation_run_ledger.v1",
             "sequence": self._sequence,
@@ -482,6 +493,7 @@ class AutomationRunLedger:
             previous_evicted_runs_count = self._evicted_runs_count
             previous_evicted_runs_by_repo = dict(self._evicted_runs_by_repo)
             previous_history_completeness_unknown = self._history_completeness_unknown
+            previous_history_completeness_unknown_from_legacy_schema = self._history_completeness_unknown_from_legacy_schema
             previous_storage_file_seen = self._storage_file_seen
             current = self._runs.get(run_id)
             if current:
@@ -537,6 +549,7 @@ class AutomationRunLedger:
                 self._evicted_runs_count = previous_evicted_runs_count
                 self._evicted_runs_by_repo = previous_evicted_runs_by_repo
                 self._history_completeness_unknown = previous_history_completeness_unknown
+                self._history_completeness_unknown_from_legacy_schema = previous_history_completeness_unknown_from_legacy_schema
                 self._storage_file_seen = previous_storage_file_seen
                 raise
             return self._public_entry(self._runs[run_id])

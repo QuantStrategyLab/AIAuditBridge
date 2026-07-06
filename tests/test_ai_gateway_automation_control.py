@@ -346,6 +346,28 @@ class TestAutomationControlSnapshot(unittest.TestCase):
         self.assertEqual(triage["recommended_action"], "open_issue")
         self.assertEqual(triage["next_step"], "open_issue")
 
+    def test_triage_omitted_mode_keeps_review_and_fix_default(self) -> None:
+        health = type("Health", (), {"status": "healthy"})()
+        quota = type("Quota", (), {"runtime_status": lambda self, repo: {"status": "ok"}})()
+        ledger = type("Ledger", (), {"snapshot": lambda self, limit=None: {"runs": []}})()
+
+        with (
+            patch("service.ai_gateway_service.read_org_health", return_value={"status": "ok"}),
+            patch("service.ai_gateway_service.get_health_monitor", return_value=health),
+            patch("service.ai_gateway_service.get_quota_manager", return_value=quota),
+            patch("service.ai_gateway_service.get_automation_run_ledger", return_value=ledger),
+            patch("service.ai_gateway_service.load_execution_policy", return_value={}),
+        ):
+            triage = _automation_triage_snapshot(
+                "QuantStrategyLab/TargetRepo",
+                task="monthly",
+                changed_paths=["docs/runbook.md"],
+            )
+
+        self.assertEqual(triage["control"]["execution"]["requested_mode"], "review_and_fix")
+        self.assertTrue(triage["auto_fix_allowed"])
+        self.assertEqual(triage["recommended_action"], "open_fix_pr")
+
     def test_control_snapshot_deduplicates_pending_run_by_run_id(self) -> None:
         runs = [
             {

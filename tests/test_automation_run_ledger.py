@@ -248,6 +248,35 @@ class TestAutomationRunLedger(unittest.TestCase):
 
         self.assertTrue(snapshot["summary"]["retention"]["history_completeness_unknown"])
 
+    def test_pre_migration_ledger_recovers_after_schema_rewrite(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "automation_runs.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "automation_run_ledger.v1",
+                        "sequence": 1,
+                        "runs": {
+                            "run-1": {
+                                "run_id": "run-1",
+                                "task_state": "failed",
+                                "updated_at": 1.0,
+                                "metadata": {"source_repository": "QuantStrategyLab/RepoA"},
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            ledger = AutomationRunLedger(max_runs=3, storage_path=path)
+            self.assertTrue(ledger.snapshot(limit=None)["summary"]["retention"]["history_completeness_unknown"])
+            ledger.record("run-2", "queued", metadata={"source_repository": "QuantStrategyLab/RepoA"})
+            snapshot = AutomationRunLedger(max_runs=3, storage_path=path).snapshot(limit=None)
+
+        self.assertFalse(snapshot["summary"]["retention"]["history_completeness_unknown"])
+        self.assertEqual({run["run_id"] for run in snapshot["runs"]}, {"run-1", "run-2"})
+
     def test_fresh_missing_persisted_ledger_starts_as_complete_empty_history(self) -> None:
         with TemporaryDirectory() as tmp:
             ledger = AutomationRunLedger(max_runs=2, storage_path=Path(tmp) / "missing.json")
