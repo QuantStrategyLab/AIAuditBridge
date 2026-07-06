@@ -64,7 +64,10 @@ def _normalize_quota_status(value: Any, default: str = "unknown") -> str:
 
 
 def _normalize_mode(value: str) -> str:
-    return MODE_REVIEW_AND_FIX if str(value or "").strip() == MODE_REVIEW_AND_FIX else MODE_REVIEW_ONLY
+    mode = str(value or "").strip().lower()
+    if mode in {MODE_REVIEW_AND_FIX, AUTONOMY_AUTO_PR, AUTONOMY_AUTO_MERGE}:
+        return MODE_REVIEW_AND_FIX
+    return MODE_REVIEW_ONLY
 
 
 def _normalize_repo_id(value: Any) -> str:
@@ -162,6 +165,8 @@ def load_execution_policy(path: Path | None = None) -> dict[str, Any]:
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return _fail_closed_policy("execution policy file is unavailable")
+    except UnicodeDecodeError:
+        return _fail_closed_policy("execution policy file is unreadable")
     except OSError:
         return _fail_closed_policy("execution policy file is unreadable")
     try:
