@@ -40,7 +40,7 @@ jobs:
       SOURCE_REPO: ${{ github.event.inputs.source_repo || vars.STRATEGY_WATCH_SOURCE_REPO || github.repository }}
       SOURCE_REF: ${{ github.event.inputs.source_ref || vars.STRATEGY_WATCH_SOURCE_REF || 'main' }}
       METRICS_PATH: ${{ github.event.inputs.metrics_path || vars.STRATEGY_WATCH_METRICS_PATH || 'data/output/strategy_metrics.json' }}
-      STRATEGY_WATCH_DRY_RUN: ${{ github.event.inputs.dry_run || vars.STRATEGY_WATCH_DRY_RUN || 'true' }}
+      STRATEGY_WATCH_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.dry_run) || vars.STRATEGY_WATCH_DRY_RUN || 'true' }}
     steps:
       - name: Checkout Bridge
         uses: actions/checkout@v6.0.3
@@ -69,7 +69,9 @@ jobs:
             echo "Invalid SOURCE_REPO: ${SOURCE_REPO}. Expected owner/name." >&2
             exit 1
           fi
+          owner="${SOURCE_REPO%%/*}"
           repository="${SOURCE_REPO#*/}"
+          echo "owner=${owner}" >> "$GITHUB_OUTPUT"
           echo "repository=${repository}" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub App Token For Source Repository
@@ -80,7 +82,7 @@ jobs:
         with:
           app-id: ${{ vars.CROSS_REPO_GITHUB_APP_ID }}
           private-key: ${{ secrets.CROSS_REPO_GITHUB_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
+          owner: ${{ steps.source_repo.outputs.owner }}
           repositories: ${{ steps.source_repo.outputs.repository }}
           permission-contents: read
           permission-issues: write

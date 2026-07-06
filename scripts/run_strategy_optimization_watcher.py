@@ -70,22 +70,28 @@ def load_payload(path: str | Path) -> dict[str, Any]:
 def find_existing_open_issue(repo: str, title: str) -> str:
     if not REPO_RE.fullmatch(repo):
         raise ValueError("repository must be in owner/name form")
-    result = subprocess.run(
-        ["gh", "issue", "list", "--repo", repo, "--state", "open", "--limit", "1000", "--json", "title,url"],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    try:
-        issues = json.loads(result.stdout or "[]")
-    except json.JSONDecodeError:
-        return ""
-    if not isinstance(issues, list):
-        return ""
-    for issue in issues:
-        if isinstance(issue, dict) and issue.get("title") == title:
-            return str(issue.get("url") or "")
-    return ""
+    page = 1
+    while True:
+        result = subprocess.run(
+            ["gh", "api", f"/repos/{repo}/issues", "-f", "state=open", "-f", "per_page=100", "-f", f"page={page}"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        try:
+            issues = json.loads(result.stdout or "[]")
+        except json.JSONDecodeError:
+            return ""
+        if not isinstance(issues, list) or not issues:
+            return ""
+        for issue in issues:
+            if not isinstance(issue, dict) or "pull_request" in issue:
+                continue
+            if issue.get("title") == title:
+                return str(issue.get("html_url") or issue.get("url") or "")
+        if len(issues) < 100:
+            return ""
+        page += 1
 
 
 def create_github_issue(repo: str, title: str, body: str) -> str:

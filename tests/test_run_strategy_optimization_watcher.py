@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
+import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
-from scripts.run_strategy_optimization_watcher import parse_bool, resolve_input_path, run_watcher
+from scripts.run_strategy_optimization_watcher import find_existing_open_issue, parse_bool, resolve_input_path, run_watcher
 
 
 class RunStrategyOptimizationWatcherTest(unittest.TestCase):
@@ -77,6 +80,23 @@ class RunStrategyOptimizationWatcherTest(unittest.TestCase):
             resolved = resolve_input_path(source_root=tmp, metrics_path="data/output/strategy_metrics.json")
 
         self.assertTrue(str(resolved).endswith("data/output/strategy_metrics.json"))
+
+    def test_find_existing_open_issue_paginates_until_exact_match(self) -> None:
+        calls: list[list[str]] = []
+        first_page = [{"title": f"other-{i}", "html_url": f"https://example.test/{i}"} for i in range(100)]
+        second_page = [{"title": "target", "html_url": "https://example.test/target"}]
+
+        def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            calls.append(cmd)
+            page = "2" if "page=2" in cmd else "1"
+            payload = second_page if page == "2" else first_page
+            return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(payload), stderr="")
+
+        with patch("scripts.run_strategy_optimization_watcher.subprocess.run", fake_run):
+            result = find_existing_open_issue("QuantStrategyLab/TestStrategies", "target")
+
+        self.assertEqual(result, "https://example.test/target")
+        self.assertEqual(len(calls), 2)
 
     def test_parse_bool_defaults_safely(self) -> None:
         self.assertTrue(parse_bool("true"))

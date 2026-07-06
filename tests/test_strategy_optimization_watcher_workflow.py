@@ -29,6 +29,8 @@ class StrategyOptimizationWatcherWorkflowTest(unittest.TestCase):
         self.assertIn("STRATEGY_WATCH_SOURCE_ROOT: ${{ github.workspace }}/source", text)
         self.assertIn("STRATEGY_WATCH_METRICS_PATH: ${{ env.METRICS_PATH }}", text)
         self.assertIn("actions/create-github-app-token", text)
+        self.assertIn("format('{0}', inputs.dry_run)", text)
+        self.assertNotIn("github.event.inputs.dry_run ||", text)
 
     def test_workflow_fails_closed_for_cross_repo_without_app_token(self) -> None:
         text = WORKFLOW_PATH.read_text(encoding="utf-8")
@@ -37,6 +39,8 @@ class StrategyOptimizationWatcherWorkflowTest(unittest.TestCase):
         self.assertIn("Verify Source Repository Token", text)
         self.assertIn("${SOURCE_REPO}" + '" != "' + "${GITHUB_REPOSITORY}", text)
         self.assertIn("Cross-repository strategy watcher requires", text)
+        self.assertIn("owner=${owner}", text)
+        self.assertIn("owner: ${{ steps.source_repo.outputs.owner }}", text)
 
 
 if __name__ == "__main__":
