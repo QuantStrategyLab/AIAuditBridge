@@ -130,23 +130,59 @@ def _expected_policy_owner() -> tuple[int, int]:
         return 0, 0
 
 
-def _policy_trust_error(path: Path) -> str:
-    try:
-        info = path.lstat()
-    except FileNotFoundError:
-        return "execution policy file is unavailable"
-    except OSError:
-        return "execution policy file is unreadable"
-    if stat.S_ISLNK(info.st_mode):
-        return "execution policy file is a symlink"
-    if not stat.S_ISREG(info.st_mode):
-        return "execution policy file is not a regular file"
+def _policy_metadata_trust_error(info: os.stat_result, *, kind: str) -> str:
     expected_uid, expected_gid = _expected_policy_owner()
     if (info.st_uid, info.st_gid) != (expected_uid, expected_gid):
-        return "execution policy file owner is invalid"
+        return f"execution policy {kind} owner is invalid"
     if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
-        return "execution policy file permissions are too broad"
+        return f"execution policy {kind} permissions are too broad"
     return ""
+
+
+def _policy_parent_trust_error(path: Path) -> str:
+    try:
+        info = path.parent.lstat()
+    except FileNotFoundError:
+        return "execution policy parent directory is unavailable"
+    except OSError:
+        return "execution policy parent directory is unreadable"
+    if stat.S_ISLNK(info.st_mode):
+        return "execution policy parent directory is a symlink"
+    if not stat.S_ISDIR(info.st_mode):
+        return "execution policy parent path is not a directory"
+    return _policy_metadata_trust_error(info, kind="parent directory")
+
+
+def _read_trusted_policy_file(path: Path) -> tuple[str, str]:
+    parent_error = _policy_parent_trust_error(path)
+    if parent_error:
+        return "", parent_error
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags)
+    except FileNotFoundError:
+        return "", "execution policy file is unavailable"
+    except OSError:
+        return "", "execution policy file is unreadable"
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            return "", "execution policy file is not a regular file"
+        trust_error = _policy_metadata_trust_error(info, kind="file")
+        if trust_error:
+            return "", trust_error
+        with os.fdopen(fd, "r", encoding="utf-8") as handle:
+            fd = -1
+            return handle.read(), ""
+    except UnicodeDecodeError:
+        return "", "execution policy file is unreadable"
+    except OSError:
+        return "", "execution policy file is unreadable"
+    finally:
+        if fd >= 0:
+            os.close(fd)
 
 
 def _validate_execution_policy(payload: dict[str, Any]) -> str:
@@ -204,17 +240,18 @@ def load_execution_policy(path: Path | None = None) -> dict[str, Any]:
             return _fail_closed_policy("execution policy path is not configured")
         path = Path(configured).expanduser()
     if require_trusted_path:
-        trust_error = _policy_trust_error(path)
-        if trust_error:
-            return _fail_closed_policy(trust_error)
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return _fail_closed_policy("execution policy file is unavailable")
-    except UnicodeDecodeError:
-        return _fail_closed_policy("execution policy file is unreadable")
-    except OSError:
-        return _fail_closed_policy("execution policy file is unreadable")
+        raw, read_error = _read_trusted_policy_file(path)
+        if read_error:
+            return _fail_closed_policy(read_error)
+    else:
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return _fail_closed_policy("execution policy file is unavailable")
+        except UnicodeDecodeError:
+            return _fail_closed_policy("execution policy file is unreadable")
+        except OSError:
+            return _fail_closed_policy("execution policy file is unreadable")
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError:
