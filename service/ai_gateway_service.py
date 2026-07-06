@@ -530,7 +530,14 @@ def _automation_control_snapshot(
         recent_runs = ledger_snapshot["runs"]
         ledger_summary = ledger_snapshot.get("summary") if isinstance(ledger_snapshot.get("summary"), dict) else {}
         retention = ledger_summary.get("retention") if isinstance(ledger_summary.get("retention"), dict) else {}
-        failure_history_complete = not bool(retention.get("may_be_truncated"))
+        evicted_by_repo = (
+            retention.get("evicted_runs_by_repo") if isinstance(retention.get("evicted_runs_by_repo"), dict) else {}
+        )
+        try:
+            repo_evictions = int(evicted_by_repo.get(str(repo or "unknown").strip().lower(), 0) or 0)
+        except (TypeError, ValueError):
+            repo_evictions = 0
+        failure_history_complete = repo_evictions <= 0
         ledger_unavailable = False
     except Exception:
         recent_runs = []
@@ -1620,7 +1627,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             _assert_automation_run_access(existing, claims)
         task_name = str(payload.get("task") or payload.get("task_name") or "")
         task_state = str(payload.get("task_state") or payload.get("state") or "running")
-        requested_mode = _normalize_control_mode_param(str(payload.get("mode") or MODE_REVIEW_ONLY))
+        requested_mode = _normalize_control_mode_param(str(payload.get("mode") or MODE_REVIEW_AND_FIX))
         if not requested_mode:
             raise ValueError("invalid mode")
         run_metadata = {

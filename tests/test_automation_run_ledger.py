@@ -169,13 +169,14 @@ class TestAutomationRunLedger(unittest.TestCase):
 
     def test_ledger_evicts_old_runs_by_count(self) -> None:
         ledger = AutomationRunLedger(max_runs=2)
-        ledger.record("run-1", "queued")
-        ledger.record("run-2", "queued")
-        ledger.record("run-3", "queued")
+        ledger.record("run-1", "queued", metadata={"source_repository": "QuantStrategyLab/RepoA"})
+        ledger.record("run-2", "queued", metadata={"source_repository": "QuantStrategyLab/RepoA"})
+        ledger.record("run-3", "queued", metadata={"source_repository": "QuantStrategyLab/RepoB"})
 
         snapshot = ledger.snapshot(limit=None)
         self.assertEqual(snapshot["summary"]["total_runs"], 2)
         self.assertEqual(snapshot["summary"]["retention"]["evicted_runs"], 1)
+        self.assertEqual(snapshot["summary"]["retention"]["evicted_runs_by_repo"], {"quantstrategylab/repoa": 1})
         self.assertTrue(snapshot["summary"]["retention"]["may_be_truncated"])
         self.assertEqual({run["run_id"] for run in snapshot["runs"]}, {"run-2", "run-3"})
 
@@ -192,14 +193,15 @@ class TestAutomationRunLedger(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             path = Path(tmp) / "automation_runs.json"
             ledger = AutomationRunLedger(max_runs=2, storage_path=path)
-            ledger.record("run-1", "queued")
-            ledger.record("run-2", "queued")
-            ledger.record("run-3", "queued")
+            ledger.record("run-1", "queued", metadata={"source_repository": "QuantStrategyLab/RepoA"})
+            ledger.record("run-2", "queued", metadata={"source_repository": "QuantStrategyLab/RepoA"})
+            ledger.record("run-3", "queued", metadata={"source_repository": "QuantStrategyLab/RepoB"})
 
             reloaded = AutomationRunLedger(max_runs=2, storage_path=path)
             snapshot = reloaded.snapshot(limit=None)
 
         self.assertEqual(snapshot["summary"]["retention"]["evicted_runs"], 1)
+        self.assertEqual(snapshot["summary"]["retention"]["evicted_runs_by_repo"], {"quantstrategylab/repoa": 1})
         self.assertTrue(snapshot["summary"]["retention"]["may_be_truncated"])
         self.assertEqual({run["run_id"] for run in snapshot["runs"]}, {"run-2", "run-3"})
 

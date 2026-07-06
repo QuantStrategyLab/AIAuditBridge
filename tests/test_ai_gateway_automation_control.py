@@ -199,7 +199,13 @@ class TestAutomationControlSnapshot(unittest.TestCase):
             {
                 "snapshot": lambda self, limit=None: {
                     "runs": runs,
-                    "summary": {"retention": {"may_be_truncated": True, "evicted_runs": 1}},
+                    "summary": {
+                        "retention": {
+                            "may_be_truncated": True,
+                            "evicted_runs": 1,
+                            "evicted_runs_by_repo": {"quantstrategylab/targetrepo": 1},
+                        }
+                    },
                 }
             },
         )()
@@ -217,6 +223,38 @@ class TestAutomationControlSnapshot(unittest.TestCase):
         self.assertEqual(control["execution"]["action"], "human_review")
         self.assertFalse(control["execution"]["failure_history_complete"])
         self.assertEqual(control["execution"]["consecutive_failures"], 1)
+
+    def test_control_snapshot_ignores_other_repo_ledger_eviction(self) -> None:
+        health = type("Health", (), {"status": "healthy"})()
+        quota = type("Quota", (), {"runtime_status": lambda self, repo: {"status": "ok"}})()
+        ledger = type(
+            "Ledger",
+            (),
+            {
+                "snapshot": lambda self, limit=None: {
+                    "runs": [],
+                    "summary": {
+                        "retention": {
+                            "may_be_truncated": True,
+                            "evicted_runs": 1,
+                            "evicted_runs_by_repo": {"quantstrategylab/otherrepo": 1},
+                        }
+                    },
+                }
+            },
+        )()
+
+        with (
+            patch("service.ai_gateway_service.read_org_health", return_value={"status": "ok"}),
+            patch("service.ai_gateway_service.get_health_monitor", return_value=health),
+            patch("service.ai_gateway_service.get_quota_manager", return_value=quota),
+            patch("service.ai_gateway_service.get_automation_run_ledger", return_value=ledger),
+            patch("service.ai_gateway_service.load_execution_policy", return_value={"default": {"max_consecutive_failures": 2}}),
+        ):
+            control = _automation_control_snapshot("QuantStrategyLab/TargetRepo", task_name="monthly")
+
+        self.assertEqual(control["action"], "continue")
+        self.assertTrue(control["execution"]["failure_history_complete"])
 
     def test_control_snapshot_preserves_legacy_continue_when_auto_merge_is_capped(self) -> None:
         health = type("Health", (), {"status": "healthy"})()
