@@ -182,7 +182,7 @@ class TestAutomationControlSnapshot(unittest.TestCase):
         self.assertEqual(control["execution"]["action"], "human_review")
         self.assertEqual(control["execution"]["consecutive_failures"], 2)
 
-    def test_control_snapshot_downgrades_legacy_action_when_auto_merge_is_capped(self) -> None:
+    def test_control_snapshot_keeps_legacy_continue_when_only_auto_merge_is_capped(self) -> None:
         health = type("Health", (), {"status": "healthy"})()
         quota = type("Quota", (), {"runtime_status": lambda self, repo: {"status": "ok"}})()
         ledger = type("Ledger", (), {"snapshot": lambda self, limit=None: {"runs": []}})()
@@ -196,8 +196,10 @@ class TestAutomationControlSnapshot(unittest.TestCase):
         ):
             control = _automation_control_snapshot("QuantStrategyLab/TargetRepo", requested_mode="auto_merge")
 
-        self.assertEqual(control["action"], "review_only")
-        self.assertFalse(control["auto_fix_allowed"])
+        self.assertEqual(control["action"], "continue")
+        self.assertTrue(control["auto_fix_allowed"])
+        self.assertEqual(control["execution"]["requested_autonomy"], "auto_merge")
+        self.assertEqual(control["execution"]["effective_autonomy"], "auto_pr")
         self.assertFalse(control["execution"]["auto_merge_allowed"])
 
     def test_control_snapshot_deduplicates_pending_run_by_run_id(self) -> None:

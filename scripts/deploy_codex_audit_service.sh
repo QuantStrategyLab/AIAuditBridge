@@ -219,10 +219,6 @@ write_default_execution_policy_if_missing() {
   local policy_path="${EXECUTION_POLICY_FILE}"
   local policy_dir
   policy_dir="$(dirname "$policy_path")"
-  if [ -L "$policy_dir" ]; then
-    echo "refusing to write execution policy under symlinked directory: $policy_dir" >&2
-    exit 1
-  fi
   if [ -L "$policy_path" ]; then
     echo "refusing to write execution policy through symlink: $policy_path" >&2
     exit 1
@@ -230,12 +226,69 @@ write_default_execution_policy_if_missing() {
   if [ -e "$policy_path" ]; then
     return
   fi
-  sudo install -d -m 0755 -o root -g root "$policy_dir"
   sudo python3 - "$policy_path" <<'PY'
 import os
+import stat
 import sys
 
 path = sys.argv[1]
+if not os.path.isabs(path):
+    print(f"refusing to write execution policy to relative path: {path}", file=sys.stderr)
+    raise SystemExit(1)
+
+policy_dir, policy_name = os.path.split(path)
+if not policy_dir or not policy_name:
+    print(f"invalid execution policy path: {path}", file=sys.stderr)
+    raise SystemExit(1)
+
+flags_dir = os.O_RDONLY | os.O_DIRECTORY
+if hasattr(os, "O_NOFOLLOW"):
+    flags_dir |= os.O_NOFOLLOW
+
+
+def fail(message: str) -> None:
+    print(message, file=sys.stderr)
+    raise SystemExit(1)
+
+
+def ensure_trusted_dir(fd: int, label: str, *, created: bool) -> None:
+    info = os.fstat(fd)
+    if not stat.S_ISDIR(info.st_mode):
+        fail(f"execution policy parent path is not a directory: {label}")
+    if created:
+        os.fchown(fd, 0, 0)
+        os.fchmod(fd, 0o755)
+        info = os.fstat(fd)
+    if (info.st_uid, info.st_gid) != (0, 0):
+        fail(f"execution policy parent directory owner is invalid: {label}")
+    if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        fail(f"execution policy parent directory permissions are too broad: {label}")
+
+
+def open_admin_policy_dir(directory: str) -> int:
+    fd = os.open(os.sep, flags_dir)
+    ensure_trusted_dir(fd, os.sep, created=False)
+    for component in [part for part in directory.split(os.sep) if part]:
+        if component in {".", ".."}:
+            fail(f"invalid execution policy directory component: {component}")
+        created = False
+        try:
+            next_fd = os.open(component, flags_dir, dir_fd=fd)
+        except FileNotFoundError:
+            os.mkdir(component, 0o755, dir_fd=fd)
+            created = True
+            next_fd = os.open(component, flags_dir, dir_fd=fd)
+        except OSError as exc:
+            fail(f"refusing to write execution policy under unsafe directory component {component}: {exc}")
+        try:
+            ensure_trusted_dir(next_fd, component, created=created)
+        finally:
+            os.close(fd)
+        fd = next_fd
+    return fd
+
+
+policy_dir_fd = open_admin_policy_dir(policy_dir)
 flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
 if hasattr(os, "O_NOFOLLOW"):
     flags |= os.O_NOFOLLOW
@@ -250,16 +303,28 @@ content = """{
 }
 """
 try:
-    fd = os.open(path, flags, 0o600)
+    fd = os.open(policy_name, flags, 0o600, dir_fd=policy_dir_fd)
 except FileExistsError:
     if os.path.islink(path):
         print(f"refusing to write execution policy through symlink: {path}", file=sys.stderr)
         raise SystemExit(1)
     raise SystemExit(0)
-with os.fdopen(fd, "w", encoding="utf-8") as handle:
-    handle.write(content)
-os.chown(path, 0, 0)
-os.chmod(path, 0o644)
+finally:
+    os.close(policy_dir_fd)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        fd = -1
+        handle.write(content)
+        handle.flush()
+        os.fchown(handle.fileno(), 0, 0)
+        os.fchmod(handle.fileno(), 0o644)
+except Exception:
+    if fd >= 0:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    raise
 PY
 }
 
