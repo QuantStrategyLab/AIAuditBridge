@@ -570,11 +570,11 @@ def _automation_control_snapshot(
         strict_action = CONTROL_REVIEW_ONLY
     if strict_action != original_action:
         control["action"] = strict_action
-        control["auto_fix_allowed"] = False
-        control["requires_human_review"] = True
         reasons = control.get("reasons") if isinstance(control.get("reasons"), list) else []
         reasons.append("capped by execution decision")
         control["reasons"] = reasons
+    control["auto_fix_allowed"] = bool(execution.get("auto_fix_allowed"))
+    control["requires_human_review"] = bool(execution.get("human_review_required"))
     control["execution"] = execution
     return control
 

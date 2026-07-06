@@ -217,13 +217,23 @@ write_admin_env_file_if_needed() {
 write_default_execution_policy_if_missing() {
   local owner="$1"
   local policy_path="${JOB_DIR}/execution_policy.json"
+  if [ -L "$policy_path" ]; then
+    echo "refusing to write execution policy through symlink: $policy_path" >&2
+    exit 1
+  fi
   if [ -e "$policy_path" ]; then
     return
   fi
-  local tmp
-  tmp="$(mktemp)"
-  cat >"$tmp" <<'EOF_POLICY'
-{
+  sudo python3 - "$policy_path" "$owner" <<'PY'
+import os
+import pwd
+import sys
+
+path, owner = sys.argv[1], sys.argv[2]
+flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+content = """{
   "default": {
     "max_autonomy": "auto_pr",
     "max_consecutive_failures": 3,
@@ -232,9 +242,20 @@ write_default_execution_policy_if_missing() {
   },
   "repositories": {}
 }
-EOF_POLICY
-  sudo install -m 0600 -o "$owner" -g "$owner" "$tmp" "$policy_path"
-  rm -f "$tmp"
+"""
+try:
+    fd = os.open(path, flags, 0o600)
+except FileExistsError:
+    if os.path.islink(path):
+        print(f"refusing to write execution policy through symlink: {path}", file=sys.stderr)
+        raise SystemExit(1)
+    raise SystemExit(0)
+with os.fdopen(fd, "w", encoding="utf-8") as handle:
+    handle.write(content)
+user = pwd.getpwnam(owner)
+os.chown(path, user.pw_uid, user.pw_gid)
+os.chmod(path, 0o600)
+PY
 }
 
 write_audit_service_unit() {
