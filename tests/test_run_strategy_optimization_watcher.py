@@ -27,6 +27,7 @@ class RunStrategyOptimizationWatcherTest(unittest.TestCase):
 
         self.assertEqual(result["findings"], 1)
         self.assertTrue(result["issues"][0]["dry_run"])
+        self.assertNotIn("metrics", result["issues"][0]["task"]["trigger"])
         self.assertEqual(calls, [])
 
     def test_non_dry_run_uses_source_repo_override(self) -> None:
@@ -97,6 +98,29 @@ class RunStrategyOptimizationWatcherTest(unittest.TestCase):
 
         self.assertEqual(issues["target"], "https://example.test/target")
         self.assertEqual(len(calls), 2)
+        self.assertIn("--method", calls[0])
+        self.assertIn("GET", calls[0])
+
+    def test_run_watcher_updates_cache_after_create(self) -> None:
+        create_calls: list[tuple[str, str, str]] = []
+        payload = {
+            "repo": "QuantStrategyLab/TestStrategies",
+            "snapshots": [
+                {"profile": "same", "current_metrics": {"sharpe": 0.5}, "baseline_metrics": {"sharpe": 1.0}},
+                {"profile": "same", "current_metrics": {"sharpe": 0.4}, "baseline_metrics": {"sharpe": 1.0}},
+            ],
+        }
+
+        result = run_watcher(
+            payload,
+            dry_run=False,
+            create_issue=lambda repo, title, body: create_calls.append((repo, title, body)) or "https://example.test/new",
+            list_issues=lambda repo: {},
+        )
+
+        self.assertEqual(result["findings"], 2)
+        self.assertEqual(len(create_calls), 1)
+        self.assertEqual(result["issues"][1]["existing_url"], "https://example.test/new")
 
     def test_run_watcher_caches_open_issues_per_repo(self) -> None:
         list_calls: list[str] = []

@@ -78,7 +78,7 @@ def list_open_issue_urls(repo: str) -> dict[str, str]:
     open_issues: dict[str, str] = {}
     while True:
         result = subprocess.run(
-            ["gh", "api", f"/repos/{repo}/issues", "-f", "state=open", "-f", "per_page=100", "-f", f"page={page}"],
+            ["gh", "api", "--method", "GET", f"/repos/{repo}/issues", "-f", "state=open", "-f", "per_page=100", "-f", f"page={page}"],
             check=True,
             capture_output=True,
             text=True,
@@ -102,6 +102,32 @@ def list_open_issue_urls(repo: str) -> dict[str, str]:
 
 def find_existing_open_issue(repo: str, title: str) -> str:
     return list_open_issue_urls(repo).get(title, "")
+
+
+def task_public_summary(task: Any) -> dict[str, Any]:
+    payload = task.to_dict()
+    trigger = payload.get("trigger") if isinstance(payload.get("trigger"), dict) else {}
+    proposed_action = payload.get("proposed_action") if isinstance(payload.get("proposed_action"), dict) else {}
+    gate_decision = payload.get("gate_decision") if isinstance(payload.get("gate_decision"), dict) else {}
+    return {
+        "trigger": {
+            "source": trigger.get("source", ""),
+            "kind": trigger.get("kind", ""),
+            "severity": trigger.get("severity", ""),
+            "subject": trigger.get("subject", ""),
+        },
+        "proposed_action": {
+            "action": proposed_action.get("action", ""),
+            "lane": proposed_action.get("lane", ""),
+            "target": proposed_action.get("target", ""),
+            "requires_human_review": proposed_action.get("requires_human_review", True),
+        },
+        "gate_decision": {
+            "allowed": gate_decision.get("allowed", False),
+            "human_review_required": gate_decision.get("human_review_required", True),
+        },
+        "status": payload.get("status", ""),
+    }
 
 
 def create_github_issue(repo: str, title: str, body: str) -> str:
@@ -134,7 +160,7 @@ def run_watcher(
         issue_result: dict[str, Any] = {
             "repo": repo,
             "title": issue["title"],
-            "task": task.to_dict(),
+            "task": task_public_summary(task),
             "created": False,
         }
         if dry_run:
@@ -148,6 +174,7 @@ def run_watcher(
                 issue_result["skipped_reason"] = "open issue already exists"
             else:
                 issue_result["url"] = create_issue(repo, issue["title"], issue["body"])
+                open_issue_cache[repo][issue["title"]] = str(issue_result["url"])
                 issue_result["created"] = True
         issues.append(issue_result)
     return {
