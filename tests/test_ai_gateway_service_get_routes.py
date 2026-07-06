@@ -32,6 +32,23 @@ LIVE_EQUIVALENT_EVIDENCE = {
     "rollback_ready": True,
 }
 
+STRATEGY_AUTOMATION_REGISTRY = {
+    "schema_version": "strategy_automation_registry.v1",
+    "summary": {"strategy_profile_count": 1},
+    "profiles": [
+        {
+            "profile": "live",
+            "domain": "us_equity",
+            "lifecycle_stage": "runtime_enabled",
+            "automation_lane": "live_equivalent_optimization",
+            "max_autonomy": "auto_pr_or_trusted_live_equivalent",
+            "approval_required": False,
+            "can_switch_live": True,
+            "position_control_sensitive": False,
+        }
+    ],
+}
+
 
 class AiGatewayGetRoutesTest(unittest.TestCase):
     def test_automation_snapshot_filters_to_calling_repository(self) -> None:
@@ -576,7 +593,7 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
                 try:
                     base_url = f"http://127.0.0.1:{server.server_port}"
                     payload = {
-                        "changed_paths": ["src/us_equity_strategies/tqqq.py"],
+                        "changed_paths": [r"./SRC//US_EQUITY_STRATEGIES\\TQQQ.py"],
                         "proposed_action": "auto_merge",
                         "automation_metadata": {
                             "change_class": "live_equivalent_optimization",
@@ -594,6 +611,527 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
                         authority = json.loads(response.read().decode("utf-8"))["automation_authority"]
                     self.assertEqual(authority["final_action"], "escalate")
                     self.assertTrue(authority["human_review_required"])
+                    self.assertTrue(authority["strategy_registry_context"]["profile_required"])
+                finally:
+                    server.shutdown()
+                    server.server_close()
+
+    def test_automation_authority_route_rejects_non_repo_relative_changed_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "CODEX_AUDIT_SERVICE_AUTH": "none",
+                "CODEX_AUDIT_SERVICE_ALLOW_NO_AUTH_FOR_LOCAL_TESTS": "true",
+                "CODEX_AUDIT_SERVICE_JOB_DIR": tmp,
+            }
+            with patch.dict(os.environ, env, clear=False):
+                server = ThreadingHTTPServer(("127.0.0.1", 0), AiGatewayRequestHandler)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    base_url = f"http://127.0.0.1:{server.server_port}"
+                    request = urllib.request.Request(
+                        f"{base_url}/v1/ai/automation/authority",
+                        data=json.dumps(
+                            {
+                                "changed_paths": ["../src/us_equity_strategies/tqqq.py"],
+                                "proposed_action": "auto_merge",
+                            }
+                        ).encode("utf-8"),
+                        method="POST",
+                        headers={"Content-Type": "application/json"},
+                    )
+                    with self.assertRaises(urllib.error.HTTPError) as ctx:
+                        urllib.request.urlopen(request, timeout=5)
+                    self.assertEqual(ctx.exception.code, 400)
+                finally:
+                    server.shutdown()
+                    server.server_close()
+
+    def test_automation_authority_route_does_not_trust_strategy_registry_from_non_operator(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "CODEX_AUDIT_SERVICE_AUTH": "none",
+                "CODEX_AUDIT_SERVICE_ALLOW_NO_AUTH_FOR_LOCAL_TESTS": "true",
+                "CODEX_AUDIT_SERVICE_JOB_DIR": tmp,
+            }
+            with patch.dict(os.environ, env, clear=False), patch("service.ai_gateway_service.read_org_health", return_value={"status": "healthy"}):
+                server = ThreadingHTTPServer(("127.0.0.1", 0), AiGatewayRequestHandler)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    base_url = f"http://127.0.0.1:{server.server_port}"
+                    payload = {
+                        "changed_paths": ["src/us_equity_strategies/tqqq.py"],
+                        "proposed_action": "auto_merge",
+                        "strategy_profile": "live",
+                        "strategy_automation_registry": STRATEGY_AUTOMATION_REGISTRY,
+                    }
+                    request = urllib.request.Request(
+                        f"{base_url}/v1/ai/automation/authority",
+                        data=json.dumps(payload).encode("utf-8"),
+                        method="POST",
+                        headers={"Content-Type": "application/json"},
+                    )
+                    with urllib.request.urlopen(request, timeout=5) as response:
+                        authority = json.loads(response.read().decode("utf-8"))["automation_authority"]
+                    self.assertEqual(authority["change_class"], "unknown_change")
+                    self.assertEqual(authority["strategy_registry_context"]["automation_lane"], "live_equivalent_optimization")
+                    self.assertNotEqual(authority["final_action"], "auto_merge")
+                finally:
+                    server.shutdown()
+                    server.server_close()
+
+    def test_automation_authority_route_does_not_trust_operator_request_body_registry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "CODEX_AUDIT_SERVICE_AUTH": "none",
+                "CODEX_AUDIT_SERVICE_ALLOW_NO_AUTH_FOR_LOCAL_TESTS": "true",
+                "CODEX_AUDIT_SERVICE_JOB_DIR": tmp,
+                "CODEX_AUDIT_SERVICE_AUTOMATION_OPERATOR_REPOSITORIES": "local",
+            }
+            with patch.dict(os.environ, env, clear=False), patch("service.ai_gateway_service.read_org_health", return_value={"status": "healthy"}):
+                server = ThreadingHTTPServer(("127.0.0.1", 0), AiGatewayRequestHandler)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    base_url = f"http://127.0.0.1:{server.server_port}"
+                    payload = {
+                        "changed_paths": ["docs/live-optimization.md"],
+                        "proposed_action": "auto_merge",
+                        "confidence": 0.99,
+                        "strategy_profile": "live",
+                        "strategy_automation_registry": STRATEGY_AUTOMATION_REGISTRY,
+                    }
+                    request = urllib.request.Request(
+                        f"{base_url}/v1/ai/automation/authority",
+                        data=json.dumps(payload).encode("utf-8"),
+                        method="POST",
+                        headers={"Content-Type": "application/json"},
+                    )
+                    with urllib.request.urlopen(request, timeout=5) as response:
+                        authority = json.loads(response.read().decode("utf-8"))["automation_authority"]
+                    self.assertEqual(authority["change_class"], "routine_low_risk")
+                    self.assertEqual(authority["final_action"], "auto_pr")
+                    self.assertEqual(authority["strategy_registry_context"]["automation_lane"], "live_equivalent_optimization")
+                finally:
+                    server.shutdown()
+                    server.server_close()
+
+    def test_automation_authority_route_fails_closed_for_profile_without_explicit_registry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "CODEX_AUDIT_SERVICE_AUTH": "none",
+                "CODEX_AUDIT_SERVICE_ALLOW_NO_AUTH_FOR_LOCAL_TESTS": "true",
+                "CODEX_AUDIT_SERVICE_JOB_DIR": tmp,
+                "CODEX_AUDIT_SERVICE_AUTOMATION_OPERATOR_REPOSITORIES": "local",
+            }
+            with patch.dict(os.environ, env, clear=False), patch("service.ai_gateway_service.read_org_health", return_value={"status": "healthy"}):
+                server = ThreadingHTTPServer(("127.0.0.1", 0), AiGatewayRequestHandler)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    base_url = f"http://127.0.0.1:{server.server_port}"
+                    payload = {
+                        "changed_paths": ["docs/live-optimization.md"],
+                        "proposed_action": "auto_merge",
+                        "confidence": 0.99,
+                        "strategy_profile": "live",
+                        "platform_health_report": {"automation_registry": STRATEGY_AUTOMATION_REGISTRY},
+                    }
+                    request = urllib.request.Request(
+                        f"{base_url}/v1/ai/automation/authority",
+                        data=json.dumps(payload).encode("utf-8"),
+                        method="POST",
+                        headers={"Content-Type": "application/json"},
+                    )
+                    with urllib.request.urlopen(request, timeout=5) as response:
+                        authority = json.loads(response.read().decode("utf-8"))["automation_authority"]
+                    self.assertFalse(authority["strategy_registry_context"]["valid"])
+                    self.assertEqual(authority["final_action"], "escalate")
+                finally:
+                    server.shutdown()
+                    server.server_close()
+
+    def test_automation_authority_route_fails_closed_when_explicit_registry_invalid_even_with_platform_health(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "CODEX_AUDIT_SERVICE_AUTH": "none",
+                "CODEX_AUDIT_SERVICE_ALLOW_NO_AUTH_FOR_LOCAL_TESTS": "true",
+                "CODEX_AUDIT_SERVICE_JOB_DIR": tmp,
+                "CODEX_AUDIT_SERVICE_AUTOMATION_OPERATOR_REPOSITORIES": "local",
+            }
+            with patch.dict(os.environ, env, clear=False), patch("service.ai_gateway_service.read_org_health", return_value={"status": "healthy"}):
+                server = ThreadingHTTPServer(("127.0.0.1", 0), AiGatewayRequestHandler)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    base_url = f"http://127.0.0.1:{server.server_port}"
+                    payload = {
+                        "changed_paths": ["docs/live-optimization.md"],
+                        "proposed_action": "auto_merge",
+                        "confidence": 0.99,
+                        "strategy_profile": "live",
+                        "strategy_automation_registry": {"schema_version": "stale"},
+                        "platform_health_report": {"automation_registry": STRATEGY_AUTOMATION_REGISTRY},
+                    }
+                    request = urllib.request.Request(
+                        f"{base_url}/v1/ai/automation/authority",
+                        data=json.dumps(payload).encode("utf-8"),
+                        method="POST",
+                        headers={"Content-Type": "application/json"},
+                    )
+                    with urllib.request.urlopen(request, timeout=5) as response:
+                        authority = json.loads(response.read().decode("utf-8"))["automation_authority"]
+                    self.assertFalse(authority["strategy_registry_context"]["valid"])
+                    self.assertEqual(authority["final_action"], "escalate")
+                finally:
+                    server.shutdown()
+                    server.server_close()
+
+    def test_automation_authority_route_fails_closed_for_registry_without_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "CODEX_AUDIT_SERVICE_AUTH": "none",
+                "CODEX_AUDIT_SERVICE_ALLOW_NO_AUTH_FOR_LOCAL_TESTS": "true",
+                "CODEX_AUDIT_SERVICE_JOB_DIR": tmp,
+                "CODEX_AUDIT_SERVICE_AUTOMATION_OPERATOR_REPOSITORIES": "local",
+            }
+            with patch.dict(os.environ, env, clear=False), patch("service.ai_gateway_service.read_org_health", return_value={"status": "healthy"}):
+                server = ThreadingHTTPServer(("127.0.0.1", 0), AiGatewayRequestHandler)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    base_url = f"http://127.0.0.1:{server.server_port}"
+                    payload = {
+                        "changed_paths": ["docs/readme.md"],
+                        "proposed_action": "auto_merge",
+                        "confidence": 0.99,
+                        "strategy_automation_registry": STRATEGY_AUTOMATION_REGISTRY,
+                    }
+                    request = urllib.request.Request(
+                        f"{base_url}/v1/ai/automation/authority",
+                        data=json.dumps(payload).encode("utf-8"),
+                        method="POST",
+                        headers={"Content-Type": "application/json"},
+                    )
+                    with urllib.request.urlopen(request, timeout=5) as response:
+                        authority = json.loads(response.read().decode("utf-8"))["automation_authority"]
+                    self.assertFalse(authority["strategy_registry_context"]["valid"])
+                    self.assertTrue(authority["strategy_registry_context"]["profile_required"])
+                    self.assertEqual(authority["final_action"], "escalate")
+                    self.assertEqual(authority["policy_guard_action"], "escalate")
+                finally:
+                    server.shutdown()
+                    server.server_close()
+
+    def test_automation_authority_route_fails_closed_for_malformed_registry_without_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "CODEX_AUDIT_SERVICE_AUTH": "none",
+                "CODEX_AUDIT_SERVICE_ALLOW_NO_AUTH_FOR_LOCAL_TESTS": "true",
+                "CODEX_AUDIT_SERVICE_JOB_DIR": tmp,
+                "CODEX_AUDIT_SERVICE_AUTOMATION_OPERATOR_REPOSITORIES": "local",
+            }
+            with patch.dict(os.environ, env, clear=False), patch("service.ai_gateway_service.read_org_health", return_value={"status": "healthy"}):
+                server = ThreadingHTTPServer(("127.0.0.1", 0), AiGatewayRequestHandler)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    base_url = f"http://127.0.0.1:{server.server_port}"
+                    payload = {
+                        "changed_paths": ["docs/readme.md"],
+                        "proposed_action": "auto_merge",
+                        "confidence": 0.99,
+                        "strategy_automation_registry": {"schema_version": "stale"},
+                    }
+                    request = urllib.request.Request(
+                        f"{base_url}/v1/ai/automation/authority",
+                        data=json.dumps(payload).encode("utf-8"),
+                        method="POST",
+                        headers={"Content-Type": "application/json"},
+                    )
+                    with urllib.request.urlopen(request, timeout=5) as response:
+                        authority = json.loads(response.read().decode("utf-8"))["automation_authority"]
+                    self.assertFalse(authority["strategy_registry_context"]["valid"])
+                    self.assertTrue(authority["strategy_registry_context"]["profile_required"])
+                    self.assertEqual(authority["final_action"], "escalate")
+                    self.assertEqual(authority["policy_guard_action"], "escalate")
+                finally:
+                    server.shutdown()
+                    server.server_close()
+
+    def test_automation_authority_route_fails_closed_for_profile_required_class_without_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "CODEX_AUDIT_SERVICE_AUTH": "none",
+                "CODEX_AUDIT_SERVICE_ALLOW_NO_AUTH_FOR_LOCAL_TESTS": "true",
+                "CODEX_AUDIT_SERVICE_JOB_DIR": tmp,
+                "CODEX_AUDIT_SERVICE_AUTOMATION_OPERATOR_REPOSITORIES": "local",
+            }
+            with patch.dict(os.environ, env, clear=False), patch("service.ai_gateway_service.read_org_health", return_value={"status": "healthy"}):
+                server = ThreadingHTTPServer(("127.0.0.1", 0), AiGatewayRequestHandler)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    base_url = f"http://127.0.0.1:{server.server_port}"
+                    payload = {
+                        "changed_paths": ["src/quant_strategy_plugins/plugin_policies.py"],
+                        "proposed_action": "auto_merge",
+                        "confidence": 0.99,
+                    }
+                    request = urllib.request.Request(
+                        f"{base_url}/v1/ai/automation/authority",
+                        data=json.dumps(payload).encode("utf-8"),
+                        method="POST",
+                        headers={"Content-Type": "application/json"},
+                    )
+                    with urllib.request.urlopen(request, timeout=5) as response:
+                        authority = json.loads(response.read().decode("utf-8"))["automation_authority"]
+                    self.assertFalse(authority["strategy_registry_context"]["valid"])
+                    self.assertTrue(authority["strategy_registry_context"]["profile_required"])
+                    self.assertEqual(authority["final_action"], "escalate")
+                    self.assertEqual(authority["policy_guard_action"], "escalate")
+                finally:
+                    server.shutdown()
+                    server.server_close()
+
+    def test_automation_authority_route_fails_closed_for_existing_high_risk_strategy_path_without_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "CODEX_AUDIT_SERVICE_AUTH": "none",
+                "CODEX_AUDIT_SERVICE_ALLOW_NO_AUTH_FOR_LOCAL_TESTS": "true",
+                "CODEX_AUDIT_SERVICE_JOB_DIR": tmp,
+                "CODEX_AUDIT_SERVICE_AUTOMATION_OPERATOR_REPOSITORIES": "local",
+            }
+            with patch.dict(os.environ, env, clear=False), patch("service.ai_gateway_service.read_org_health", return_value={"status": "healthy"}):
+                server = ThreadingHTTPServer(("127.0.0.1", 0), AiGatewayRequestHandler)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    base_url = f"http://127.0.0.1:{server.server_port}"
+                    payload = {
+                        "changed_paths": ["src/quant_strategy.py"],
+                        "proposed_action": "auto_merge",
+                        "confidence": 0.99,
+                    }
+                    request = urllib.request.Request(
+                        f"{base_url}/v1/ai/automation/authority",
+                        data=json.dumps(payload).encode("utf-8"),
+                        method="POST",
+                        headers={"Content-Type": "application/json"},
+                    )
+                    with urllib.request.urlopen(request, timeout=5) as response:
+                        authority = json.loads(response.read().decode("utf-8"))["automation_authority"]
+                    self.assertTrue(authority["strategy_registry_context"]["profile_required"])
+                    self.assertEqual(authority["final_action"], "escalate")
+                finally:
+                    server.shutdown()
+                    server.server_close()
+
+    def test_automation_authority_route_does_not_require_profile_for_strategy_profile_example_asset(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "CODEX_AUDIT_SERVICE_AUTH": "none",
+                "CODEX_AUDIT_SERVICE_ALLOW_NO_AUTH_FOR_LOCAL_TESTS": "true",
+                "CODEX_AUDIT_SERVICE_JOB_DIR": tmp,
+                "CODEX_AUDIT_SERVICE_AUTOMATION_OPERATOR_REPOSITORIES": "local",
+            }
+            with patch.dict(os.environ, env, clear=False), patch("service.ai_gateway_service.read_org_health", return_value={"status": "healthy"}):
+                server = ThreadingHTTPServer(("127.0.0.1", 0), AiGatewayRequestHandler)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    base_url = f"http://127.0.0.1:{server.server_port}"
+                    payload = {
+                        "changed_paths": ["web/strategy-switch-console/strategy-profiles.example.json"],
+                        "proposed_action": "auto_merge",
+                        "confidence": 0.99,
+                    }
+                    request = urllib.request.Request(
+                        f"{base_url}/v1/ai/automation/authority",
+                        data=json.dumps(payload).encode("utf-8"),
+                        method="POST",
+                        headers={"Content-Type": "application/json"},
+                    )
+                    with urllib.request.urlopen(request, timeout=5) as response:
+                        authority = json.loads(response.read().decode("utf-8"))["automation_authority"]
+                    self.assertEqual(authority["change_class"], "live_candidate_promotion")
+                    self.assertFalse(authority["strategy_registry_context"]["valid"])
+                    self.assertFalse(authority["strategy_registry_context"].get("profile_required", False))
+                    self.assertEqual(authority["final_action"], "auto_pr")
+                finally:
+                    server.shutdown()
+                    server.server_close()
+
+    def test_automation_authority_route_requires_profile_for_example_asset_with_protected_class(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "CODEX_AUDIT_SERVICE_AUTH": "none",
+                "CODEX_AUDIT_SERVICE_ALLOW_NO_AUTH_FOR_LOCAL_TESTS": "true",
+                "CODEX_AUDIT_SERVICE_JOB_DIR": tmp,
+                "CODEX_AUDIT_SERVICE_AUTOMATION_OPERATOR_REPOSITORIES": "local",
+            }
+            with patch.dict(os.environ, env, clear=False), patch("service.ai_gateway_service.read_org_health", return_value={"status": "healthy"}):
+                server = ThreadingHTTPServer(("127.0.0.1", 0), AiGatewayRequestHandler)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    base_url = f"http://127.0.0.1:{server.server_port}"
+                    payload = {
+                        "changed_paths": ["web/strategy-switch-console/strategy-profiles.example.json"],
+                        "proposed_action": "auto_merge",
+                        "confidence": 0.99,
+                        "automation_metadata": {"change_class": "plugin_position_control"},
+                    }
+                    request = urllib.request.Request(
+                        f"{base_url}/v1/ai/automation/authority",
+                        data=json.dumps(payload).encode("utf-8"),
+                        method="POST",
+                        headers={"Content-Type": "application/json"},
+                    )
+                    with urllib.request.urlopen(request, timeout=5) as response:
+                        authority = json.loads(response.read().decode("utf-8"))["automation_authority"]
+                    self.assertEqual(authority["change_class"], "plugin_position_control")
+                    self.assertTrue(authority["strategy_registry_context"]["profile_required"])
+                    self.assertEqual(authority["final_action"], "escalate")
+                finally:
+                    server.shutdown()
+                    server.server_close()
+
+    def test_automation_authority_route_requires_profile_for_non_example_promotion_class(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "CODEX_AUDIT_SERVICE_AUTH": "none",
+                "CODEX_AUDIT_SERVICE_ALLOW_NO_AUTH_FOR_LOCAL_TESTS": "true",
+                "CODEX_AUDIT_SERVICE_JOB_DIR": tmp,
+                "CODEX_AUDIT_SERVICE_AUTOMATION_OPERATOR_REPOSITORIES": "local",
+            }
+            with patch.dict(os.environ, env, clear=False), patch("service.ai_gateway_service.read_org_health", return_value={"status": "healthy"}):
+                server = ThreadingHTTPServer(("127.0.0.1", 0), AiGatewayRequestHandler)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    base_url = f"http://127.0.0.1:{server.server_port}"
+                    payload = {
+                        "changed_paths": ["src/candidate_strategy.py"],
+                        "proposed_action": "auto_merge",
+                        "confidence": 0.99,
+                        "automation_metadata": {"change_class": "live_candidate_promotion"},
+                    }
+                    request = urllib.request.Request(
+                        f"{base_url}/v1/ai/automation/authority",
+                        data=json.dumps(payload).encode("utf-8"),
+                        method="POST",
+                        headers={"Content-Type": "application/json"},
+                    )
+                    with urllib.request.urlopen(request, timeout=5) as response:
+                        authority = json.loads(response.read().decode("utf-8"))["automation_authority"]
+                    self.assertEqual(authority["change_class"], "live_candidate_promotion")
+                    self.assertTrue(authority["strategy_registry_context"]["profile_required"])
+                    self.assertEqual(authority["final_action"], "escalate")
+                finally:
+                    server.shutdown()
+                    server.server_close()
+
+    def test_automation_authority_route_ignores_metadata_strategy_profile_without_top_level_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "CODEX_AUDIT_SERVICE_AUTH": "none",
+                "CODEX_AUDIT_SERVICE_ALLOW_NO_AUTH_FOR_LOCAL_TESTS": "true",
+                "CODEX_AUDIT_SERVICE_JOB_DIR": tmp,
+                "CODEX_AUDIT_SERVICE_AUTOMATION_OPERATOR_REPOSITORIES": "local",
+            }
+            with patch.dict(os.environ, env, clear=False), patch("service.ai_gateway_service.read_org_health", return_value={"status": "healthy"}):
+                server = ThreadingHTTPServer(("127.0.0.1", 0), AiGatewayRequestHandler)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    base_url = f"http://127.0.0.1:{server.server_port}"
+                    payload = {
+                        "changed_paths": ["docs/readme.md"],
+                        "proposed_action": "auto_merge",
+                        "confidence": 0.99,
+                        "automation_metadata": {"strategy_profile": "live"},
+                    }
+                    request = urllib.request.Request(
+                        f"{base_url}/v1/ai/automation/authority",
+                        data=json.dumps(payload).encode("utf-8"),
+                        method="POST",
+                        headers={"Content-Type": "application/json"},
+                    )
+                    with urllib.request.urlopen(request, timeout=5) as response:
+                        authority = json.loads(response.read().decode("utf-8"))["automation_authority"]
+                    self.assertFalse(authority["strategy_registry_context"]["valid"])
+                    self.assertFalse(authority["strategy_registry_context"].get("profile_required", False))
+                    self.assertEqual(authority["final_action"], "auto_pr")
+                finally:
+                    server.shutdown()
+                    server.server_close()
+
+    def test_automation_authority_route_does_not_require_profile_for_docs_strategy_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "CODEX_AUDIT_SERVICE_AUTH": "none",
+                "CODEX_AUDIT_SERVICE_ALLOW_NO_AUTH_FOR_LOCAL_TESTS": "true",
+                "CODEX_AUDIT_SERVICE_JOB_DIR": tmp,
+                "CODEX_AUDIT_SERVICE_AUTOMATION_OPERATOR_REPOSITORIES": "local",
+            }
+            with patch.dict(os.environ, env, clear=False), patch("service.ai_gateway_service.read_org_health", return_value={"status": "healthy"}):
+                server = ThreadingHTTPServer(("127.0.0.1", 0), AiGatewayRequestHandler)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    base_url = f"http://127.0.0.1:{server.server_port}"
+                    payload = {
+                        "changed_paths": ["docs/strategy-notes.md"],
+                        "proposed_action": "auto_merge",
+                        "confidence": 0.99,
+                    }
+                    request = urllib.request.Request(
+                        f"{base_url}/v1/ai/automation/authority",
+                        data=json.dumps(payload).encode("utf-8"),
+                        method="POST",
+                        headers={"Content-Type": "application/json"},
+                    )
+                    with urllib.request.urlopen(request, timeout=5) as response:
+                        authority = json.loads(response.read().decode("utf-8"))["automation_authority"]
+                    self.assertFalse(authority["strategy_registry_context"]["valid"])
+                    self.assertFalse(authority["strategy_registry_context"].get("profile_required", False))
+                    self.assertEqual(authority["final_action"], "auto_pr")
+                finally:
+                    server.shutdown()
+                    server.server_close()
+
+    def test_automation_authority_route_ignores_platform_health_registry_without_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "CODEX_AUDIT_SERVICE_AUTH": "none",
+                "CODEX_AUDIT_SERVICE_ALLOW_NO_AUTH_FOR_LOCAL_TESTS": "true",
+                "CODEX_AUDIT_SERVICE_JOB_DIR": tmp,
+                "CODEX_AUDIT_SERVICE_AUTOMATION_OPERATOR_REPOSITORIES": "local",
+            }
+            with patch.dict(os.environ, env, clear=False), patch("service.ai_gateway_service.read_org_health", return_value={"status": "healthy"}):
+                server = ThreadingHTTPServer(("127.0.0.1", 0), AiGatewayRequestHandler)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    base_url = f"http://127.0.0.1:{server.server_port}"
+                    payload = {
+                        "changed_paths": ["docs/readme.md"],
+                        "proposed_action": "auto_merge",
+                        "confidence": 0.99,
+                        "platform_health_report": {"automation_registry": STRATEGY_AUTOMATION_REGISTRY},
+                    }
+                    request = urllib.request.Request(
+                        f"{base_url}/v1/ai/automation/authority",
+                        data=json.dumps(payload).encode("utf-8"),
+                        method="POST",
+                        headers={"Content-Type": "application/json"},
+                    )
+                    with urllib.request.urlopen(request, timeout=5) as response:
+                        authority = json.loads(response.read().decode("utf-8"))["automation_authority"]
+                    self.assertFalse(authority["strategy_registry_context"]["valid"])
+                    self.assertEqual(authority["final_action"], "auto_pr")
                 finally:
                     server.shutdown()
                     server.server_close()
