@@ -579,6 +579,49 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
                     server.shutdown()
                     server.server_close()
 
+    def test_automation_triage_reports_retryable_incident(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "CODEX_AUDIT_SERVICE_AUTH": "none",
+                "CODEX_AUDIT_SERVICE_ALLOW_NO_AUTH_FOR_LOCAL_TESTS": "true",
+                "CODEX_AUDIT_SERVICE_JOB_DIR": tmp,
+                "CODEX_AUDIT_SERVICE_AUTOMATION_OPERATOR_REPOSITORIES": "local",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                server = ThreadingHTTPServer(("127.0.0.1", 0), AiGatewayRequestHandler)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    base_url = f"http://127.0.0.1:{server.server_port}"
+                    payload = {
+                        "source_repository": "local/repo",
+                        "task": "runtime-health",
+                        "failure_category": "transient_service_failure",
+                        "error": "codex service timed out waiting for a background job",
+                        "changed_paths": ["docs/runbook.md"],
+                        "run_id": "incident-123",
+                    }
+                    request = urllib.request.Request(
+                        f"{base_url}/v1/ai/automation/triage",
+                        data=json.dumps(payload).encode("utf-8"),
+                        method="POST",
+                        headers={"Content-Type": "application/json"},
+                    )
+                    with urllib.request.urlopen(request, timeout=5) as response:
+                        self.assertEqual(response.status, 200)
+                        body = json.loads(response.read().decode("utf-8"))
+
+                    triage = body["triage"]
+                    self.assertEqual(triage["failure_category"], "transient_service_failure")
+                    self.assertEqual(triage["incident_class"], "retryable")
+                    self.assertTrue(triage["retry_allowed"])
+                    self.assertEqual(triage["recommended_action"], "retry")
+                    self.assertEqual(triage["file_risk"], "low")
+                    self.assertIn("run_id=incident-123", triage["summary"])
+                finally:
+                    server.shutdown()
+                    server.server_close()
+
     def test_automation_authority_route_does_not_trust_live_equivalent_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             env = {

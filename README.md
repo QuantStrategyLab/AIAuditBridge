@@ -20,6 +20,7 @@ AIAuditBridge is the QuantStrategyLab AI audit automation bridge. It runs Codex 
 It produces research, audit, or orchestration artifacts. It should not submit broker orders or mutate live allocations by itself.
 
 Health terms are intentionally split into online service health, organization workflow health, background job health, and artifact/content health. See [`docs/health_taxonomy.md`](docs/health_taxonomy.md) before wiring new dashboard panels or automation gates.
+The service also exposes a structured automation triage endpoint for failure diagnosis and release-readiness guidance. It remains advisory and does not bypass merge or deploy controls.
 
 ## Architecture boundary
 

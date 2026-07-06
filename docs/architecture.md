@@ -70,6 +70,7 @@ operations: **Analyze**, **Execute**, and **Review**.
 | `/v1/ai/health` | GET | Online service health snapshot | No |
 | `/healthz` | GET | Liveness check | No |
 | `/v1/ai/quota` | GET | Provider usage, Codex account limits, and internal estimates | No |
+| `/v1/ai/automation/triage` | POST | Structured failure triage and release/readiness guidance | No |
 | `/v1/ai/feedback/*` | GET/POST | Change tracking and evaluation | No |
 
 Health status vocabulary is defined in [`health_taxonomy.md`](health_taxonomy.md). Do not use `/v1/ai/health` as a substitute for monthly audit results, artifact freshness, or strategy-level health evidence.

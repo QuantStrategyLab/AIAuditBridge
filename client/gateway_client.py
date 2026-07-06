@@ -312,6 +312,42 @@ class AiGatewayClient:
                 consensus="unknown", all_success=False,
             )
 
+    # ── triage ─────────────────────────────────────────────────────
+
+    def triage(
+        self,
+        *,
+        source_repository: str = "",
+        task: str = "",
+        failure_category: str = "",
+        error: str = "",
+        changed_paths: list[str] | None = None,
+        run_id: str = "",
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        """Request a structured automation triage report.
+
+        Best for: runtime failures, deploy blockers, and preflight release checks.
+        """
+        timeout = timeout or self.config.timeout_review
+        token = _fetch_oidc_token(self.config.audience)
+        payload: dict[str, Any] = {
+            "task": task,
+            "source_repository": source_repository or self.config.source_repository,
+            "failure_category": failure_category,
+            "error": error,
+            "run_id": run_id,
+            "changed_paths": changed_paths or [],
+        }
+        req = urllib.request.Request(
+            f"{self.config.service_url}/v1/ai/automation/triage",
+            data=json.dumps(payload).encode("utf-8"),
+            method="POST",
+            headers=_headers(token),
+        )
+        with urllib.request.urlopen(req, timeout=timeout + 30) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
     # ── feedback (Phase 3: closed-loop change tracking) ──────────────
 
     def register_change(
