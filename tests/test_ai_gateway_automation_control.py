@@ -76,7 +76,14 @@ class TestAutomationControlSnapshot(unittest.TestCase):
             ledger = type("Ledger", (), {"snapshot": lambda self, limit=20: {"runs": []}})()
 
             with (
-                patch.dict(os.environ, {"CODEX_AUDIT_SERVICE_EXECUTION_POLICY_PATH": str(policy_path)}, clear=False),
+                patch.dict(
+                    os.environ,
+                    {
+                        "CODEX_AUDIT_SERVICE_EXECUTION_POLICY_PATH": str(policy_path),
+                        "CODEX_AUDIT_SERVICE_EXECUTION_POLICY_OWNER": f"{os.getuid()}:{os.getgid()}",
+                    },
+                    clear=False,
+                ),
                 patch("service.ai_gateway_service.read_org_health", return_value={"status": "ok"}),
                 patch("service.ai_gateway_service.get_health_monitor", return_value=health),
                 patch("service.ai_gateway_service.get_quota_manager", return_value=quota),

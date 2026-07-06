@@ -295,6 +295,26 @@ class TestAutomationDecision(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(load_execution_policy()["default"]["max_autonomy"], "manual")
 
+    def test_load_execution_policy_fails_closed_for_untrusted_env_path(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "policy.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "default": {
+                            "max_autonomy": "auto_pr",
+                            "max_consecutive_failures": 3,
+                            "low_cost_model": "gpt-5.4-mini",
+                            "low_cost_provider": "openai",
+                        },
+                        "repositories": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch.dict(os.environ, {"CODEX_AUDIT_SERVICE_EXECUTION_POLICY_PATH": str(path)}, clear=False):
+                self.assertEqual(load_execution_policy()["default"]["max_autonomy"], "manual")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -14,6 +14,7 @@ ALLOWED_REPOSITORY_VISIBILITIES="${CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORY_VISIBI
 ALLOWED_SOURCE_REPOSITORIES="${CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES:-QuantStrategyLab/AIAuditBridge,QuantStrategyLab/CryptoLivePoolPipelines,QuantStrategyLab/HkEquitySnapshotPipelines,QuantStrategyLab/UsEquitySnapshotPipelines,QuantStrategyLab/ResearchSignalContextPipelines}"
 JOB_DIR="${CODEX_AUDIT_SERVICE_JOB_DIR:-/var/lib/codex-audit-bridge/jobs}"
 ADMIN_ENV_FILE="${CODEX_AUDIT_SERVICE_ADMIN_ENV_FILE:-/etc/codex-audit-bridge/admin.env}"
+EXECUTION_POLICY_FILE="${CODEX_AUDIT_SERVICE_EXECUTION_POLICY_PATH:-/var/lib/codex-audit-bridge/policy/execution_policy.json}"
 AUDIT_MODEL="${CODEX_AUDIT_SERVICE_MODEL:-}"
 AUDIT_REASONING_EFFORT="${CODEX_AUDIT_SERVICE_REASONING_EFFORT:-}"
 CODEX_ACCOUNT_USAGE="${CODEX_AUDIT_SERVICE_CODEX_ACCOUNT_USAGE:-1}"
@@ -215,8 +216,7 @@ write_admin_env_file_if_needed() {
 }
 
 write_default_execution_policy_if_missing() {
-  local owner="$1"
-  local policy_path="${JOB_DIR}/execution_policy.json"
+  local policy_path="${EXECUTION_POLICY_FILE}"
   if [ -L "$policy_path" ]; then
     echo "refusing to write execution policy through symlink: $policy_path" >&2
     exit 1
@@ -224,12 +224,12 @@ write_default_execution_policy_if_missing() {
   if [ -e "$policy_path" ]; then
     return
   fi
-  sudo python3 - "$policy_path" "$owner" <<'PY'
+  sudo install -d -m 0755 -o root -g root "$(dirname "$policy_path")"
+  sudo python3 - "$policy_path" <<'PY'
 import os
-import pwd
 import sys
 
-path, owner = sys.argv[1], sys.argv[2]
+path = sys.argv[1]
 flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
 if hasattr(os, "O_NOFOLLOW"):
     flags |= os.O_NOFOLLOW
@@ -252,9 +252,8 @@ except FileExistsError:
     raise SystemExit(0)
 with os.fdopen(fd, "w", encoding="utf-8") as handle:
     handle.write(content)
-user = pwd.getpwnam(owner)
-os.chown(path, user.pw_uid, user.pw_gid)
-os.chmod(path, 0o600)
+os.chown(path, 0, 0)
+os.chmod(path, 0o644)
 PY
 }
 
@@ -296,7 +295,7 @@ Environment=CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORY_VISIBILITIES=${ALLOWED_REPOSI
 Environment=CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES=${ALLOWED_SOURCE_REPOSITORIES}
 Environment=CODEX_AUDIT_SERVICE_JOB_DIR=${JOB_DIR}
 Environment=CODEX_AUDIT_SERVICE_QUOTA_STORE=${JOB_DIR}/quota.json
-Environment=CODEX_AUDIT_SERVICE_EXECUTION_POLICY_PATH=${JOB_DIR}/execution_policy.json
+Environment=CODEX_AUDIT_SERVICE_EXECUTION_POLICY_PATH=${EXECUTION_POLICY_FILE}
 Environment=CODEX_AUDIT_SERVICE_CODEX_ACCOUNT_USAGE=${CODEX_ACCOUNT_USAGE}
 Environment=CODEX_AUDIT_SERVICE_OPENAI_USAGE_WINDOW_DAYS=${OPENAI_USAGE_WINDOW_DAYS}
 Environment=CODEX_AUDIT_SERVICE_ANTHROPIC_USAGE_WINDOW_DAYS=${ANTHROPIC_USAGE_WINDOW_DAYS}
@@ -326,7 +325,7 @@ Environment="CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS=${ALLOWED_WORKFLOW_REFS}"
 Environment="CODEX_AUDIT_SERVICE_ALLOWED_REFS=${ALLOWED_REFS}"
 Environment="CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORY_VISIBILITIES=${ALLOWED_REPOSITORY_VISIBILITIES}"
 Environment="CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES=${ALLOWED_SOURCE_REPOSITORIES}"
-Environment="CODEX_AUDIT_SERVICE_EXECUTION_POLICY_PATH=${JOB_DIR}/execution_policy.json"
+Environment="CODEX_AUDIT_SERVICE_EXECUTION_POLICY_PATH=${EXECUTION_POLICY_FILE}"
 EOF_DROPIN
 }
 
@@ -554,7 +553,7 @@ deploy() {
   install_file "scripts/codex_audit_service.py" "${DEPLOY_DIR}/scripts/codex_audit_service.py" "0755"
   install_service_package
   sudo install -d -m 0700 -o "$runner_user" -g "$runner_user" "$JOB_DIR"
-  write_default_execution_policy_if_missing "$runner_user"
+  write_default_execution_policy_if_missing
   write_admin_env_file_if_needed
   write_audit_service_unit
   write_managed_audit_service_dropin

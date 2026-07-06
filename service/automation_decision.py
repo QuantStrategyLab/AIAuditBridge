@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import stat
 from typing import Any
 
 from service.automation_run_ledger import CONTROL_ESCALATE, CONTROL_PAUSE_AUTO_FIX, CONTROL_REVIEW_ONLY
@@ -29,6 +30,7 @@ DEFAULT_MAX_CONSECUTIVE_FAILURES = 3
 DEFAULT_LOW_COST_MODEL = "gpt-5.4-mini"
 DEFAULT_LOW_COST_PROVIDER = "openai"
 EXECUTION_POLICY_PATH_ENV = "CODEX_AUDIT_SERVICE_EXECUTION_POLICY_PATH"
+EXECUTION_POLICY_OWNER_ENV = "CODEX_AUDIT_SERVICE_EXECUTION_POLICY_OWNER"
 POLICY_LOAD_ERROR_KEY = "_load_error"
 TRUSTED_FAILURE_ORIGINS = frozenset({"service_job"})
 POLICY_ALLOWED_KEYS = frozenset({"max_autonomy", "max_consecutive_failures", "low_cost_model", "low_cost_provider", "quota_low_behavior"})
@@ -108,6 +110,34 @@ def _fail_closed_policy(reason: str) -> dict[str, Any]:
     }
 
 
+def _expected_policy_owner() -> tuple[int, int]:
+    raw = os.environ.get(EXECUTION_POLICY_OWNER_ENV, "0:0").strip() or "0:0"
+    try:
+        uid, gid = raw.split(":", 1)
+        return int(uid), int(gid)
+    except (TypeError, ValueError):
+        return 0, 0
+
+
+def _policy_trust_error(path: Path) -> str:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return "execution policy file is unavailable"
+    except OSError:
+        return "execution policy file is unreadable"
+    if stat.S_ISLNK(info.st_mode):
+        return "execution policy file is a symlink"
+    if not stat.S_ISREG(info.st_mode):
+        return "execution policy file is not a regular file"
+    expected_uid, expected_gid = _expected_policy_owner()
+    if (info.st_uid, info.st_gid) != (expected_uid, expected_gid):
+        return "execution policy file owner is invalid"
+    if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        return "execution policy file permissions are too broad"
+    return ""
+
+
 def _validate_execution_policy(payload: dict[str, Any]) -> str:
     default_policy = payload.get("default")
     if not isinstance(default_policy, dict):
@@ -155,12 +185,17 @@ def _validate_policy_section(section: dict[str, Any], *, section_name: str, requ
 
 
 def load_execution_policy(path: Path | None = None) -> dict[str, Any]:
-    """Load service-owned execution policy for repo autonomy thresholds."""
+    """Load admin-owned execution policy for repo autonomy thresholds."""
+    require_trusted_path = path is None
     if path is None:
         configured = os.environ.get(EXECUTION_POLICY_PATH_ENV, "").strip()
         if not configured:
             return _fail_closed_policy("execution policy path is not configured")
         path = Path(configured).expanduser()
+    if require_trusted_path:
+        trust_error = _policy_trust_error(path)
+        if trust_error:
+            return _fail_closed_policy(trust_error)
     try:
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
