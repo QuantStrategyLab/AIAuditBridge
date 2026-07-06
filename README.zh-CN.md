@@ -1,5 +1,14 @@
 # Quant AI Audit Bridge
 
+
+## QSL 架构角色
+
+- **层级**：`运维/审计工具`。
+- **职责**：AI 审计与 review 自动化桥接。
+- **事实源/归属**：审计 prompt、服务策略、workflow 健康术语。
+- **消费对象**：QuantStrategyLab 仓库、PR/workflow 元数据、Codex/API 提供方。
+- **禁止事项**：提交券商订单或修改 live allocation。
+
 [English README](README.md)
 
 > 投资有风险。本项目不构成投资建议，仅用于学习、研究和工程审阅。
