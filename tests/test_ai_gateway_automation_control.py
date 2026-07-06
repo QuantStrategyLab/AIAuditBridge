@@ -13,7 +13,7 @@ from service.ai_gateway_service import _automation_control_snapshot
 
 
 class TestAutomationControlSnapshot(unittest.TestCase):
-    def test_control_snapshot_preserves_continue_for_healthy_default_mode(self) -> None:
+    def test_control_snapshot_defaults_to_review_only_for_healthy_repo(self) -> None:
         health = type("Health", (), {"status": "healthy"})()
         quota = type("Quota", (), {"runtime_status": lambda self, repo: {"status": "ok"}})()
         ledger = type("Ledger", (), {"snapshot": lambda self, limit=None: {"runs": []}})()
@@ -26,6 +26,24 @@ class TestAutomationControlSnapshot(unittest.TestCase):
             patch("service.ai_gateway_service.load_execution_policy", return_value={}),
         ):
             control = _automation_control_snapshot("QuantStrategyLab/TargetRepo")
+
+        self.assertEqual(control["action"], "review_only")
+        self.assertEqual(control["execution"]["effective_mode"], "review_only")
+        self.assertFalse(control["execution"]["auto_fix_allowed"])
+
+    def test_control_snapshot_preserves_continue_for_explicit_review_and_fix_mode(self) -> None:
+        health = type("Health", (), {"status": "healthy"})()
+        quota = type("Quota", (), {"runtime_status": lambda self, repo: {"status": "ok"}})()
+        ledger = type("Ledger", (), {"snapshot": lambda self, limit=None: {"runs": []}})()
+
+        with (
+            patch("service.ai_gateway_service.read_org_health", return_value={"status": "ok"}),
+            patch("service.ai_gateway_service.get_health_monitor", return_value=health),
+            patch("service.ai_gateway_service.get_quota_manager", return_value=quota),
+            patch("service.ai_gateway_service.get_automation_run_ledger", return_value=ledger),
+            patch("service.ai_gateway_service.load_execution_policy", return_value={}),
+        ):
+            control = _automation_control_snapshot("QuantStrategyLab/TargetRepo", requested_mode="review_and_fix")
 
         self.assertEqual(control["action"], "continue")
         self.assertEqual(control["execution"]["effective_mode"], "review_and_fix")

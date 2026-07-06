@@ -35,7 +35,6 @@ from typing import Any
 
 from service.auth import authenticate
 from service.contracts import (
-    MODE_REVIEW_AND_FIX,
     MODE_REVIEW_ONLY,
     TASK_ANALYZE,
     TASK_EXECUTE,
@@ -509,7 +508,7 @@ def _public_job_payload(job: dict[str, Any]) -> dict[str, object]:
     return payload
 
 
-def _automation_control_snapshot(repo: str, *, task_name: str = "", requested_mode: str = MODE_REVIEW_AND_FIX) -> dict[str, Any]:
+def _automation_control_snapshot(repo: str, *, task_name: str = "", requested_mode: str = MODE_REVIEW_ONLY) -> dict[str, Any]:
     try:
         org_health = read_org_health()
     except Exception:
@@ -1470,7 +1469,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             else:
                 repo = claims_repo
         repo = repo or "unknown"
-        mode = str(params.get("mode", [MODE_REVIEW_AND_FIX])[0] or MODE_REVIEW_AND_FIX)
+        mode = str(params.get("mode", [MODE_REVIEW_ONLY])[0] or MODE_REVIEW_ONLY)
         _json_response(self, HTTPStatus.OK, {"status": "ok", "control": _automation_control_snapshot(repo, requested_mode=mode)})
 
     def _handle_automation_triage(self, claims: dict[str, Any], payload: dict[str, Any]) -> None:
@@ -1552,7 +1551,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         control = _automation_control_snapshot(
             repo,
             task_name=str(payload.get("task") or payload.get("task_name") or ""),
-            requested_mode=str(payload.get("mode") or MODE_REVIEW_AND_FIX),
+            requested_mode=str(payload.get("mode") or MODE_REVIEW_ONLY),
         )
         metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
         ledger = get_automation_run_ledger()

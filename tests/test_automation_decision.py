@@ -189,6 +189,12 @@ class TestAutomationDecision(unittest.TestCase):
 
             self.assertEqual(load_execution_policy(path)["default"]["max_autonomy"], "manual")
 
+            path.write_text(json.dumps({"default": []}), encoding="utf-8")
+            self.assertEqual(load_execution_policy(path)["default"]["max_autonomy"], "manual")
+
+            path.write_text(json.dumps({"repositories": {"QuantStrategyLab/AIAuditBridge": "bad"}}), encoding="utf-8")
+            self.assertEqual(load_execution_policy(path)["default"]["max_autonomy"], "manual")
+
             path.write_text(json.dumps({"default": {"max_autonomy": "review_only"}}), encoding="utf-8")
             self.assertEqual(load_execution_policy(path)["default"]["max_autonomy"], "review_only")
 

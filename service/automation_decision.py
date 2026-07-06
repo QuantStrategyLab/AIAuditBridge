@@ -94,6 +94,21 @@ def _fail_closed_policy(reason: str) -> dict[str, Any]:
     }
 
 
+def _validate_execution_policy(payload: dict[str, Any]) -> str:
+    default_policy = payload.get("default")
+    if default_policy is not None and not isinstance(default_policy, dict):
+        return "execution policy default section is invalid"
+    repositories = payload.get("repositories")
+    if repositories is None:
+        return ""
+    if not isinstance(repositories, dict):
+        return "execution policy repositories section is invalid"
+    for repo, repo_policy in repositories.items():
+        if not isinstance(repo_policy, dict):
+            return f"execution policy override for {repo!r} is invalid"
+    return ""
+
+
 def load_execution_policy(path: Path | None = None) -> dict[str, Any]:
     """Load service-owned execution policy for repo autonomy thresholds."""
     if path is None:
@@ -109,6 +124,9 @@ def load_execution_policy(path: Path | None = None) -> dict[str, Any]:
         return _fail_closed_policy("execution policy file is unreadable")
     if not isinstance(payload, dict):
         return _fail_closed_policy("execution policy file is invalid")
+    schema_error = _validate_execution_policy(payload)
+    if schema_error:
+        return _fail_closed_policy(schema_error)
     return payload
 
 
