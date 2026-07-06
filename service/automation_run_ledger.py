@@ -214,31 +214,34 @@ class AutomationRunLedger:
         self._max_runs = max(1, int(max_runs))
         self._max_events_per_run = max(1, int(max_events_per_run))
         self._sequence = 0
+        self._evicted_runs_count = 0
         self._storage_path = storage_path
         self._load_from_disk()
 
     def _load_from_disk(self) -> None:
         if self._storage_path is None or not self._storage_path.exists():
             return
-        runs, sequence = self._read_from_disk_unlocked()
+        runs, sequence, evicted_runs = self._read_from_disk_unlocked()
         with self._lock:
             self._runs = runs
             self._sequence = sequence
+            self._evicted_runs_count = evicted_runs
             self._evict_old_runs_locked()
 
-    def _read_from_disk_unlocked(self) -> tuple[dict[str, dict[str, Any]], int]:
+    def _read_from_disk_unlocked(self) -> tuple[dict[str, dict[str, Any]], int, int]:
         if self._storage_path is None or not self._storage_path.exists():
-            return {}, 0
+            return {}, 0, 0
         try:
             payload = json.loads(self._storage_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
-            return {}, 0
+            return {}, 0, 0
         runs = payload.get("runs") if isinstance(payload, dict) else None
         if not isinstance(runs, dict):
-            return {}, 0
+            return {}, 0, 0
         clean_runs = {str(key): value for key, value in runs.items() if isinstance(value, dict)}
         sequence = _safe_int(payload.get("sequence"), len(clean_runs))
-        return clean_runs, sequence
+        evicted_runs = _safe_int(payload.get("evicted_runs"), 0)
+        return clean_runs, sequence, max(0, evicted_runs)
 
     def _persist_locked(self) -> None:
         self._persist_with_owner_guard_locked()
@@ -252,7 +255,7 @@ class AutomationRunLedger:
                 lock_path = self._storage_path.with_suffix(self._storage_path.suffix + ".lock")
                 lock_handle = lock_path.open("a+", encoding="utf-8")
                 fcntl.flock(lock_handle.fileno(), fcntl.LOCK_SH)
-            disk_runs, disk_sequence = self._read_from_disk_unlocked()
+            disk_runs, disk_sequence, disk_evicted_runs = self._read_from_disk_unlocked()
             for run_id, disk_entry in disk_runs.items():
                 current = self._runs.get(run_id)
                 if current is not None:
@@ -260,6 +263,7 @@ class AutomationRunLedger:
                 else:
                     self._runs[run_id] = disk_entry
             self._sequence = max(self._sequence, disk_sequence, len(self._runs))
+            self._evicted_runs_count = max(self._evicted_runs_count, disk_evicted_runs)
             self._evict_old_runs_locked()
         finally:
             if lock_handle is not None:
@@ -283,7 +287,7 @@ class AutomationRunLedger:
                 lock_path = self._storage_path.with_suffix(self._storage_path.suffix + ".lock")
                 lock_handle = lock_path.open("a+", encoding="utf-8")
                 fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
-            disk_runs, disk_sequence = self._read_from_disk_unlocked()
+            disk_runs, disk_sequence, disk_evicted_runs = self._read_from_disk_unlocked()
             if guard_run_id and owner_repository:
                 disk_entry = disk_runs.get(guard_run_id)
                 disk_owner = _entry_owner_repository(disk_entry) if isinstance(disk_entry, dict) else ""
@@ -296,6 +300,7 @@ class AutomationRunLedger:
                 else:
                     self._runs[run_id] = disk_entry
             self._sequence = max(self._sequence, disk_sequence, len(self._runs))
+            self._evicted_runs_count = max(self._evicted_runs_count, disk_evicted_runs)
             self._evict_old_runs_locked()
             self._write_to_disk_locked()
         finally:
@@ -311,6 +316,7 @@ class AutomationRunLedger:
         payload = {
             "schema_version": "automation_run_ledger.v1",
             "sequence": self._sequence,
+            "evicted_runs": self._evicted_runs_count,
             "runs": self._runs,
         }
         tmp = self._storage_path.with_suffix(self._storage_path.suffix + ".tmp")
@@ -366,6 +372,7 @@ class AutomationRunLedger:
         )
         for entry in ordered[:overflow]:
             self._runs.pop(str(entry["run_id"]))
+        self._evicted_runs_count += overflow
 
     @staticmethod
     def _public_entry(entry: dict[str, Any], *, include_events: bool = True) -> dict[str, Any]:
@@ -407,6 +414,7 @@ class AutomationRunLedger:
         with self._lock:
             previous_runs = deepcopy(self._runs)
             previous_sequence = self._sequence
+            previous_evicted_runs_count = self._evicted_runs_count
             current = self._runs.get(run_id)
             if current:
                 current_owner = _entry_owner_repository(current)
@@ -451,12 +459,14 @@ class AutomationRunLedger:
                 }
             )
             self._runs[run_id] = entry
-            self._evict_old_runs_locked()
+            if self._storage_path is None:
+                self._evict_old_runs_locked()
             try:
                 self._persist_with_owner_guard_locked(guard_run_id=run_id, owner_repository=owner_repository)
             except Exception:
                 self._runs = previous_runs
                 self._sequence = previous_sequence
+                self._evicted_runs_count = previous_evicted_runs_count
                 raise
             return self._public_entry(self._runs[run_id])
 
@@ -476,6 +486,7 @@ class AutomationRunLedger:
             ]
             max_runs = self._max_runs
             max_events_per_run = self._max_events_per_run
+            evicted_runs_count = self._evicted_runs_count
 
         task_states = Counter(str(run.get("task_state", "")).strip().lower() for run in retained_runs if run.get("task_state"))
         suggested_actions = Counter(
@@ -505,6 +516,8 @@ class AutomationRunLedger:
                     "max_runs": max_runs,
                     "max_events_per_run": max_events_per_run,
                     "events_included": include_events,
+                    "evicted_runs": evicted_runs_count,
+                    "may_be_truncated": evicted_runs_count > 0,
                 },
             },
         }

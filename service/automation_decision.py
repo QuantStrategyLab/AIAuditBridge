@@ -290,11 +290,9 @@ def consecutive_failure_count(
     runs: list[dict[str, Any]],
     *,
     repo: str,
-    require_terminal_boundary: bool = False,
 ) -> int:
     """Count latest consecutive trusted failed runs for one repo from newest-first runs."""
     count = 0
-    terminal_boundary_seen = False
     normalized_repo = _normalize_repo_id(repo)
     for run in runs:
         if not isinstance(run, dict):
@@ -310,10 +308,7 @@ def consecutive_failure_count(
             continue
         if state in {"queued", "running", "pending", "in_progress"}:
             continue
-        terminal_boundary_seen = True
         break
-    if require_terminal_boundary and count > 0 and not terminal_boundary_seen:
-        return 0
     return count
 
 
@@ -362,7 +357,6 @@ def decide_automation_execution(
     failures = consecutive_failure_count(
         recent_runs or [],
         repo=repo,
-        require_terminal_boundary=not failure_history_complete,
     )
 
     if AUTONOMY_RANK[max_autonomy] <= AUTONOMY_RANK[AUTONOMY_REVIEW_ONLY]:
@@ -386,7 +380,7 @@ def decide_automation_execution(
         human_review_required = True
         reasons.append(f"consecutive failures reached {failures}/{max_failures}")
     elif not failure_history_complete:
-        reasons.append("failure history may be truncated; not enforcing failure threshold")
+        reasons.append("failure history may be truncated; using retained failure streak")
 
     if control_action in {CONTROL_REVIEW_ONLY, CONTROL_PAUSE_AUTO_FIX, CONTROL_ESCALATE}:
         effective_mode = MODE_REVIEW_ONLY

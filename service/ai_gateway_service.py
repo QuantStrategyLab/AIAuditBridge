@@ -530,8 +530,7 @@ def _automation_control_snapshot(
         recent_runs = ledger_snapshot["runs"]
         ledger_summary = ledger_snapshot.get("summary") if isinstance(ledger_snapshot.get("summary"), dict) else {}
         retention = ledger_summary.get("retention") if isinstance(ledger_summary.get("retention"), dict) else {}
-        max_retained_runs = int(retention.get("max_runs") or 0)
-        failure_history_complete = max_retained_runs <= 0 or int(ledger_summary.get("total_runs") or 0) < max_retained_runs
+        failure_history_complete = not bool(retention.get("may_be_truncated"))
         ledger_unavailable = False
     except Exception:
         recent_runs = []
@@ -572,6 +571,8 @@ def _automation_control_snapshot(
         strict_action = CONTROL_REVIEW_ONLY
     elif execution.get("action") == EXECUTION_DEFER:
         strict_action = CONTROL_PAUSE_AUTO_FIX
+    elif execution.get("requested_autonomy") != execution.get("effective_autonomy") and strict_action == CONTROL_CONTINUE:
+        strict_action = CONTROL_REVIEW_ONLY
     elif (
         execution.get("requested_mode") == MODE_REVIEW_AND_FIX
         and execution.get("effective_mode") == MODE_REVIEW_ONLY
