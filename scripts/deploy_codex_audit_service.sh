@@ -214,6 +214,28 @@ write_admin_env_file_if_needed() {
   trap - RETURN
 }
 
+write_default_execution_policy_if_missing() {
+  local owner="$1"
+  local policy_path="${JOB_DIR}/execution_policy.json"
+  if [ -e "$policy_path" ]; then
+    return
+  fi
+  local tmp
+  tmp="$(mktemp)"
+  cat >"$tmp" <<'EOF_POLICY'
+{
+  "default": {
+    "max_autonomy": "auto_pr",
+    "max_consecutive_failures": 3,
+    "low_cost_model": "gpt-5.4-mini"
+  },
+  "repositories": {}
+}
+EOF_POLICY
+  sudo install -m 0600 -o "$owner" -g "$owner" "$tmp" "$policy_path"
+  rm -f "$tmp"
+}
+
 write_audit_service_unit() {
   local runner_user runner_home
   runner_user="$(id -un)"
@@ -510,6 +532,7 @@ deploy() {
   install_file "scripts/codex_audit_service.py" "${DEPLOY_DIR}/scripts/codex_audit_service.py" "0755"
   install_service_package
   sudo install -d -m 0700 -o "$runner_user" -g "$runner_user" "$JOB_DIR"
+  write_default_execution_policy_if_missing "$runner_user"
   write_admin_env_file_if_needed
   write_audit_service_unit
   write_managed_audit_service_dropin

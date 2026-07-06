@@ -35,6 +35,7 @@ from typing import Any
 
 from service.auth import authenticate
 from service.contracts import (
+    MODE_REVIEW_AND_FIX,
     MODE_REVIEW_ONLY,
     TASK_ANALYZE,
     TASK_EXECUTE,
@@ -508,7 +509,7 @@ def _public_job_payload(job: dict[str, Any]) -> dict[str, object]:
     return payload
 
 
-def _automation_control_snapshot(repo: str, *, task_name: str = "", requested_mode: str = MODE_REVIEW_ONLY) -> dict[str, Any]:
+def _automation_control_snapshot(repo: str, *, task_name: str = "", requested_mode: str = MODE_REVIEW_AND_FIX) -> dict[str, Any]:
     try:
         org_health = read_org_health()
     except Exception:
@@ -520,8 +521,10 @@ def _automation_control_snapshot(repo: str, *, task_name: str = "", requested_mo
     control = suggest_control_action(get_health_monitor().status, quota_status, org_health)
     try:
         recent_runs = get_automation_run_ledger().snapshot(limit=None)["runs"]
+        ledger_unavailable = False
     except Exception:
         recent_runs = []
+        ledger_unavailable = True
     execution = decide_automation_execution(
         repo=repo or "unknown",
         task_name=task_name,
@@ -533,6 +536,14 @@ def _automation_control_snapshot(repo: str, *, task_name: str = "", requested_mo
         recent_runs=recent_runs,
         policy=load_execution_policy(),
     )
+    if ledger_unavailable:
+        execution["action"] = EXECUTION_HUMAN_REVIEW
+        execution["effective_mode"] = MODE_REVIEW_ONLY
+        execution["human_review_required"] = True
+        execution["auto_fix_allowed"] = False
+        reasons = execution.get("reasons") if isinstance(execution.get("reasons"), list) else []
+        reasons.append("automation ledger unavailable; forcing human review")
+        execution["reasons"] = reasons
     original_action = str(control.get("action") or CONTROL_REVIEW_ONLY)
     strict_action = original_action
     if execution.get("action") == EXECUTION_HUMAN_REVIEW:
@@ -1459,7 +1470,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             else:
                 repo = claims_repo
         repo = repo or "unknown"
-        mode = str(params.get("mode", [MODE_REVIEW_ONLY])[0] or MODE_REVIEW_ONLY)
+        mode = str(params.get("mode", [MODE_REVIEW_AND_FIX])[0] or MODE_REVIEW_AND_FIX)
         _json_response(self, HTTPStatus.OK, {"status": "ok", "control": _automation_control_snapshot(repo, requested_mode=mode)})
 
     def _handle_automation_triage(self, claims: dict[str, Any], payload: dict[str, Any]) -> None:
@@ -1541,7 +1552,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         control = _automation_control_snapshot(
             repo,
             task_name=str(payload.get("task") or payload.get("task_name") or ""),
-            requested_mode=str(payload.get("mode") or MODE_REVIEW_ONLY),
+            requested_mode=str(payload.get("mode") or MODE_REVIEW_AND_FIX),
         )
         metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
         ledger = get_automation_run_ledger()

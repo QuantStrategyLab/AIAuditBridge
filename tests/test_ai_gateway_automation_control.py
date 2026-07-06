@@ -13,6 +13,24 @@ from service.ai_gateway_service import _automation_control_snapshot
 
 
 class TestAutomationControlSnapshot(unittest.TestCase):
+    def test_control_snapshot_preserves_continue_for_healthy_default_mode(self) -> None:
+        health = type("Health", (), {"status": "healthy"})()
+        quota = type("Quota", (), {"runtime_status": lambda self, repo: {"status": "ok"}})()
+        ledger = type("Ledger", (), {"snapshot": lambda self, limit=None: {"runs": []}})()
+
+        with (
+            patch("service.ai_gateway_service.read_org_health", return_value={"status": "ok"}),
+            patch("service.ai_gateway_service.get_health_monitor", return_value=health),
+            patch("service.ai_gateway_service.get_quota_manager", return_value=quota),
+            patch("service.ai_gateway_service.get_automation_run_ledger", return_value=ledger),
+            patch("service.ai_gateway_service.load_execution_policy", return_value={}),
+        ):
+            control = _automation_control_snapshot("QuantStrategyLab/TargetRepo")
+
+        self.assertEqual(control["action"], "continue")
+        self.assertEqual(control["execution"]["effective_mode"], "review_and_fix")
+        self.assertTrue(control["execution"]["auto_fix_allowed"])
+
     def test_control_snapshot_applies_service_owned_execution_policy(self) -> None:
         with TemporaryDirectory() as tmp:
             policy_path = Path(tmp) / "execution_policy.json"
@@ -94,6 +112,23 @@ class TestAutomationControlSnapshot(unittest.TestCase):
         self.assertEqual(control["action"], "escalate")
         self.assertEqual(control["execution"]["action"], "human_review")
         self.assertEqual(control["execution"]["consecutive_failures"], 2)
+
+    def test_control_snapshot_fails_closed_when_ledger_is_unavailable(self) -> None:
+        health = type("Health", (), {"status": "healthy"})()
+        quota = type("Quota", (), {"runtime_status": lambda self, repo: {"status": "ok"}})()
+        ledger = type("Ledger", (), {"snapshot": lambda self, limit=None: (_ for _ in ()).throw(RuntimeError("boom"))})()
+
+        with (
+            patch("service.ai_gateway_service.read_org_health", return_value={"status": "ok"}),
+            patch("service.ai_gateway_service.get_health_monitor", return_value=health),
+            patch("service.ai_gateway_service.get_quota_manager", return_value=quota),
+            patch("service.ai_gateway_service.get_automation_run_ledger", return_value=ledger),
+            patch("service.ai_gateway_service.load_execution_policy", return_value={}),
+        ):
+            control = _automation_control_snapshot("QuantStrategyLab/TargetRepo")
+
+        self.assertEqual(control["action"], "escalate")
+        self.assertEqual(control["execution"]["action"], "human_review")
 
 
 if __name__ == "__main__":

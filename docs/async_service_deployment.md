@@ -72,8 +72,9 @@ bash scripts/deploy_codex_audit_service.sh deploy
 
 The job directory should be owned by the service user and mode `0700`.
 The deploy script points `CODEX_AUDIT_SERVICE_EXECUTION_POLICY_PATH` to
-`${CODEX_AUDIT_SERVICE_JOB_DIR}/execution_policy.json`. If present, this
-service-owned file can cap repo autonomy without trusting the reviewed checkout:
+`${CODEX_AUDIT_SERVICE_JOB_DIR}/execution_policy.json` and creates a conservative
+default file if it is missing. This service-owned file can cap repo autonomy
+without trusting the reviewed checkout:
 
 ```json
 {
@@ -90,6 +91,9 @@ service-owned file can cap repo autonomy without trusting the reviewed checkout:
   }
 }
 ```
+
+If this configured file later becomes unreadable or malformed, the service
+fails closed for execution decisions until the file is repaired.
 
 The service should rely on an authenticated Codex CLI session and must not
 inject OpenAI/Codex API keys into the Codex subprocess.

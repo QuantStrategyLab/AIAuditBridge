@@ -29,6 +29,7 @@ AUTONOMY_RANK = {level: index for index, level in enumerate(AUTONOMY_ORDER)}
 DEFAULT_MAX_CONSECUTIVE_FAILURES = 3
 DEFAULT_LOW_COST_MODEL = "gpt-5.4-mini"
 EXECUTION_POLICY_PATH_ENV = "CODEX_AUDIT_SERVICE_EXECUTION_POLICY_PATH"
+POLICY_LOAD_ERROR_KEY = "_load_error"
 QUOTA_STATUS_SEVERITY = {
     "ok": 0,
     "healthy": 0,
@@ -83,6 +84,16 @@ def _repo_from_run(run: dict[str, Any]) -> str:
     return str(metadata.get("source_repository") or metadata.get("repository") or "")
 
 
+def _fail_closed_policy(reason: str) -> dict[str, Any]:
+    return {
+        POLICY_LOAD_ERROR_KEY: reason,
+        "default": {
+            "max_autonomy": AUTONOMY_MANUAL,
+            "max_consecutive_failures": 1,
+        },
+    }
+
+
 def load_execution_policy(path: Path | None = None) -> dict[str, Any]:
     """Load service-owned execution policy for repo autonomy thresholds."""
     if path is None:
@@ -90,11 +101,15 @@ def load_execution_policy(path: Path | None = None) -> dict[str, Any]:
         if not configured:
             return {}
         path = Path(configured).expanduser()
+    if not path.exists():
+        return _fail_closed_policy("execution policy file is unavailable")
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return {}
-    return payload if isinstance(payload, dict) else {}
+        return _fail_closed_policy("execution policy file is unreadable")
+    if not isinstance(payload, dict):
+        return _fail_closed_policy("execution policy file is invalid")
+    return payload
 
 
 def repo_execution_policy(repo: str, policy: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -146,6 +161,7 @@ def decide_automation_execution(
 ) -> dict[str, Any]:
     """Produce a safe execution decision from health, quota, failures, and repo policy."""
     repo_policy = repo_execution_policy(repo, policy)
+    policy_load_error = str((policy or {}).get(POLICY_LOAD_ERROR_KEY) or "") if isinstance(policy, dict) else ""
     max_autonomy, autonomy_config_error = _parse_autonomy(repo_policy.get("max_autonomy"), AUTONOMY_AUTO_PR)
     max_failures = _safe_positive_int(repo_policy.get("max_consecutive_failures"), DEFAULT_MAX_CONSECUTIVE_FAILURES)
     low_cost_model = str(repo_policy.get("low_cost_model") or DEFAULT_LOW_COST_MODEL)
@@ -170,6 +186,8 @@ def decide_automation_execution(
         reasons.append(f"repo max autonomy is {max_autonomy}")
     if autonomy_config_error:
         reasons.append(autonomy_config_error)
+    if policy_load_error:
+        reasons.append(policy_load_error)
     if max_autonomy == AUTONOMY_MANUAL:
         action = EXECUTION_HUMAN_REVIEW
 
@@ -199,16 +217,18 @@ def decide_automation_execution(
     if quota in {"low", "constrained"}:
         effective_model = effective_model or low_cost_model or recommend_model(0.0)
         if quota_low_behavior == "defer":
-            action = EXECUTION_DEFER
-            defer = True
+            if action != EXECUTION_HUMAN_REVIEW:
+                action = EXECUTION_DEFER
+                defer = True
             effective_mode = MODE_REVIEW_ONLY
             human_review_required = True
             reasons.append(f"quota status is {quota}; deferring automation")
         else:
             reasons.append(f"quota status is {quota}; recommending low-cost model")
     elif quota in {"exhausted", "blocked"}:
-        action = EXECUTION_DEFER
-        defer = True
+        if action != EXECUTION_HUMAN_REVIEW:
+            action = EXECUTION_DEFER
+            defer = True
         effective_mode = MODE_REVIEW_ONLY
         human_review_required = True
         reasons.append(f"quota status is {quota}; deferring automation")

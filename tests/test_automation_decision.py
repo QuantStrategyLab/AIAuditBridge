@@ -49,7 +49,21 @@ class TestAutomationDecision(unittest.TestCase):
         self.assertFalse(result["auto_fix_allowed"])
         self.assertTrue(result["human_review_required"])
 
-    def test_exhausted_quota_defers_execution(self) -> None:
+    def test_exhausted_quota_defers_execution_without_stronger_guard(self) -> None:
+        result = decide_automation_execution(
+            repo="QuantStrategyLab/AIAuditBridge",
+            requested_mode=MODE_REVIEW_AND_FIX,
+            control_action=CONTROL_CONTINUE,
+            service_health="healthy",
+            quota_status={"status": "exhausted"},
+            org_health_status="ok",
+        )
+
+        self.assertEqual(result["action"], EXECUTION_DEFER)
+        self.assertTrue(result["defer"])
+        self.assertEqual(result["effective_mode"], MODE_REVIEW_ONLY)
+
+    def test_human_review_dominates_exhausted_quota_defer(self) -> None:
         result = decide_automation_execution(
             repo="QuantStrategyLab/AIAuditBridge",
             requested_mode=MODE_REVIEW_AND_FIX,
@@ -59,8 +73,8 @@ class TestAutomationDecision(unittest.TestCase):
             org_health_status="ok",
         )
 
-        self.assertEqual(result["action"], EXECUTION_DEFER)
-        self.assertTrue(result["defer"])
+        self.assertEqual(result["action"], EXECUTION_HUMAN_REVIEW)
+        self.assertFalse(result["defer"])
         self.assertEqual(result["effective_mode"], MODE_REVIEW_ONLY)
 
     def test_low_quota_recommends_low_cost_model(self) -> None:
@@ -168,12 +182,12 @@ class TestAutomationDecision(unittest.TestCase):
         self.assertEqual(result["max_consecutive_failures"], 3)
         self.assertEqual(result["action"], EXECUTION_RUN)
 
-    def test_load_execution_policy_ignores_malformed_files(self) -> None:
+    def test_load_execution_policy_fails_closed_for_malformed_files(self) -> None:
         with TemporaryDirectory() as tmp:
             path = Path(tmp) / "policy.json"
             path.write_text("not-json", encoding="utf-8")
 
-            self.assertEqual(load_execution_policy(path), {})
+            self.assertEqual(load_execution_policy(path)["default"]["max_autonomy"], "manual")
 
             path.write_text(json.dumps({"default": {"max_autonomy": "review_only"}}), encoding="utf-8")
             self.assertEqual(load_execution_policy(path)["default"]["max_autonomy"], "review_only")
