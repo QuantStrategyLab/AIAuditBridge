@@ -372,6 +372,9 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
                 )
                 with urllib.request.urlopen(request, timeout=5) as response:
                     self.assertEqual(response.status, 200)
+                    control = json.loads(response.read().decode("utf-8"))["control"]
+                self.assertIn("execution", control)
+                self.assertEqual(control["execution"]["repo"], "QuantStrategyLab/TargetRepo")
 
                 missing_repo_request = urllib.request.Request(
                     f"{base_url}/v1/ai/automation/control",
@@ -576,6 +579,7 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
                     with urllib.request.urlopen(f"{base_url}/v1/ai/automation/control?repo=local/repo", timeout=5) as response:
                         control = json.loads(response.read().decode("utf-8"))["control"]
                     self.assertIn(control["action"], {"continue", "review_only", "pause_auto_fix", "escalate"})
+                    self.assertIn("execution", control)
                 finally:
                     server.shutdown()
                     server.server_close()

@@ -71,6 +71,26 @@ bash scripts/deploy_codex_audit_service.sh deploy
 ```
 
 The job directory should be owned by the service user and mode `0700`.
+The deploy script points `CODEX_AUDIT_SERVICE_EXECUTION_POLICY_PATH` to
+`${CODEX_AUDIT_SERVICE_JOB_DIR}/execution_policy.json`. If present, this
+service-owned file can cap repo autonomy without trusting the reviewed checkout:
+
+```json
+{
+  "default": {
+    "max_autonomy": "auto_pr",
+    "max_consecutive_failures": 3,
+    "low_cost_model": "gpt-5.4-mini"
+  },
+  "repositories": {
+    "QuantStrategyLab/CryptoLivePoolPipelines": {
+      "max_autonomy": "review_only",
+      "max_consecutive_failures": 2
+    }
+  }
+}
+```
+
 The service should rely on an authenticated Codex CLI session and must not
 inject OpenAI/Codex API keys into the Codex subprocess.
 With `CODEX_AUDIT_SERVICE_CODEX_ACCOUNT_USAGE=1`, `/v1/ai/quota` includes a

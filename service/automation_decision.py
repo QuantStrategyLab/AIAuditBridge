@@ -1,0 +1,218 @@
+"""Health-driven execution decisions for automation scheduling."""
+
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+from typing import Any
+
+from service.automation_run_ledger import CONTROL_ESCALATE, CONTROL_PAUSE_AUTO_FIX, CONTROL_REVIEW_ONLY
+from service.quota import recommend_model
+
+EXECUTION_RUN = "run"
+EXECUTION_REVIEW_ONLY = "review_only"
+EXECUTION_DEFER = "defer"
+EXECUTION_HUMAN_REVIEW = "human_review"
+
+MODE_REVIEW_AND_FIX = "review_and_fix"
+MODE_REVIEW_ONLY = "review_only"
+
+AUTONOMY_MANUAL = "manual"
+AUTONOMY_REVIEW_ONLY = "review_only"
+AUTONOMY_AUTO_PR = "auto_pr"
+AUTONOMY_AUTO_MERGE = "auto_merge"
+AUTONOMY_ORDER = (AUTONOMY_MANUAL, AUTONOMY_REVIEW_ONLY, AUTONOMY_AUTO_PR, AUTONOMY_AUTO_MERGE)
+AUTONOMY_RANK = {level: index for index, level in enumerate(AUTONOMY_ORDER)}
+
+DEFAULT_MAX_CONSECUTIVE_FAILURES = 3
+DEFAULT_LOW_COST_MODEL = "gpt-5.4-mini"
+EXECUTION_POLICY_PATH_ENV = "CODEX_AUDIT_SERVICE_EXECUTION_POLICY_PATH"
+QUOTA_STATUS_SEVERITY = {
+    "ok": 0,
+    "healthy": 0,
+    "unknown": 1,
+    "unavailable": 1,
+    "low": 2,
+    "constrained": 2,
+    "exhausted": 3,
+    "blocked": 3,
+}
+
+
+def _normalize_status(value: Any, default: str = "unknown") -> str:
+    if isinstance(value, dict):
+        value = value.get("status", default)
+    return str(value or default).strip().lower()
+
+
+def _normalize_quota_status(value: Any, default: str = "unknown") -> str:
+    statuses = [_normalize_status(value, "")]
+    if isinstance(value, dict) and isinstance(value.get("quota"), dict):
+        statuses.append(_normalize_status(value["quota"], ""))
+    normalized = [status for status in statuses if status]
+    if not normalized:
+        return default
+    return max(normalized, key=lambda status: QUOTA_STATUS_SEVERITY.get(status, 1))
+
+
+def _normalize_mode(value: str) -> str:
+    return MODE_REVIEW_AND_FIX if str(value or "").strip() == MODE_REVIEW_AND_FIX else MODE_REVIEW_ONLY
+
+
+def _normalize_autonomy(value: Any, default: str = AUTONOMY_AUTO_PR) -> str:
+    level = str(value or default).strip().lower()
+    return level if level in AUTONOMY_RANK else default
+
+
+def _repo_from_run(run: dict[str, Any]) -> str:
+    metadata = run.get("metadata") if isinstance(run.get("metadata"), dict) else {}
+    return str(metadata.get("source_repository") or metadata.get("repository") or "")
+
+
+def load_execution_policy(path: Path | None = None) -> dict[str, Any]:
+    """Load service-owned execution policy for repo autonomy thresholds."""
+    if path is None:
+        configured = os.environ.get(EXECUTION_POLICY_PATH_ENV, "").strip()
+        if not configured:
+            return {}
+        path = Path(configured).expanduser()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def repo_execution_policy(repo: str, policy: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Merge default and repo-specific execution policy without trusting repo checkouts."""
+    raw = policy if isinstance(policy, dict) else {}
+    defaults = raw.get("default") if isinstance(raw.get("default"), dict) else {}
+    repositories = raw.get("repositories") if isinstance(raw.get("repositories"), dict) else {}
+    override = repositories.get(repo) if isinstance(repositories.get(repo), dict) else {}
+    return {**defaults, **override}
+
+
+def consecutive_failure_count(
+    runs: list[dict[str, Any]],
+    *,
+    repo: str,
+    task_name: str = "",
+) -> int:
+    """Count latest consecutive failed runs for one repo/task from newest-first runs."""
+    count = 0
+    for run in runs:
+        if not isinstance(run, dict):
+            continue
+        if repo and _repo_from_run(run) != repo:
+            continue
+        if task_name and str(run.get("task_name") or "") != task_name:
+            continue
+        state = str(run.get("task_state") or "").strip().lower()
+        if state == "failed":
+            count += 1
+            continue
+        if state:
+            break
+    return count
+
+
+def decide_automation_execution(
+    *,
+    repo: str,
+    task_name: str = "",
+    requested_mode: str = MODE_REVIEW_AND_FIX,
+    requested_provider: str = "auto",
+    requested_model: str = "",
+    control_action: str = CONTROL_REVIEW_ONLY,
+    service_health: Any = "",
+    quota_status: Any = "",
+    org_health_status: Any = "",
+    recent_runs: list[dict[str, Any]] | None = None,
+    policy: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Produce a safe execution decision from health, quota, failures, and repo policy."""
+    repo_policy = repo_execution_policy(repo, policy)
+    max_autonomy = _normalize_autonomy(repo_policy.get("max_autonomy"), AUTONOMY_AUTO_PR)
+    max_failures = int(repo_policy.get("max_consecutive_failures") or DEFAULT_MAX_CONSECUTIVE_FAILURES)
+    low_cost_model = str(repo_policy.get("low_cost_model") or DEFAULT_LOW_COST_MODEL)
+    quota_low_behavior = str(repo_policy.get("quota_low_behavior") or "low_cost_model").strip().lower()
+
+    effective_mode = _normalize_mode(requested_mode)
+    effective_provider = str(requested_provider or "auto").strip().lower() or "auto"
+    effective_model = str(requested_model or "").strip()
+    action = EXECUTION_RUN
+    reasons: list[str] = []
+    human_review_required = False
+    defer = False
+
+    service = _normalize_status(service_health)
+    quota = _normalize_quota_status(quota_status)
+    org_health = _normalize_status(org_health_status)
+    failures = consecutive_failure_count(recent_runs or [], repo=repo, task_name=task_name)
+
+    if AUTONOMY_RANK[max_autonomy] <= AUTONOMY_RANK[AUTONOMY_REVIEW_ONLY]:
+        effective_mode = MODE_REVIEW_ONLY
+        human_review_required = True
+        reasons.append(f"repo max autonomy is {max_autonomy}")
+    if max_autonomy == AUTONOMY_MANUAL:
+        action = EXECUTION_HUMAN_REVIEW
+
+    if failures >= max_failures:
+        action = EXECUTION_HUMAN_REVIEW
+        effective_mode = MODE_REVIEW_ONLY
+        human_review_required = True
+        reasons.append(f"consecutive failures reached {failures}/{max_failures}")
+
+    if control_action in {CONTROL_REVIEW_ONLY, CONTROL_PAUSE_AUTO_FIX, CONTROL_ESCALATE}:
+        effective_mode = MODE_REVIEW_ONLY
+        human_review_required = True
+        reasons.append(f"runtime control action is {control_action}")
+    if control_action == CONTROL_ESCALATE:
+        action = EXECUTION_HUMAN_REVIEW
+
+    if service == "degraded" or org_health == "degraded":
+        effective_mode = MODE_REVIEW_ONLY
+        human_review_required = True
+        reasons.append("health degraded; forcing review_only")
+    if service == "unhealthy" or org_health == "unhealthy":
+        action = EXECUTION_HUMAN_REVIEW
+        effective_mode = MODE_REVIEW_ONLY
+        human_review_required = True
+        reasons.append("health unhealthy; forcing human review")
+
+    if quota in {"low", "constrained"}:
+        effective_model = effective_model or low_cost_model or recommend_model(0.0)
+        if quota_low_behavior == "defer":
+            action = EXECUTION_DEFER
+            defer = True
+            effective_mode = MODE_REVIEW_ONLY
+            human_review_required = True
+            reasons.append(f"quota status is {quota}; deferring automation")
+        else:
+            reasons.append(f"quota status is {quota}; recommending low-cost model")
+    elif quota in {"exhausted", "blocked"}:
+        action = EXECUTION_DEFER
+        defer = True
+        effective_mode = MODE_REVIEW_ONLY
+        human_review_required = True
+        reasons.append(f"quota status is {quota}; deferring automation")
+
+    return {
+        "action": action,
+        "repo": repo,
+        "task_name": task_name,
+        "requested_mode": _normalize_mode(requested_mode),
+        "effective_mode": effective_mode,
+        "requested_provider": requested_provider,
+        "effective_provider": effective_provider,
+        "requested_model": requested_model,
+        "effective_model": effective_model,
+        "max_autonomy": max_autonomy,
+        "consecutive_failures": failures,
+        "max_consecutive_failures": max_failures,
+        "human_review_required": human_review_required,
+        "auto_fix_allowed": action == EXECUTION_RUN and effective_mode == MODE_REVIEW_AND_FIX and not human_review_required,
+        "defer": defer,
+        "reasons": reasons or ["execution allowed"],
+    }

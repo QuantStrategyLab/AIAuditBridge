@@ -72,6 +72,7 @@ from service.automation_run_ledger import (
     get_automation_run_ledger,
     suggest_control_action,
 )
+from service.automation_decision import decide_automation_execution, load_execution_policy
 from service.strategy_automation_registry import (
     apply_strategy_registry_guard,
     summarize_strategy_registry_context,
@@ -507,7 +508,7 @@ def _public_job_payload(job: dict[str, Any]) -> dict[str, object]:
     return payload
 
 
-def _automation_control_snapshot(repo: str) -> dict[str, Any]:
+def _automation_control_snapshot(repo: str, *, task_name: str = "", requested_mode: str = "review_and_fix") -> dict[str, Any]:
     try:
         org_health = read_org_health()
     except Exception:
@@ -516,7 +517,23 @@ def _automation_control_snapshot(repo: str) -> dict[str, Any]:
         quota_status = get_quota_manager().runtime_status(repo or "unknown")
     except Exception:
         quota_status = {"status": "unavailable"}
-    return suggest_control_action(get_health_monitor().status, quota_status, org_health)
+    control = suggest_control_action(get_health_monitor().status, quota_status, org_health)
+    try:
+        recent_runs = get_automation_run_ledger().snapshot(limit=20)["runs"]
+    except Exception:
+        recent_runs = []
+    control["execution"] = decide_automation_execution(
+        repo=repo or "unknown",
+        task_name=task_name,
+        requested_mode=requested_mode,
+        control_action=str(control.get("action") or CONTROL_REVIEW_ONLY),
+        service_health=control.get("service_health"),
+        quota_status=quota_status,
+        org_health_status=control.get("org_health_status"),
+        recent_runs=recent_runs,
+        policy=load_execution_policy(),
+    )
+    return control
 
 
 def _highest_changed_path_risk(changed_paths: list[str], policy: dict[str, Any]) -> str:
@@ -540,7 +557,7 @@ def _automation_triage_snapshot(
     changed_paths: list[str] | None = None,
     run_id: str = "",
 ) -> dict[str, Any]:
-    control = _automation_control_snapshot(repo)
+    control = _automation_control_snapshot(repo, task_name=task)
     policy = load_autonomy_policy()
     normalized_paths = [
         normalized
@@ -648,7 +665,7 @@ def _automation_triage_snapshot(
 def _record_job_automation_run(job: dict[str, Any]) -> None:
     try:
         repo = str(job.get("source_repository") or job.get("repository") or "unknown")
-        control = _automation_control_snapshot(repo)
+        control = _automation_control_snapshot(repo, task_name=str(job.get("task") or ""), requested_mode=str(job.get("mode") or "review_and_fix"))
         get_automation_run_ledger().record(
             str(job.get("job_id") or ""),
             job_task_state(job),
@@ -1504,7 +1521,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 _validate_source_repo_org(claims, source_repo)
                 _assert_source_repository_owner_or_operator(claims, source_repo)
         repo = source_repo or str(claims.get("repository") or "unknown")
-        control = _automation_control_snapshot(repo)
+        control = _automation_control_snapshot(repo, task_name=str(payload.get("task") or payload.get("task_name") or ""))
         metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
         ledger = get_automation_run_ledger()
         run_id = str(payload.get("run_id") or payload.get("job_id") or "")

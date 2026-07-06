@@ -2342,6 +2342,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertIn("location = /v1/codex-audit", deploy_script)
         self.assertIn("location ^~ /v1/codex-audit/", deploy_script)
         self.assertIn("CODEX_AUDIT_SERVICE_JOB_DIR", deploy_script)
+        self.assertIn("CODEX_AUDIT_SERVICE_EXECUTION_POLICY_PATH", deploy_script)
         self.assertIn("codex_pr_review.yml@refs/pull/*/merge", deploy_script)
         self.assertIn("refs/pull/*/merge", deploy_script)
         self.assertIn("QuantStrategyLab/AIAuditBridge,QuantStrategyLab/CryptoLivePoolPipelines", deploy_script)

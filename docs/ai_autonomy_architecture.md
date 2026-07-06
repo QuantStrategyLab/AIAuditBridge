@@ -337,6 +337,15 @@ AIAuditBridge 是 QuantStrategyLab 的 AI 审计控制面，负责：
 - 健康驱动的执行降级策略；
 - repo 级别自治阈值。
 
+首批落地边界：
+
+- `/v1/ai/automation/control` 输出 `execution` 决策快照；
+- health degraded / runtime pause 时，执行模式降级到 `review_only`；
+- quota low 时给出低成本模型建议，quota exhausted / blocked 时建议 defer；
+- 连续失败达到 repo 阈值时强制 human review；
+- repo 级 `max_autonomy` / `max_consecutive_failures` 从服务端受控 policy 文件读取，不信任被审仓库 checkout；
+- 该阶段只影响调度建议和控制面输出，不自动放宽 merge / deploy 权限。
+
 ### Phase 4：扩大自动修复，但只扩大低风险面
 
 目标：提升无人值守覆盖率，但不放松安全门。
