@@ -249,12 +249,13 @@ class TestAutomationControlSnapshot(unittest.TestCase):
             patch("service.ai_gateway_service.get_health_monitor", return_value=health),
             patch("service.ai_gateway_service.get_quota_manager", return_value=quota),
             patch("service.ai_gateway_service.get_automation_run_ledger", return_value=ledger),
-            patch("service.ai_gateway_service.load_execution_policy", return_value={}),
+            patch("service.ai_gateway_service.load_execution_policy", return_value={"default": {"max_autonomy": "auto_merge"}}),
         ):
-            control = _automation_control_snapshot("QuantStrategyLab/TargetRepo")
+            control = _automation_control_snapshot("QuantStrategyLab/TargetRepo", requested_mode="auto_merge")
 
         self.assertEqual(control["action"], "escalate")
         self.assertEqual(control["execution"]["action"], "human_review")
+        self.assertFalse(control["execution"]["auto_merge_allowed"])
 
 
 if __name__ == "__main__":

@@ -290,9 +290,11 @@ def consecutive_failure_count(
     runs: list[dict[str, Any]],
     *,
     repo: str,
+    require_terminal_boundary: bool = False,
 ) -> int:
     """Count latest consecutive trusted failed runs for one repo from newest-first runs."""
     count = 0
+    terminal_boundary_seen = False
     normalized_repo = _normalize_repo_id(repo)
     for run in runs:
         if not isinstance(run, dict):
@@ -308,7 +310,10 @@ def consecutive_failure_count(
             continue
         if state in {"queued", "running", "pending", "in_progress"}:
             continue
+        terminal_boundary_seen = True
         break
+    if require_terminal_boundary and count > 0 and not terminal_boundary_seen:
+        return 0
     return count
 
 
@@ -324,6 +329,7 @@ def decide_automation_execution(
     quota_status: Any = "",
     org_health_status: Any = "",
     recent_runs: list[dict[str, Any]] | None = None,
+    failure_history_complete: bool = True,
     policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Produce a safe execution decision from health, quota, failures, and repo policy."""
@@ -353,7 +359,11 @@ def decide_automation_execution(
     service = _normalize_status(service_health)
     quota = _normalize_quota_status(quota_status)
     org_health = _normalize_status(org_health_status)
-    failures = consecutive_failure_count(recent_runs or [], repo=repo)
+    failures = consecutive_failure_count(
+        recent_runs or [],
+        repo=repo,
+        require_terminal_boundary=not failure_history_complete,
+    )
 
     if AUTONOMY_RANK[max_autonomy] <= AUTONOMY_RANK[AUTONOMY_REVIEW_ONLY]:
         effective_mode = MODE_REVIEW_ONLY
@@ -375,6 +385,8 @@ def decide_automation_execution(
         effective_mode = MODE_REVIEW_ONLY
         human_review_required = True
         reasons.append(f"consecutive failures reached {failures}/{max_failures}")
+    elif not failure_history_complete:
+        reasons.append("failure history may be truncated; not enforcing failure threshold")
 
     if control_action in {CONTROL_REVIEW_ONLY, CONTROL_PAUSE_AUTO_FIX, CONTROL_ESCALATE}:
         effective_mode = MODE_REVIEW_ONLY
@@ -430,6 +442,7 @@ def decide_automation_execution(
         "max_autonomy": max_autonomy,
         "consecutive_failures": failures,
         "max_consecutive_failures": max_failures,
+        "failure_history_complete": failure_history_complete,
         "human_review_required": human_review_required,
         "auto_fix_allowed": action == EXECUTION_RUN and effective_mode == MODE_REVIEW_AND_FIX and not human_review_required,
         "auto_merge_allowed": action == EXECUTION_RUN and effective_autonomy == AUTONOMY_AUTO_MERGE and not human_review_required,

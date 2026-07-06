@@ -526,10 +526,16 @@ def _automation_control_snapshot(
         quota_status = {"status": "unavailable"}
     control = suggest_control_action(get_health_monitor().status, quota_status, org_health)
     try:
-        recent_runs = get_automation_run_ledger().snapshot(limit=None)["runs"]
+        ledger_snapshot = get_automation_run_ledger().snapshot(limit=None)
+        recent_runs = ledger_snapshot["runs"]
+        ledger_summary = ledger_snapshot.get("summary") if isinstance(ledger_snapshot.get("summary"), dict) else {}
+        retention = ledger_summary.get("retention") if isinstance(ledger_summary.get("retention"), dict) else {}
+        max_retained_runs = int(retention.get("max_runs") or 0)
+        failure_history_complete = max_retained_runs <= 0 or int(ledger_summary.get("total_runs") or 0) < max_retained_runs
         ledger_unavailable = False
     except Exception:
         recent_runs = []
+        failure_history_complete = False
         ledger_unavailable = True
     if pending_run is not None:
         pending_run_id = str(pending_run.get("run_id") or "")
@@ -545,6 +551,7 @@ def _automation_control_snapshot(
         quota_status=quota_status,
         org_health_status=control.get("org_health_status"),
         recent_runs=recent_runs,
+        failure_history_complete=failure_history_complete,
         policy=load_execution_policy(),
     )
     if ledger_unavailable:
@@ -552,6 +559,7 @@ def _automation_control_snapshot(
         execution["effective_mode"] = MODE_REVIEW_ONLY
         execution["human_review_required"] = True
         execution["auto_fix_allowed"] = False
+        execution["auto_merge_allowed"] = False
         execution["defer"] = False
         reasons = execution.get("reasons") if isinstance(execution.get("reasons"), list) else []
         reasons.append("automation ledger unavailable; forcing human review")
