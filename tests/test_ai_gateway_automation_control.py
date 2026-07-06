@@ -42,7 +42,7 @@ class TestAutomationControlSnapshot(unittest.TestCase):
             ):
                 control = _automation_control_snapshot("QuantStrategyLab/TargetRepo")
 
-        self.assertEqual(control["action"], "continue")
+        self.assertEqual(control["action"], "review_only")
         self.assertEqual(control["execution"]["effective_mode"], "review_only")
         self.assertFalse(control["execution"]["auto_fix_allowed"])
 
@@ -91,6 +91,7 @@ class TestAutomationControlSnapshot(unittest.TestCase):
             control = _automation_control_snapshot("QuantStrategyLab/TargetRepo", task_name="monthly")
 
         self.assertIsNone(ledger.requested_limit)
+        self.assertEqual(control["action"], "escalate")
         self.assertEqual(control["execution"]["action"], "human_review")
         self.assertEqual(control["execution"]["consecutive_failures"], 2)
 

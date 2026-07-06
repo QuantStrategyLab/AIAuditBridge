@@ -9,6 +9,7 @@ from typing import Any
 
 from service.automation_run_ledger import CONTROL_ESCALATE, CONTROL_PAUSE_AUTO_FIX, CONTROL_REVIEW_ONLY
 from service.quota import recommend_model
+from service.task_state import TERMINAL_STATES
 
 EXECUTION_RUN = "run"
 EXECUTION_REVIEW_ONLY = "review_only"
@@ -60,9 +61,13 @@ def _normalize_mode(value: str) -> str:
     return MODE_REVIEW_AND_FIX if str(value or "").strip() == MODE_REVIEW_AND_FIX else MODE_REVIEW_ONLY
 
 
-def _normalize_autonomy(value: Any, default: str = AUTONOMY_AUTO_PR) -> str:
-    level = str(value or default).strip().lower()
-    return level if level in AUTONOMY_RANK else default
+def _parse_autonomy(value: Any, default: str = AUTONOMY_AUTO_PR) -> tuple[str, str]:
+    level = str(value or "").strip().lower()
+    if not level:
+        return default, ""
+    if level in AUTONOMY_RANK:
+        return level, ""
+    return AUTONOMY_MANUAL, f"invalid max_autonomy {level!r}; forcing manual"
 
 
 def _safe_positive_int(value: Any, default: int) -> int:
@@ -120,7 +125,7 @@ def consecutive_failure_count(
         if state == "failed":
             count += 1
             continue
-        if state:
+        if state in TERMINAL_STATES:
             break
     return count
 
@@ -141,7 +146,7 @@ def decide_automation_execution(
 ) -> dict[str, Any]:
     """Produce a safe execution decision from health, quota, failures, and repo policy."""
     repo_policy = repo_execution_policy(repo, policy)
-    max_autonomy = _normalize_autonomy(repo_policy.get("max_autonomy"), AUTONOMY_AUTO_PR)
+    max_autonomy, autonomy_config_error = _parse_autonomy(repo_policy.get("max_autonomy"), AUTONOMY_AUTO_PR)
     max_failures = _safe_positive_int(repo_policy.get("max_consecutive_failures"), DEFAULT_MAX_CONSECUTIVE_FAILURES)
     low_cost_model = str(repo_policy.get("low_cost_model") or DEFAULT_LOW_COST_MODEL)
     quota_low_behavior = str(repo_policy.get("quota_low_behavior") or "low_cost_model").strip().lower()
@@ -163,6 +168,8 @@ def decide_automation_execution(
         effective_mode = MODE_REVIEW_ONLY
         human_review_required = True
         reasons.append(f"repo max autonomy is {max_autonomy}")
+    if autonomy_config_error:
+        reasons.append(autonomy_config_error)
     if max_autonomy == AUTONOMY_MANUAL:
         action = EXECUTION_HUMAN_REVIEW
 

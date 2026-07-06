@@ -72,7 +72,7 @@ from service.automation_run_ledger import (
     get_automation_run_ledger,
     suggest_control_action,
 )
-from service.automation_decision import decide_automation_execution, load_execution_policy
+from service.automation_decision import EXECUTION_DEFER, EXECUTION_HUMAN_REVIEW, decide_automation_execution, load_execution_policy
 from service.strategy_automation_registry import (
     apply_strategy_registry_guard,
     summarize_strategy_registry_context,
@@ -522,7 +522,7 @@ def _automation_control_snapshot(repo: str, *, task_name: str = "", requested_mo
         recent_runs = get_automation_run_ledger().snapshot(limit=None)["runs"]
     except Exception:
         recent_runs = []
-    control["execution"] = decide_automation_execution(
+    execution = decide_automation_execution(
         repo=repo or "unknown",
         task_name=task_name,
         requested_mode=requested_mode,
@@ -533,6 +533,22 @@ def _automation_control_snapshot(repo: str, *, task_name: str = "", requested_mo
         recent_runs=recent_runs,
         policy=load_execution_policy(),
     )
+    original_action = str(control.get("action") or CONTROL_REVIEW_ONLY)
+    strict_action = original_action
+    if execution.get("action") == EXECUTION_HUMAN_REVIEW:
+        strict_action = CONTROL_ESCALATE
+    elif execution.get("action") == EXECUTION_DEFER:
+        strict_action = CONTROL_PAUSE_AUTO_FIX
+    elif execution.get("effective_mode") == MODE_REVIEW_ONLY and strict_action == CONTROL_CONTINUE:
+        strict_action = CONTROL_REVIEW_ONLY
+    if strict_action != original_action:
+        control["action"] = strict_action
+        control["requires_human_review"] = True
+        control["auto_fix_allowed"] = False
+        reasons = control.get("reasons") if isinstance(control.get("reasons"), list) else []
+        reasons.append("capped by execution decision")
+        control["reasons"] = reasons
+    control["execution"] = execution
     return control
 
 

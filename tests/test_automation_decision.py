@@ -93,6 +93,21 @@ class TestAutomationDecision(unittest.TestCase):
         self.assertTrue(result["human_review_required"])
         self.assertFalse(result["auto_fix_allowed"])
 
+    def test_invalid_repo_autonomy_fails_closed(self) -> None:
+        result = decide_automation_execution(
+            repo="QuantStrategyLab/CryptoLivePoolPipelines",
+            requested_mode=MODE_REVIEW_AND_FIX,
+            control_action=CONTROL_CONTINUE,
+            service_health="healthy",
+            quota_status="ok",
+            org_health_status="ok",
+            policy={"repositories": {"QuantStrategyLab/CryptoLivePoolPipelines": {"max_autonomy": "auto_mrege"}}},
+        )
+
+        self.assertEqual(result["max_autonomy"], "manual")
+        self.assertEqual(result["action"], EXECUTION_HUMAN_REVIEW)
+        self.assertTrue(any("invalid max_autonomy" in reason for reason in result["reasons"]))
+
     def test_consecutive_failures_force_human_review(self) -> None:
         runs = [
             {
@@ -122,6 +137,22 @@ class TestAutomationDecision(unittest.TestCase):
         self.assertEqual(consecutive_failure_count(runs, repo="QuantStrategyLab/AIAuditBridge", task_name="monthly"), 2)
         self.assertEqual(result["action"], EXECUTION_HUMAN_REVIEW)
         self.assertEqual(result["effective_mode"], MODE_REVIEW_ONLY)
+
+    def test_running_state_does_not_clear_failure_streak(self) -> None:
+        runs = [
+            {
+                "task_name": "monthly",
+                "task_state": "running",
+                "metadata": {"source_repository": "QuantStrategyLab/AIAuditBridge"},
+            },
+            {
+                "task_name": "monthly",
+                "task_state": "failed",
+                "metadata": {"source_repository": "QuantStrategyLab/AIAuditBridge"},
+            },
+        ]
+
+        self.assertEqual(consecutive_failure_count(runs, repo="QuantStrategyLab/AIAuditBridge", task_name="monthly"), 1)
 
     def test_invalid_failure_threshold_falls_back_safely(self) -> None:
         result = decide_automation_execution(
