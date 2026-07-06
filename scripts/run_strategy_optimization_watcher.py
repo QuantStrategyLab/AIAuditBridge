@@ -131,6 +131,18 @@ def task_public_summary(task: Any) -> dict[str, Any]:
     }
 
 
+def comment_github_issue(repo: str, issue_url: str, body: str) -> str:
+    if not REPO_RE.fullmatch(repo):
+        raise ValueError("repository must be in owner/name form")
+    result = subprocess.run(
+        ["gh", "issue", "comment", issue_url, "--repo", repo, "--body", body],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
 def create_github_issue(repo: str, title: str, body: str) -> str:
     if not REPO_RE.fullmatch(repo):
         raise ValueError("repository must be in owner/name form")
@@ -176,6 +188,7 @@ def run_watcher(
     source_repo: str = "",
     dry_run: bool = True,
     create_issue: Callable[[str, str, str], str] = create_github_issue,
+    comment_issue: Callable[[str, str, str], str] = comment_github_issue,
     list_issues: Callable[[str], dict[str, str]] = list_open_issue_urls,
 ) -> dict[str, Any]:
     watch_payload = _payload_for_source_repo(payload, source_repo)
@@ -201,7 +214,9 @@ def run_watcher(
                 existing_url = open_issue_cache[repo].get(issue["title"], "")
                 if existing_url:
                     issue_result["existing_url"] = existing_url
-                    issue_result["skipped_reason"] = "open issue already exists"
+                    issue_result["comment_url"] = comment_issue(repo, existing_url, issue["body"])
+                    issue_result["commented"] = True
+                    issue_result["skipped_reason"] = "open issue already exists; appended watcher update"
                 else:
                     issue_result["url"] = create_issue(repo, issue["title"], issue["body"])
                     open_issue_cache[repo][issue["title"]] = str(issue_result["url"])
@@ -258,7 +273,7 @@ def main() -> int:
         print(json.dumps({"status": "error", "error": str(exc)}, sort_keys=True))
         return 2
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
-    return 0
+    return 1 if int(result.get("errors", 0)) > 0 or result.get("status") != "ok" else 0
 
 
 if __name__ == "__main__":

@@ -178,8 +178,7 @@ def issue_for_task(task: AutomationTask) -> dict[str, str]:
     evidence = payload["evidence"]
     action = payload["proposed_action"]
     event_key = str(payload.get("metadata", {}).get("event_key") or "")
-    marker = f" [{event_key}]" if event_key else ""
-    title = f"AI strategy optimization proposal: {trigger.get('subject') or action.get('target') or 'strategy profile'}{marker}"
+    title = f"AI strategy optimization proposal: {trigger.get('subject') or action.get('target') or 'strategy profile'}"
     signals = "\n".join(f"- {item}" for item in trigger.get("evidence", [])) or "- Strategy metrics degraded."
     checks = "\n".join(f"- [ ] {item}" for item in payload["gate_decision"].get("required_checks", []))
     risks = "\n".join(f"- {item}" for item in evidence.get("risks", []))

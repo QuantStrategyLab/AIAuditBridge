@@ -22,6 +22,7 @@ class RunStrategyOptimizationWatcherTest(unittest.TestCase):
             },
             dry_run=True,
             create_issue=lambda repo, title, body: calls.append((repo, title, body)) or "https://example.test/1",
+            comment_issue=lambda repo, url, body: "https://example.test/comment",
             list_issues=lambda repo: {},
         )
 
@@ -44,6 +45,7 @@ class RunStrategyOptimizationWatcherTest(unittest.TestCase):
             source_repo="QuantStrategyLab/IssueRepo",
             dry_run=False,
             create_issue=lambda repo, title, body: calls.append((repo, title, body)) or "https://example.test/issue/1",
+            comment_issue=lambda repo, url, body: "https://example.test/comment",
             list_issues=lambda repo: {},
         )
 
@@ -65,11 +67,14 @@ class RunStrategyOptimizationWatcherTest(unittest.TestCase):
             payload,
             dry_run=False,
             create_issue=lambda repo, title, body: calls.append((repo, title, body)) or "https://example.test/new",
+            comment_issue=lambda repo, url, body: "https://example.test/comment",
             list_issues=lambda repo: {title: "https://example.test/existing"},
         )
 
         self.assertFalse(result["issues"][0]["created"])
         self.assertEqual(result["issues"][0]["existing_url"], "https://example.test/existing")
+        self.assertEqual(result["issues"][0]["comment_url"], "https://example.test/comment")
+        self.assertTrue(result["issues"][0]["commented"])
         self.assertEqual(calls, [])
 
     def test_resolve_input_path_rejects_metrics_path_traversal(self) -> None:
@@ -127,7 +132,7 @@ class RunStrategyOptimizationWatcherTest(unittest.TestCase):
         )
 
         self.assertIn("QuantStrategyLab/TestStrategies:live", result["issues"][0]["title"])
-        self.assertRegex(result["issues"][0]["title"], r"\[[a-f0-9]{12}\]$")
+        self.assertNotRegex(result["issues"][0]["title"], r"\[[a-f0-9]{12}\]$")
         self.assertEqual(result["issues"][0]["task"]["proposed_action"]["target"], "QuantStrategyLab/TestStrategies")
 
     def test_run_watcher_records_issue_errors_per_finding(self) -> None:
@@ -142,7 +147,8 @@ class RunStrategyOptimizationWatcherTest(unittest.TestCase):
         result = run_watcher(
             payload,
             dry_run=False,
-            create_issue=lambda repo, title, body: (_ for _ in ()).throw(RuntimeError("boom")) if ":a " in title else "https://example.test/new",
+            create_issue=lambda repo, title, body: (_ for _ in ()).throw(RuntimeError("boom")) if ":a" in title else "https://example.test/new",
+            comment_issue=lambda repo, url, body: "https://example.test/comment",
             list_issues=lambda repo: {},
         )
 
@@ -164,6 +170,7 @@ class RunStrategyOptimizationWatcherTest(unittest.TestCase):
             payload,
             dry_run=False,
             create_issue=lambda repo, title, body: create_calls.append((repo, title, body)) or "https://example.test/new",
+            comment_issue=lambda repo, url, body: "https://example.test/comment",
             list_issues=lambda repo: {},
         )
 
