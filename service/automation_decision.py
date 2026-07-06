@@ -28,9 +28,14 @@ AUTONOMY_RANK = {level: index for index, level in enumerate(AUTONOMY_ORDER)}
 
 DEFAULT_MAX_CONSECUTIVE_FAILURES = 3
 DEFAULT_LOW_COST_MODEL = "gpt-5.4-mini"
+DEFAULT_LOW_COST_PROVIDER = "openai"
 EXECUTION_POLICY_PATH_ENV = "CODEX_AUDIT_SERVICE_EXECUTION_POLICY_PATH"
 POLICY_LOAD_ERROR_KEY = "_load_error"
 TRUSTED_FAILURE_ORIGINS = frozenset({"service_job"})
+POLICY_ALLOWED_KEYS = frozenset({"max_autonomy", "max_consecutive_failures", "low_cost_model", "low_cost_provider", "quota_low_behavior"})
+POLICY_REQUIRED_DEFAULT_KEYS = frozenset({"max_autonomy", "max_consecutive_failures", "low_cost_model", "low_cost_provider"})
+POLICY_LOW_QUOTA_BEHAVIORS = frozenset({"low_cost_model", "defer"})
+POLICY_PROVIDERS = frozenset({"auto", "openai", "anthropic", "api", "codex"})
 QUOTA_STATUS_SEVERITY = {
     "ok": 0,
     "healthy": 0,
@@ -101,16 +106,47 @@ def _fail_closed_policy(reason: str) -> dict[str, Any]:
 
 def _validate_execution_policy(payload: dict[str, Any]) -> str:
     default_policy = payload.get("default")
-    if default_policy is not None and not isinstance(default_policy, dict):
+    if not isinstance(default_policy, dict):
         return "execution policy default section is invalid"
+    default_error = _validate_policy_section(default_policy, section_name="default", require_defaults=True)
+    if default_error:
+        return default_error
     repositories = payload.get("repositories")
-    if repositories is None:
-        return ""
     if not isinstance(repositories, dict):
         return "execution policy repositories section is invalid"
     for repo, repo_policy in repositories.items():
         if not isinstance(repo_policy, dict):
             return f"execution policy override for {repo!r} is invalid"
+        if not repo_policy:
+            return f"execution policy override for {repo!r} is empty"
+        repo_error = _validate_policy_section(repo_policy, section_name=f"override for {repo!r}", require_defaults=False)
+        if repo_error:
+            return repo_error
+    return ""
+
+
+def _validate_policy_section(section: dict[str, Any], *, section_name: str, require_defaults: bool) -> str:
+    unknown_keys = set(section) - POLICY_ALLOWED_KEYS
+    if unknown_keys:
+        return f"execution policy {section_name} has unknown keys"
+    if require_defaults:
+        missing_keys = POLICY_REQUIRED_DEFAULT_KEYS - set(section)
+        if missing_keys:
+            return f"execution policy {section_name} is missing required keys"
+    if "max_autonomy" in section and str(section["max_autonomy"] or "").strip().lower() not in AUTONOMY_RANK:
+        return f"execution policy {section_name} has invalid max_autonomy"
+    if "max_consecutive_failures" in section and _safe_positive_int(section["max_consecutive_failures"], 0) <= 0:
+        return f"execution policy {section_name} has invalid max_consecutive_failures"
+    if "low_cost_model" in section and not str(section["low_cost_model"] or "").strip():
+        return f"execution policy {section_name} has invalid low_cost_model"
+    if "low_cost_provider" in section:
+        provider = str(section["low_cost_provider"] or "").strip().lower()
+        if provider not in POLICY_PROVIDERS:
+            return f"execution policy {section_name} has invalid low_cost_provider"
+    if "quota_low_behavior" in section:
+        behavior = str(section["quota_low_behavior"] or "").strip().lower()
+        if behavior not in POLICY_LOW_QUOTA_BEHAVIORS:
+            return f"execution policy {section_name} has invalid quota_low_behavior"
     return ""
 
 
@@ -195,6 +231,7 @@ def decide_automation_execution(
     max_autonomy, autonomy_config_error = _parse_autonomy(repo_policy.get("max_autonomy"), AUTONOMY_AUTO_PR)
     max_failures = _safe_positive_int(repo_policy.get("max_consecutive_failures"), DEFAULT_MAX_CONSECUTIVE_FAILURES)
     low_cost_model = str(repo_policy.get("low_cost_model") or DEFAULT_LOW_COST_MODEL)
+    low_cost_provider = str(repo_policy.get("low_cost_provider") or DEFAULT_LOW_COST_PROVIDER).strip().lower()
     quota_low_behavior = str(repo_policy.get("quota_low_behavior") or "low_cost_model").strip().lower()
 
     effective_mode = _normalize_mode(requested_mode)
@@ -246,6 +283,7 @@ def decide_automation_execution(
 
     if quota in {"low", "constrained"}:
         effective_model = low_cost_model or recommend_model(0.0)
+        effective_provider = low_cost_provider or "auto"
         if quota_low_behavior == "defer":
             if action != EXECUTION_HUMAN_REVIEW:
                 action = EXECUTION_DEFER

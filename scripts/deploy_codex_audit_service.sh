@@ -227,7 +227,8 @@ write_default_execution_policy_if_missing() {
   "default": {
     "max_autonomy": "auto_pr",
     "max_consecutive_failures": 3,
-    "low_cost_model": "gpt-5.4-mini"
+    "low_cost_model": "gpt-5.4-mini",
+    "low_cost_provider": "openai"
   },
   "repositories": {}
 }

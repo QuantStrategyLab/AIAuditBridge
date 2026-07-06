@@ -91,6 +91,7 @@ class TestAutomationDecision(unittest.TestCase):
         )
 
         self.assertEqual(result["action"], EXECUTION_RUN)
+        self.assertEqual(result["effective_provider"], "openai")
         self.assertEqual(result["effective_model"], "gpt-5.4-mini")
         self.assertTrue(any("low-cost model" in reason for reason in result["reasons"]))
 
@@ -106,6 +107,7 @@ class TestAutomationDecision(unittest.TestCase):
             policy={"default": {"low_cost_model": "gpt-5.4-mini"}},
         )
 
+        self.assertEqual(result["effective_provider"], "openai")
         self.assertEqual(result["effective_model"], "gpt-5.4-mini")
 
     def test_repo_policy_can_force_review_only(self) -> None:
@@ -233,7 +235,26 @@ class TestAutomationDecision(unittest.TestCase):
             path.write_text(json.dumps({"repositories": {"QuantStrategyLab/AIAuditBridge": "bad"}}), encoding="utf-8")
             self.assertEqual(load_execution_policy(path)["default"]["max_autonomy"], "manual")
 
-            path.write_text(json.dumps({"default": {"max_autonomy": "review_only"}}), encoding="utf-8")
+            path.write_text(json.dumps({"default": {"max_consecutive_failures": "oops"}, "repositories": {}}), encoding="utf-8")
+            self.assertEqual(load_execution_policy(path)["default"]["max_autonomy"], "manual")
+
+            path.write_text(json.dumps({"default": {"max_autnomy": "review_only"}, "repositories": {}}), encoding="utf-8")
+            self.assertEqual(load_execution_policy(path)["default"]["max_autonomy"], "manual")
+
+            path.write_text(
+                json.dumps(
+                    {
+                        "default": {
+                            "max_autonomy": "review_only",
+                            "max_consecutive_failures": 3,
+                            "low_cost_model": "gpt-5.4-mini",
+                            "low_cost_provider": "openai",
+                        },
+                        "repositories": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
             self.assertEqual(load_execution_policy(path)["default"]["max_autonomy"], "review_only")
 
     def test_load_execution_policy_fails_closed_when_path_unset(self) -> None:
