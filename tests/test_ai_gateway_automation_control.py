@@ -210,7 +210,7 @@ class TestAutomationControlSnapshot(unittest.TestCase):
         self.assertEqual(control["action"], "continue")
         self.assertEqual(control["execution"]["consecutive_failures"], 1)
 
-    def test_control_snapshot_maps_defer_to_legacy_escalate(self) -> None:
+    def test_control_snapshot_maps_defer_to_legacy_defer(self) -> None:
         health = type("Health", (), {"status": "healthy"})()
         quota = type("Quota", (), {"runtime_status": lambda self, repo: {"status": "low"}})()
         ledger = type("Ledger", (), {"snapshot": lambda self, limit=None: {"runs": []}})()
@@ -227,7 +227,8 @@ class TestAutomationControlSnapshot(unittest.TestCase):
         ):
             control = _automation_control_snapshot("QuantStrategyLab/TargetRepo", requested_mode="review_and_fix")
 
-        self.assertEqual(control["action"], "escalate")
+        self.assertEqual(control["action"], "defer")
+        self.assertFalse(control["requires_human_review"])
         self.assertEqual(control["execution"]["action"], "defer")
 
     def test_control_snapshot_fails_closed_when_ledger_is_unavailable(self) -> None:

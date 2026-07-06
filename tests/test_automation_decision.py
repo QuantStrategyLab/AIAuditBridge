@@ -134,7 +134,7 @@ class TestAutomationDecision(unittest.TestCase):
             },
         ]
 
-        self.assertEqual(consecutive_failure_count(runs, repo="quantstrategylab/aiauditbridge", task_name="monthly"), 1)
+        self.assertEqual(consecutive_failure_count(runs, repo="quantstrategylab/aiauditbridge"), 1)
 
     def test_external_workflow_failures_do_not_force_repo_failure_streak(self) -> None:
         runs = [
@@ -188,7 +188,7 @@ class TestAutomationDecision(unittest.TestCase):
             policy={"default": {"max_consecutive_failures": 2}},
         )
 
-        self.assertEqual(consecutive_failure_count(runs, repo="QuantStrategyLab/AIAuditBridge", task_name="monthly"), 2)
+        self.assertEqual(consecutive_failure_count(runs, repo="QuantStrategyLab/AIAuditBridge"), 2)
         self.assertEqual(result["action"], EXECUTION_HUMAN_REVIEW)
         self.assertEqual(result["effective_mode"], MODE_REVIEW_ONLY)
 
@@ -206,7 +206,7 @@ class TestAutomationDecision(unittest.TestCase):
             },
         ]
 
-        self.assertEqual(consecutive_failure_count(runs, repo="QuantStrategyLab/AIAuditBridge", task_name="monthly"), 1)
+        self.assertEqual(consecutive_failure_count(runs, repo="QuantStrategyLab/AIAuditBridge"), 1)
 
     def test_invalid_failure_threshold_falls_back_safely(self) -> None:
         result = decide_automation_execution(

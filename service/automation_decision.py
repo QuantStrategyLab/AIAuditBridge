@@ -189,7 +189,6 @@ def consecutive_failure_count(
     runs: list[dict[str, Any]],
     *,
     repo: str,
-    task_name: str = "",
 ) -> int:
     """Count latest consecutive trusted failed runs for one repo from newest-first runs."""
     count = 0
@@ -245,7 +244,7 @@ def decide_automation_execution(
     service = _normalize_status(service_health)
     quota = _normalize_quota_status(quota_status)
     org_health = _normalize_status(org_health_status)
-    failures = consecutive_failure_count(recent_runs or [], repo=repo, task_name=task_name)
+    failures = consecutive_failure_count(recent_runs or [], repo=repo)
 
     if AUTONOMY_RANK[max_autonomy] <= AUTONOMY_RANK[AUTONOMY_REVIEW_ONLY]:
         effective_mode = MODE_REVIEW_ONLY

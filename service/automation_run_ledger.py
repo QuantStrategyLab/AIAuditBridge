@@ -22,6 +22,7 @@ CONTROL_CONTINUE = "continue"
 CONTROL_REVIEW_ONLY = "review_only"
 CONTROL_PAUSE_AUTO_FIX = "pause_auto_fix"
 CONTROL_ESCALATE = "escalate"
+CONTROL_DEFER = "defer"
 
 CONTROL_ACTIONS = frozenset(
     {
@@ -29,6 +30,7 @@ CONTROL_ACTIONS = frozenset(
         CONTROL_REVIEW_ONLY,
         CONTROL_PAUSE_AUTO_FIX,
         CONTROL_ESCALATE,
+        CONTROL_DEFER,
     }
 )
 

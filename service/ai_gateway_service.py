@@ -67,6 +67,7 @@ from service.automation_authority import (
 )
 from service.automation_run_ledger import (
     CONTROL_CONTINUE,
+    CONTROL_DEFER,
     CONTROL_ESCALATE,
     CONTROL_PAUSE_AUTO_FIX,
     CONTROL_REVIEW_ONLY,
@@ -560,7 +561,7 @@ def _automation_control_snapshot(
     if execution.get("action") == EXECUTION_HUMAN_REVIEW:
         strict_action = CONTROL_ESCALATE
     elif execution.get("action") == EXECUTION_DEFER:
-        strict_action = CONTROL_ESCALATE
+        strict_action = CONTROL_DEFER
     elif (
         execution.get("requested_mode") == MODE_REVIEW_AND_FIX
         and execution.get("effective_mode") == MODE_REVIEW_ONLY
@@ -569,8 +570,8 @@ def _automation_control_snapshot(
         strict_action = CONTROL_REVIEW_ONLY
     if strict_action != original_action:
         control["action"] = strict_action
-        control["requires_human_review"] = True
         control["auto_fix_allowed"] = False
+        control["requires_human_review"] = execution.get("action") != EXECUTION_DEFER
         reasons = control.get("reasons") if isinstance(control.get("reasons"), list) else []
         reasons.append("capped by execution decision")
         control["reasons"] = reasons
