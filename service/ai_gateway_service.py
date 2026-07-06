@@ -537,7 +537,7 @@ def _automation_control_snapshot(
             repo_evictions = int(evicted_by_repo.get(str(repo or "unknown").strip().lower(), 0) or 0)
         except (TypeError, ValueError):
             repo_evictions = 0
-        failure_history_complete = repo_evictions <= 0
+        failure_history_complete = repo_evictions <= 0 and not bool(retention.get("history_completeness_unknown"))
         ledger_unavailable = False
     except Exception:
         recent_runs = []
