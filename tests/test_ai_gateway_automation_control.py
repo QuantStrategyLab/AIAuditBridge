@@ -13,7 +13,7 @@ from service.ai_gateway_service import _automation_control_snapshot, _automation
 
 
 class TestAutomationControlSnapshot(unittest.TestCase):
-    def test_control_snapshot_defaults_to_review_and_fix_for_healthy_repo(self) -> None:
+    def test_control_snapshot_defaults_to_review_only_for_healthy_repo(self) -> None:
         health = type("Health", (), {"status": "healthy"})()
         quota = type("Quota", (), {"runtime_status": lambda self, repo: {"status": "ok"}})()
         ledger = type("Ledger", (), {"snapshot": lambda self, limit=None: {"runs": []}})()
@@ -27,9 +27,9 @@ class TestAutomationControlSnapshot(unittest.TestCase):
         ):
             control = _automation_control_snapshot("QuantStrategyLab/TargetRepo")
 
-        self.assertEqual(control["action"], "continue")
-        self.assertEqual(control["execution"]["effective_mode"], "review_and_fix")
-        self.assertTrue(control["execution"]["auto_fix_allowed"])
+        self.assertEqual(control["action"], "review_only")
+        self.assertEqual(control["execution"]["effective_mode"], "review_only")
+        self.assertFalse(control["execution"]["auto_fix_allowed"])
 
     def test_control_snapshot_downgrades_legacy_action_for_review_only_mode(self) -> None:
         health = type("Health", (), {"status": "healthy"})()
@@ -64,7 +64,7 @@ class TestAutomationControlSnapshot(unittest.TestCase):
                         },
                         "repositories": {
                             "QuantStrategyLab/TargetRepo": {
-                                "max_autonomy": "review_only",
+                                "max_autonomy": "manual",
                                 "max_consecutive_failures": 2,
                             }
                         }
@@ -94,7 +94,8 @@ class TestAutomationControlSnapshot(unittest.TestCase):
 
         self.assertEqual(control["action"], "review_only")
         self.assertEqual(control["effective_action"], "review_only")
-        self.assertFalse(control["requires_human_review"])
+        self.assertTrue(control["requires_human_review"])
+        self.assertEqual(control["execution"]["action"], "human_review")
         self.assertEqual(control["execution"]["effective_mode"], "review_only")
         self.assertFalse(control["execution"]["auto_fix_allowed"])
 
@@ -143,8 +144,8 @@ class TestAutomationControlSnapshot(unittest.TestCase):
             control = _automation_control_snapshot("QuantStrategyLab/TargetRepo", task_name="monthly")
 
         self.assertIsNone(ledger.requested_limit)
-        self.assertEqual(control["action"], "escalate")
-        self.assertEqual(control["effective_action"], "escalate")
+        self.assertEqual(control["action"], "review_only")
+        self.assertEqual(control["effective_action"], "review_only")
         self.assertEqual(control["execution"]["action"], "human_review")
         self.assertEqual(control["execution"]["consecutive_failures"], 2)
 
@@ -181,8 +182,8 @@ class TestAutomationControlSnapshot(unittest.TestCase):
                 pending_run=pending_run,
             )
 
-        self.assertEqual(control["action"], "escalate")
-        self.assertEqual(control["effective_action"], "escalate")
+        self.assertEqual(control["action"], "review_only")
+        self.assertEqual(control["effective_action"], "review_only")
         self.assertEqual(control["execution"]["action"], "human_review")
         self.assertEqual(control["execution"]["consecutive_failures"], 2)
 
@@ -223,8 +224,8 @@ class TestAutomationControlSnapshot(unittest.TestCase):
         ):
             control = _automation_control_snapshot("QuantStrategyLab/TargetRepo", task_name="monthly")
 
-        self.assertEqual(control["action"], "escalate")
-        self.assertEqual(control["effective_action"], "escalate")
+        self.assertEqual(control["action"], "review_only")
+        self.assertEqual(control["effective_action"], "review_only")
         self.assertEqual(control["execution"]["action"], "human_review")
         self.assertFalse(control["execution"]["failure_history_complete"])
         self.assertEqual(control["execution"]["consecutive_failures"], 1)
@@ -258,7 +259,7 @@ class TestAutomationControlSnapshot(unittest.TestCase):
         ):
             control = _automation_control_snapshot("QuantStrategyLab/TargetRepo", task_name="monthly")
 
-        self.assertEqual(control["action"], "continue")
+        self.assertEqual(control["action"], "review_only")
         self.assertTrue(control["execution"]["failure_history_complete"])
 
     def test_control_snapshot_fails_closed_when_ledger_history_is_unknown(self) -> None:
@@ -284,8 +285,8 @@ class TestAutomationControlSnapshot(unittest.TestCase):
         ):
             control = _automation_control_snapshot("QuantStrategyLab/TargetRepo", task_name="monthly")
 
-        self.assertEqual(control["action"], "escalate")
-        self.assertEqual(control["effective_action"], "escalate")
+        self.assertEqual(control["action"], "review_only")
+        self.assertEqual(control["effective_action"], "review_only")
         self.assertFalse(control["execution"]["failure_history_complete"])
 
     def test_control_snapshot_preserves_legacy_continue_when_auto_merge_is_capped(self) -> None:
@@ -334,7 +335,7 @@ class TestAutomationControlSnapshot(unittest.TestCase):
         self.assertEqual(triage["recommended_action"], "open_issue")
         self.assertEqual(triage["next_step"], "open_issue")
 
-    def test_triage_omitted_mode_keeps_review_and_fix_default(self) -> None:
+    def test_triage_omitted_mode_keeps_review_only_default(self) -> None:
         health = type("Health", (), {"status": "healthy"})()
         quota = type("Quota", (), {"runtime_status": lambda self, repo: {"status": "ok"}})()
         ledger = type("Ledger", (), {"snapshot": lambda self, limit=None: {"runs": []}})()
@@ -352,9 +353,9 @@ class TestAutomationControlSnapshot(unittest.TestCase):
                 changed_paths=["docs/runbook.md"],
             )
 
-        self.assertEqual(triage["control"]["execution"]["requested_mode"], "review_and_fix")
-        self.assertTrue(triage["auto_fix_allowed"])
-        self.assertEqual(triage["recommended_action"], "open_fix_pr")
+        self.assertEqual(triage["control"]["execution"]["requested_mode"], "review_only")
+        self.assertFalse(triage["auto_fix_allowed"])
+        self.assertEqual(triage["recommended_action"], "open_issue")
 
     def test_control_snapshot_deduplicates_pending_run_by_run_id(self) -> None:
         runs = [

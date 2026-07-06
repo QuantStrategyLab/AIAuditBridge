@@ -375,7 +375,7 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
                     control = json.loads(response.read().decode("utf-8"))["control"]
                 self.assertIn("execution", control)
                 self.assertEqual(control["execution"]["repo"], "QuantStrategyLab/TargetRepo")
-                self.assertEqual(control["execution"]["requested_mode"], "review_and_fix")
+                self.assertEqual(control["execution"]["requested_mode"], "review_only")
                 self.assertEqual(control["execution"]["effective_mode"], "review_only")
                 self.assertFalse(control["execution"]["auto_fix_allowed"])
 
@@ -583,8 +583,8 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
                         recorded = json.loads(response.read().decode("utf-8"))
                     self.assertEqual(recorded["run"]["run_id"], "platform-health-run-1")
                     self.assertEqual(recorded["run"]["suggested_action"], recorded["control"]["effective_action"])
-                    self.assertEqual(recorded["control"]["execution"]["requested_mode"], "review_and_fix")
-                    self.assertEqual(recorded["run"]["metadata"]["requested_mode"], "review_and_fix")
+                    self.assertEqual(recorded["control"]["execution"]["requested_mode"], "review_only")
+                    self.assertEqual(recorded["run"]["metadata"]["requested_mode"], "review_only")
                     self.assertEqual(recorded["run"]["service_health"], recorded["control"]["service_health"])
                     self.assertEqual(recorded["run"]["quota_status"], recorded["control"]["quota_status"])
                     self.assertEqual(recorded["run"]["org_health_status"], recorded["control"]["org_health_status"])
