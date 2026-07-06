@@ -102,6 +102,8 @@ class RunStrategyOptimizationWatcherTest(unittest.TestCase):
         self.assertTrue(parse_bool("true"))
         self.assertFalse(parse_bool("false"))
         self.assertTrue(parse_bool(None, default=True))
+        with self.assertRaises(ValueError):
+            parse_bool("flase")
 
 
 if __name__ == "__main__":

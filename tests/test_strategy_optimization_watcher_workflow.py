@@ -24,6 +24,8 @@ class StrategyOptimizationWatcherWorkflowTest(unittest.TestCase):
         text = WORKFLOW_PATH.read_text(encoding="utf-8")
 
         self.assertIn("SOURCE_REPO", text)
+        self.assertIn("QuantStrategyLab/CryptoLivePoolPipelines", text)
+        self.assertNotIn("vars.STRATEGY_WATCH_SOURCE_REPO || github.repository", text)
         self.assertIn("METRICS_PATH", text)
         self.assertIn("path: source", text)
         self.assertIn("STRATEGY_WATCH_SOURCE_ROOT: ${{ github.workspace }}/source", text)

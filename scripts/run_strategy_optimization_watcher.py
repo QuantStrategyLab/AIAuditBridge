@@ -28,7 +28,11 @@ def parse_bool(value: Any, *, default: bool = False) -> bool:
     text = str(value).strip().lower()
     if not text:
         return default
-    return text in {"1", "true", "yes", "on"}
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError("boolean value must be one of true/false/yes/no/on/off/1/0")
 
 
 def resolve_input_path(
@@ -162,10 +166,15 @@ def main() -> int:
         print(json.dumps({"status": "error", "error": "strategy metrics input not found"}, sort_keys=True))
         return 2
     payload = load_payload(input_path)
+    try:
+        dry_run = parse_bool(os.environ.get("STRATEGY_WATCH_DRY_RUN"), default=True)
+    except ValueError as exc:
+        print(json.dumps({"status": "error", "error": str(exc)}, sort_keys=True))
+        return 2
     result = run_watcher(
         payload,
         source_repo=os.environ.get("STRATEGY_WATCH_SOURCE_REPO", "").strip(),
-        dry_run=parse_bool(os.environ.get("STRATEGY_WATCH_DRY_RUN"), default=True),
+        dry_run=dry_run,
     )
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 0

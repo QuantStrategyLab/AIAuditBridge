@@ -13,6 +13,10 @@ WATCHER_SCHEMA_VERSION = "strategy_optimization_watch.v1"
 ISSUE_ONLY_ACTION = "open_issue"
 
 
+def _dict_payload(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
 @dataclass(frozen=True)
 class StrategyWatchSnapshot:
     repo: str
@@ -30,8 +34,8 @@ class StrategyWatchSnapshot:
             repo=str(payload.get("repo") or payload.get("repository") or default_repo).strip(),
             profile=profile,
             plugin=str(payload.get("plugin") or payload.get("strategy_plugin") or "").strip(),
-            current_metrics=dict(payload.get("current_metrics") or payload.get("current") or {}),
-            baseline_metrics=dict(payload.get("baseline_metrics") or payload.get("baseline") or {}),
+            current_metrics=_dict_payload(payload.get("current_metrics") or payload.get("current")),
+            baseline_metrics=_dict_payload(payload.get("baseline_metrics") or payload.get("baseline")),
             source=str(payload.get("source") or "").strip(),
             generated_at=str(payload.get("generated_at") or "").strip(),
         )

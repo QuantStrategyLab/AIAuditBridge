@@ -31,6 +31,20 @@ class StrategyWatchTest(unittest.TestCase):
         self.assertTrue(payload["gate_decision"]["human_review_required"])
         self.assertFalse(payload["gate_decision"]["metadata"]["live_impact_allowed"])
 
+    def test_malformed_metrics_snapshot_is_ignored_without_crashing(self) -> None:
+        findings = evaluate_strategy_watch(
+            {
+                "repo": "QuantStrategyLab/TestStrategies",
+                "snapshots": [
+                    {"profile": "bad", "current_metrics": "oops", "baseline_metrics": {"sharpe": 1.0}},
+                    {"profile": "live", "current_metrics": {"sharpe": 0.5}, "baseline_metrics": {"sharpe": 1.0}},
+                ],
+            }
+        )
+
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].snapshot.profile, "live")
+
     def test_healthy_snapshot_creates_no_finding(self) -> None:
         findings = evaluate_strategy_watch(
             {
