@@ -26,6 +26,8 @@ class StrategyOptimizationWatcherWorkflowTest(unittest.TestCase):
         self.assertIn("SOURCE_REPO", text)
         self.assertIn("QuantStrategyLab/CryptoLivePoolPipelines", text)
         self.assertIn("STRATEGY_WATCH_ALLOWED_SOURCE_REPOS", text)
+        self.assertIn("STRATEGY_WATCH_ALLOWED_SOURCE_REFS", text)
+        self.assertIn("SOURCE_REF is not allowed", text)
         self.assertNotIn("vars.STRATEGY_WATCH_SOURCE_REPO || github.repository", text)
         self.assertIn("METRICS_PATH", text)
         self.assertIn("path: source", text)

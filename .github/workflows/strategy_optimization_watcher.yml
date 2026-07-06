@@ -42,6 +42,7 @@ jobs:
       METRICS_PATH: ${{ github.event.inputs.metrics_path || vars.STRATEGY_WATCH_METRICS_PATH || 'data/output/strategy_metrics.json' }}
       STRATEGY_WATCH_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.dry_run) || vars.STRATEGY_WATCH_DRY_RUN || 'true' }}
       ALLOWED_SOURCE_REPOS: ${{ vars.STRATEGY_WATCH_ALLOWED_SOURCE_REPOS || 'QuantStrategyLab/CryptoLivePoolPipelines' }}
+      ALLOWED_SOURCE_REFS: ${{ vars.STRATEGY_WATCH_ALLOWED_SOURCE_REFS || 'main' }}
     steps:
       - name: Checkout Bridge
         uses: actions/checkout@v6.0.3
@@ -81,6 +82,19 @@ jobs:
           done
           if [ "${allowed_match}" != "true" ]; then
             echo "SOURCE_REPO is not allowed for strategy watcher: ${SOURCE_REPO}" >&2
+            exit 1
+          fi
+          ref_allowed=false
+          IFS=',' read -ra allowed_refs <<< "${ALLOWED_SOURCE_REFS}"
+          for allowed_ref in "${allowed_refs[@]}"; do
+            allowed_ref="${allowed_ref//[[:space:]]/}"
+            if [ "${allowed_ref}" = "${SOURCE_REF}" ]; then
+              ref_allowed=true
+              break
+            fi
+          done
+          if [ "${ref_allowed}" != "true" ]; then
+            echo "SOURCE_REF is not allowed for strategy watcher: ${SOURCE_REF}" >&2
             exit 1
           fi
           owner="${SOURCE_REPO%%/*}"

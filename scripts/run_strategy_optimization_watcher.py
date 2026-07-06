@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -85,8 +86,8 @@ def list_open_issue_urls(repo: str) -> dict[str, str]:
         )
         try:
             issues = json.loads(result.stdout or "[]")
-        except json.JSONDecodeError:
-            return open_issues
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("failed to parse open issue list") from exc
         if not isinstance(issues, list) or not issues:
             return open_issues
         for issue in issues:
@@ -142,6 +143,33 @@ def create_github_issue(repo: str, title: str, body: str) -> str:
     return result.stdout.strip()
 
 
+def _payload_for_source_repo(payload: dict[str, Any], source_repo: str) -> dict[str, Any]:
+    if not source_repo:
+        return payload
+    normalized = copy.deepcopy(payload)
+    for key in ("repo", "repository"):
+        embedded = str(normalized.get(key) or "").strip()
+        if embedded and embedded != source_repo:
+            raise ValueError("metrics payload repository does not match validated source repository")
+    normalized["repo"] = source_repo
+    raw_snapshots = normalized.get("snapshots")
+    if isinstance(raw_snapshots, list):
+        clean_snapshots: list[Any] = []
+        for item in raw_snapshots:
+            if not isinstance(item, dict):
+                clean_snapshots.append(item)
+                continue
+            snapshot = dict(item)
+            for key in ("repo", "repository"):
+                embedded = str(snapshot.get(key) or "").strip()
+                if embedded and embedded != source_repo:
+                    raise ValueError("snapshot repository does not match validated source repository")
+            snapshot["repo"] = source_repo
+            clean_snapshots.append(snapshot)
+        normalized["snapshots"] = clean_snapshots
+    return normalized
+
+
 def run_watcher(
     payload: dict[str, Any],
     *,
@@ -150,7 +178,8 @@ def run_watcher(
     create_issue: Callable[[str, str, str], str] = create_github_issue,
     list_issues: Callable[[str], dict[str, str]] = list_open_issue_urls,
 ) -> dict[str, Any]:
-    findings = evaluate_strategy_watch(payload)
+    watch_payload = _payload_for_source_repo(payload, source_repo)
+    findings = evaluate_strategy_watch(watch_payload)
     issues: list[dict[str, Any]] = []
     open_issue_cache: dict[str, dict[str, str]] = {}
     for finding in findings:
@@ -214,11 +243,15 @@ def main() -> int:
     except ValueError as exc:
         print(json.dumps({"status": "error", "error": str(exc)}, sort_keys=True))
         return 2
-    result = run_watcher(
-        payload,
-        source_repo=os.environ.get("STRATEGY_WATCH_SOURCE_REPO", "").strip(),
-        dry_run=dry_run,
-    )
+    try:
+        result = run_watcher(
+            payload,
+            source_repo=os.environ.get("STRATEGY_WATCH_SOURCE_REPO", "").strip(),
+            dry_run=dry_run,
+        )
+    except (ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
+        print(json.dumps({"status": "error", "error": str(exc)}, sort_keys=True))
+        return 2
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 0
 

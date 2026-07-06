@@ -35,7 +35,7 @@ class RunStrategyOptimizationWatcherTest(unittest.TestCase):
 
         result = run_watcher(
             {
-                "repo": "QuantStrategyLab/MetricSource",
+                "repo": "QuantStrategyLab/IssueRepo",
                 "profile": "live",
                 "current_metrics": {"max_dd": 0.2},
                 "baseline_metrics": {"max_dd": 0.1},
@@ -101,6 +101,31 @@ class RunStrategyOptimizationWatcherTest(unittest.TestCase):
         self.assertIn("--method", calls[0])
         self.assertIn("GET", calls[0])
 
+    def test_run_watcher_rejects_mismatched_source_repo_payload(self) -> None:
+        with self.assertRaises(ValueError):
+            run_watcher(
+                {
+                    "repo": "QuantStrategyLab/Other",
+                    "current_metrics": {"sharpe": 0.5},
+                    "baseline_metrics": {"sharpe": 1.0},
+                },
+                source_repo="QuantStrategyLab/TestStrategies",
+            )
+
+    def test_run_watcher_uses_validated_source_repo_in_task_summary(self) -> None:
+        result = run_watcher(
+            {
+                "profile": "live",
+                "current_metrics": {"sharpe": 0.5},
+                "baseline_metrics": {"sharpe": 1.0},
+            },
+            source_repo="QuantStrategyLab/TestStrategies",
+            dry_run=True,
+        )
+
+        self.assertIn("QuantStrategyLab/TestStrategies:live", result["issues"][0]["title"])
+        self.assertEqual(result["issues"][0]["task"]["proposed_action"]["target"], "QuantStrategyLab/TestStrategies")
+
     def test_run_watcher_updates_cache_after_create(self) -> None:
         create_calls: list[tuple[str, str, str]] = []
         payload = {
@@ -143,6 +168,14 @@ class RunStrategyOptimizationWatcherTest(unittest.TestCase):
         self.assertEqual(result["findings"], 2)
         self.assertEqual(list_calls, ["QuantStrategyLab/TestStrategies"])
         self.assertEqual(len(create_calls), 2)
+
+    def test_list_open_issue_urls_fails_closed_on_bad_json(self) -> None:
+        def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="not-json", stderr="")
+
+        with patch("scripts.run_strategy_optimization_watcher.subprocess.run", fake_run):
+            with self.assertRaises(RuntimeError):
+                list_open_issue_urls("QuantStrategyLab/TestStrategies")
 
     def test_parse_bool_defaults_safely(self) -> None:
         self.assertTrue(parse_bool("true"))
