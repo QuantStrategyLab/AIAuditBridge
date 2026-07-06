@@ -17,6 +17,7 @@ from service.ai_gateway_service import (
     _automation_run_access_allowed,
     _automation_run_owner_repository,
     _automation_snapshot_for_claims,
+    service_failure_category,
 )
 from service.automation_run_ledger import get_automation_run_ledger
 
@@ -621,6 +622,12 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
                 finally:
                     server.shutdown()
                     server.server_close()
+
+    def test_service_failure_category_treats_token_rate_limits_as_quota(self) -> None:
+        self.assertEqual(
+            service_failure_category("OpenAI token-per-minute rate limit exceeded"),
+            "quota_or_capacity_failure",
+        )
 
     def test_automation_authority_route_does_not_trust_live_equivalent_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
