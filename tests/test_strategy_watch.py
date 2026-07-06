@@ -69,6 +69,8 @@ class StrategyWatchTest(unittest.TestCase):
         issue = issue_for_task(finding_to_automation_task(finding))
 
         self.assertIn("AI strategy optimization proposal", issue["title"])
+        self.assertRegex(issue["title"], r"\[[a-f0-9]{12}\]$")
+        self.assertIn("Event key", issue["body"])
         self.assertIn("only opens an issue", issue["body"])
         self.assertIn("does not modify strategy code", issue["body"])
         self.assertIn("sandbox backtest", issue["body"])

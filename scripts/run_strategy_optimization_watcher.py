@@ -195,22 +195,27 @@ def run_watcher(
         if dry_run:
             issue_result["dry_run"] = True
         else:
-            if repo not in open_issue_cache:
-                open_issue_cache[repo] = list_issues(repo)
-            existing_url = open_issue_cache[repo].get(issue["title"], "")
-            if existing_url:
-                issue_result["existing_url"] = existing_url
-                issue_result["skipped_reason"] = "open issue already exists"
-            else:
-                issue_result["url"] = create_issue(repo, issue["title"], issue["body"])
-                open_issue_cache[repo][issue["title"]] = str(issue_result["url"])
-                issue_result["created"] = True
+            try:
+                if repo not in open_issue_cache:
+                    open_issue_cache[repo] = list_issues(repo)
+                existing_url = open_issue_cache[repo].get(issue["title"], "")
+                if existing_url:
+                    issue_result["existing_url"] = existing_url
+                    issue_result["skipped_reason"] = "open issue already exists"
+                else:
+                    issue_result["url"] = create_issue(repo, issue["title"], issue["body"])
+                    open_issue_cache[repo][issue["title"]] = str(issue_result["url"])
+                    issue_result["created"] = True
+            except (ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
+                issue_result["error"] = str(exc)
         issues.append(issue_result)
+    errors = sum(1 for issue in issues if issue.get("error"))
     return {
-        "status": "ok",
+        "status": "partial_error" if errors else "ok",
         "dry_run": dry_run,
         "findings": len(findings),
         "issues": issues,
+        "errors": errors,
     }
 
 

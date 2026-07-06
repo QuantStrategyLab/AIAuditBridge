@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
+import json
 from typing import Any
 
 from service.automation_contracts import AutomationTask, EvidenceBundle, GateDecision, ProposedAction, TriggerRecord
@@ -105,9 +107,20 @@ def evaluate_strategy_watch(payload: dict[str, Any]) -> list[StrategyWatchFindin
     return findings
 
 
+def finding_event_key(finding: StrategyWatchFinding) -> str:
+    payload = {
+        "snapshot": finding.snapshot.to_dict(),
+        "severity": finding.severity,
+        "signals": finding.signals,
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:12]
+
+
 def finding_to_automation_task(finding: StrategyWatchFinding) -> AutomationTask:
     """Convert a deterministic finding into an issue-only automation task."""
     lane = str(finding.registry_context.get("automation_lane") or LANE_RESEARCH_BACKLOG)
+    event_key = finding_event_key(finding)
     signal_reasons = [str(signal.get("reason") or signal.get("metric") or "metric degraded") for signal in finding.signals]
     trigger = TriggerRecord(
         source="strategy_optimization_watcher",
@@ -136,7 +149,7 @@ def finding_to_automation_task(finding: StrategyWatchFinding) -> AutomationTask:
         target=finding.snapshot.repo,
         rationale="Open a research optimization issue for AI diagnosis and sandbox experiment planning.",
         requires_human_review=True,
-        metadata={"profile": finding.snapshot.profile, "plugin": finding.snapshot.plugin},
+        metadata={"profile": finding.snapshot.profile, "plugin": finding.snapshot.plugin, "event_key": event_key},
     )
     gate = GateDecision(
         allowed=True,
@@ -149,7 +162,13 @@ def finding_to_automation_task(finding: StrategyWatchFinding) -> AutomationTask:
         human_review_required=True,
         metadata={"issue_only": True, "live_impact_allowed": False},
     )
-    return AutomationTask(trigger=trigger, evidence=evidence, proposed_action=proposed, gate_decision=gate)
+    return AutomationTask(
+        trigger=trigger,
+        evidence=evidence,
+        proposed_action=proposed,
+        gate_decision=gate,
+        metadata={"event_key": event_key},
+    )
 
 
 def issue_for_task(task: AutomationTask) -> dict[str, str]:
@@ -158,7 +177,9 @@ def issue_for_task(task: AutomationTask) -> dict[str, str]:
     trigger = payload["trigger"]
     evidence = payload["evidence"]
     action = payload["proposed_action"]
-    title = f"AI strategy optimization proposal: {trigger.get('subject') or action.get('target') or 'strategy profile'}"
+    event_key = str(payload.get("metadata", {}).get("event_key") or "")
+    marker = f" [{event_key}]" if event_key else ""
+    title = f"AI strategy optimization proposal: {trigger.get('subject') or action.get('target') or 'strategy profile'}{marker}"
     signals = "\n".join(f"- {item}" for item in trigger.get("evidence", [])) or "- Strategy metrics degraded."
     checks = "\n".join(f"- [ ] {item}" for item in payload["gate_decision"].get("required_checks", []))
     risks = "\n".join(f"- {item}" for item in evidence.get("risks", []))
@@ -170,6 +191,7 @@ def issue_for_task(task: AutomationTask) -> dict[str, str]:
             "## Trigger",
             f"- Severity: `{trigger.get('severity')}`",
             f"- Subject: `{trigger.get('subject')}`",
+            f"- Event key: `{event_key}`",
             "",
             "## Signals",
             signals,

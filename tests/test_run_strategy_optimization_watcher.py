@@ -26,6 +26,7 @@ class RunStrategyOptimizationWatcherTest(unittest.TestCase):
         )
 
         self.assertEqual(result["findings"], 1)
+        self.assertEqual(result["errors"], 0)
         self.assertTrue(result["issues"][0]["dry_run"])
         self.assertNotIn("metrics", result["issues"][0]["task"]["trigger"])
         self.assertEqual(calls, [])
@@ -52,17 +53,19 @@ class RunStrategyOptimizationWatcherTest(unittest.TestCase):
 
     def test_non_dry_run_skips_existing_open_issue(self) -> None:
         calls: list[tuple[str, str, str]] = []
+        payload = {
+            "repo": "QuantStrategyLab/TestStrategies",
+            "profile": "live",
+            "current_metrics": {"sharpe": 0.5},
+            "baseline_metrics": {"sharpe": 1.0},
+        }
+        title = run_watcher(payload, dry_run=True)["issues"][0]["title"]
 
         result = run_watcher(
-            {
-                "repo": "QuantStrategyLab/TestStrategies",
-                "profile": "live",
-                "current_metrics": {"sharpe": 0.5},
-                "baseline_metrics": {"sharpe": 1.0},
-            },
+            payload,
             dry_run=False,
             create_issue=lambda repo, title, body: calls.append((repo, title, body)) or "https://example.test/new",
-            list_issues=lambda repo: {"AI strategy optimization proposal: QuantStrategyLab/TestStrategies:live": "https://example.test/existing"},
+            list_issues=lambda repo: {title: "https://example.test/existing"},
         )
 
         self.assertFalse(result["issues"][0]["created"])
@@ -124,7 +127,28 @@ class RunStrategyOptimizationWatcherTest(unittest.TestCase):
         )
 
         self.assertIn("QuantStrategyLab/TestStrategies:live", result["issues"][0]["title"])
+        self.assertRegex(result["issues"][0]["title"], r"\[[a-f0-9]{12}\]$")
         self.assertEqual(result["issues"][0]["task"]["proposed_action"]["target"], "QuantStrategyLab/TestStrategies")
+
+    def test_run_watcher_records_issue_errors_per_finding(self) -> None:
+        payload = {
+            "repo": "QuantStrategyLab/TestStrategies",
+            "snapshots": [
+                {"profile": "a", "current_metrics": {"sharpe": 0.5}, "baseline_metrics": {"sharpe": 1.0}},
+                {"profile": "b", "current_metrics": {"sharpe": 0.4}, "baseline_metrics": {"sharpe": 1.0}},
+            ],
+        }
+
+        result = run_watcher(
+            payload,
+            dry_run=False,
+            create_issue=lambda repo, title, body: (_ for _ in ()).throw(RuntimeError("boom")) if ":a " in title else "https://example.test/new",
+            list_issues=lambda repo: {},
+        )
+
+        self.assertEqual(result["status"], "partial_error")
+        self.assertEqual(result["errors"], 1)
+        self.assertEqual(len(result["issues"]), 2)
 
     def test_run_watcher_updates_cache_after_create(self) -> None:
         create_calls: list[tuple[str, str, str]] = []
@@ -132,7 +156,7 @@ class RunStrategyOptimizationWatcherTest(unittest.TestCase):
             "repo": "QuantStrategyLab/TestStrategies",
             "snapshots": [
                 {"profile": "same", "current_metrics": {"sharpe": 0.5}, "baseline_metrics": {"sharpe": 1.0}},
-                {"profile": "same", "current_metrics": {"sharpe": 0.4}, "baseline_metrics": {"sharpe": 1.0}},
+                {"profile": "same", "current_metrics": {"sharpe": 0.5}, "baseline_metrics": {"sharpe": 1.0}},
             ],
         }
 
