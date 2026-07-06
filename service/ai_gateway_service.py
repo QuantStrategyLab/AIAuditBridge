@@ -579,6 +579,15 @@ def _automation_control_snapshot(
     return control
 
 
+def _normalize_control_mode_param(value: str) -> str:
+    mode = str(value or "").strip().lower()
+    if mode in {MODE_REVIEW_ONLY, "manual"}:
+        return MODE_REVIEW_ONLY
+    if mode in {MODE_REVIEW_AND_FIX, "auto_pr", "auto_merge"}:
+        return MODE_REVIEW_AND_FIX
+    return ""
+
+
 def _highest_changed_path_risk(changed_paths: list[str], policy: dict[str, Any]) -> str:
     if not changed_paths:
         return RISK_LOW
@@ -1499,8 +1508,8 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             else:
                 repo = claims_repo
         repo = repo or "unknown"
-        mode = str(params.get("mode", [MODE_REVIEW_AND_FIX])[0] or MODE_REVIEW_AND_FIX)
-        if mode not in {MODE_REVIEW_ONLY, MODE_REVIEW_AND_FIX}:
+        mode = _normalize_control_mode_param(str(params.get("mode", [MODE_REVIEW_AND_FIX])[0] or MODE_REVIEW_AND_FIX))
+        if not mode:
             _json_response(self, HTTPStatus.BAD_REQUEST, {"status": "error", "error": "invalid mode"})
             return
         _json_response(self, HTTPStatus.OK, {"status": "ok", "control": _automation_control_snapshot(repo, requested_mode=mode)})

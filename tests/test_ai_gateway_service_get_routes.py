@@ -378,6 +378,16 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
                 self.assertEqual(control["execution"]["effective_mode"], "review_only")
                 self.assertFalse(control["execution"]["auto_fix_allowed"])
 
+                for legacy_mode, expected_mode in {"manual": "review_only", "auto_pr": "review_and_fix", "auto_merge": "review_and_fix"}.items():
+                    legacy_mode_request = urllib.request.Request(
+                        f"{base_url}/v1/ai/automation/control?repo=QuantStrategyLab/TargetRepo&mode={legacy_mode}",
+                        headers={"Authorization": f"Bearer {token}"},
+                    )
+                    with urllib.request.urlopen(legacy_mode_request, timeout=5) as response:
+                        self.assertEqual(response.status, 200)
+                        legacy_control = json.loads(response.read().decode("utf-8"))["control"]
+                    self.assertEqual(legacy_control["execution"]["requested_mode"], expected_mode)
+
                 invalid_mode_request = urllib.request.Request(
                     f"{base_url}/v1/ai/automation/control?repo=QuantStrategyLab/TargetRepo&mode=bad",
                     headers={"Authorization": f"Bearer {token}"},
