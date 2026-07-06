@@ -424,6 +424,8 @@ def decide_automation_execution(
         else:
             reasons.append(f"quota status is {quota}; execution already blocked")
         effective_mode = MODE_REVIEW_ONLY
+    if action == EXECUTION_RUN and effective_mode == MODE_REVIEW_ONLY:
+        action = EXECUTION_REVIEW_ONLY
     human_review_required = action == EXECUTION_HUMAN_REVIEW
 
     return {

@@ -93,7 +93,7 @@ class TestAutomationDecision(unittest.TestCase):
             policy={"default": {"max_autonomy": "auto_merge"}},
         )
 
-        self.assertEqual(result["action"], EXECUTION_RUN)
+        self.assertEqual(result["action"], EXECUTION_REVIEW_ONLY)
         self.assertEqual(result["effective_mode"], MODE_REVIEW_ONLY)
         self.assertFalse(result["auto_fix_allowed"])
         self.assertFalse(result["auto_merge_allowed"])
@@ -108,6 +108,7 @@ class TestAutomationDecision(unittest.TestCase):
             org_health_status="ok",
         )
 
+        self.assertEqual(result["action"], EXECUTION_REVIEW_ONLY)
         self.assertEqual(result["effective_mode"], MODE_REVIEW_ONLY)
         self.assertFalse(result["auto_fix_allowed"])
         self.assertFalse(result["human_review_required"])
@@ -197,6 +198,7 @@ class TestAutomationDecision(unittest.TestCase):
             policy={"repositories": {"QuantStrategyLab/CryptoLivePoolPipelines": {"max_autonomy": "review_only"}}},
         )
 
+        self.assertEqual(result["action"], EXECUTION_REVIEW_ONLY)
         self.assertEqual(result["effective_mode"], MODE_REVIEW_ONLY)
         self.assertFalse(result["human_review_required"])
         self.assertFalse(result["auto_fix_allowed"])

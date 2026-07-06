@@ -1633,7 +1633,8 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             if mode_from_payload
             else existing_metadata.get("requested_mode") or existing_metadata.get("mode")
         )
-        requested_mode = _normalize_control_mode_param(str(raw_mode or MODE_REVIEW_ONLY))
+        default_mode = MODE_REVIEW_ONLY if existing is not None else MODE_REVIEW_AND_FIX
+        requested_mode = _normalize_control_mode_param(str(raw_mode or default_mode))
         if mode_from_payload and not requested_mode:
             raise ValueError("invalid mode")
         run_metadata = {
