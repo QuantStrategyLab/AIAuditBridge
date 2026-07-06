@@ -63,7 +63,7 @@ class TestAutomationControlSnapshot(unittest.TestCase):
         ):
             control = _automation_control_snapshot("QuantStrategyLab/TargetRepo", requested_mode="review_only")
 
-        self.assertEqual(control["action"], "continue")
+        self.assertEqual(control["action"], "review_only")
         self.assertEqual(control["effective_action"], "review_only")
         self.assertEqual(control["execution"]["effective_mode"], "review_only")
         self.assertFalse(control["auto_fix_allowed"])
@@ -110,7 +110,7 @@ class TestAutomationControlSnapshot(unittest.TestCase):
             ):
                 control = _automation_control_snapshot("QuantStrategyLab/TargetRepo", requested_mode="review_and_fix")
 
-        self.assertEqual(control["action"], "continue")
+        self.assertEqual(control["action"], "review_only")
         self.assertEqual(control["effective_action"], "review_only")
         self.assertFalse(control["requires_human_review"])
         self.assertEqual(control["execution"]["effective_mode"], "review_only")
@@ -161,7 +161,7 @@ class TestAutomationControlSnapshot(unittest.TestCase):
             control = _automation_control_snapshot("QuantStrategyLab/TargetRepo", task_name="monthly")
 
         self.assertIsNone(ledger.requested_limit)
-        self.assertEqual(control["action"], "continue")
+        self.assertEqual(control["action"], "escalate")
         self.assertEqual(control["effective_action"], "escalate")
         self.assertEqual(control["execution"]["action"], "human_review")
         self.assertEqual(control["execution"]["consecutive_failures"], 2)
@@ -199,7 +199,7 @@ class TestAutomationControlSnapshot(unittest.TestCase):
                 pending_run=pending_run,
             )
 
-        self.assertEqual(control["action"], "continue")
+        self.assertEqual(control["action"], "escalate")
         self.assertEqual(control["effective_action"], "escalate")
         self.assertEqual(control["execution"]["action"], "human_review")
         self.assertEqual(control["execution"]["consecutive_failures"], 2)
@@ -241,7 +241,7 @@ class TestAutomationControlSnapshot(unittest.TestCase):
         ):
             control = _automation_control_snapshot("QuantStrategyLab/TargetRepo", task_name="monthly")
 
-        self.assertEqual(control["action"], "continue")
+        self.assertEqual(control["action"], "escalate")
         self.assertEqual(control["effective_action"], "escalate")
         self.assertEqual(control["execution"]["action"], "human_review")
         self.assertFalse(control["execution"]["failure_history_complete"])
@@ -302,7 +302,7 @@ class TestAutomationControlSnapshot(unittest.TestCase):
         ):
             control = _automation_control_snapshot("QuantStrategyLab/TargetRepo", task_name="monthly")
 
-        self.assertEqual(control["action"], "continue")
+        self.assertEqual(control["action"], "escalate")
         self.assertEqual(control["effective_action"], "escalate")
         self.assertFalse(control["execution"]["failure_history_complete"])
 
@@ -445,7 +445,7 @@ class TestAutomationControlSnapshot(unittest.TestCase):
         ):
             control = _automation_control_snapshot("QuantStrategyLab/TargetRepo", requested_mode="auto_merge")
 
-        self.assertEqual(control["action"], "continue")
+        self.assertEqual(control["action"], "escalate")
         self.assertEqual(control["effective_action"], "escalate")
         self.assertEqual(control["execution"]["action"], "human_review")
         self.assertFalse(control["execution"]["auto_merge_allowed"])

@@ -580,10 +580,12 @@ def _automation_control_snapshot(
         strict_action = CONTROL_PAUSE_AUTO_FIX
     elif execution.get("effective_mode") == MODE_REVIEW_ONLY and strict_action == CONTROL_CONTINUE:
         strict_action = CONTROL_REVIEW_ONLY
+    control["runtime_action"] = original_action
     control["effective_action"] = strict_action
     if strict_action != original_action:
+        control["action"] = strict_action
         reasons = control.get("reasons") if isinstance(control.get("reasons"), list) else []
-        reasons.append("effective action capped by execution decision")
+        reasons.append("capped by execution decision")
         control["reasons"] = reasons
     control["auto_fix_allowed"] = bool(execution.get("auto_fix_allowed")) and strict_action == CONTROL_CONTINUE
     control["auto_merge_allowed"] = bool(execution.get("auto_merge_allowed")) and strict_action == CONTROL_CONTINUE
@@ -1625,7 +1627,8 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 raise PermissionError("automation run is service-owned")
             _assert_automation_run_access(existing, claims)
         task_name = str(payload.get("task") or payload.get("task_name") or "")
-        task_state = str(payload.get("task_state") or payload.get("state") or "running")
+        existing_state = str(existing.get("task_state") or "") if isinstance(existing, dict) else ""
+        task_state = str(payload.get("task_state") or payload.get("state") or existing_state or "running")
         existing_metadata = existing.get("metadata") if isinstance(existing, dict) and isinstance(existing.get("metadata"), dict) else {}
         mode_from_payload = "mode" in payload
         raw_mode = (

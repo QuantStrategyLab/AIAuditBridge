@@ -71,7 +71,6 @@ bash scripts/deploy_codex_audit_service.sh deploy
 ```
 
 The job directory should be owned by the service user and mode `0700`.
-The deploy script points `CODEX_AUDIT_SERVICE_EXECUTION_POLICY_PATH` to `/etc/codex-audit-bridge-policy/execution_policy.json` by default and creates a conservative admin-owned policy file if missing. The file lives outside the service-user-writable job workspace and can cap repo autonomy with `default` / `repositories` keys such as `max_autonomy`, `max_consecutive_failures`, `low_cost_model`, and `low_cost_provider`. If the configured file is missing, unreadable, malformed, or the policy path is unset, execution decisions fail closed until configuration is repaired.
 
 The service should rely on an authenticated Codex CLI session and must not
 inject OpenAI/Codex API keys into the Codex subprocess.
