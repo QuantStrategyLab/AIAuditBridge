@@ -2,13 +2,21 @@
 
 from __future__ import annotations
 
+import json
+import os
 import threading
 import time
 from collections import Counter
 from copy import deepcopy
+from pathlib import Path
 from typing import Any
 
 from service.task_state import TERMINAL_STATES
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX fallback
+    fcntl = None  # type: ignore[assignment]
 
 CONTROL_CONTINUE = "continue"
 CONTROL_REVIEW_ONLY = "review_only"
@@ -26,6 +34,7 @@ CONTROL_ACTIONS = frozenset(
 
 DEFAULT_MAX_RUNS = 500
 DEFAULT_MAX_EVENTS_PER_RUN = 50
+AUTOMATION_LEDGER_PATH_ENV = "CODEX_AUDIT_SERVICE_AUTOMATION_LEDGER_PATH"
 MAX_RUN_METADATA_FIELDS = 20
 MAX_RUN_METADATA_VALUE_LENGTH = 500
 MAX_EVENT_METADATA_FIELDS = 10
@@ -103,6 +112,46 @@ def _event_metadata_snapshot(metadata: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _entry_order_key(entry: dict[str, Any]) -> tuple[float, int]:
+    try:
+        updated_at = float(entry.get("updated_at", 0.0))
+    except (TypeError, ValueError):
+        updated_at = 0.0
+    return updated_at, _safe_int(entry.get("_ledger_sequence"), 0)
+
+
+def _entry_owner_repository(entry: dict[str, Any]) -> str:
+    metadata = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
+    return str(metadata.get("source_repository") or metadata.get("repository") or "")
+
+
+def _entry_origin(entry: dict[str, Any]) -> str:
+    metadata = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
+    return str(metadata.get("origin") or "")
+
+
+def _is_terminal_task_state(value: Any) -> bool:
+    return str(value or "").strip().lower() in TERMINAL_STATES
+
+
+def _can_replace_stale_service_failure(current: dict[str, Any], candidate: dict[str, Any]) -> bool:
+    metadata = current.get("metadata") if isinstance(current.get("metadata"), dict) else {}
+    return (
+        str(current.get("task_state") or "").strip().lower() == "failed"
+        and _entry_origin(current) == "service_job"
+        and _entry_origin(candidate) == "service_job"
+        and str(metadata.get("failure_category") or "") == "stale_job_timeout"
+        and _entry_order_key(candidate) >= _entry_order_key(current)
+    )
+
+
 def suggest_control_action(
     service_health: Any = "",
     quota_status: Any = "",
@@ -158,12 +207,151 @@ class AutomationRunLedger:
         *,
         max_runs: int = DEFAULT_MAX_RUNS,
         max_events_per_run: int = DEFAULT_MAX_EVENTS_PER_RUN,
+        storage_path: Path | None = None,
     ) -> None:
         self._lock = threading.Lock()
         self._runs: dict[str, dict[str, Any]] = {}
         self._max_runs = max(1, int(max_runs))
         self._max_events_per_run = max(1, int(max_events_per_run))
         self._sequence = 0
+        self._storage_path = storage_path
+        self._load_from_disk()
+
+    def _load_from_disk(self) -> None:
+        if self._storage_path is None or not self._storage_path.exists():
+            return
+        runs, sequence = self._read_from_disk_unlocked()
+        with self._lock:
+            self._runs = runs
+            self._sequence = sequence
+            self._evict_old_runs_locked()
+
+    def _read_from_disk_unlocked(self) -> tuple[dict[str, dict[str, Any]], int]:
+        if self._storage_path is None or not self._storage_path.exists():
+            return {}, 0
+        try:
+            payload = json.loads(self._storage_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}, 0
+        runs = payload.get("runs") if isinstance(payload, dict) else None
+        if not isinstance(runs, dict):
+            return {}, 0
+        clean_runs = {str(key): value for key, value in runs.items() if isinstance(value, dict)}
+        sequence = _safe_int(payload.get("sequence"), len(clean_runs))
+        return clean_runs, sequence
+
+    def _persist_locked(self) -> None:
+        self._persist_with_owner_guard_locked()
+
+    def _refresh_from_disk_locked(self) -> None:
+        if self._storage_path is None or not self._storage_path.exists():
+            return
+        lock_handle = None
+        try:
+            if fcntl is not None:
+                lock_path = self._storage_path.with_suffix(self._storage_path.suffix + ".lock")
+                lock_handle = lock_path.open("a+", encoding="utf-8")
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_SH)
+            disk_runs, disk_sequence = self._read_from_disk_unlocked()
+            for run_id, disk_entry in disk_runs.items():
+                current = self._runs.get(run_id)
+                if current is not None:
+                    self._runs[run_id] = self._merge_entry_locked(current, disk_entry)
+                else:
+                    self._runs[run_id] = disk_entry
+            self._sequence = max(self._sequence, disk_sequence, len(self._runs))
+            self._evict_old_runs_locked()
+        finally:
+            if lock_handle is not None:
+                try:
+                    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)  # type: ignore[union-attr]
+                finally:
+                    lock_handle.close()
+
+    def _persist_with_owner_guard_locked(
+        self,
+        *,
+        guard_run_id: str = "",
+        owner_repository: str = "",
+    ) -> None:
+        if self._storage_path is None:
+            return
+        self._storage_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        lock_handle = None
+        try:
+            if fcntl is not None:
+                lock_path = self._storage_path.with_suffix(self._storage_path.suffix + ".lock")
+                lock_handle = lock_path.open("a+", encoding="utf-8")
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+            disk_runs, disk_sequence = self._read_from_disk_unlocked()
+            if guard_run_id and owner_repository:
+                disk_entry = disk_runs.get(guard_run_id)
+                disk_owner = _entry_owner_repository(disk_entry) if isinstance(disk_entry, dict) else ""
+                if disk_owner and disk_owner != owner_repository:
+                    raise PermissionError("automation run_id belongs to another repository")
+            for run_id, disk_entry in disk_runs.items():
+                current = self._runs.get(run_id)
+                if current is not None:
+                    self._runs[run_id] = self._merge_entry_locked(current, disk_entry)
+                else:
+                    self._runs[run_id] = disk_entry
+            self._sequence = max(self._sequence, disk_sequence, len(self._runs))
+            self._evict_old_runs_locked()
+            self._write_to_disk_locked()
+        finally:
+            if lock_handle is not None:
+                try:
+                    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)  # type: ignore[union-attr]
+                finally:
+                    lock_handle.close()
+
+    def _write_to_disk_locked(self) -> None:
+        if self._storage_path is None:
+            return
+        payload = {
+            "schema_version": "automation_run_ledger.v1",
+            "sequence": self._sequence,
+            "runs": self._runs,
+        }
+        tmp = self._storage_path.with_suffix(self._storage_path.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+        try:
+            os.chmod(tmp, 0o600)
+        except OSError:
+            pass
+        os.replace(tmp, self._storage_path)
+
+    def _merge_entry_locked(self, current: dict[str, Any], disk_entry: dict[str, Any]) -> dict[str, Any]:
+        current_terminal = _is_terminal_task_state(current.get("task_state"))
+        disk_terminal = _is_terminal_task_state(disk_entry.get("task_state"))
+        current_state = str(current.get("task_state") or "")
+        disk_state = str(disk_entry.get("task_state") or "")
+        if _can_replace_stale_service_failure(current, disk_entry):
+            base = disk_entry
+        elif _can_replace_stale_service_failure(disk_entry, current):
+            base = current
+        elif current_terminal and disk_terminal and current_state != disk_state:
+            base = current if _entry_order_key(current) <= _entry_order_key(disk_entry) else disk_entry
+        elif current_terminal != disk_terminal:
+            base = current if current_terminal else disk_entry
+        else:
+            base = current if _entry_order_key(current) >= _entry_order_key(disk_entry) else disk_entry
+        merged = deepcopy(base)
+        events: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for source in (disk_entry, current):
+            for event in source.get("events", []):
+                if not isinstance(event, dict):
+                    continue
+                key = json.dumps(event, ensure_ascii=False, sort_keys=True, default=str)
+                if key in seen:
+                    continue
+                seen.add(key)
+                events.append(deepcopy(event))
+        if events:
+            events.sort(key=lambda event: float(event.get("recorded_at", 0.0) or 0.0))
+            merged["events"] = events[-self._max_events_per_run :]
+        return merged
 
     def _evict_old_runs_locked(self) -> None:
         overflow = len(self._runs) - self._max_runs
@@ -198,6 +386,7 @@ class AutomationRunLedger:
         quota_status: Any = "",
         org_health_status: Any = "",
         metadata: dict[str, Any] | None = None,
+        owner_repository: str = "",
     ) -> dict[str, Any]:
         """Record or update one automation run."""
         if not run_id.strip():
@@ -216,8 +405,20 @@ class AutomationRunLedger:
             "events": [],
         }
         with self._lock:
+            previous_runs = deepcopy(self._runs)
+            previous_sequence = self._sequence
             current = self._runs.get(run_id)
             if current:
+                current_owner = _entry_owner_repository(current)
+                if owner_repository and current_owner and current_owner != owner_repository:
+                    raise PermissionError("automation run_id belongs to another repository")
+                current_state = str(current.get("task_state") or "").strip().lower()
+                if (
+                    _is_terminal_task_state(current_state)
+                    and entry["task_state"] != current_state
+                    and not _can_replace_stale_service_failure(current, entry)
+                ):
+                    return self._public_entry(current)
                 entry["_ledger_sequence"] = current.get("_ledger_sequence", 0)
                 old_events = list(current.get("events", []))
                 entry["events"] = (
@@ -251,15 +452,23 @@ class AutomationRunLedger:
             )
             self._runs[run_id] = entry
             self._evict_old_runs_locked()
+            try:
+                self._persist_with_owner_guard_locked(guard_run_id=run_id, owner_repository=owner_repository)
+            except Exception:
+                self._runs = previous_runs
+                self._sequence = previous_sequence
+                raise
             return self._public_entry(self._runs[run_id])
 
     def get(self, run_id: str) -> dict[str, Any] | None:
         with self._lock:
+            self._refresh_from_disk_locked()
             entry = self._runs.get(run_id)
             return self._public_entry(entry) if entry else None
 
     def snapshot(self, *, limit: int | None = 100, include_events: bool = False) -> dict[str, Any]:
         with self._lock:
+            self._refresh_from_disk_locked()
             retained_runs = [
                 self._public_entry(entry, include_events=include_events)
                 for entry in self._runs.values()
@@ -298,3 +507,28 @@ class AutomationRunLedger:
                 },
             },
         }
+
+
+def default_automation_ledger_path() -> Path:
+    configured = os.environ.get(AUTOMATION_LEDGER_PATH_ENV, "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    base_dir = Path(
+        os.environ.get("CODEX_AUDIT_SERVICE_JOB_DIR")
+        or os.environ.get("CODEX_AUDIT_SERVICE_STATE_DIR")
+        or (Path.home() / ".local/state/codex-audit-service")
+    ).expanduser()
+    return base_dir / "automation_runs.json"
+
+
+_automation_run_ledger: AutomationRunLedger | None = None
+_automation_run_ledger_path: Path | None = None
+
+
+def get_automation_run_ledger() -> AutomationRunLedger:
+    global _automation_run_ledger, _automation_run_ledger_path
+    path = default_automation_ledger_path()
+    if _automation_run_ledger is None or _automation_run_ledger_path != path:
+        _automation_run_ledger = AutomationRunLedger(storage_path=path)
+        _automation_run_ledger_path = path
+    return _automation_run_ledger

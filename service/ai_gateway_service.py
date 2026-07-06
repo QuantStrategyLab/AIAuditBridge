@@ -26,6 +26,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections import Counter
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -44,8 +45,19 @@ from service.contracts import (
 from service.adapters.llm_adapter import LlmAdapter
 from service.adapters.codex_adapter import CodexAdapter
 from service.autonomy import (
+    ACTION_AUTO_PR,
+    ACTION_RANK,
     load_autonomy_policy,
     recommended_action as compute_recommended_action,
+)
+from service.automation_authority import (
+    CLASS_LIVE_EQUIVALENT_OPTIMIZATION,
+    LIVE_EQUIVALENT_REQUIRED_EVIDENCE,
+    evaluate_automation_authority,
+)
+from service.automation_run_ledger import (
+    get_automation_run_ledger,
+    suggest_control_action,
 )
 from service.feedback import (
     write_change,
@@ -59,7 +71,7 @@ from service.feedback import (
     _new_change_id,
 )
 from service.quota import get_quota_manager
-from service.task_state import job_task_state
+from service.task_state import TERMINAL_STATES, job_task_state
 from service.health import get_health_monitor
 from service.org_health import read_org_health
 
@@ -71,6 +83,8 @@ DEFAULT_JOB_TTL_SECONDS = 86_400
 DEFAULT_JOB_MAX_ACTIVE = 10
 ACTIVE_JOB_STATUSES = frozenset({"queued", "running"})
 WRITE_AUTH_METHODS = frozenset({"github_oidc", "none"})
+TRUSTED_AUTOMATION_PROOF_PATH_ENV = "CODEX_AUDIT_SERVICE_TRUSTED_AUTOMATION_PROOF_PATH"
+DASHBOARD_REPOSITORIES_ENV = "CODEX_AUDIT_SERVICE_DASHBOARD_REPOSITORIES"
 
 # sandbox allowlist — restrict what callers can request
 ALLOWED_SANDBOXES: frozenset[str] = frozenset(
@@ -393,7 +407,9 @@ def _mark_stale_job_failed(job: dict[str, Any]) -> dict[str, Any]:
     job["status"] = "failed"
     job["updated_at"] = _now()
     job["error"] = "codex audit job became stale before completion"
+    job["failure_category"] = "stale_job_timeout"
     _write_job(job)
+    _record_job_automation_run(job)
     return job
 
 
@@ -423,6 +439,203 @@ def _public_job_payload(job: dict[str, Any]) -> dict[str, object]:
         payload["error"] = str(job.get("error") or "")
         payload["failure_category"] = str(job.get("failure_category") or "unknown_failure")
     return payload
+
+
+def _automation_control_snapshot(repo: str) -> dict[str, Any]:
+    try:
+        org_health = read_org_health()
+    except Exception:
+        org_health = {"status": "unavailable"}
+    try:
+        quota_status = get_quota_manager().runtime_status(repo or "unknown")
+    except Exception:
+        quota_status = {"status": "unavailable"}
+    return suggest_control_action(get_health_monitor().status, quota_status, org_health)
+
+
+def _record_job_automation_run(job: dict[str, Any]) -> None:
+    try:
+        repo = str(job.get("source_repository") or job.get("repository") or "unknown")
+        control = _automation_control_snapshot(repo)
+        get_automation_run_ledger().record(
+            str(job.get("job_id") or ""),
+            job_task_state(job),
+            task_name=str(job.get("task") or ""),
+            suggested_action=str(control.get("action") or ""),
+            service_health=str(control.get("service_health") or ""),
+            quota_status=str(control.get("quota_status") or ""),
+            org_health_status=str(control.get("org_health_status") or ""),
+            metadata={
+                "origin": "service_job",
+                "repository": repo,
+                "source_repository": str(job.get("source_repository") or ""),
+                "caller_repository": str(job.get("repository") or ""),
+                "source_ref": str(job.get("source_ref") or ""),
+                "mode": str(job.get("mode") or ""),
+                "failure_category": str(job.get("failure_category") or ""),
+            },
+            owner_repository=repo,
+        )
+    except Exception as exc:
+        _audit_log("automation_ledger_record_failed", job_id=job.get("job_id"), error=type(exc).__name__)
+
+
+def _automation_operator_claims(claims: dict[str, Any]) -> bool:
+    if claims.get("automation_operator") is True or claims.get("operator") is True:
+        return True
+    if str(claims.get("auth_method") or "") == "static_token":
+        return False
+    scopes = claims.get("scopes") or claims.get("scope") or ""
+    if isinstance(scopes, str):
+        scope_values = {item.strip() for item in re.split(r"[\s,]", scopes) if item.strip()}
+    elif isinstance(scopes, list):
+        scope_values = {str(item).strip() for item in scopes if str(item).strip()}
+    else:
+        scope_values = set()
+    if "automation_operator" in scope_values:
+        return True
+    allowed_repositories = _split_csv_env("CODEX_AUDIT_SERVICE_AUTOMATION_OPERATOR_REPOSITORIES")
+    repository = str(claims.get("repository") or "")
+    return bool(repository) and repository in allowed_repositories
+
+
+def _dashboard_repository_allowed(claims: dict[str, Any], repository: str) -> bool:
+    if str(claims.get("auth_method") or "") != "static_token":
+        return False
+    allowed_repositories = _split_csv_env(DASHBOARD_REPOSITORIES_ENV)
+    return bool(repository) and repository in allowed_repositories
+
+
+def _automation_run_owner_repository(run: dict[str, Any]) -> str:
+    metadata = run.get("metadata") if isinstance(run.get("metadata"), dict) else {}
+    return str(metadata.get("source_repository") or metadata.get("repository") or "")
+
+
+def _assert_source_repository_owner_or_operator(claims: dict[str, Any], source_repository: str) -> None:
+    if not source_repository or _automation_operator_claims(claims):
+        return
+    if source_repository != str(claims.get("repository") or ""):
+        raise PermissionError("source_repository must match authenticated repository")
+
+
+def _automation_run_access_allowed(
+    run: dict[str, Any],
+    claims: dict[str, Any],
+) -> bool:
+    if _automation_operator_claims(claims):
+        return True
+    owner = _automation_run_owner_repository(run)
+    caller_repository = str(claims.get("repository") or "")
+    return bool(owner) and (owner == caller_repository or _dashboard_repository_allowed(claims, owner))
+
+
+def _assert_automation_run_access(
+    run: dict[str, Any],
+    claims: dict[str, Any],
+) -> None:
+    if not _automation_run_access_allowed(run, claims):
+        raise PermissionError("automation run repository is not allowed")
+
+
+def _automation_snapshot_for_claims(
+    snapshot: dict[str, Any],
+    claims: dict[str, Any],
+    *,
+    limit: int | None = None,
+) -> dict[str, Any]:
+    if _automation_operator_claims(claims):
+        return snapshot
+    visible_runs = [run for run in snapshot.get("runs", []) if _automation_run_access_allowed(run, claims)]
+    runs = visible_runs[: max(0, int(limit))] if limit is not None else visible_runs
+    task_states = Counter(str(run.get("task_state", "")).strip().lower() for run in visible_runs if run.get("task_state"))
+    suggested_actions = Counter(
+        str(run.get("suggested_action", "")).strip().lower()
+        for run in visible_runs
+        if run.get("suggested_action")
+    )
+    terminal_runs = sum(1 for run in visible_runs if str(run.get("task_state", "")).strip().lower() in TERMINAL_STATES)
+    summary = dict(snapshot.get("summary") or {})
+    summary.update(
+        {
+            "total_runs": len(visible_runs),
+            "returned_runs": len(runs),
+            "active_runs": len(visible_runs) - terminal_runs,
+            "terminal_runs": terminal_runs,
+            "task_states": dict(task_states),
+            "suggested_actions": dict(suggested_actions),
+        }
+    )
+    return {"runs": runs, "summary": summary}
+
+
+def _trusted_automation_proof_for_review(payload: dict[str, Any], claims: dict[str, Any]) -> dict[str, Any]:
+    proof_path = os.environ.get(TRUSTED_AUTOMATION_PROOF_PATH_ENV, "").strip()
+    proof_id = str(payload.get("trusted_proof_id") or "")
+    prompt = str(payload.get("prompt") or "")
+    commit_sha = str(payload.get("commit_sha") or payload.get("source_sha") or "")
+    diff_hash = str(payload.get("diff_hash") or "")
+    base_ref, base_sha = str(payload.get("base_ref") or ""), str(payload.get("base_sha") or "")
+    review_context_id = str(payload.get("pull_request_number") or payload.get("pr_number") or payload.get("issue_number") or "")
+    changed_paths_raw = payload.get("changed_paths")
+    if not proof_path or not proof_id or not prompt or not commit_sha or not diff_hash or not base_ref or not base_sha or not review_context_id:
+        return {}
+    payload_source_repository = str(payload.get("source_repository") or "")
+    if not payload_source_repository:
+        raise PermissionError("trusted automation proof requires source_repository")
+    _validate_source_repo(payload_source_repository)
+    if not _automation_operator_claims(claims):
+        _validate_source_repo_org(claims, payload_source_repository)
+        _assert_source_repository_owner_or_operator(claims, payload_source_repository)
+    if not isinstance(changed_paths_raw, list):
+        return {}
+    requested_paths = sorted(str(path) for path in changed_paths_raw if isinstance(path, str))
+    if not requested_paths:
+        return {}
+    try:
+        proof_payload = json.loads(Path(proof_path).expanduser().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    proofs = proof_payload.get("proofs") if isinstance(proof_payload, dict) else None
+    if not isinstance(proofs, list):
+        return {}
+    prompt_sha256 = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+    for proof in proofs:
+        if not isinstance(proof, dict):
+            continue
+        if str(proof.get("proof_id") or "") != proof_id:
+            continue
+        if str(proof.get("prompt_sha256") or "") != prompt_sha256:
+            continue
+        proof_source_repository = str(proof.get("source_repository") or "")
+        if not proof_source_repository or payload_source_repository != proof_source_repository:
+            continue
+        proof_commit_sha = str(proof.get("commit_sha") or proof.get("source_sha") or "")
+        if proof_commit_sha != commit_sha or str(proof.get("diff_hash") or "") != diff_hash:
+            continue
+        proof_context_id = str(proof.get("pull_request_number") or proof.get("pr_number") or proof.get("issue_number") or "")
+        if str(proof.get("base_ref") or "") != base_ref or str(proof.get("base_sha") or "") != base_sha or proof_context_id != review_context_id:
+            continue
+        proof_paths_raw = proof.get("changed_paths")
+        if not isinstance(proof_paths_raw, list):
+            continue
+        proof_paths = sorted(str(path) for path in proof_paths_raw if isinstance(path, str))
+        if proof_paths != requested_paths:
+            continue
+        metadata = proof.get("trusted_automation_metadata")
+        if not isinstance(metadata, dict):
+            continue
+        if metadata.get("change_class") != CLASS_LIVE_EQUIVALENT_OPTIMIZATION:
+            continue
+        if not all(metadata.get(key) is True for key in LIVE_EQUIVALENT_REQUIRED_EVIDENCE):
+            continue
+        return {
+            "source_repository": proof_source_repository,
+            "commit_sha": str(proof.get("commit_sha") or proof.get("source_sha") or ""),
+            "diff_hash": str(proof.get("diff_hash") or ""),
+            "changed_paths": proof_paths,
+            "trusted_automation_metadata": dict(metadata),
+        }
+    return {}
 
 
 def _job_dedupe_key(payload: dict[str, Any]) -> str:
@@ -495,6 +708,7 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
         job["status"] = "running"
         job["updated_at"] = _now()
         _write_job(job)
+        _record_job_automation_run(job)
         adapter = CodexAdapter()
         sandbox = _validate_sandbox(str(payload.get("sandbox") or ""))
         reasoning_effort = _resolve_codex_reasoning_effort(payload, str(payload.get("task") or TASK_EXECUTE))
@@ -516,6 +730,7 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
             job["failure_category"] = _classify_failure(result.error)
         job["updated_at"] = _now()
         _write_job(job)
+        _record_job_automation_run(job)
         get_health_monitor().record(
             "/v1/ai/execute/jobs/run",
             time.time() - started,
@@ -534,6 +749,7 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
         job["error"] = str(exc)[-4000:]
         job["failure_category"] = _classify_failure(str(exc))
         _write_job(job)
+        _record_job_automation_run(job)
         get_health_monitor().record("/v1/ai/execute/jobs/run", time.time() - started, False, type(exc).__name__)
         _audit_log("job_failed", job_id=job_id, error=type(exc).__name__,
                    repository=job.get("repository"))
@@ -575,6 +791,7 @@ def _submit_job(claims: dict[str, Any], payload: dict[str, Any]) -> dict[str, ob
         "dedupe_key": dedupe_key,
     }
     _write_job(job)
+    _record_job_automation_run(job)
     _audit_log("job_submitted", job_id=job_id, repository=job["repository"],
                task=job["task"], source_repository=job["source_repository"])
     thread = threading.Thread(target=_run_job, args=(job_id, payload), name=f"ai-gateway-job-{job_id}", daemon=True)
@@ -625,6 +842,16 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             return
         if request_path == "/v1/ai/quota":
             self._handle_quota_status()
+            return
+        if request_path == "/v1/ai/automation/control":
+            self._handle_automation_control()
+            return
+        if request_path == "/v1/ai/automation/runs":
+            self._handle_list_automation_runs()
+            return
+        if request_path.startswith("/v1/ai/automation/runs/"):
+            run_id = request_path[len("/v1/ai/automation/runs/"):]
+            self._handle_get_automation_run(run_id)
             return
 
         # Feedback: list changes or get effectiveness report
@@ -698,12 +925,18 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             elif self.path in {"/v1/ai/execute/jobs", "/v1/codex-audit/jobs"}:
                 _assert_write_authz(claims, self.path)
                 self._handle_execute_async(claims, payload)
+            elif self.path in {"/v1/ai/automation/runs"}:
+                _assert_write_authz(claims, self.path)
+                self._handle_record_automation_run(claims, payload)
+            elif self.path in {"/v1/ai/automation/authority"}:
+                _assert_write_authz(claims, self.path)
+                self._handle_automation_authority(claims, payload)
             elif self.path in {"/v1/ai/execute", "/v1/codex-audit"}:
                 _assert_write_authz(claims, self.path)
                 self._handle_execute_sync(claims, payload)
             elif self.path in {"/v1/ai/review"}:
                 _assert_write_authz(claims, self.path)
-                self._handle_review(payload)
+                self._handle_review(claims, payload)
             else:
                 _json_response(self, HTTPStatus.NOT_FOUND, {"status": "error", "error": "not found"})
 
@@ -837,7 +1070,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         else:
             _json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"status": "error", "error": result.error})
 
-    def _handle_review(self, payload: dict[str, Any]) -> None:
+    def _handle_review(self, claims: dict[str, Any], payload: dict[str, Any]) -> None:
         """POST /v1/ai/review — multi-model parallel review + optional Codex verify.
 
         Returns a ``recommended_action`` based on AI confidence scores and file risk tiers.
@@ -853,6 +1086,9 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             [str(p) for p in changed_paths_raw if isinstance(p, str)]
             if isinstance(changed_paths_raw, list) else []
         )
+        trusted_proof = _trusted_automation_proof_for_review(payload, claims)
+        if trusted_proof:
+            changed_paths = list(trusted_proof["changed_paths"])
 
         # Step 1: parallel LLM review
         reviewer_tuples = [
@@ -907,14 +1143,23 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
 
         # Autonomy decision: confidence + file risk → recommended action
         repo = str(payload.get("source_repository") or "")
+        if trusted_proof and not repo:
+            repo = str(trusted_proof.get("source_repository") or "")
         quota_status = get_quota_manager().runtime_status(repo or "unknown").get("status", "ok")
+        try:
+            org_health_status = str((read_org_health() or {}).get("status") or "unknown")
+        except Exception:
+            org_health_status = "unavailable"
         action = compute_recommended_action(
             results,
             changed_paths,
             repo=repo if repo else None,
             policy=load_autonomy_policy(),
+            automation_metadata=payload.get("automation_metadata") if isinstance(payload.get("automation_metadata"), dict) else {},
+            trusted_automation_metadata=trusted_proof.get("trusted_automation_metadata") if trusted_proof else {},
             health_status=get_health_monitor().status,
             quota_status=str(quota_status),
+            org_health_status=org_health_status,
         )
         _audit_log("review_completed", consensus=consensus, all_success=all_ok,
                    action=action["action"], confidence=action["confidence"], risk=action["risk"])
@@ -925,6 +1170,153 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             "consensus": consensus,
             "recommended_action": action,
         })
+
+    # -- automation control handlers --
+
+    def _handle_automation_control(self) -> None:
+        from urllib.parse import parse_qs, urlparse
+        try:
+            claims = authenticate(self.headers, audience=DEFAULT_AUDIENCE)
+        except PermissionError as exc:
+            _json_response(self, HTTPStatus.UNAUTHORIZED, {"status": "error", "error": str(exc)})
+            return
+        parsed = urlparse(self.path)
+        params = parse_qs(parsed.query)
+        repo = str(params.get("repo", [""])[0] or "")
+        if not _automation_operator_claims(claims):
+            claims_repo = str(claims.get("repository") or "")
+            if str(claims.get("auth_method") or "") == "static_token":
+                if not _dashboard_repository_allowed(claims, repo):
+                    _json_response(self, HTTPStatus.UNAUTHORIZED, {"status": "error", "error": "repo is not allowed"})
+                    return
+            elif repo and _dashboard_repository_allowed(claims, repo):
+                pass
+            elif repo and repo != claims_repo:
+                _json_response(self, HTTPStatus.UNAUTHORIZED, {"status": "error", "error": "repo is not allowed"})
+                return
+            else:
+                repo = claims_repo
+        repo = repo or "unknown"
+        _json_response(self, HTTPStatus.OK, {"status": "ok", "control": _automation_control_snapshot(repo)})
+
+    def _handle_list_automation_runs(self) -> None:
+        from urllib.parse import parse_qs, urlparse
+        try:
+            claims = authenticate(self.headers, audience=DEFAULT_AUDIENCE)
+        except PermissionError as exc:
+            _json_response(self, HTTPStatus.UNAUTHORIZED, {"status": "error", "error": str(exc)})
+            return
+        parsed = urlparse(self.path)
+        params = parse_qs(parsed.query)
+        try:
+            limit = int(params.get("limit", ["100"])[0])
+        except (TypeError, ValueError):
+            _json_response(self, HTTPStatus.BAD_REQUEST, {"status": "error", "error": "limit must be an integer"})
+            return
+        if limit < 0 or limit > 1000:
+            _json_response(self, HTTPStatus.BAD_REQUEST, {"status": "error", "error": "limit out of range"})
+            return
+        include_events = str(params.get("include_events", ["false"])[0]).lower() in {"1", "true", "yes", "on"}
+        snapshot_limit = limit if _automation_operator_claims(claims) else None
+        snapshot = get_automation_run_ledger().snapshot(limit=snapshot_limit, include_events=include_events)
+        snapshot = _automation_snapshot_for_claims(snapshot, claims, limit=limit)
+        _json_response(self, HTTPStatus.OK, {"status": "ok", "ledger": snapshot})
+
+    def _handle_get_automation_run(self, run_id: str) -> None:
+        try:
+            claims = authenticate(self.headers, audience=DEFAULT_AUDIENCE)
+        except PermissionError as exc:
+            _json_response(self, HTTPStatus.UNAUTHORIZED, {"status": "error", "error": str(exc)})
+            return
+        record = get_automation_run_ledger().get(run_id)
+        if record is None:
+            _json_response(self, HTTPStatus.NOT_FOUND, {"status": "error", "error": "automation run not found"})
+            return
+        try:
+            _assert_automation_run_access(record, claims)
+        except PermissionError as exc:
+            _json_response(self, HTTPStatus.UNAUTHORIZED, {"status": "error", "error": str(exc)})
+            return
+        _json_response(self, HTTPStatus.OK, {"status": "ok", "run": record})
+
+    def _handle_record_automation_run(self, claims: dict[str, Any], payload: dict[str, Any]) -> None:
+        source_repo = str(payload.get("source_repository") or "")
+        if source_repo:
+            _validate_source_repo(source_repo)
+            if not _automation_operator_claims(claims):
+                _validate_source_repo_org(claims, source_repo)
+                _assert_source_repository_owner_or_operator(claims, source_repo)
+        repo = source_repo or str(claims.get("repository") or "unknown")
+        control = _automation_control_snapshot(repo)
+        metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+        ledger = get_automation_run_ledger()
+        run_id = str(payload.get("run_id") or payload.get("job_id") or "")
+        if not run_id.strip():
+            raise ValueError("run_id must be a non-empty string")
+        existing = ledger.get(run_id)
+        if existing is not None:
+            existing_owner = _automation_run_owner_repository(existing)
+            if existing_owner and existing_owner != repo:
+                raise PermissionError("automation run_id belongs to another repository")
+            existing_metadata = existing.get("metadata") if isinstance(existing.get("metadata"), dict) else {}
+            if existing_metadata.get("origin") == "service_job":
+                raise PermissionError("automation run is service-owned")
+            _assert_automation_run_access(existing, claims)
+        record = get_automation_run_ledger().record(
+            run_id,
+            str(payload.get("task_state") or payload.get("state") or "running"),
+            task_name=str(payload.get("task") or payload.get("task_name") or ""),
+            suggested_action=str(control.get("action") or ""),
+            service_health=str(control.get("service_health") or ""),
+            quota_status=control.get("quota_status") or "",
+            org_health_status=str(control.get("org_health_status") or ""),
+            metadata={
+                **metadata,
+                "origin": "external_workflow",
+                "repository": repo,
+                "source_repository": source_repo,
+                "caller_repository": str(claims.get("repository") or ""),
+            },
+            owner_repository=repo,
+        )
+        _json_response(self, HTTPStatus.OK, {"status": "ok", "run": record, "control": control})
+
+    def _handle_automation_authority(self, claims: dict[str, Any], payload: dict[str, Any]) -> None:
+        source_repo = str(payload.get("source_repository") or "")
+        if source_repo:
+            _validate_source_repo(source_repo)
+            if not _automation_operator_claims(claims):
+                _validate_source_repo_org(claims, source_repo)
+        changed_paths = [str(path) for path in payload.get("changed_paths", []) if isinstance(path, str)]
+        metadata = payload.get("automation_metadata") if isinstance(payload.get("automation_metadata"), dict) else {}
+        proposed_action = str(payload.get("proposed_action") or ACTION_AUTO_PR)
+        authority = evaluate_automation_authority(changed_paths, metadata=metadata, proposed_action=proposed_action)
+        repo = source_repo or str(claims.get("repository") or "unknown")
+        try:
+            org_health_status = str((read_org_health() or {}).get("status") or "unknown")
+        except Exception:
+            org_health_status = "unavailable"
+        guarded = compute_recommended_action(
+            [{"confidence": float(payload.get("confidence", 0.5))}],
+            changed_paths,
+            repo=repo,
+            policy=load_autonomy_policy(),
+            automation_metadata=metadata,
+            health_status=get_health_monitor().status,
+            quota_status=str(get_quota_manager().runtime_status(repo).get("status", "ok")),
+            org_health_status=org_health_status,
+        )
+        authority["class_level_final_action"] = authority["final_action"]
+        if authority["final_action"] == "auto_merge":
+            authority["final_action"] = ACTION_AUTO_PR
+            authority["human_review_required"] = True
+            authority["reasons"].append("use /v1/ai/review for executable auto_merge decisions")
+        if ACTION_RANK.get(str(guarded["action"]), 0) < ACTION_RANK.get(str(authority["final_action"]), 0):
+            authority["final_action"] = str(guarded["action"])
+            authority["human_review_required"] = True
+            authority["reasons"].append("capped by repository policy or runtime guards")
+        authority["policy_guard_action"] = guarded["action"]
+        _json_response(self, HTTPStatus.OK, {"status": "ok", "automation_authority": authority})
 
     # -- feedback handlers (Phase 3: closed-loop change tracking) --
 
