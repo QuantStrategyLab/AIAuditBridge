@@ -262,7 +262,6 @@ def _classify_service_failure(message: str) -> str:
     auth_config_signals = (
         "auth",
         "oidc",
-        "token",
         "secret",
         "credential",
         "permission denied",
