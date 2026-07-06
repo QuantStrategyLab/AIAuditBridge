@@ -123,6 +123,20 @@ class TestAutomationDecision(unittest.TestCase):
         self.assertEqual(result["action"], EXECUTION_HUMAN_REVIEW)
         self.assertEqual(result["effective_mode"], MODE_REVIEW_ONLY)
 
+    def test_invalid_failure_threshold_falls_back_safely(self) -> None:
+        result = decide_automation_execution(
+            repo="QuantStrategyLab/AIAuditBridge",
+            requested_mode=MODE_REVIEW_AND_FIX,
+            control_action=CONTROL_CONTINUE,
+            service_health="healthy",
+            quota_status="ok",
+            org_health_status="ok",
+            policy={"default": {"max_consecutive_failures": "oops"}},
+        )
+
+        self.assertEqual(result["max_consecutive_failures"], 3)
+        self.assertEqual(result["action"], EXECUTION_RUN)
+
     def test_load_execution_policy_ignores_malformed_files(self) -> None:
         with TemporaryDirectory() as tmp:
             path = Path(tmp) / "policy.json"

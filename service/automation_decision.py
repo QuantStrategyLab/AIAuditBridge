@@ -65,6 +65,14 @@ def _normalize_autonomy(value: Any, default: str = AUTONOMY_AUTO_PR) -> str:
     return level if level in AUTONOMY_RANK else default
 
 
+def _safe_positive_int(value: Any, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
 def _repo_from_run(run: dict[str, Any]) -> str:
     metadata = run.get("metadata") if isinstance(run.get("metadata"), dict) else {}
     return str(metadata.get("source_repository") or metadata.get("repository") or "")
@@ -134,7 +142,7 @@ def decide_automation_execution(
     """Produce a safe execution decision from health, quota, failures, and repo policy."""
     repo_policy = repo_execution_policy(repo, policy)
     max_autonomy = _normalize_autonomy(repo_policy.get("max_autonomy"), AUTONOMY_AUTO_PR)
-    max_failures = int(repo_policy.get("max_consecutive_failures") or DEFAULT_MAX_CONSECUTIVE_FAILURES)
+    max_failures = _safe_positive_int(repo_policy.get("max_consecutive_failures"), DEFAULT_MAX_CONSECUTIVE_FAILURES)
     low_cost_model = str(repo_policy.get("low_cost_model") or DEFAULT_LOW_COST_MODEL)
     quota_low_behavior = str(repo_policy.get("quota_low_behavior") or "low_cost_model").strip().lower()
 

@@ -375,6 +375,8 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
                     control = json.loads(response.read().decode("utf-8"))["control"]
                 self.assertIn("execution", control)
                 self.assertEqual(control["execution"]["repo"], "QuantStrategyLab/TargetRepo")
+                self.assertEqual(control["execution"]["effective_mode"], "review_only")
+                self.assertFalse(control["execution"]["auto_fix_allowed"])
 
                 missing_repo_request = urllib.request.Request(
                     f"{base_url}/v1/ai/automation/control",

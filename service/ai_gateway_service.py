@@ -508,7 +508,7 @@ def _public_job_payload(job: dict[str, Any]) -> dict[str, object]:
     return payload
 
 
-def _automation_control_snapshot(repo: str, *, task_name: str = "", requested_mode: str = "review_and_fix") -> dict[str, Any]:
+def _automation_control_snapshot(repo: str, *, task_name: str = "", requested_mode: str = MODE_REVIEW_ONLY) -> dict[str, Any]:
     try:
         org_health = read_org_health()
     except Exception:
@@ -519,7 +519,7 @@ def _automation_control_snapshot(repo: str, *, task_name: str = "", requested_mo
         quota_status = {"status": "unavailable"}
     control = suggest_control_action(get_health_monitor().status, quota_status, org_health)
     try:
-        recent_runs = get_automation_run_ledger().snapshot(limit=20)["runs"]
+        recent_runs = get_automation_run_ledger().snapshot(limit=None)["runs"]
     except Exception:
         recent_runs = []
     control["execution"] = decide_automation_execution(
@@ -665,7 +665,7 @@ def _automation_triage_snapshot(
 def _record_job_automation_run(job: dict[str, Any]) -> None:
     try:
         repo = str(job.get("source_repository") or job.get("repository") or "unknown")
-        control = _automation_control_snapshot(repo, task_name=str(job.get("task") or ""), requested_mode=str(job.get("mode") or "review_and_fix"))
+        control = _automation_control_snapshot(repo, task_name=str(job.get("task") or ""), requested_mode=str(job.get("mode") or MODE_REVIEW_ONLY))
         get_automation_run_ledger().record(
             str(job.get("job_id") or ""),
             job_task_state(job),
@@ -1443,7 +1443,8 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             else:
                 repo = claims_repo
         repo = repo or "unknown"
-        _json_response(self, HTTPStatus.OK, {"status": "ok", "control": _automation_control_snapshot(repo)})
+        mode = str(params.get("mode", [MODE_REVIEW_ONLY])[0] or MODE_REVIEW_ONLY)
+        _json_response(self, HTTPStatus.OK, {"status": "ok", "control": _automation_control_snapshot(repo, requested_mode=mode)})
 
     def _handle_automation_triage(self, claims: dict[str, Any], payload: dict[str, Any]) -> None:
         from urllib.parse import parse_qs, urlparse
@@ -1521,7 +1522,11 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 _validate_source_repo_org(claims, source_repo)
                 _assert_source_repository_owner_or_operator(claims, source_repo)
         repo = source_repo or str(claims.get("repository") or "unknown")
-        control = _automation_control_snapshot(repo, task_name=str(payload.get("task") or payload.get("task_name") or ""))
+        control = _automation_control_snapshot(
+            repo,
+            task_name=str(payload.get("task") or payload.get("task_name") or ""),
+            requested_mode=str(payload.get("mode") or MODE_REVIEW_ONLY),
+        )
         metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
         ledger = get_automation_run_ledger()
         run_id = str(payload.get("run_id") or payload.get("job_id") or "")

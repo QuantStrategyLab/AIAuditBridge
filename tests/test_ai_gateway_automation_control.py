@@ -46,6 +46,54 @@ class TestAutomationControlSnapshot(unittest.TestCase):
         self.assertEqual(control["execution"]["effective_mode"], "review_only")
         self.assertFalse(control["execution"]["auto_fix_allowed"])
 
+    def test_control_snapshot_scans_full_retained_ledger_for_repo_failure_streak(self) -> None:
+        runs = [
+            {
+                "task_name": f"other-{index}",
+                "task_state": "merged",
+                "metadata": {"source_repository": f"QuantStrategyLab/Other{index}"},
+            }
+            for index in range(20)
+        ]
+        runs.extend(
+            [
+                {
+                    "task_name": "monthly",
+                    "task_state": "failed",
+                    "metadata": {"source_repository": "QuantStrategyLab/TargetRepo"},
+                },
+                {
+                    "task_name": "monthly",
+                    "task_state": "failed",
+                    "metadata": {"source_repository": "QuantStrategyLab/TargetRepo"},
+                },
+            ]
+        )
+        health = type("Health", (), {"status": "healthy"})()
+        quota = type("Quota", (), {"runtime_status": lambda self, repo: {"status": "ok"}})()
+
+        class Ledger:
+            requested_limit = object()
+
+            def snapshot(self, limit=100):
+                self.requested_limit = limit
+                return {"runs": runs}
+
+        ledger = Ledger()
+
+        with (
+            patch("service.ai_gateway_service.read_org_health", return_value={"status": "ok"}),
+            patch("service.ai_gateway_service.get_health_monitor", return_value=health),
+            patch("service.ai_gateway_service.get_quota_manager", return_value=quota),
+            patch("service.ai_gateway_service.get_automation_run_ledger", return_value=ledger),
+            patch("service.ai_gateway_service.load_execution_policy", return_value={"default": {"max_consecutive_failures": 2}}),
+        ):
+            control = _automation_control_snapshot("QuantStrategyLab/TargetRepo", task_name="monthly")
+
+        self.assertIsNone(ledger.requested_limit)
+        self.assertEqual(control["execution"]["action"], "human_review")
+        self.assertEqual(control["execution"]["consecutive_failures"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()
