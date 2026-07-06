@@ -35,6 +35,7 @@ from typing import Any
 
 from service.auth import authenticate
 from service.contracts import (
+    MODE_REVIEW_AND_FIX,
     MODE_REVIEW_ONLY,
     TASK_ANALYZE,
     TASK_EXECUTE,
@@ -508,7 +509,13 @@ def _public_job_payload(job: dict[str, Any]) -> dict[str, object]:
     return payload
 
 
-def _automation_control_snapshot(repo: str, *, task_name: str = "", requested_mode: str = MODE_REVIEW_ONLY) -> dict[str, Any]:
+def _automation_control_snapshot(
+    repo: str,
+    *,
+    task_name: str = "",
+    requested_mode: str = MODE_REVIEW_ONLY,
+    pending_run: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     try:
         org_health = read_org_health()
     except Exception:
@@ -524,6 +531,8 @@ def _automation_control_snapshot(repo: str, *, task_name: str = "", requested_mo
     except Exception:
         recent_runs = []
         ledger_unavailable = True
+    if pending_run is not None:
+        recent_runs = [pending_run, *recent_runs]
     execution = decide_automation_execution(
         repo=repo or "unknown",
         task_name=task_name,
@@ -549,7 +558,11 @@ def _automation_control_snapshot(repo: str, *, task_name: str = "", requested_mo
         strict_action = CONTROL_ESCALATE
     elif execution.get("action") == EXECUTION_DEFER:
         strict_action = CONTROL_PAUSE_AUTO_FIX
-    elif execution.get("effective_mode") == MODE_REVIEW_ONLY and strict_action == CONTROL_CONTINUE:
+    elif (
+        execution.get("requested_mode") == MODE_REVIEW_AND_FIX
+        and execution.get("effective_mode") == MODE_REVIEW_ONLY
+        and strict_action == CONTROL_CONTINUE
+    ):
         strict_action = CONTROL_REVIEW_ONLY
     if strict_action != original_action:
         control["action"] = strict_action
@@ -691,24 +704,32 @@ def _automation_triage_snapshot(
 def _record_job_automation_run(job: dict[str, Any]) -> None:
     try:
         repo = str(job.get("source_repository") or job.get("repository") or "unknown")
-        control = _automation_control_snapshot(repo, task_name=str(job.get("task") or ""), requested_mode=str(job.get("mode") or MODE_REVIEW_ONLY))
+        task_name = str(job.get("task") or "")
+        task_state = job_task_state(job)
+        metadata = {
+            "origin": "service_job",
+            "repository": repo,
+            "source_repository": str(job.get("source_repository") or ""),
+            "caller_repository": str(job.get("repository") or ""),
+            "source_ref": str(job.get("source_ref") or ""),
+            "mode": str(job.get("mode") or ""),
+            "failure_category": str(job.get("failure_category") or ""),
+        }
+        control = _automation_control_snapshot(
+            repo,
+            task_name=task_name,
+            requested_mode=str(job.get("mode") or MODE_REVIEW_ONLY),
+            pending_run={"task_name": task_name, "task_state": task_state, "metadata": metadata},
+        )
         get_automation_run_ledger().record(
             str(job.get("job_id") or ""),
-            job_task_state(job),
-            task_name=str(job.get("task") or ""),
+            task_state,
+            task_name=task_name,
             suggested_action=str(control.get("action") or ""),
             service_health=str(control.get("service_health") or ""),
             quota_status=str(control.get("quota_status") or ""),
             org_health_status=str(control.get("org_health_status") or ""),
-            metadata={
-                "origin": "service_job",
-                "repository": repo,
-                "source_repository": str(job.get("source_repository") or ""),
-                "caller_repository": str(job.get("repository") or ""),
-                "source_ref": str(job.get("source_ref") or ""),
-                "mode": str(job.get("mode") or ""),
-                "failure_category": str(job.get("failure_category") or ""),
-            },
+            metadata=metadata,
             owner_repository=repo,
         )
     except Exception as exc:
@@ -1548,11 +1569,6 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 _validate_source_repo_org(claims, source_repo)
                 _assert_source_repository_owner_or_operator(claims, source_repo)
         repo = source_repo or str(claims.get("repository") or "unknown")
-        control = _automation_control_snapshot(
-            repo,
-            task_name=str(payload.get("task") or payload.get("task_name") or ""),
-            requested_mode=str(payload.get("mode") or MODE_REVIEW_ONLY),
-        )
         metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
         ledger = get_automation_run_ledger()
         run_id = str(payload.get("run_id") or payload.get("job_id") or "")
@@ -1567,21 +1583,30 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             if existing_metadata.get("origin") == "service_job":
                 raise PermissionError("automation run is service-owned")
             _assert_automation_run_access(existing, claims)
+        task_name = str(payload.get("task") or payload.get("task_name") or "")
+        task_state = str(payload.get("task_state") or payload.get("state") or "running")
+        run_metadata = {
+            **metadata,
+            "origin": "external_workflow",
+            "repository": repo,
+            "source_repository": source_repo,
+            "caller_repository": str(claims.get("repository") or ""),
+        }
+        control = _automation_control_snapshot(
+            repo,
+            task_name=task_name,
+            requested_mode=str(payload.get("mode") or MODE_REVIEW_ONLY),
+            pending_run={"task_name": task_name, "task_state": task_state, "metadata": run_metadata},
+        )
         record = get_automation_run_ledger().record(
             run_id,
-            str(payload.get("task_state") or payload.get("state") or "running"),
-            task_name=str(payload.get("task") or payload.get("task_name") or ""),
+            task_state,
+            task_name=task_name,
             suggested_action=str(control.get("action") or ""),
             service_health=str(control.get("service_health") or ""),
             quota_status=control.get("quota_status") or "",
             org_health_status=str(control.get("org_health_status") or ""),
-            metadata={
-                **metadata,
-                "origin": "external_workflow",
-                "repository": repo,
-                "source_repository": source_repo,
-                "caller_repository": str(claims.get("repository") or ""),
-            },
+            metadata=run_metadata,
             owner_repository=repo,
         )
         _json_response(self, HTTPStatus.OK, {"status": "ok", "run": record, "control": control})

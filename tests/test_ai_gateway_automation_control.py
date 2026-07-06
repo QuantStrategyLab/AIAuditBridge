@@ -27,7 +27,7 @@ class TestAutomationControlSnapshot(unittest.TestCase):
         ):
             control = _automation_control_snapshot("QuantStrategyLab/TargetRepo")
 
-        self.assertEqual(control["action"], "review_only")
+        self.assertEqual(control["action"], "continue")
         self.assertEqual(control["execution"]["effective_mode"], "review_only")
         self.assertFalse(control["execution"]["auto_fix_allowed"])
 
@@ -76,7 +76,7 @@ class TestAutomationControlSnapshot(unittest.TestCase):
                 patch("service.ai_gateway_service.get_quota_manager", return_value=quota),
                 patch("service.ai_gateway_service.get_automation_run_ledger", return_value=ledger),
             ):
-                control = _automation_control_snapshot("QuantStrategyLab/TargetRepo")
+                control = _automation_control_snapshot("QuantStrategyLab/TargetRepo", requested_mode="review_and_fix")
 
         self.assertEqual(control["action"], "review_only")
         self.assertEqual(control["execution"]["effective_mode"], "review_only")
@@ -127,6 +127,41 @@ class TestAutomationControlSnapshot(unittest.TestCase):
             control = _automation_control_snapshot("QuantStrategyLab/TargetRepo", task_name="monthly")
 
         self.assertIsNone(ledger.requested_limit)
+        self.assertEqual(control["action"], "escalate")
+        self.assertEqual(control["execution"]["action"], "human_review")
+        self.assertEqual(control["execution"]["consecutive_failures"], 2)
+
+    def test_control_snapshot_counts_pending_run_for_failure_threshold(self) -> None:
+        runs = [
+            {
+                "task_name": "monthly",
+                "task_state": "failed",
+                "metadata": {"source_repository": "QuantStrategyLab/TargetRepo"},
+            }
+        ]
+        health = type("Health", (), {"status": "healthy"})()
+        quota = type("Quota", (), {"runtime_status": lambda self, repo: {"status": "ok"}})()
+        ledger = type("Ledger", (), {"snapshot": lambda self, limit=None: {"runs": runs}})()
+        pending_run = {
+            "task_name": "monthly",
+            "task_state": "failed",
+            "metadata": {"source_repository": "QuantStrategyLab/TargetRepo"},
+        }
+
+        with (
+            patch("service.ai_gateway_service.read_org_health", return_value={"status": "ok"}),
+            patch("service.ai_gateway_service.get_health_monitor", return_value=health),
+            patch("service.ai_gateway_service.get_quota_manager", return_value=quota),
+            patch("service.ai_gateway_service.get_automation_run_ledger", return_value=ledger),
+            patch("service.ai_gateway_service.load_execution_policy", return_value={"default": {"max_consecutive_failures": 2}}),
+        ):
+            control = _automation_control_snapshot(
+                "QuantStrategyLab/TargetRepo",
+                task_name="monthly",
+                requested_mode="review_and_fix",
+                pending_run=pending_run,
+            )
+
         self.assertEqual(control["action"], "escalate")
         self.assertEqual(control["execution"]["action"], "human_review")
         self.assertEqual(control["execution"]["consecutive_failures"], 2)
