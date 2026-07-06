@@ -582,7 +582,7 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
                         self.assertEqual(response.status, 200)
                         recorded = json.loads(response.read().decode("utf-8"))
                     self.assertEqual(recorded["run"]["run_id"], "platform-health-run-1")
-                    self.assertEqual(recorded["run"]["suggested_action"], recorded["control"]["action"])
+                    self.assertEqual(recorded["run"]["suggested_action"], recorded["control"]["effective_action"])
                     self.assertEqual(recorded["control"]["execution"]["requested_mode"], "review_and_fix")
                     self.assertEqual(recorded["run"]["metadata"]["requested_mode"], "review_and_fix")
                     self.assertEqual(recorded["run"]["service_health"], recorded["control"]["service_health"])

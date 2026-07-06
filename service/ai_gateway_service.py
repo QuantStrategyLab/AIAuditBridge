@@ -580,10 +580,10 @@ def _automation_control_snapshot(
         strict_action = CONTROL_PAUSE_AUTO_FIX
     elif execution.get("effective_mode") == MODE_REVIEW_ONLY and strict_action == CONTROL_CONTINUE:
         strict_action = CONTROL_REVIEW_ONLY
+    control["effective_action"] = strict_action
     if strict_action != original_action:
-        control["action"] = strict_action
         reasons = control.get("reasons") if isinstance(control.get("reasons"), list) else []
-        reasons.append("capped by execution decision")
+        reasons.append("effective action capped by execution decision")
         control["reasons"] = reasons
     control["auto_fix_allowed"] = bool(execution.get("auto_fix_allowed")) and strict_action == CONTROL_CONTINUE
     control["auto_merge_allowed"] = bool(execution.get("auto_merge_allowed")) and strict_action == CONTROL_CONTINUE
@@ -635,7 +635,7 @@ def _automation_triage_snapshot(
     if not category and error:
         category = service_failure_category(error)
 
-    control_action = str(control.get("action") or CONTROL_REVIEW_ONLY)
+    control_action = str(control.get("effective_action") or control.get("action") or CONTROL_REVIEW_ONLY)
     execution = control.get("execution") if isinstance(control.get("execution"), dict) else {}
     execution_auto_fix_allowed = bool(control.get("auto_fix_allowed")) and bool(execution.get("auto_fix_allowed"))
     retry_allowed = False
@@ -757,7 +757,7 @@ def _record_job_automation_run(job: dict[str, Any]) -> None:
             str(job.get("job_id") or ""),
             task_state,
             task_name=task_name,
-            suggested_action=str(control.get("action") or ""),
+            suggested_action=str(control.get("effective_action") or control.get("action") or ""),
             service_health=str(control.get("service_health") or ""),
             quota_status=str(control.get("quota_status") or ""),
             org_health_status=str(control.get("org_health_status") or ""),
@@ -1660,7 +1660,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             run_id,
             task_state,
             task_name=task_name,
-            suggested_action=str(control.get("action") or ""),
+            suggested_action=str(control.get("effective_action") or control.get("action") or ""),
             service_health=str(control.get("service_health") or ""),
             quota_status=control.get("quota_status") or "",
             org_health_status=str(control.get("org_health_status") or ""),
