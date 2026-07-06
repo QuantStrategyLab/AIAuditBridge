@@ -1500,6 +1500,9 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 repo = claims_repo
         repo = repo or "unknown"
         mode = str(params.get("mode", [MODE_REVIEW_AND_FIX])[0] or MODE_REVIEW_AND_FIX)
+        if mode not in {MODE_REVIEW_ONLY, MODE_REVIEW_AND_FIX}:
+            _json_response(self, HTTPStatus.BAD_REQUEST, {"status": "error", "error": "invalid mode"})
+            return
         _json_response(self, HTTPStatus.OK, {"status": "ok", "control": _automation_control_snapshot(repo, requested_mode=mode)})
 
     def _handle_automation_triage(self, claims: dict[str, Any], payload: dict[str, Any]) -> None:

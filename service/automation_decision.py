@@ -9,7 +9,6 @@ from typing import Any
 
 from service.automation_run_ledger import CONTROL_ESCALATE, CONTROL_PAUSE_AUTO_FIX, CONTROL_REVIEW_ONLY
 from service.quota import recommend_model
-from service.task_state import TERMINAL_STATES
 
 EXECUTION_RUN = "run"
 EXECUTION_REVIEW_ONLY = "review_only"
@@ -100,6 +99,8 @@ def _fail_closed_policy(reason: str) -> dict[str, Any]:
         "default": {
             "max_autonomy": AUTONOMY_MANUAL,
             "max_consecutive_failures": 1,
+            "low_cost_model": DEFAULT_LOW_COST_MODEL,
+            "low_cost_provider": DEFAULT_LOW_COST_PROVIDER,
         },
     }
 
@@ -157,11 +158,15 @@ def load_execution_policy(path: Path | None = None) -> dict[str, Any]:
         if not configured:
             return _fail_closed_policy("execution policy path is not configured")
         path = Path(configured).expanduser()
-    if not path.exists():
-        return _fail_closed_policy("execution policy file is unavailable")
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return _fail_closed_policy("execution policy file is unavailable")
+    except OSError:
+        return _fail_closed_policy("execution policy file is unreadable")
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
         return _fail_closed_policy("execution policy file is unreadable")
     if not isinstance(payload, dict):
         return _fail_closed_policy("execution policy file is invalid")
@@ -205,8 +210,7 @@ def consecutive_failure_count(
         if state == "failed":
             count += 1
             continue
-        if state in TERMINAL_STATES:
-            break
+        break
     return count
 
 
@@ -281,9 +285,9 @@ def decide_automation_execution(
         reasons.append("health unhealthy; forcing human review")
 
     if quota in {"low", "constrained"}:
-        effective_model = low_cost_model or recommend_model(0.0)
-        effective_provider = low_cost_provider or "auto"
-        if quota_low_behavior == "defer":
+        if action in {EXECUTION_HUMAN_REVIEW, EXECUTION_DEFER}:
+            reasons.append(f"quota status is {quota}; execution already blocked")
+        elif quota_low_behavior == "defer":
             if action != EXECUTION_HUMAN_REVIEW:
                 action = EXECUTION_DEFER
                 defer = True
@@ -291,14 +295,18 @@ def decide_automation_execution(
             human_review_required = True
             reasons.append(f"quota status is {quota}; deferring automation")
         else:
+            effective_model = low_cost_model or recommend_model(0.0)
+            effective_provider = low_cost_provider or "auto"
             reasons.append(f"quota status is {quota}; recommending low-cost model")
     elif quota in {"exhausted", "blocked"}:
         if action != EXECUTION_HUMAN_REVIEW:
             action = EXECUTION_DEFER
             defer = True
+            reasons.append(f"quota status is {quota}; deferring automation")
+        else:
+            reasons.append(f"quota status is {quota}; execution already blocked")
         effective_mode = MODE_REVIEW_ONLY
         human_review_required = True
-        reasons.append(f"quota status is {quota}; deferring automation")
 
     return {
         "action": action,

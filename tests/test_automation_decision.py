@@ -110,6 +110,21 @@ class TestAutomationDecision(unittest.TestCase):
         self.assertEqual(result["effective_provider"], "openai")
         self.assertEqual(result["effective_model"], "gpt-5.4-mini")
 
+    def test_low_quota_does_not_override_model_when_human_review_required(self) -> None:
+        result = decide_automation_execution(
+            repo="QuantStrategyLab/AIAuditBridge",
+            requested_mode=MODE_REVIEW_AND_FIX,
+            requested_model="gpt-5.4-pro",
+            control_action=CONTROL_ESCALATE,
+            service_health="healthy",
+            quota_status="low",
+            org_health_status="ok",
+            policy={"default": {"low_cost_model": "gpt-5.4-mini", "low_cost_provider": "openai"}},
+        )
+
+        self.assertEqual(result["action"], EXECUTION_HUMAN_REVIEW)
+        self.assertEqual(result["effective_model"], "gpt-5.4-pro")
+
     def test_repo_policy_can_force_review_only(self) -> None:
         result = decide_automation_execution(
             repo="quantstrategylab/cryptolivepoolpipelines",
@@ -206,7 +221,7 @@ class TestAutomationDecision(unittest.TestCase):
             },
         ]
 
-        self.assertEqual(consecutive_failure_count(runs, repo="QuantStrategyLab/AIAuditBridge"), 1)
+        self.assertEqual(consecutive_failure_count(runs, repo="QuantStrategyLab/AIAuditBridge"), 0)
 
     def test_invalid_failure_threshold_falls_back_safely(self) -> None:
         result = decide_automation_execution(

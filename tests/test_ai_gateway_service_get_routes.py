@@ -378,6 +378,14 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
                 self.assertEqual(control["execution"]["effective_mode"], "review_only")
                 self.assertFalse(control["execution"]["auto_fix_allowed"])
 
+                invalid_mode_request = urllib.request.Request(
+                    f"{base_url}/v1/ai/automation/control?repo=QuantStrategyLab/TargetRepo&mode=bad",
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                with self.assertRaises(urllib.error.HTTPError) as ctx:
+                    urllib.request.urlopen(invalid_mode_request, timeout=5)
+                self.assertEqual(ctx.exception.code, 400)
+
                 missing_repo_request = urllib.request.Request(
                     f"{base_url}/v1/ai/automation/control",
                     headers={"Authorization": f"Bearer {token}"},
