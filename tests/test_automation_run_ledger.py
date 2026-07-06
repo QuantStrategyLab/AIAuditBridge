@@ -145,6 +145,17 @@ class TestAutomationRunLedger(unittest.TestCase):
         self.assertEqual(snapshot["summary"]["suggested_actions"][CONTROL_CONTINUE], 2)
         self.assertNotIn("events", snapshot["runs"][0])
 
+    def test_snapshot_none_limit_returns_all_retained_runs(self) -> None:
+        self.ledger.record("run-1", "running")
+        self.ledger.record("run-2", "running")
+        self.ledger.record("run-3", "running")
+
+        snapshot = self.ledger.snapshot(limit=None)
+
+        self.assertEqual(snapshot["summary"]["total_runs"], 3)
+        self.assertEqual(snapshot["summary"]["returned_runs"], 3)
+        self.assertEqual({run["run_id"] for run in snapshot["runs"]}, {"run-1", "run-2", "run-3"})
+
     def test_snapshot_can_include_bounded_history(self) -> None:
         ledger = AutomationRunLedger(max_events_per_run=2)
         ledger.record("run-1", "queued")

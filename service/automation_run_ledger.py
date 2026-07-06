@@ -467,6 +467,7 @@ class AutomationRunLedger:
             return self._public_entry(entry) if entry else None
 
     def snapshot(self, *, limit: int | None = 100, include_events: bool = False) -> dict[str, Any]:
+        """Return retained runs; ``limit=None`` returns the full retained ledger."""
         with self._lock:
             self._refresh_from_disk_locked()
             retained_runs = [

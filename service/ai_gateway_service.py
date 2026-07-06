@@ -532,6 +532,9 @@ def _automation_control_snapshot(
         recent_runs = []
         ledger_unavailable = True
     if pending_run is not None:
+        pending_run_id = str(pending_run.get("run_id") or "")
+        if pending_run_id:
+            recent_runs = [run for run in recent_runs if str(run.get("run_id") or "") != pending_run_id]
         recent_runs = [pending_run, *recent_runs]
     execution = decide_automation_execution(
         repo=repo or "unknown",
@@ -557,7 +560,7 @@ def _automation_control_snapshot(
     if execution.get("action") == EXECUTION_HUMAN_REVIEW:
         strict_action = CONTROL_ESCALATE
     elif execution.get("action") == EXECUTION_DEFER:
-        strict_action = CONTROL_PAUSE_AUTO_FIX
+        strict_action = CONTROL_ESCALATE
     elif (
         execution.get("requested_mode") == MODE_REVIEW_AND_FIX
         and execution.get("effective_mode") == MODE_REVIEW_ONLY
@@ -719,7 +722,12 @@ def _record_job_automation_run(job: dict[str, Any]) -> None:
             repo,
             task_name=task_name,
             requested_mode=str(job.get("mode") or MODE_REVIEW_ONLY),
-            pending_run={"task_name": task_name, "task_state": task_state, "metadata": metadata},
+            pending_run={
+                "run_id": str(job.get("job_id") or ""),
+                "task_name": task_name,
+                "task_state": task_state,
+                "metadata": metadata,
+            },
         )
         get_automation_run_ledger().record(
             str(job.get("job_id") or ""),
@@ -1596,7 +1604,12 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             repo,
             task_name=task_name,
             requested_mode=str(payload.get("mode") or MODE_REVIEW_ONLY),
-            pending_run={"task_name": task_name, "task_state": task_state, "metadata": run_metadata},
+            pending_run={
+                "run_id": run_id,
+                "task_name": task_name,
+                "task_state": task_state,
+                "metadata": run_metadata,
+            },
         )
         record = get_automation_run_ledger().record(
             run_id,

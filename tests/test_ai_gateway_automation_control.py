@@ -134,6 +134,7 @@ class TestAutomationControlSnapshot(unittest.TestCase):
     def test_control_snapshot_counts_pending_run_for_failure_threshold(self) -> None:
         runs = [
             {
+                "run_id": "previous-run",
                 "task_name": "monthly",
                 "task_state": "failed",
                 "metadata": {"source_repository": "QuantStrategyLab/TargetRepo"},
@@ -143,6 +144,7 @@ class TestAutomationControlSnapshot(unittest.TestCase):
         quota = type("Quota", (), {"runtime_status": lambda self, repo: {"status": "ok"}})()
         ledger = type("Ledger", (), {"snapshot": lambda self, limit=None: {"runs": runs}})()
         pending_run = {
+            "run_id": "current-run",
             "task_name": "monthly",
             "task_state": "failed",
             "metadata": {"source_repository": "QuantStrategyLab/TargetRepo"},
@@ -165,6 +167,62 @@ class TestAutomationControlSnapshot(unittest.TestCase):
         self.assertEqual(control["action"], "escalate")
         self.assertEqual(control["execution"]["action"], "human_review")
         self.assertEqual(control["execution"]["consecutive_failures"], 2)
+
+    def test_control_snapshot_deduplicates_pending_run_by_run_id(self) -> None:
+        runs = [
+            {
+                "run_id": "current-run",
+                "task_name": "monthly",
+                "task_state": "failed",
+                "metadata": {"source_repository": "QuantStrategyLab/TargetRepo"},
+            }
+        ]
+        health = type("Health", (), {"status": "healthy"})()
+        quota = type("Quota", (), {"runtime_status": lambda self, repo: {"status": "ok"}})()
+        ledger = type("Ledger", (), {"snapshot": lambda self, limit=None: {"runs": runs}})()
+        pending_run = {
+            "run_id": "current-run",
+            "task_name": "monthly",
+            "task_state": "failed",
+            "metadata": {"source_repository": "QuantStrategyLab/TargetRepo"},
+        }
+
+        with (
+            patch("service.ai_gateway_service.read_org_health", return_value={"status": "ok"}),
+            patch("service.ai_gateway_service.get_health_monitor", return_value=health),
+            patch("service.ai_gateway_service.get_quota_manager", return_value=quota),
+            patch("service.ai_gateway_service.get_automation_run_ledger", return_value=ledger),
+            patch("service.ai_gateway_service.load_execution_policy", return_value={"default": {"max_consecutive_failures": 2}}),
+        ):
+            control = _automation_control_snapshot(
+                "QuantStrategyLab/TargetRepo",
+                task_name="monthly",
+                requested_mode="review_and_fix",
+                pending_run=pending_run,
+            )
+
+        self.assertEqual(control["action"], "continue")
+        self.assertEqual(control["execution"]["consecutive_failures"], 1)
+
+    def test_control_snapshot_maps_defer_to_legacy_escalate(self) -> None:
+        health = type("Health", (), {"status": "healthy"})()
+        quota = type("Quota", (), {"runtime_status": lambda self, repo: {"status": "low"}})()
+        ledger = type("Ledger", (), {"snapshot": lambda self, limit=None: {"runs": []}})()
+
+        with (
+            patch("service.ai_gateway_service.read_org_health", return_value={"status": "ok"}),
+            patch("service.ai_gateway_service.get_health_monitor", return_value=health),
+            patch("service.ai_gateway_service.get_quota_manager", return_value=quota),
+            patch("service.ai_gateway_service.get_automation_run_ledger", return_value=ledger),
+            patch(
+                "service.ai_gateway_service.load_execution_policy",
+                return_value={"default": {"quota_low_behavior": "defer"}},
+            ),
+        ):
+            control = _automation_control_snapshot("QuantStrategyLab/TargetRepo", requested_mode="review_and_fix")
+
+        self.assertEqual(control["action"], "escalate")
+        self.assertEqual(control["execution"]["action"], "defer")
 
     def test_control_snapshot_fails_closed_when_ledger_is_unavailable(self) -> None:
         health = type("Health", (), {"status": "healthy"})()
