@@ -257,6 +257,28 @@ AIAuditBridge 是 QuantStrategyLab 的 AI 审计控制面，负责：
 
 这类优化有价值，但不是无人值守的先决条件。
 
+#### 3.8 Strategy Optimization Watcher 的 issue-only 安全边界
+
+对于 Strategy Optimization Watcher，首批实现只走 issue-only 提案流，不直接触碰策略执行面。
+
+推荐流程是：
+
+1. deterministic trigger 触发 watcher；
+2. 生成 evidence bundle；
+3. 只创建 optimization issue / task proposal；
+4. 经过 authority / registry gate 校验后再决定是否进入下一步；
+5. 后续如需执行，再由人工或 CI gate 接管。
+
+当前首批实现的安全边界是：
+
+- 只创建 optimization issue/task；
+- 不自动改策略；
+- 不调 live 参数；
+- 不联网检索；
+- 不自动 merge / deploy。
+
+这样可以把策略优化先收敛为可审计、可回放的建议流，再逐步扩展到受控执行面。
+
 ---
 
 ## 4. 可落地的阶段性改造计划

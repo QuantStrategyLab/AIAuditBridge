@@ -1,0 +1,125 @@
+name: Strategy Optimization Watcher
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_repo:
+        description: "Repository that owns strategy metrics and receives optimization issues"
+        required: true
+        default: "QuantStrategyLab/CryptoLivePoolPipelines"
+      source_ref:
+        description: "Source repository ref to inspect"
+        required: false
+        default: "main"
+      metrics_path:
+        description: "JSON metrics payload path inside the source repository"
+        required: false
+        default: "data/output/strategy_metrics.json"
+      dry_run:
+        description: "Do not create GitHub issues"
+        required: false
+        type: boolean
+        default: true
+  schedule:
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: strategy-optimization-watcher-${{ github.event.inputs.source_repo || vars.STRATEGY_WATCH_SOURCE_REPO || github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  strategy-optimization-watcher:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+      SOURCE_REPO: ${{ github.event.inputs.source_repo || vars.STRATEGY_WATCH_SOURCE_REPO || github.repository }}
+      SOURCE_REF: ${{ github.event.inputs.source_ref || vars.STRATEGY_WATCH_SOURCE_REF || 'main' }}
+      METRICS_PATH: ${{ github.event.inputs.metrics_path || vars.STRATEGY_WATCH_METRICS_PATH || 'data/output/strategy_metrics.json' }}
+      STRATEGY_WATCH_DRY_RUN: ${{ github.event.inputs.dry_run || vars.STRATEGY_WATCH_DRY_RUN || 'true' }}
+    steps:
+      - name: Checkout Bridge
+        uses: actions/checkout@v6.0.3
+        with:
+          path: bridge
+          persist-credentials: false
+
+      - name: Detect GitHub App Credentials
+        id: app_credentials
+        env:
+          APP_ID: ${{ vars.CROSS_REPO_GITHUB_APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.CROSS_REPO_GITHUB_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -n "${APP_ID:-}" ] && [ -n "${APP_PRIVATE_KEY:-}" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Resolve Source Repository Name
+        id: source_repo
+        run: |
+          set -euo pipefail
+          if [[ ! "${SOURCE_REPO}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+            echo "Invalid SOURCE_REPO: ${SOURCE_REPO}. Expected owner/name." >&2
+            exit 1
+          fi
+          repository="${SOURCE_REPO#*/}"
+          echo "repository=${repository}" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub App Token For Source Repository
+        id: source_app_token
+        if: steps.app_credentials.outputs.available == 'true'
+        continue-on-error: true
+        uses: actions/create-github-app-token@v3.2.0
+        with:
+          app-id: ${{ vars.CROSS_REPO_GITHUB_APP_ID }}
+          private-key: ${{ secrets.CROSS_REPO_GITHUB_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ steps.source_repo.outputs.repository }}
+          permission-contents: read
+          permission-issues: write
+
+      - name: Verify Source Repository Token
+        env:
+          SOURCE_APP_TOKEN: ${{ steps.source_app_token.outputs.token }}
+        run: |
+          set -euo pipefail
+          if [ "${SOURCE_REPO}" != "${GITHUB_REPOSITORY}" ] && [ -z "${SOURCE_APP_TOKEN:-}" ]; then
+            echo "Cross-repository strategy watcher requires CROSS_REPO_GITHUB_APP_ID and CROSS_REPO_GITHUB_APP_PRIVATE_KEY." >&2
+            exit 1
+          fi
+
+      - name: Checkout Source Metrics
+        uses: actions/checkout@v6.0.3
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: ${{ env.SOURCE_REF }}
+          path: source
+          token: ${{ steps.source_app_token.outputs.token || github.token }}
+          persist-credentials: false
+
+      - name: Run Strategy Optimization Watcher
+        env:
+          GH_TOKEN: ${{ steps.source_app_token.outputs.token || github.token }}
+          STRATEGY_WATCH_SOURCE_ROOT: ${{ github.workspace }}/source
+          STRATEGY_WATCH_METRICS_PATH: ${{ env.METRICS_PATH }}
+          STRATEGY_WATCH_SOURCE_REPO: ${{ env.SOURCE_REPO }}
+        working-directory: bridge
+        run: |
+          set -euo pipefail
+          mkdir -p data/output/strategy_optimization_watcher
+          python scripts/run_strategy_optimization_watcher.py | tee data/output/strategy_optimization_watcher/result.json
+
+      - name: Upload watcher diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: strategy-optimization-watcher-${{ github.run_id }}
+          path: bridge/data/output/strategy_optimization_watcher/
+          if-no-files-found: warn
