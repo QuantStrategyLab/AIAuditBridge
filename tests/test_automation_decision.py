@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from service.automation_decision import (
     EXECUTION_DEFER,
@@ -92,9 +94,23 @@ class TestAutomationDecision(unittest.TestCase):
         self.assertEqual(result["effective_model"], "gpt-5.4-mini")
         self.assertTrue(any("low-cost model" in reason for reason in result["reasons"]))
 
+    def test_low_quota_overrides_requested_expensive_model(self) -> None:
+        result = decide_automation_execution(
+            repo="QuantStrategyLab/AIAuditBridge",
+            requested_mode=MODE_REVIEW_AND_FIX,
+            requested_model="gpt-5.4-pro",
+            control_action=CONTROL_CONTINUE,
+            service_health="healthy",
+            quota_status="low",
+            org_health_status="ok",
+            policy={"default": {"low_cost_model": "gpt-5.4-mini"}},
+        )
+
+        self.assertEqual(result["effective_model"], "gpt-5.4-mini")
+
     def test_repo_policy_can_force_review_only(self) -> None:
         result = decide_automation_execution(
-            repo="QuantStrategyLab/CryptoLivePoolPipelines",
+            repo="quantstrategylab/cryptolivepoolpipelines",
             requested_mode=MODE_REVIEW_AND_FIX,
             control_action=CONTROL_CONTINUE,
             service_health="healthy",
@@ -106,6 +122,17 @@ class TestAutomationDecision(unittest.TestCase):
         self.assertEqual(result["effective_mode"], MODE_REVIEW_ONLY)
         self.assertTrue(result["human_review_required"])
         self.assertFalse(result["auto_fix_allowed"])
+
+    def test_failure_streak_matching_is_case_insensitive(self) -> None:
+        runs = [
+            {
+                "task_name": "monthly",
+                "task_state": "failed",
+                "metadata": {"source_repository": "QuantStrategyLab/AIAuditBridge"},
+            },
+        ]
+
+        self.assertEqual(consecutive_failure_count(runs, repo="quantstrategylab/aiauditbridge", task_name="monthly"), 1)
 
     def test_invalid_repo_autonomy_fails_closed(self) -> None:
         result = decide_automation_execution(
@@ -197,6 +224,10 @@ class TestAutomationDecision(unittest.TestCase):
 
             path.write_text(json.dumps({"default": {"max_autonomy": "review_only"}}), encoding="utf-8")
             self.assertEqual(load_execution_policy(path)["default"]["max_autonomy"], "review_only")
+
+    def test_load_execution_policy_fails_closed_when_path_unset(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(load_execution_policy()["default"]["max_autonomy"], "manual")
 
 
 if __name__ == "__main__":

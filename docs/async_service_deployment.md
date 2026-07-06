@@ -92,8 +92,9 @@ without trusting the reviewed checkout:
 }
 ```
 
-If this configured file later becomes unreadable or malformed, the service
-fails closed for execution decisions until the file is repaired.
+If this configured file is missing, unreadable, malformed, or the policy path is
+not configured, the service fails closed for execution decisions until the
+configuration is repaired.
 
 The service should rely on an authenticated Codex CLI session and must not
 inject OpenAI/Codex API keys into the Codex subprocess.

@@ -62,6 +62,10 @@ def _normalize_mode(value: str) -> str:
     return MODE_REVIEW_AND_FIX if str(value or "").strip() == MODE_REVIEW_AND_FIX else MODE_REVIEW_ONLY
 
 
+def _normalize_repo_id(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
 def _parse_autonomy(value: Any, default: str = AUTONOMY_AUTO_PR) -> tuple[str, str]:
     level = str(value or "").strip().lower()
     if not level:
@@ -114,7 +118,7 @@ def load_execution_policy(path: Path | None = None) -> dict[str, Any]:
     if path is None:
         configured = os.environ.get(EXECUTION_POLICY_PATH_ENV, "").strip()
         if not configured:
-            return {}
+            return _fail_closed_policy("execution policy path is not configured")
         path = Path(configured).expanduser()
     if not path.exists():
         return _fail_closed_policy("execution policy file is unavailable")
@@ -135,7 +139,12 @@ def repo_execution_policy(repo: str, policy: dict[str, Any] | None = None) -> di
     raw = policy if isinstance(policy, dict) else {}
     defaults = raw.get("default") if isinstance(raw.get("default"), dict) else {}
     repositories = raw.get("repositories") if isinstance(raw.get("repositories"), dict) else {}
-    override = repositories.get(repo) if isinstance(repositories.get(repo), dict) else {}
+    normalized_repo = _normalize_repo_id(repo)
+    override = {}
+    for configured_repo, configured_policy in repositories.items():
+        if _normalize_repo_id(configured_repo) == normalized_repo and isinstance(configured_policy, dict):
+            override = configured_policy
+            break
     return {**defaults, **override}
 
 
@@ -147,10 +156,11 @@ def consecutive_failure_count(
 ) -> int:
     """Count latest consecutive failed runs for one repo/task from newest-first runs."""
     count = 0
+    normalized_repo = _normalize_repo_id(repo)
     for run in runs:
         if not isinstance(run, dict):
             continue
-        if repo and _repo_from_run(run) != repo:
+        if normalized_repo and _normalize_repo_id(_repo_from_run(run)) != normalized_repo:
             continue
         if task_name and str(run.get("task_name") or "") != task_name:
             continue
@@ -233,7 +243,7 @@ def decide_automation_execution(
         reasons.append("health unhealthy; forcing human review")
 
     if quota in {"low", "constrained"}:
-        effective_model = effective_model or low_cost_model or recommend_model(0.0)
+        effective_model = low_cost_model or recommend_model(0.0)
         if quota_low_behavior == "defer":
             if action != EXECUTION_HUMAN_REVIEW:
                 action = EXECUTION_DEFER
