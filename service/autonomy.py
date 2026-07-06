@@ -75,6 +75,10 @@ CRITICAL_PATTERNS = (
 )
 HIGH_RISK_PREFIXES = (
     "src/quant_",
+    "src/us_equity_strategies/",
+    "src/cn_equity_strategies/",
+    "src/hk_equity_strategies/",
+    "src/crypto_strategies/",
     "application/",
 )
 MEDIUM_RISK_PREFIXES = (
@@ -85,9 +89,9 @@ LOW_RISK_PREFIXES = (
     "tests/",
 )
 LOW_RISK_EXACT = frozenset({
-    "README.md",
-    "README.zh-CN.md",
-    "LICENSE",
+    "readme.md",
+    "readme.zh-cn.md",
+    "license",
     ".gitignore",
 })
 CRITICAL_EXACT = frozenset({
@@ -181,10 +185,10 @@ class AutonomyConfig:
 
 def _policy_matches(path: str, rule: dict[str, Any]) -> bool:
     exact = rule.get("exact")
-    if isinstance(exact, list) and path in {str(item) for item in exact}:
+    if isinstance(exact, list) and path in {str(item).lower() for item in exact}:
         return True
     prefixes = rule.get("prefixes")
-    if isinstance(prefixes, list) and any(path.startswith(str(prefix)) for prefix in prefixes):
+    if isinstance(prefixes, list) and any(path.startswith(str(prefix).lower()) for prefix in prefixes):
         return True
     return False
 
@@ -213,6 +217,7 @@ def classify_file_risk(path: str, *, policy: dict[str, Any] | None = None) -> st
     Mirrors ``codex_auto_merge_policy.json`` when present, then falls back to
     the built-in conservative rules.
     """
+    path = str(path).strip().replace("\\", "/").lower()
     if _blocked_by_policy(path, policy):
         return RISK_CRITICAL
 

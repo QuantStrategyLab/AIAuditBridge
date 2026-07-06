@@ -20,6 +20,7 @@ import json
 import hashlib
 import logging
 import os
+import posixpath
 import re
 import secrets
 import sys
@@ -47,17 +48,26 @@ from service.adapters.codex_adapter import CodexAdapter
 from service.autonomy import (
     ACTION_AUTO_PR,
     ACTION_RANK,
+    RISK_HIGH,
+    classify_file_risk,
     load_autonomy_policy,
     recommended_action as compute_recommended_action,
 )
 from service.automation_authority import (
     CLASS_LIVE_EQUIVALENT_OPTIMIZATION,
+    CLASS_LIVE_CANDIDATE_PROMOTION,
+    CLASS_NEW_OR_RECONSTRUCTED_STRATEGY,
+    CLASS_PLUGIN_POSITION_CONTROL,
     LIVE_EQUIVALENT_REQUIRED_EVIDENCE,
     evaluate_automation_authority,
 )
 from service.automation_run_ledger import (
     get_automation_run_ledger,
     suggest_control_action,
+)
+from service.strategy_automation_registry import (
+    apply_strategy_registry_guard,
+    summarize_strategy_registry_context,
 )
 from service.feedback import (
     write_change,
@@ -509,6 +519,40 @@ def _dashboard_repository_allowed(claims: dict[str, Any], repository: str) -> bo
 def _automation_run_owner_repository(run: dict[str, Any]) -> str:
     metadata = run.get("metadata") if isinstance(run.get("metadata"), dict) else {}
     return str(metadata.get("source_repository") or metadata.get("repository") or "")
+
+
+def _normalize_changed_path(path: str) -> str:
+    raw_path = str(path).strip().replace("\\", "/")
+    if not raw_path:
+        return ""
+    if raw_path.startswith("/") or re.match(r"^[A-Za-z]:/", raw_path):
+        raise ValueError("changed_paths must be clean repo-relative paths")
+    parts = [part for part in raw_path.split("/") if part not in {"", "."}]
+    if any(part == ".." for part in parts):
+        raise ValueError("changed_paths must not contain parent-directory segments")
+    normalized = posixpath.normpath("/".join(parts))
+    if normalized in {"", "."}:
+        return ""
+    return normalized
+
+
+def _strategy_profile_required_for_paths(changed_paths: list[str], policy: dict[str, Any]) -> bool:
+    return any(classify_file_risk(path.lower(), policy=policy) == RISK_HIGH for path in changed_paths)
+
+
+def _strategy_profile_required_for_class(change_class: str, changed_paths: list[str], policy: dict[str, Any]) -> bool:
+    profile_optional_paths = {"web/strategy-switch-console/strategy-profiles.example.json"}
+    protected_classes = {
+        CLASS_LIVE_EQUIVALENT_OPTIMIZATION,
+        CLASS_LIVE_CANDIDATE_PROMOTION,
+        CLASS_NEW_OR_RECONSTRUCTED_STRATEGY,
+        CLASS_PLUGIN_POSITION_CONTROL,
+    }
+    if change_class in protected_classes:
+        if change_class == CLASS_LIVE_CANDIDATE_PROMOTION and changed_paths:
+            return not all(path.lower() in profile_optional_paths for path in changed_paths)
+        return True
+    return _strategy_profile_required_for_paths(changed_paths, policy)
 
 
 def _assert_source_repository_owner_or_operator(claims: dict[str, Any], source_repository: str) -> None:
@@ -1287,10 +1331,48 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             _validate_source_repo(source_repo)
             if not _automation_operator_claims(claims):
                 _validate_source_repo_org(claims, source_repo)
-        changed_paths = [str(path) for path in payload.get("changed_paths", []) if isinstance(path, str)]
+        changed_paths = [
+            normalized
+            for path in payload.get("changed_paths", [])
+            if isinstance(path, str)
+            for normalized in (_normalize_changed_path(path),)
+            if normalized
+        ]
         metadata = payload.get("automation_metadata") if isinstance(payload.get("automation_metadata"), dict) else {}
         proposed_action = str(payload.get("proposed_action") or ACTION_AUTO_PR)
-        authority = evaluate_automation_authority(changed_paths, metadata=metadata, proposed_action=proposed_action)
+        strategy_profile = str(payload.get("strategy_profile") or "")
+        autonomy_policy = load_autonomy_policy()
+        authority = evaluate_automation_authority(
+            changed_paths,
+            metadata=metadata,
+            proposed_action=proposed_action,
+        )
+        if "strategy_automation_registry" in payload:
+            if not strategy_profile:
+                registry_context = {
+                    "valid": False,
+                    "profile_required": True,
+                    "reason": "strategy_profile is missing for explicit strategy registry",
+                }
+            else:
+                registry_context = summarize_strategy_registry_context(
+                    payload.get("strategy_automation_registry"),
+                    strategy_profile,
+                )
+        elif strategy_profile:
+            registry_context = {
+                "valid": False,
+                "profile": strategy_profile,
+                "reason": "strategy_profile requires a trusted server-owned strategy registry",
+            }
+        elif _strategy_profile_required_for_class(str(authority.get("change_class") or ""), changed_paths, autonomy_policy):
+            registry_context = {
+                "valid": False,
+                "profile_required": True,
+                "reason": "strategy_profile is required for strategy-owned changes",
+            }
+        else:
+            registry_context = summarize_strategy_registry_context(None, "")
         repo = source_repo or str(claims.get("repository") or "unknown")
         try:
             org_health_status = str((read_org_health() or {}).get("status") or "unknown")
@@ -1300,7 +1382,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             [{"confidence": float(payload.get("confidence", 0.5))}],
             changed_paths,
             repo=repo,
-            policy=load_autonomy_policy(),
+            policy=autonomy_policy,
             automation_metadata=metadata,
             health_status=get_health_monitor().status,
             quota_status=str(get_quota_manager().runtime_status(repo).get("status", "ok")),
@@ -1315,7 +1397,11 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             authority["final_action"] = str(guarded["action"])
             authority["human_review_required"] = True
             authority["reasons"].append("capped by repository policy or runtime guards")
-        authority["policy_guard_action"] = guarded["action"]
+        authority = apply_strategy_registry_guard(authority, registry_context)
+        policy_guard_action = str(guarded["action"])
+        if ACTION_RANK.get(policy_guard_action, 0) > ACTION_RANK.get(str(authority["final_action"]), 0):
+            policy_guard_action = str(authority["final_action"])
+        authority["policy_guard_action"] = policy_guard_action
         _json_response(self, HTTPStatus.OK, {"status": "ok", "automation_authority": authority})
 
     # -- feedback handlers (Phase 3: closed-loop change tracking) --

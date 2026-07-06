@@ -43,6 +43,17 @@ class TestDefaultDecisionMatrix(unittest.TestCase):
     def test_high_risk_never_auto_merges(self) -> None:
         self.assertEqual(recommended_action([{"confidence": 0.95}], ["src/quant_strategy.py"])["action"], ACTION_AUTO_PR)
         self.assertEqual(recommended_action([{"confidence": 0.84}], ["src/quant_strategy.py"])["action"], ACTION_ESCALATE)
+        self.assertEqual(classify_file_risk("SRC/QUANT_STRATEGY.py"), RISK_HIGH)
+
+    def test_market_strategy_paths_are_high_risk(self) -> None:
+        for path in (
+            "src/us_equity_strategies/tqqq.py",
+            "src/cn_equity_strategies/kc50.py",
+            "src/hk_equity_strategies/hsi.py",
+            "src/crypto_strategies/btc.py",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(classify_file_risk(path), RISK_HIGH)
 
     def test_low_risk_high_confidence_can_auto_merge(self) -> None:
         result = recommended_action([{"confidence": 0.96}], ["docs/README.md"])
