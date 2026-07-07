@@ -320,18 +320,19 @@ class TestAutomationRunLedger(unittest.TestCase):
 
         self.assertTrue(snapshot["summary"]["retention"]["history_completeness_unknown"])
 
-    def test_corrupt_disk_read_preserves_local_runs_without_overwriting_file(self) -> None:
+    def test_corrupt_disk_read_fails_record_without_overwriting_file(self) -> None:
         with TemporaryDirectory() as tmp:
             path = Path(tmp) / "automation_runs.json"
             ledger = AutomationRunLedger(max_runs=3, storage_path=path)
             ledger.record("run-1", "queued")
             path.write_text("{not-json", encoding="utf-8")
-            ledger.record("run-2", "queued")
+            with self.assertRaises(OSError):
+                ledger.record("run-2", "queued")
             snapshot = ledger.snapshot(limit=None)
 
             self.assertEqual(path.read_text(encoding="utf-8"), "{not-json")
 
-        self.assertEqual({run["run_id"] for run in snapshot["runs"]}, {"run-1", "run-2"})
+        self.assertEqual({run["run_id"] for run in snapshot["runs"]}, {"run-1"})
         self.assertTrue(snapshot["summary"]["retention"]["history_completeness_unknown"])
 
     def test_update_preserves_control_fields_when_omitted(self) -> None:

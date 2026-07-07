@@ -228,7 +228,7 @@ class TestAutomationControlSnapshot(unittest.TestCase):
         self.assertFalse(control["execution"]["failure_history_complete"])
         self.assertEqual(control["execution"]["consecutive_failures"], 1)
 
-    def test_control_snapshot_ignores_other_repo_ledger_eviction(self) -> None:
+    def test_control_snapshot_allows_known_repo_boundary_when_history_unknown(self) -> None:
         health = type("Health", (), {"status": "healthy"})()
         quota = type("Quota", (), {"runtime_status": lambda self, repo: {"status": "ok"}})()
         ledger = type(
@@ -236,9 +236,12 @@ class TestAutomationControlSnapshot(unittest.TestCase):
             (),
             {
                 "snapshot": lambda self, limit=None: {
-                    "runs": [],
+                    "runs": [
+                        {"run_id": "merged-1", "task_state": "merged", "metadata": {"source_repository": "QuantStrategyLab/TargetRepo"}}
+                    ],
                     "summary": {
                         "retention": {
+                            "history_completeness_unknown": True,
                             "may_be_truncated": True,
                             "evicted_runs": 1,
                             "evicted_runs_by_repo": {"quantstrategylab/otherrepo": 1},

@@ -351,8 +351,7 @@ class AutomationRunLedger:
             self._storage_file_seen = True
             if not disk_read_ok:
                 self._history_completeness_unknown = True
-                self._evict_old_runs_locked()
-                return
+                raise OSError("automation ledger could not be refreshed from disk")
             if guard_run_id:
                 disk_entry = disk_runs.get(guard_run_id)
                 disk_owner = _entry_owner_repository(disk_entry) if isinstance(disk_entry, dict) else ""
