@@ -649,7 +649,6 @@ def _automation_triage_snapshot(
         category = service_failure_category(error)
 
     control_action = str(control.get("effective_action") or control.get("action") or CONTROL_REVIEW_ONLY)
-    runtime_control_action = str(control.get("runtime_action") or control.get("action") or CONTROL_REVIEW_ONLY)
     execution = control.get("execution") if isinstance(control.get("execution"), dict) else {}
     execution_auto_fix_allowed = bool(control.get("auto_fix_allowed")) and bool(execution.get("auto_fix_allowed"))
     retry_allowed = False
@@ -675,7 +674,7 @@ def _automation_triage_snapshot(
         recommended_action = "retry"
         next_step = "retry"
     else:
-        if path_risk in {RISK_CRITICAL, RISK_HIGH} or runtime_control_action == CONTROL_ESCALATE:
+        if path_risk in {RISK_CRITICAL, RISK_HIGH} or control_action == CONTROL_ESCALATE:
             incident_class = "blocked"
             recommended_action = "escalate"
             next_step = "escalate"
