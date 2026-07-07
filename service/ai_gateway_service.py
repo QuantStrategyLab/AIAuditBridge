@@ -549,7 +549,7 @@ def _automation_control_snapshot(
         repo_evictions = 0
     normalized_repo = str(repo or "unknown").strip().lower()
     repo_history_has_terminal_boundary = any(
-        str(run.get("task_state") or "").strip().lower() not in {"failed", "queued", "running", "pending", "in_progress"}
+        str(run.get("task_state") or "").strip().lower() not in {"failed", "blocked", "queued", "running", "pending", "in_progress"}
         and _automation_run_owner_repository(run).strip().lower() == normalized_repo
         and str((run.get("metadata") if isinstance(run.get("metadata"), dict) else {}).get("origin") or "") == "service_job"
         for run in recent_runs
@@ -1669,7 +1669,8 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         }
         if mode_from_payload or raw_mode or existing is None:
             run_metadata["requested_mode"] = requested_mode
-        control = _automation_control_snapshot(repo, task_name=task_name, requested_mode=requested_mode)
+        pending_run = {"run_id": run_id, "task_name": task_name, "task_state": task_state, "metadata": run_metadata}
+        control = _automation_control_snapshot(repo, task_name=task_name, requested_mode=requested_mode, pending_run=pending_run)
         record = get_automation_run_ledger().record(
             run_id,
             task_state,
