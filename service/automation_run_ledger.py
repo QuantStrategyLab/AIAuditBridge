@@ -252,7 +252,7 @@ class AutomationRunLedger:
             return {}, 0, 0, {}, True
         clean_runs = {str(key): value for key, value in runs.items() if isinstance(value, dict)}
         sequence = _safe_int(payload.get("sequence"), len(clean_runs))
-        history_unknown = ("evicted_runs" not in payload or "evicted_runs_by_repo" not in payload) and len(clean_runs) >= self._max_runs
+        history_unknown = "evicted_runs" not in payload or "evicted_runs_by_repo" not in payload
         evicted_runs = _safe_int(payload.get("evicted_runs"), 0)
         raw_evicted_by_repo = payload.get("evicted_runs_by_repo")
         evicted_by_repo = {

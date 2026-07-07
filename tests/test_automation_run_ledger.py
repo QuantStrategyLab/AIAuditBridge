@@ -222,7 +222,7 @@ class TestAutomationRunLedger(unittest.TestCase):
         self.assertEqual(snapshot["summary"]["retention"]["evicted_runs_by_repo"], {"quantstrategylab/repoa": 2})
         self.assertEqual({run["run_id"] for run in snapshot["runs"]}, {"run-3", "run-4"})
 
-    def test_pre_migration_full_ledger_marks_history_completeness_unknown(self) -> None:
+    def test_pre_migration_ledger_marks_history_completeness_unknown(self) -> None:
         with TemporaryDirectory() as tmp:
             path = Path(tmp) / "automation_runs.json"
             path.write_text(
@@ -243,12 +243,12 @@ class TestAutomationRunLedger(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            ledger = AutomationRunLedger(max_runs=1, storage_path=path)
+            ledger = AutomationRunLedger(max_runs=2, storage_path=path)
             snapshot = ledger.snapshot(limit=None)
 
         self.assertTrue(snapshot["summary"]["retention"]["history_completeness_unknown"])
 
-    def test_pre_migration_partial_ledger_clears_history_unknown_after_schema_rewrite(self) -> None:
+    def test_pre_migration_ledger_keeps_history_unknown_after_schema_rewrite(self) -> None:
         with TemporaryDirectory() as tmp:
             path = Path(tmp) / "automation_runs.json"
             path.write_text(
@@ -270,11 +270,11 @@ class TestAutomationRunLedger(unittest.TestCase):
             )
 
             ledger = AutomationRunLedger(max_runs=3, storage_path=path)
-            self.assertFalse(ledger.snapshot(limit=None)["summary"]["retention"]["history_completeness_unknown"])
+            self.assertTrue(ledger.snapshot(limit=None)["summary"]["retention"]["history_completeness_unknown"])
             ledger.record("run-2", "queued", metadata={"source_repository": "QuantStrategyLab/RepoA"})
             snapshot = AutomationRunLedger(max_runs=3, storage_path=path).snapshot(limit=None)
 
-        self.assertFalse(snapshot["summary"]["retention"]["history_completeness_unknown"])
+        self.assertTrue(snapshot["summary"]["retention"]["history_completeness_unknown"])
         self.assertEqual({run["run_id"] for run in snapshot["runs"]}, {"run-1", "run-2"})
 
     def test_stale_update_cannot_resurrect_run_evicted_on_disk(self) -> None:
