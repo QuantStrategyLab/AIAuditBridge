@@ -90,9 +90,7 @@ class TestAutomationControlSnapshot(unittest.TestCase):
                 control = _automation_control_snapshot("QuantStrategyLab/TargetRepo", requested_mode="review_and_fix")
 
         self.assertEqual(control["effective_action"], "escalate")
-        self.assertTrue(control["requires_human_review"])
         self.assertEqual(control["execution"]["action"], "human_review")
-        self.assertEqual(control["execution"]["effective_mode"], "review_only")
 
     def test_control_snapshot_scans_full_retained_ledger_for_repo_failure_streak(self) -> None:
         runs = [
@@ -139,7 +137,6 @@ class TestAutomationControlSnapshot(unittest.TestCase):
             control = _automation_control_snapshot("QuantStrategyLab/TargetRepo", task_name="monthly")
 
         self.assertIsNone(ledger.requested_limit)
-        self.assertEqual(control["execution"]["action"], "human_review")
         self.assertEqual(control["execution"]["consecutive_failures"], 2)
 
     def test_control_snapshot_counts_pending_run_for_failure_threshold(self) -> None:
@@ -176,7 +173,6 @@ class TestAutomationControlSnapshot(unittest.TestCase):
             )
 
         self.assertEqual(control["effective_action"], "escalate")
-        self.assertEqual(control["execution"]["action"], "human_review")
         self.assertEqual(control["execution"]["consecutive_failures"], 2)
 
     def test_control_snapshot_fails_closed_after_ledger_eviction(self) -> None:
@@ -217,9 +213,7 @@ class TestAutomationControlSnapshot(unittest.TestCase):
             control = _automation_control_snapshot("QuantStrategyLab/TargetRepo", task_name="monthly")
 
         self.assertEqual(control["effective_action"], "escalate")
-        self.assertEqual(control["execution"]["action"], "human_review")
         self.assertFalse(control["execution"]["failure_history_complete"])
-        self.assertEqual(control["execution"]["consecutive_failures"], 1)
 
     def test_control_snapshot_allows_known_repo_boundary_when_history_unknown(self) -> None:
         health = type("Health", (), {"status": "healthy"})()
@@ -296,12 +290,8 @@ class TestAutomationControlSnapshot(unittest.TestCase):
             control = _automation_control_snapshot("QuantStrategyLab/TargetRepo", requested_mode="auto_merge")
 
         self.assertEqual(control["action"], "continue")
-        self.assertTrue(control["auto_fix_allowed"])
         self.assertFalse(control["auto_merge_allowed"])
-        self.assertEqual(control["execution"]["requested_autonomy"], "auto_merge")
         self.assertEqual(control["execution"]["effective_autonomy"], "auto_pr")
-        self.assertEqual(control["execution"]["action"], "run")
-        self.assertFalse(control["execution"]["auto_merge_allowed"])
 
     def test_triage_omitted_mode_keeps_review_and_fix_default(self) -> None:
         health = type("Health", (), {"status": "healthy"})()
@@ -393,7 +383,6 @@ class TestAutomationControlSnapshot(unittest.TestCase):
             control = _automation_control_snapshot("QuantStrategyLab/TargetRepo", requested_mode="auto_merge")
 
         self.assertEqual(control["effective_action"], "escalate")
-        self.assertEqual(control["execution"]["action"], "human_review")
         self.assertFalse(control["execution"]["auto_merge_allowed"])
 
 

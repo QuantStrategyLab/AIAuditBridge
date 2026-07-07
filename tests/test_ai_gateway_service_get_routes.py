@@ -605,6 +605,7 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
                         **payload,
                         "run_id": "platform-health-run-manual",
                         "task_state": "failed",
+                        "metadata": {"requested_mode": "auto_merge", "mode": "auto_merge"},
                     }
                     manual_update_request = urllib.request.Request(
                         f"{base_url}/v1/ai/automation/runs",

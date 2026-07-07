@@ -552,7 +552,7 @@ def _automation_control_snapshot(
     repo_history_has_terminal_boundary = any(
         str(run.get("task_state") or "").strip().lower() in {"merged", "completed", "succeeded"}
         and _automation_run_owner_repository(run).strip().lower() == normalized_repo
-        and str((run.get("metadata") if isinstance(run.get("metadata"), dict) else {}).get("origin") or "") in {"service_job", "external_workflow"}
+        and str((run.get("metadata") if isinstance(run.get("metadata"), dict) else {}).get("origin") or "") == "service_job"
         for run in recent_runs
         if isinstance(run, dict)
     )
@@ -1632,6 +1632,11 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 _assert_source_repository_owner_or_operator(claims, source_repo)
         repo = source_repo or str(claims.get("repository") or "unknown")
         metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+        metadata = {
+            key: value
+            for key, value in metadata.items()
+            if str(key).strip().lower() not in {"requested_mode", "mode"}
+        }
         ledger = get_automation_run_ledger()
         run_id = str(payload.get("run_id") or payload.get("job_id") or "")
         if not run_id.strip():
@@ -1668,8 +1673,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             "source_repository": source_repo,
             "caller_repository": str(claims.get("repository") or ""),
         }
-        if mode_from_payload or raw_mode or existing is None:
-            run_metadata["requested_mode"] = requested_mode
+        run_metadata["requested_mode"] = requested_mode
         pending_run = {"run_id": run_id, "task_name": task_name, "task_state": task_state, "metadata": run_metadata}
         control = _automation_control_snapshot(repo, task_name=task_name, requested_mode=requested_mode, pending_run=pending_run)
         record = get_automation_run_ledger().record(
