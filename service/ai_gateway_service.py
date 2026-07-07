@@ -513,7 +513,7 @@ def _automation_control_snapshot(
     repo: str,
     *,
     task_name: str = "",
-    requested_mode: str = MODE_REVIEW_ONLY,
+    requested_mode: str = MODE_REVIEW_AND_FIX,
     pending_run: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     try:
@@ -628,7 +628,7 @@ def _automation_triage_snapshot(
     repo: str,
     *,
     task: str = "",
-    requested_mode: str = MODE_REVIEW_ONLY,
+    requested_mode: str = MODE_REVIEW_AND_FIX,
     failure_category: str = "",
     error: str = "",
     changed_paths: list[str] | None = None,
@@ -1535,7 +1535,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             else:
                 repo = claims_repo
         repo = repo or "unknown"
-        mode = _normalize_control_mode_param(str(params.get("mode", [MODE_REVIEW_ONLY])[0] or MODE_REVIEW_ONLY))
+        mode = _normalize_control_mode_param(str(params.get("mode", [MODE_REVIEW_AND_FIX])[0] or MODE_REVIEW_AND_FIX))
         if not mode:
             _json_response(self, HTTPStatus.BAD_REQUEST, {"status": "error", "error": "invalid mode"})
             return
@@ -1553,8 +1553,8 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         params = parse_qs(parsed.query)
         repo = str(payload.get("source_repository") or params.get("repo", [""])[0] or claims.get("repository") or "unknown")
         task = str(payload.get("task") or params.get("task", [""])[0] or "")
-        raw_mode = payload.get("mode") if "mode" in payload else params.get("mode", [MODE_REVIEW_ONLY])[0]
-        requested_mode = _normalize_control_mode_param(str(raw_mode or MODE_REVIEW_ONLY))
+        raw_mode = payload.get("mode") if "mode" in payload else params.get("mode", [MODE_REVIEW_AND_FIX])[0]
+        requested_mode = _normalize_control_mode_param(str(raw_mode or MODE_REVIEW_AND_FIX))
         if not requested_mode:
             _json_response(self, HTTPStatus.BAD_REQUEST, {"status": "error", "error": "invalid mode"})
             return
@@ -1647,7 +1647,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             if mode_from_payload
             else existing_metadata.get("requested_mode") or existing_metadata.get("mode")
         )
-        default_mode = MODE_REVIEW_ONLY
+        default_mode = MODE_REVIEW_AND_FIX
         requested_mode = _normalize_control_mode_param(str(raw_mode or default_mode))
         if mode_from_payload and not requested_mode:
             raise ValueError("invalid mode")
