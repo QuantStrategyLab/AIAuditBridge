@@ -759,7 +759,7 @@ def _record_job_automation_run(job: dict[str, Any]) -> None:
         control = _automation_control_snapshot(
             repo,
             task_name=task_name,
-            requested_mode=str(job.get("mode") or MODE_REVIEW_ONLY),
+            requested_mode=str(job.get("mode") or MODE_REVIEW_AND_FIX),
             pending_run={
                 "run_id": str(job.get("job_id") or ""),
                 "task_name": task_name,
@@ -1649,7 +1649,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             if mode_from_payload
             else existing_metadata.get("requested_mode") or existing_metadata.get("mode")
         )
-        default_mode = MODE_REVIEW_AND_FIX
+        default_mode = MODE_REVIEW_ONLY if existing is not None else MODE_REVIEW_AND_FIX
         requested_mode = _normalize_control_mode_param(str(raw_mode if raw_mode is not None and raw_mode != "" else ("" if mode_from_payload else default_mode)))
         if mode_from_payload and not requested_mode:
             raise ValueError("invalid mode")
