@@ -551,6 +551,7 @@ def _automation_control_snapshot(
     repo_history_has_terminal_boundary = any(
         str(run.get("task_state") or "").strip().lower() not in {"failed", "queued", "running", "pending", "in_progress"}
         and _automation_run_owner_repository(run).strip().lower() == normalized_repo
+        and str((run.get("metadata") if isinstance(run.get("metadata"), dict) else {}).get("origin") or "") == "service_job"
         for run in recent_runs
         if isinstance(run, dict)
     )
@@ -1519,7 +1520,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             _json_response(self, HTTPStatus.UNAUTHORIZED, {"status": "error", "error": str(exc)})
             return
         parsed = urlparse(self.path)
-        params = parse_qs(parsed.query)
+        params = parse_qs(parsed.query, keep_blank_values=True)
         repo = str(params.get("repo", [""])[0] or "")
         if not _automation_operator_claims(claims):
             claims_repo = str(claims.get("repository") or "")
@@ -1535,7 +1536,8 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             else:
                 repo = claims_repo
         repo = repo or "unknown"
-        mode = _normalize_control_mode_param(str(params.get("mode", [MODE_REVIEW_AND_FIX])[0] or MODE_REVIEW_AND_FIX))
+        raw_mode = params["mode"][0] if "mode" in params else MODE_REVIEW_AND_FIX
+        mode = _normalize_control_mode_param(str(raw_mode if raw_mode is not None else ""))
         if not mode:
             _json_response(self, HTTPStatus.BAD_REQUEST, {"status": "error", "error": "invalid mode"})
             return
@@ -1550,11 +1552,11 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             if not _automation_operator_claims(claims):
                 _validate_source_repo_org(claims, source_repo)
         parsed = urlparse(self.path)
-        params = parse_qs(parsed.query)
+        params = parse_qs(parsed.query, keep_blank_values=True)
         repo = str(payload.get("source_repository") or params.get("repo", [""])[0] or claims.get("repository") or "unknown")
         task = str(payload.get("task") or params.get("task", [""])[0] or "")
-        raw_mode = payload.get("mode") if "mode" in payload else params.get("mode", [MODE_REVIEW_AND_FIX])[0]
-        requested_mode = _normalize_control_mode_param(str(raw_mode or MODE_REVIEW_AND_FIX))
+        raw_mode = payload.get("mode") if "mode" in payload else params["mode"][0] if "mode" in params else MODE_REVIEW_AND_FIX
+        requested_mode = _normalize_control_mode_param(str(raw_mode if raw_mode is not None else ""))
         if not requested_mode:
             _json_response(self, HTTPStatus.BAD_REQUEST, {"status": "error", "error": "invalid mode"})
             return
@@ -1648,7 +1650,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             else existing_metadata.get("requested_mode") or existing_metadata.get("mode")
         )
         default_mode = MODE_REVIEW_AND_FIX
-        requested_mode = _normalize_control_mode_param(str(raw_mode or default_mode))
+        requested_mode = _normalize_control_mode_param(str(raw_mode if raw_mode is not None and raw_mode != "" else ("" if mode_from_payload else default_mode)))
         if mode_from_payload and not requested_mode:
             raise ValueError("invalid mode")
         run_metadata = {

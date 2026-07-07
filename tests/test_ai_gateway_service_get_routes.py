@@ -617,7 +617,7 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
                     self.assertEqual(manual_updated["control"]["execution"]["requested_mode"], "review_only")
                     self.assertEqual(manual_updated["run"]["metadata"]["requested_mode"], "manual")
 
-                    invalid_mode_payload = {**payload, "run_id": "platform-health-run-invalid", "mode": "bad"}
+                    invalid_mode_payload = {**payload, "run_id": "platform-health-run-invalid", "mode": ""}
                     invalid_mode_request = urllib.request.Request(
                         f"{base_url}/v1/ai/automation/runs",
                         data=json.dumps(invalid_mode_payload).encode("utf-8"),
