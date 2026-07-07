@@ -589,8 +589,6 @@ def _automation_control_snapshot(
         strict_action = CONTROL_REVIEW_ONLY
     elif execution.get("action") == EXECUTION_DEFER:
         strict_action = CONTROL_PAUSE_AUTO_FIX
-    elif execution.get("requested_autonomy") == "auto_merge" and execution.get("effective_autonomy") != "auto_merge":
-        strict_action = CONTROL_REVIEW_ONLY
     elif execution.get("effective_mode") == MODE_REVIEW_ONLY and strict_action == CONTROL_CONTINUE:
         strict_action = CONTROL_REVIEW_ONLY
     control["runtime_action"] = original_action

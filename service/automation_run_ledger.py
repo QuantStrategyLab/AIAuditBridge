@@ -230,7 +230,7 @@ class AutomationRunLedger:
             return
         if not self._storage_path.exists():
             return
-        runs, sequence, evicted_runs, evicted_runs_by_repo, history_unknown = self._read_from_disk_unlocked()
+        runs, sequence, evicted_runs, evicted_runs_by_repo, history_unknown, _read_ok = self._read_from_disk_unlocked()
         with self._lock:
             self._storage_file_seen = True
             self._runs = runs
@@ -240,16 +240,16 @@ class AutomationRunLedger:
             self._history_completeness_unknown = history_unknown
             self._evict_old_runs_locked()
 
-    def _read_from_disk_unlocked(self) -> tuple[dict[str, dict[str, Any]], int, int, dict[str, int], bool]:
+    def _read_from_disk_unlocked(self) -> tuple[dict[str, dict[str, Any]], int, int, dict[str, int], bool, bool]:
         if self._storage_path is None or not self._storage_path.exists():
-            return {}, 0, 0, {}, self._storage_file_seen
+            return {}, 0, 0, {}, self._storage_file_seen, not self._storage_file_seen
         try:
             payload = json.loads(self._storage_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
-            return {}, 0, 0, {}, True
+            return {}, 0, 0, {}, True, False
         runs = payload.get("runs") if isinstance(payload, dict) else None
         if not isinstance(runs, dict):
-            return {}, 0, 0, {}, True
+            return {}, 0, 0, {}, True, False
         clean_runs = {str(key): value for key, value in runs.items() if isinstance(value, dict)}
         sequence = _safe_int(payload.get("sequence"), len(clean_runs))
         history_unknown = "evicted_runs" not in payload or "evicted_runs_by_repo" not in payload
@@ -261,7 +261,7 @@ class AutomationRunLedger:
             if _repo_retention_key(repo)
         }
         history_unknown = bool(payload.get("history_completeness_unknown", history_unknown))
-        return clean_runs, sequence, max(0, evicted_runs), evicted_by_repo, history_unknown
+        return clean_runs, sequence, max(0, evicted_runs), evicted_by_repo, history_unknown, True
 
     def _merge_evicted_runs_by_repo_locked(self, disk_evicted_runs_by_repo: dict[str, int]) -> None:
         for repo, count in disk_evicted_runs_by_repo.items():
@@ -298,8 +298,12 @@ class AutomationRunLedger:
                 disk_evicted_runs,
                 disk_evicted_runs_by_repo,
                 disk_history_unknown,
+                disk_read_ok,
             ) = self._read_from_disk_unlocked()
             self._storage_file_seen = True
+            if not disk_read_ok:
+                self._history_completeness_unknown = True
+                return
             self._drop_runs_evicted_on_disk_locked(disk_runs)
             for run_id, disk_entry in disk_runs.items():
                 current = self._runs.get(run_id)
@@ -335,20 +339,26 @@ class AutomationRunLedger:
                 lock_path = self._storage_path.with_suffix(self._storage_path.suffix + ".lock")
                 lock_handle = lock_path.open("a+", encoding="utf-8")
                 fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+            had_seen_storage = self._storage_file_seen
             (
                 disk_runs,
                 disk_sequence,
                 disk_evicted_runs,
                 disk_evicted_runs_by_repo,
                 disk_history_unknown,
+                disk_read_ok,
             ) = self._read_from_disk_unlocked()
             self._storage_file_seen = True
+            if not disk_read_ok:
+                self._history_completeness_unknown = True
+                self._evict_old_runs_locked()
+                return
             if guard_run_id:
                 disk_entry = disk_runs.get(guard_run_id)
                 disk_owner = _entry_owner_repository(disk_entry) if isinstance(disk_entry, dict) else ""
                 if owner_repository and disk_owner and disk_owner != owner_repository:
                     raise PermissionError("automation run_id belongs to another repository")
-                if guard_preexisting and disk_entry is None and self._storage_file_seen:
+                if guard_preexisting and disk_entry is None and had_seen_storage:
                     raise ValueError("automation run was evicted from retained ledger")
             self._drop_runs_evicted_on_disk_locked(disk_runs, preserve_run_id=guard_run_id)
             for run_id, disk_entry in disk_runs.items():
