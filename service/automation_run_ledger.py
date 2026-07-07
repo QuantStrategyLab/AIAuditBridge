@@ -221,6 +221,7 @@ class AutomationRunLedger:
         self._evicted_runs_count = 0
         self._evicted_runs_by_repo: dict[str, int] = {}
         self._history_completeness_unknown = False
+        self._storage_unavailable = False
         self._storage_file_seen = False
         self._storage_path = storage_path
         self._load_from_disk()
@@ -230,7 +231,7 @@ class AutomationRunLedger:
             return
         if not self._storage_path.exists():
             return
-        runs, sequence, evicted_runs, evicted_runs_by_repo, history_unknown, _read_ok = self._read_from_disk_unlocked()
+        runs, sequence, evicted_runs, evicted_runs_by_repo, history_unknown, read_ok = self._read_from_disk_unlocked()
         with self._lock:
             self._storage_file_seen = True
             self._runs = runs
@@ -238,6 +239,7 @@ class AutomationRunLedger:
             self._evicted_runs_count = evicted_runs
             self._evicted_runs_by_repo = evicted_runs_by_repo
             self._history_completeness_unknown = history_unknown
+            self._storage_unavailable = not read_ok
             self._evict_old_runs_locked()
 
     def _read_from_disk_unlocked(self) -> tuple[dict[str, dict[str, Any]], int, int, dict[str, int], bool, bool]:
@@ -288,6 +290,7 @@ class AutomationRunLedger:
         if not self._storage_path.exists():
             if self._storage_file_seen:
                 self._history_completeness_unknown = True
+                self._storage_unavailable = True
             return
         lock_handle = None
         try:
@@ -306,7 +309,9 @@ class AutomationRunLedger:
             self._storage_file_seen = True
             if not disk_read_ok:
                 self._history_completeness_unknown = True
+                self._storage_unavailable = True
                 return
+            self._storage_unavailable = False
             self._drop_runs_evicted_on_disk_locked(disk_runs)
             for run_id, disk_entry in disk_runs.items():
                 current = self._runs.get(run_id)
@@ -401,6 +406,7 @@ class AutomationRunLedger:
             pass
         os.replace(tmp, self._storage_path)
         self._storage_file_seen = True
+        self._storage_unavailable = False
 
     def _merge_entry_locked(self, current: dict[str, Any], disk_entry: dict[str, Any]) -> dict[str, Any]:
         current_terminal = _is_terminal_task_state(current.get("task_state"))
@@ -495,6 +501,7 @@ class AutomationRunLedger:
             previous_evicted_runs_count = self._evicted_runs_count
             previous_evicted_runs_by_repo = dict(self._evicted_runs_by_repo)
             previous_history_completeness_unknown = self._history_completeness_unknown
+            previous_storage_unavailable = self._storage_unavailable
             previous_storage_file_seen = self._storage_file_seen
             current = self._runs.get(run_id)
             if current:
@@ -555,6 +562,7 @@ class AutomationRunLedger:
                 self._evicted_runs_count = previous_evicted_runs_count
                 self._evicted_runs_by_repo = previous_evicted_runs_by_repo
                 self._history_completeness_unknown = previous_history_completeness_unknown
+                self._storage_unavailable = previous_storage_unavailable
                 self._storage_file_seen = previous_storage_file_seen
                 raise
             return self._public_entry(self._runs[run_id])
@@ -578,6 +586,7 @@ class AutomationRunLedger:
             evicted_runs_count = self._evicted_runs_count
             evicted_runs_by_repo = dict(self._evicted_runs_by_repo)
             history_completeness_unknown = self._history_completeness_unknown
+            storage_unavailable = self._storage_unavailable
 
         task_states = Counter(str(run.get("task_state", "")).strip().lower() for run in retained_runs if run.get("task_state"))
         suggested_actions = Counter(
@@ -606,6 +615,7 @@ class AutomationRunLedger:
                     "evicted_runs": evicted_runs_count,
                     "evicted_runs_by_repo": evicted_runs_by_repo,
                     "history_completeness_unknown": history_completeness_unknown,
+                    "storage_unavailable": storage_unavailable,
                     "may_be_truncated": evicted_runs_count > 0,
                 },
             },

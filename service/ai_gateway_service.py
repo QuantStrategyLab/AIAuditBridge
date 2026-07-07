@@ -547,6 +547,7 @@ def _automation_control_snapshot(
         repo_evictions = int(evicted_by_repo.get(str(repo or "unknown").strip().lower(), 0) or 0)
     except (TypeError, ValueError):
         repo_evictions = 0
+    storage_unavailable = bool(retention.get("storage_unavailable"))
     normalized_repo = str(repo or "unknown").strip().lower()
     repo_history_has_terminal_boundary = any(
         str(run.get("task_state") or "").strip().lower() in {"merged", "completed", "succeeded"}
@@ -557,7 +558,8 @@ def _automation_control_snapshot(
     )
     failure_history_complete = (
         not ledger_unavailable
-        and (not bool(retention.get("history_completeness_unknown")) or repo_history_has_terminal_boundary)
+        and not storage_unavailable
+        and (not bool(retention.get("history_completeness_unknown")) or (repo_evictions > 0 and repo_history_has_terminal_boundary))
         and (repo_evictions <= 0 or repo_history_has_terminal_boundary)
     )
     execution = decide_automation_execution(
@@ -596,13 +598,6 @@ def _automation_control_snapshot(
         strict_action = CONTROL_REVIEW_ONLY
     control["runtime_action"] = original_action
     control["effective_action"] = strict_action
-    if strict_action != original_action:
-        control["action"] = strict_action
-        reasons = control.get("reasons") if isinstance(control.get("reasons"), list) else []
-        reasons.append(
-            "aligned with execution decision" if strict_action == CONTROL_CONTINUE else "capped by execution decision"
-        )
-        control["reasons"] = reasons
     control["auto_fix_allowed"] = bool(execution.get("auto_fix_allowed")) and strict_action == CONTROL_CONTINUE
     control["auto_merge_allowed"] = bool(execution.get("auto_merge_allowed")) and strict_action == CONTROL_CONTINUE
     control["requires_human_review"] = strict_action != CONTROL_CONTINUE or bool(execution.get("human_review_required"))
