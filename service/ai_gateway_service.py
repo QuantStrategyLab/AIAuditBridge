@@ -895,6 +895,9 @@ def _automation_snapshot_for_claims(
     )
     terminal_runs = sum(1 for run in visible_runs if str(run.get("task_state", "")).strip().lower() in TERMINAL_STATES)
     summary = dict(snapshot.get("summary") or {})
+    retention = summary.get("retention")
+    if isinstance(retention, dict):
+        summary["retention"] = {key: value for key, value in retention.items() if key != "evicted_runs_by_repo"}
     summary.update(
         {
             "total_runs": len(visible_runs),
@@ -1666,17 +1669,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         }
         if mode_from_payload or raw_mode or existing is None:
             run_metadata["requested_mode"] = requested_mode
-        control = _automation_control_snapshot(
-            repo,
-            task_name=task_name,
-            requested_mode=requested_mode,
-            pending_run={
-                "run_id": run_id,
-                "task_name": task_name,
-                "task_state": task_state,
-                "metadata": run_metadata,
-            },
-        )
+        control = _automation_control_snapshot(repo, task_name=task_name, requested_mode=requested_mode)
         record = get_automation_run_ledger().record(
             run_id,
             task_state,
@@ -1688,6 +1681,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             metadata=run_metadata,
             owner_repository=repo,
         )
+        control = _automation_control_snapshot(repo, task_name=task_name, requested_mode=requested_mode, pending_run=record)
         _json_response(self, HTTPStatus.OK, {"status": "ok", "run": record, "control": control})
 
     def _handle_automation_authority(self, claims: dict[str, Any], payload: dict[str, Any]) -> None:

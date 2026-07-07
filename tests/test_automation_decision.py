@@ -205,7 +205,7 @@ class TestAutomationDecision(unittest.TestCase):
 
     def test_failure_streak_matching_is_case_insensitive(self) -> None:
         runs = [
-            {"task_name": "monthly", "task_state": "failed", "metadata": {"origin": "service_job", "source_repository": "QuantStrategyLab/AIAuditBridge"}},
+            {"task_name": "monthly", "task_state": "blocked", "metadata": {"origin": "service_job", "source_repository": "QuantStrategyLab/AIAuditBridge"}},
         ]
 
         self.assertEqual(consecutive_failure_count(runs, repo="quantstrategylab/aiauditbridge"), 1)

@@ -252,14 +252,17 @@ class AutomationRunLedger:
             return {}, 0, 0, {}, True, False
         clean_runs = {str(key): value for key, value in runs.items() if isinstance(value, dict)}
         sequence = _safe_int(payload.get("sequence"), len(clean_runs))
-        history_unknown = "evicted_runs" not in payload or "evicted_runs_by_repo" not in payload
         evicted_runs = _safe_int(payload.get("evicted_runs"), 0)
         raw_evicted_by_repo = payload.get("evicted_runs_by_repo")
-        evicted_by_repo = {
-            _repo_retention_key(repo): max(0, _safe_int(count))
-            for repo, count in (raw_evicted_by_repo.items() if isinstance(raw_evicted_by_repo, dict) else [])
-            if _repo_retention_key(repo)
-        }
+        history_unknown = "evicted_runs" not in payload or not isinstance(raw_evicted_by_repo, dict)
+        evicted_by_repo = {}
+        for repo, count in (raw_evicted_by_repo.items() if isinstance(raw_evicted_by_repo, dict) else []):
+            repo_key = _repo_retention_key(repo)
+            count_value = _safe_int(count, -1)
+            if not repo_key or count_value < 0:
+                history_unknown = True
+                continue
+            evicted_by_repo[repo_key] = count_value
         history_unknown = bool(payload.get("history_completeness_unknown", history_unknown))
         return clean_runs, sequence, max(0, evicted_runs), evicted_by_repo, history_unknown, True
 

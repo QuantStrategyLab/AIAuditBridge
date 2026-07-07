@@ -310,7 +310,7 @@ def consecutive_failure_count(
         state = str(run.get("task_state") or "").strip().lower()
         if origin not in TRUSTED_FAILURE_ORIGINS:
             continue
-        if state == "failed":
+        if state in {"failed", "blocked"}:
             count += 1
             continue
         if state in {"queued", "running", "pending", "in_progress"}:
