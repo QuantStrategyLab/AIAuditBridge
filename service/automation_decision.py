@@ -410,12 +410,13 @@ def decide_automation_execution(
     if quota in {"low", "constrained"}:
         if action in {EXECUTION_HUMAN_REVIEW, EXECUTION_DEFER}:
             reasons.append(f"quota status is {quota}; execution already blocked")
-        elif quota_low_behavior == "defer":
-            if action != EXECUTION_HUMAN_REVIEW:
-                action = EXECUTION_DEFER
-                defer = True
+        elif quota_low_behavior == "defer" and action == EXECUTION_RUN and AUTONOMY_RANK[requested_autonomy] > AUTONOMY_RANK[AUTONOMY_REVIEW_ONLY]:
+            action = EXECUTION_DEFER
+            defer = True
             effective_mode = MODE_REVIEW_ONLY
             reasons.append(f"quota status is {quota}; deferring automation")
+        elif quota_low_behavior == "defer":
+            reasons.append(f"quota status is {quota}; automation already review_only")
         else:
             effective_model = low_cost_model or recommend_model(0.0)
             effective_provider = low_cost_provider or "auto"

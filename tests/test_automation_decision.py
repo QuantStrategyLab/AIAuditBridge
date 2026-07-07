@@ -63,8 +63,9 @@ class TestAutomationDecision(unittest.TestCase):
             requested_mode="manual",
             control_action=CONTROL_CONTINUE,
             service_health="healthy",
-            quota_status="ok",
+            quota_status="low",
             org_health_status="ok",
+            policy={"default": {"quota_low_behavior": "defer"}},
         )
         self.assertEqual(manual_result["action"], EXECUTION_REVIEW_ONLY)
 
