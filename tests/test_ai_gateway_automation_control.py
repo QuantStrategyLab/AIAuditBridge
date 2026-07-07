@@ -13,7 +13,7 @@ from service.ai_gateway_service import _automation_control_snapshot, _automation
 
 
 class TestAutomationControlSnapshot(unittest.TestCase):
-    def test_control_snapshot_defaults_to_review_and_fix_for_healthy_repo(self) -> None:
+    def test_control_snapshot_defaults_to_review_only_for_healthy_repo(self) -> None:
         health = type("Health", (), {"status": "healthy"})()
         quota = type("Quota", (), {"runtime_status": lambda self, repo: {"status": "ok"}})()
         ledger = type("Ledger", (), {"snapshot": lambda self, limit=None: {"runs": []}})()
@@ -27,9 +27,9 @@ class TestAutomationControlSnapshot(unittest.TestCase):
         ):
             control = _automation_control_snapshot("QuantStrategyLab/TargetRepo")
 
-        self.assertEqual(control["action"], "continue")
-        self.assertEqual(control["execution"]["effective_mode"], "review_and_fix")
-        self.assertTrue(control["execution"]["auto_fix_allowed"])
+        self.assertEqual(control["action"], "review_only")
+        self.assertEqual(control["execution"]["effective_mode"], "review_only")
+        self.assertFalse(control["execution"]["auto_fix_allowed"])
 
     def test_control_snapshot_downgrades_legacy_action_for_review_only_mode(self) -> None:
         health = type("Health", (), {"status": "healthy"})()
@@ -48,7 +48,7 @@ class TestAutomationControlSnapshot(unittest.TestCase):
         self.assertEqual(control["action"], "review_only")
         self.assertEqual(control["effective_action"], "review_only")
         self.assertEqual(control["execution"]["effective_mode"], "review_only")
-        self.assertFalse(control["auto_fix_allowed"])
+        self.assertTrue(control["requires_human_review"])
 
     def test_control_snapshot_applies_service_owned_execution_policy(self) -> None:
         with TemporaryDirectory(dir=".") as tmp:
@@ -258,7 +258,7 @@ class TestAutomationControlSnapshot(unittest.TestCase):
             patch("service.ai_gateway_service.get_automation_run_ledger", return_value=ledger),
             patch("service.ai_gateway_service.load_execution_policy", return_value={"default": {"max_consecutive_failures": 2}}),
         ):
-            control = _automation_control_snapshot("QuantStrategyLab/TargetRepo", task_name="monthly")
+            control = _automation_control_snapshot("QuantStrategyLab/TargetRepo", task_name="monthly", requested_mode="review_and_fix")
 
         self.assertEqual(control["action"], "continue")
         self.assertTrue(control["execution"]["failure_history_complete"])
@@ -313,7 +313,7 @@ class TestAutomationControlSnapshot(unittest.TestCase):
         self.assertTrue(control["execution"]["auto_fix_allowed"])
         self.assertFalse(control["execution"]["auto_merge_allowed"])
 
-    def test_triage_omitted_mode_keeps_review_and_fix_default(self) -> None:
+    def test_triage_omitted_mode_uses_review_only_default(self) -> None:
         health = type("Health", (), {"status": "healthy"})()
         quota = type("Quota", (), {"runtime_status": lambda self, repo: {"status": "ok"}})()
         ledger = type("Ledger", (), {"snapshot": lambda self, limit=None: {"runs": []}})()
@@ -331,9 +331,9 @@ class TestAutomationControlSnapshot(unittest.TestCase):
                 changed_paths=["docs/runbook.md"],
             )
 
-        self.assertEqual(triage["control"]["execution"]["requested_mode"], "review_and_fix")
-        self.assertTrue(triage["auto_fix_allowed"])
-        self.assertEqual(triage["recommended_action"], "open_fix_pr")
+        self.assertEqual(triage["control"]["execution"]["requested_mode"], "review_only")
+        self.assertFalse(triage["auto_fix_allowed"])
+        self.assertEqual(triage["recommended_action"], "open_issue")
 
     def test_control_snapshot_deduplicates_pending_run_by_run_id(self) -> None:
         runs = [
@@ -389,7 +389,7 @@ class TestAutomationControlSnapshot(unittest.TestCase):
             control = _automation_control_snapshot("QuantStrategyLab/TargetRepo", requested_mode="review_and_fix")
 
         self.assertEqual(control["action"], "pause_auto_fix")
-        self.assertFalse(control["requires_human_review"])
+        self.assertTrue(control["requires_human_review"])
         self.assertEqual(control["execution"]["action"], "defer")
 
     def test_control_snapshot_fails_closed_when_ledger_is_unavailable(self) -> None:
