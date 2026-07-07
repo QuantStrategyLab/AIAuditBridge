@@ -73,7 +73,14 @@ from service.automation_run_ledger import (
     get_automation_run_ledger,
     suggest_control_action,
 )
-from service.automation_decision import EXECUTION_DEFER, EXECUTION_HUMAN_REVIEW, EXECUTION_REVIEW_ONLY, decide_automation_execution, load_execution_policy
+from service.automation_decision import (
+    EXECUTION_DEFER,
+    EXECUTION_HUMAN_REVIEW,
+    EXECUTION_REVIEW_ONLY,
+    EXECUTION_RUN,
+    decide_automation_execution,
+    load_execution_policy,
+)
 from service.strategy_automation_registry import (
     apply_strategy_registry_guard,
     summarize_strategy_registry_context,
@@ -590,6 +597,8 @@ def _automation_control_snapshot(
         strict_action = CONTROL_REVIEW_ONLY
     elif execution.get("action") == EXECUTION_DEFER:
         strict_action = CONTROL_PAUSE_AUTO_FIX
+    elif execution.get("action") == EXECUTION_RUN and execution.get("auto_fix_allowed"):
+        strict_action = CONTROL_CONTINUE
     elif execution.get("effective_mode") == MODE_REVIEW_ONLY and strict_action == CONTROL_CONTINUE:
         strict_action = CONTROL_REVIEW_ONLY
     control["runtime_action"] = original_action
@@ -597,7 +606,9 @@ def _automation_control_snapshot(
     if strict_action != original_action:
         control["action"] = strict_action
         reasons = control.get("reasons") if isinstance(control.get("reasons"), list) else []
-        reasons.append("capped by execution decision")
+        reasons.append(
+            "aligned with execution decision" if strict_action == CONTROL_CONTINUE else "capped by execution decision"
+        )
         control["reasons"] = reasons
     control["auto_fix_allowed"] = bool(execution.get("auto_fix_allowed")) and strict_action == CONTROL_CONTINUE
     control["auto_merge_allowed"] = bool(execution.get("auto_merge_allowed")) and strict_action == CONTROL_CONTINUE

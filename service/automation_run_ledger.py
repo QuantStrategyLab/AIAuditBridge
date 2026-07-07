@@ -505,7 +505,8 @@ class AutomationRunLedger:
                     and not _can_replace_stale_service_failure(current, entry)
                 ):
                     return self._public_entry(current)
-                entry["_ledger_sequence"] = current.get("_ledger_sequence", 0)
+                self._sequence += 1
+                entry["_ledger_sequence"] = self._sequence
                 old_events = list(current.get("events", []))
                 entry["events"] = (
                     old_events[-(self._max_events_per_run - 1) :] if self._max_events_per_run > 1 else []
@@ -567,7 +568,7 @@ class AutomationRunLedger:
             self._refresh_from_disk_locked()
             retained_runs = [
                 self._public_entry(entry, include_events=include_events)
-                for entry in self._runs.values()
+                for entry in sorted(self._runs.values(), key=_entry_order_key, reverse=True)
             ]
             max_runs = self._max_runs
             max_events_per_run = self._max_events_per_run
@@ -582,11 +583,7 @@ class AutomationRunLedger:
             if run.get("suggested_action")
         )
         terminal_runs = sum(1 for run in retained_runs if str(run.get("task_state", "")).strip().lower() in TERMINAL_STATES)
-        ordered_runs = sorted(
-            retained_runs,
-            key=lambda item: (float(item.get("updated_at", 0.0)), str(item.get("run_id", ""))),
-            reverse=True,
-        )
+        ordered_runs = retained_runs
         if limit is not None:
             ordered_runs = ordered_runs[: max(0, int(limit))]
         runs = ordered_runs
