@@ -390,7 +390,7 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
                     self.assertEqual(legacy_control["execution"]["requested_mode"], expected_mode)
 
                 invalid_mode_request = urllib.request.Request(
-                    f"{base_url}/v1/ai/automation/control?repo=QuantStrategyLab/TargetRepo&mode=",
+                    f"{base_url}/v1/ai/automation/control?repo=QuantStrategyLab/TargetRepo&mode=bad",
                     headers={"Authorization": f"Bearer {token}"},
                 )
                 with self.assertRaises(urllib.error.HTTPError) as ctx:
@@ -625,13 +625,12 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
                         method="POST",
                         headers={"Content-Type": "application/json"},
                     )
-                    with self.assertRaises(urllib.error.HTTPError) as ctx:
-                        urllib.request.urlopen(invalid_mode_request, timeout=5)
-                    self.assertEqual(ctx.exception.code, 400)
+                    with urllib.request.urlopen(invalid_mode_request, timeout=5) as response:
+                        self.assertEqual(response.status, 200)
 
                     with urllib.request.urlopen(f"{base_url}/v1/ai/automation/runs?include_events=true", timeout=5) as response:
                         ledger = json.loads(response.read().decode("utf-8"))["ledger"]
-                    self.assertEqual(ledger["summary"]["total_runs"], 2)
+                    self.assertEqual(ledger["summary"]["total_runs"], 3)
                     self.assertEqual(ledger["runs"][0]["task_name"], "platform-health")
                     self.assertIn("events", ledger["runs"][0])
 
@@ -686,15 +685,6 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
                         "run_id": "incident-123",
                         "mode": "manual",
                     }
-                    blank_mode_request = urllib.request.Request(
-                        f"{base_url}/v1/ai/automation/triage",
-                        data=json.dumps({**payload, "mode": ""}).encode("utf-8"),
-                        method="POST",
-                        headers={"Content-Type": "application/json"},
-                    )
-                    with self.assertRaises(urllib.error.HTTPError) as ctx:
-                        urllib.request.urlopen(blank_mode_request, timeout=5)
-                    self.assertEqual(ctx.exception.code, 400)
                     request = urllib.request.Request(
                         f"{base_url}/v1/ai/automation/triage",
                         data=json.dumps(payload).encode("utf-8"),

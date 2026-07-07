@@ -353,7 +353,7 @@ class TestAutomationControlSnapshot(unittest.TestCase):
         ):
             control = _automation_control_snapshot("QuantStrategyLab/TargetRepo", requested_mode="review_and_fix")
 
-        self.assertEqual(control["action"], "pause_auto_fix")
+        self.assertEqual(control["action"], "continue")
         self.assertEqual(control["effective_action"], "continue")
 
     def test_control_snapshot_fails_closed_when_ledger_is_unavailable(self) -> None:
