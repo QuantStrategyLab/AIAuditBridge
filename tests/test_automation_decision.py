@@ -206,22 +206,19 @@ class TestAutomationDecision(unittest.TestCase):
 
     def test_failure_streak_matching_is_case_insensitive(self) -> None:
         runs = [
-            {
-                "task_name": "monthly",
-                "task_state": "failed",
-                "metadata": {"origin": "service_job", "source_repository": "QuantStrategyLab/AIAuditBridge"},
-            },
+            {"task_name": "monthly", "task_state": "failed", "metadata": {"origin": "service_job", "source_repository": "QuantStrategyLab/AIAuditBridge"}},
         ]
 
         self.assertEqual(consecutive_failure_count(runs, repo="quantstrategylab/aiauditbridge"), 1)
 
-    def test_external_workflow_failures_do_not_drive_repo_failure_streak(self) -> None:
+    def test_external_workflow_success_breaks_repo_failure_streak(self) -> None:
         runs = [
             {
                 "task_name": "monthly",
-                "task_state": "failed",
+                "task_state": "merged",
                 "metadata": {"origin": "external_workflow", "source_repository": "QuantStrategyLab/AIAuditBridge"},
             },
+            {"task_name": "monthly", "task_state": "failed", "metadata": {"origin": "service_job", "source_repository": "QuantStrategyLab/AIAuditBridge"}},
         ]
 
         self.assertEqual(consecutive_failure_count(runs, repo="QuantStrategyLab/AIAuditBridge"), 0)
@@ -243,11 +240,7 @@ class TestAutomationDecision(unittest.TestCase):
 
     def test_consecutive_failures_force_human_review(self) -> None:
         runs = [
-            {
-                "task_name": "monthly",
-                "task_state": "failed",
-                "metadata": {"origin": "service_job", "source_repository": "QuantStrategyLab/AIAuditBridge"},
-            },
+            {"task_name": "monthly", "task_state": "failed", "metadata": {"origin": "service_job", "source_repository": "QuantStrategyLab/AIAuditBridge"}},
             {
                 "task_name": "runtime-health",
                 "task_state": "failed",
@@ -273,11 +266,7 @@ class TestAutomationDecision(unittest.TestCase):
 
     def test_truncated_failure_history_fails_closed(self) -> None:
         runs = [
-            {
-                "task_name": "monthly",
-                "task_state": "failed",
-                "metadata": {"origin": "service_job", "source_repository": "QuantStrategyLab/AIAuditBridge"},
-            },
+            {"task_name": "monthly", "task_state": "failed", "metadata": {"origin": "service_job", "source_repository": "QuantStrategyLab/AIAuditBridge"}},
         ]
 
         result = decide_automation_execution(
@@ -302,11 +291,7 @@ class TestAutomationDecision(unittest.TestCase):
                 "task_state": "running",
                 "metadata": {"origin": "service_job", "source_repository": "QuantStrategyLab/AIAuditBridge"},
             },
-            {
-                "task_name": "monthly",
-                "task_state": "failed",
-                "metadata": {"origin": "service_job", "source_repository": "QuantStrategyLab/AIAuditBridge"},
-            },
+            {"task_name": "monthly", "task_state": "failed", "metadata": {"origin": "service_job", "source_repository": "QuantStrategyLab/AIAuditBridge"}},
         ]
 
         self.assertEqual(consecutive_failure_count(runs, repo="QuantStrategyLab/AIAuditBridge"), 1)

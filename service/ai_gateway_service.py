@@ -1649,7 +1649,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             if mode_from_payload
             else existing_metadata.get("requested_mode") or existing_metadata.get("mode")
         )
-        default_mode = MODE_REVIEW_ONLY if existing is not None else MODE_REVIEW_AND_FIX
+        default_mode = MODE_REVIEW_AND_FIX
         requested_mode = _normalize_control_mode_param(str(raw_mode if raw_mode is not None and raw_mode != "" else ("" if mode_from_payload else default_mode)))
         if mode_from_payload and not requested_mode:
             raise ValueError("invalid mode")
@@ -1659,8 +1659,9 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             "repository": repo,
             "source_repository": source_repo,
             "caller_repository": str(claims.get("repository") or ""),
-            "requested_mode": requested_mode,
         }
+        if mode_from_payload or raw_mode or existing is None:
+            run_metadata["requested_mode"] = requested_mode
         control = _automation_control_snapshot(
             repo,
             task_name=task_name,

@@ -304,11 +304,14 @@ def consecutive_failure_count(
         if not isinstance(run, dict):
             continue
         metadata = run.get("metadata") if isinstance(run.get("metadata"), dict) else {}
-        if str(metadata.get("origin") or "") not in TRUSTED_FAILURE_ORIGINS:
-            continue
+        origin = str(metadata.get("origin") or "")
         if normalized_repo and _normalize_repo_id(_repo_from_run(run)) != normalized_repo:
             continue
         state = str(run.get("task_state") or "").strip().lower()
+        if origin not in TRUSTED_FAILURE_ORIGINS:
+            if origin == "external_workflow" and state not in {"failed", "queued", "running", "pending", "in_progress"}:
+                break
+            continue
         if state == "failed":
             count += 1
             continue
