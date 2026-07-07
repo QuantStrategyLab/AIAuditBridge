@@ -14,6 +14,7 @@ ALLOWED_REPOSITORY_VISIBILITIES="${CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORY_VISIBI
 ALLOWED_SOURCE_REPOSITORIES="${CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES:-QuantStrategyLab/AIAuditBridge,QuantStrategyLab/CryptoLivePoolPipelines,QuantStrategyLab/HkEquitySnapshotPipelines,QuantStrategyLab/UsEquitySnapshotPipelines,QuantStrategyLab/ResearchSignalContextPipelines}"
 JOB_DIR="${CODEX_AUDIT_SERVICE_JOB_DIR:-/var/lib/codex-audit-bridge/jobs}"
 ADMIN_ENV_FILE="${CODEX_AUDIT_SERVICE_ADMIN_ENV_FILE:-/etc/codex-audit-bridge/admin.env}"
+EXECUTION_POLICY_FILE="${CODEX_AUDIT_SERVICE_EXECUTION_POLICY_PATH:-/etc/codex-audit-bridge-policy/execution_policy.json}"
 AUDIT_MODEL="${CODEX_AUDIT_SERVICE_MODEL:-}"
 AUDIT_REASONING_EFFORT="${CODEX_AUDIT_SERVICE_REASONING_EFFORT:-}"
 CODEX_ACCOUNT_USAGE="${CODEX_AUDIT_SERVICE_CODEX_ACCOUNT_USAGE:-1}"
@@ -60,7 +61,7 @@ systemctl_environment_brief() {
       | sed 's/^Environment=//' \
       | tr ' ' '\n' \
       | sed -E "s/^[\"']//; s/[\"']$//" \
-      | grep -E '^CODEX_AUDIT_SERVICE_(ALLOWED_|AUDIENCE=|HOST=|PORT=|JOB_DIR=|QUOTA_STORE=|CODEX_ACCOUNT_USAGE=|OPENAI_USAGE_WINDOW_DAYS=|ANTHROPIC_USAGE_WINDOW_DAYS=|SANDBOX=|MODEL=|REASONING_EFFORT=)' \
+      | grep -E '^CODEX_AUDIT_SERVICE_(ALLOWED_|AUDIENCE=|HOST=|PORT=|JOB_DIR=|QUOTA_STORE=|EXECUTION_POLICY_PATH=|CODEX_ACCOUNT_USAGE=|OPENAI_USAGE_WINDOW_DAYS=|ANTHROPIC_USAGE_WINDOW_DAYS=|SANDBOX=|MODEL=|REASONING_EFFORT=)' \
       | mask_infra || true
   fi
 }
@@ -214,6 +215,123 @@ write_admin_env_file_if_needed() {
   trap - RETURN
 }
 
+write_default_execution_policy_if_missing() {
+  local policy_path="${EXECUTION_POLICY_FILE}"
+  local policy_dir
+  policy_dir="$(dirname "$policy_path")"
+  if [ -L "$policy_path" ]; then
+    echo "refusing to write execution policy through symlink: $policy_path" >&2
+    exit 1
+  fi
+  if [ -e "$policy_path" ]; then
+    return
+  fi
+  sudo python3 - "$policy_path" <<'PY'
+import os
+import stat
+import sys
+
+path = sys.argv[1]
+if not os.path.isabs(path):
+    print(f"refusing to write execution policy to relative path: {path}", file=sys.stderr)
+    raise SystemExit(1)
+
+policy_dir, policy_name = os.path.split(path)
+if not policy_dir or not policy_name:
+    print(f"invalid execution policy path: {path}", file=sys.stderr)
+    raise SystemExit(1)
+
+flags_dir = os.O_RDONLY | os.O_DIRECTORY
+if hasattr(os, "O_NOFOLLOW"):
+    flags_dir |= os.O_NOFOLLOW
+
+
+def fail(message: str) -> None:
+    print(message, file=sys.stderr)
+    raise SystemExit(1)
+
+
+def ensure_trusted_dir(fd: int, label: str, *, created: bool) -> None:
+    info = os.fstat(fd)
+    if not stat.S_ISDIR(info.st_mode):
+        fail(f"execution policy parent path is not a directory: {label}")
+    if created:
+        os.fchown(fd, 0, 0)
+        os.fchmod(fd, 0o755)
+        info = os.fstat(fd)
+    if (info.st_uid, info.st_gid) != (0, 0):
+        fail(f"execution policy parent directory owner is invalid: {label}")
+    if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        fail(f"execution policy parent directory permissions are too broad: {label}")
+
+
+def open_admin_policy_dir(directory: str) -> int:
+    fd = os.open(os.sep, flags_dir)
+    ensure_trusted_dir(fd, os.sep, created=False)
+    for component in [part for part in directory.split(os.sep) if part]:
+        if component in {".", ".."}:
+            fail(f"invalid execution policy directory component: {component}")
+        created = False
+        try:
+            next_fd = os.open(component, flags_dir, dir_fd=fd)
+        except FileNotFoundError:
+            os.mkdir(component, 0o755, dir_fd=fd)
+            created = True
+            next_fd = os.open(component, flags_dir, dir_fd=fd)
+        except OSError as exc:
+            fail(f"refusing to write execution policy under unsafe directory component {component}: {exc}")
+        try:
+            ensure_trusted_dir(next_fd, component, created=created)
+        finally:
+            os.close(fd)
+        fd = next_fd
+    return fd
+
+
+policy_dir_fd = open_admin_policy_dir(policy_dir)
+flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+content = """{
+  "default": {
+    "max_autonomy": "auto_pr",
+    "max_consecutive_failures": 3,
+    "low_cost_model": "gpt-5.4-mini",
+    "low_cost_provider": "openai"
+  },
+  "repositories": {}
+}
+"""
+try:
+    fd = os.open(policy_name, flags, 0o600, dir_fd=policy_dir_fd)
+except FileExistsError:
+    if os.path.islink(path):
+        print(f"refusing to write execution policy through symlink: {path}", file=sys.stderr)
+        raise SystemExit(1)
+    raise SystemExit(0)
+finally:
+    os.close(policy_dir_fd)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        fd = -1
+        handle.write(content)
+        handle.flush()
+        os.fchown(handle.fileno(), 0, 0)
+        os.fchmod(handle.fileno(), 0o644)
+except Exception:
+    if fd >= 0:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    raise
+PY
+}
+
 write_audit_service_unit() {
   local runner_user runner_home
   runner_user="$(id -un)"
@@ -252,6 +370,7 @@ Environment=CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORY_VISIBILITIES=${ALLOWED_REPOSI
 Environment=CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES=${ALLOWED_SOURCE_REPOSITORIES}
 Environment=CODEX_AUDIT_SERVICE_JOB_DIR=${JOB_DIR}
 Environment=CODEX_AUDIT_SERVICE_QUOTA_STORE=${JOB_DIR}/quota.json
+Environment=CODEX_AUDIT_SERVICE_EXECUTION_POLICY_PATH=${EXECUTION_POLICY_FILE}
 Environment=CODEX_AUDIT_SERVICE_CODEX_ACCOUNT_USAGE=${CODEX_ACCOUNT_USAGE}
 Environment=CODEX_AUDIT_SERVICE_OPENAI_USAGE_WINDOW_DAYS=${OPENAI_USAGE_WINDOW_DAYS}
 Environment=CODEX_AUDIT_SERVICE_ANTHROPIC_USAGE_WINDOW_DAYS=${ANTHROPIC_USAGE_WINDOW_DAYS}
@@ -281,6 +400,7 @@ Environment="CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS=${ALLOWED_WORKFLOW_REFS}"
 Environment="CODEX_AUDIT_SERVICE_ALLOWED_REFS=${ALLOWED_REFS}"
 Environment="CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORY_VISIBILITIES=${ALLOWED_REPOSITORY_VISIBILITIES}"
 Environment="CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES=${ALLOWED_SOURCE_REPOSITORIES}"
+Environment="CODEX_AUDIT_SERVICE_EXECUTION_POLICY_PATH=${EXECUTION_POLICY_FILE}"
 EOF_DROPIN
 }
 
@@ -508,6 +628,7 @@ deploy() {
   install_file "scripts/codex_audit_service.py" "${DEPLOY_DIR}/scripts/codex_audit_service.py" "0755"
   install_service_package
   sudo install -d -m 0700 -o "$runner_user" -g "$runner_user" "$JOB_DIR"
+  write_default_execution_policy_if_missing
   write_admin_env_file_if_needed
   write_audit_service_unit
   write_managed_audit_service_dropin

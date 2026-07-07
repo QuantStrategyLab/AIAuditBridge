@@ -35,6 +35,7 @@ from typing import Any
 
 from service.auth import authenticate
 from service.contracts import (
+    MODE_REVIEW_AND_FIX,
     MODE_REVIEW_ONLY,
     TASK_ANALYZE,
     TASK_EXECUTE,
@@ -72,6 +73,7 @@ from service.automation_run_ledger import (
     get_automation_run_ledger,
     suggest_control_action,
 )
+from service.automation_decision import EXECUTION_DEFER, EXECUTION_HUMAN_REVIEW, EXECUTION_REVIEW_ONLY, decide_automation_execution, load_execution_policy
 from service.strategy_automation_registry import (
     apply_strategy_registry_guard,
     summarize_strategy_registry_context,
@@ -507,7 +509,13 @@ def _public_job_payload(job: dict[str, Any]) -> dict[str, object]:
     return payload
 
 
-def _automation_control_snapshot(repo: str) -> dict[str, Any]:
+def _automation_control_snapshot(
+    repo: str,
+    *,
+    task_name: str = "",
+    requested_mode: str = MODE_REVIEW_AND_FIX,
+    pending_run: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     try:
         org_health = read_org_health()
     except Exception:
@@ -516,7 +524,98 @@ def _automation_control_snapshot(repo: str) -> dict[str, Any]:
         quota_status = get_quota_manager().runtime_status(repo or "unknown")
     except Exception:
         quota_status = {"status": "unavailable"}
-    return suggest_control_action(get_health_monitor().status, quota_status, org_health)
+    control = suggest_control_action(get_health_monitor().status, quota_status, org_health)
+    try:
+        ledger_snapshot = get_automation_run_ledger().snapshot(limit=None)
+        recent_runs = ledger_snapshot["runs"]
+        ledger_summary = ledger_snapshot.get("summary") if isinstance(ledger_snapshot.get("summary"), dict) else {}
+        retention = ledger_summary.get("retention") if isinstance(ledger_summary.get("retention"), dict) else {}
+        ledger_unavailable = False
+    except Exception:
+        recent_runs = []
+        retention = {}
+        ledger_unavailable = True
+    if pending_run is not None:
+        pending_run_id = str(pending_run.get("run_id") or "")
+        if pending_run_id:
+            recent_runs = [run for run in recent_runs if str(run.get("run_id") or "") != pending_run_id]
+        recent_runs = [pending_run, *recent_runs]
+    evicted_by_repo = (
+        retention.get("evicted_runs_by_repo") if isinstance(retention.get("evicted_runs_by_repo"), dict) else {}
+    )
+    try:
+        repo_evictions = int(evicted_by_repo.get(str(repo or "unknown").strip().lower(), 0) or 0)
+    except (TypeError, ValueError):
+        repo_evictions = 0
+    storage_unavailable = bool(retention.get("storage_unavailable"))
+    normalized_repo = str(repo or "unknown").strip().lower()
+    repo_history_has_terminal_boundary = any(
+        str(run.get("task_state") or "").strip().lower() in {"merged", "completed", "succeeded"}
+        and _automation_run_owner_repository(run).strip().lower() == normalized_repo
+        and str((run.get("metadata") if isinstance(run.get("metadata"), dict) else {}).get("origin") or "") in {"service_job", "external_workflow"}
+        for run in recent_runs
+        if isinstance(run, dict)
+    )
+    failure_history_complete = (
+        not ledger_unavailable
+        and not storage_unavailable
+        and (not bool(retention.get("history_completeness_unknown")) or repo_history_has_terminal_boundary)
+        and (repo_evictions <= 0 or repo_history_has_terminal_boundary)
+    )
+    execution = decide_automation_execution(
+        repo=repo or "unknown",
+        task_name=task_name,
+        requested_mode=requested_mode,
+        control_action=str(control.get("action") or CONTROL_REVIEW_ONLY),
+        service_health=control.get("service_health"),
+        quota_status=quota_status,
+        org_health_status=control.get("org_health_status"),
+        recent_runs=recent_runs,
+        failure_history_complete=failure_history_complete,
+        policy=load_execution_policy(),
+    )
+    if ledger_unavailable:
+        execution["action"] = EXECUTION_HUMAN_REVIEW
+        execution["effective_mode"] = MODE_REVIEW_ONLY
+        execution["human_review_required"] = True
+        execution["auto_fix_allowed"] = False
+        execution["auto_merge_allowed"] = False
+        execution["defer"] = False
+        reasons = execution.get("reasons") if isinstance(execution.get("reasons"), list) else []
+        reasons.append("automation ledger unavailable; forcing human review")
+        execution["reasons"] = reasons
+    original_action = str(control.get("action") or CONTROL_REVIEW_ONLY)
+    strict_action = original_action
+    if execution.get("action") == EXECUTION_HUMAN_REVIEW:
+        strict_action = CONTROL_ESCALATE
+    elif execution.get("action") == EXECUTION_REVIEW_ONLY:
+        strict_action = CONTROL_REVIEW_ONLY
+    elif execution.get("action") == EXECUTION_DEFER:
+        strict_action = CONTROL_PAUSE_AUTO_FIX
+    elif execution.get("action") == "run" and execution.get("auto_fix_allowed"):
+        strict_action = CONTROL_CONTINUE
+    elif execution.get("effective_mode") == MODE_REVIEW_ONLY and strict_action == CONTROL_CONTINUE:
+        strict_action = CONTROL_REVIEW_ONLY
+    action_rank = {CONTROL_CONTINUE: 0, CONTROL_PAUSE_AUTO_FIX: 1, CONTROL_REVIEW_ONLY: 2, CONTROL_ESCALATE: 3}
+    if strict_action != CONTROL_CONTINUE and action_rank.get(strict_action, 2) < action_rank.get(original_action, 2):
+        strict_action = original_action
+    control["runtime_action"] = original_action
+    control["effective_action"] = strict_action
+    control["action"] = strict_action
+    control["auto_fix_allowed"] = bool(execution.get("auto_fix_allowed")) and strict_action == CONTROL_CONTINUE
+    control["auto_merge_allowed"] = bool(execution.get("auto_merge_allowed")) and strict_action == CONTROL_CONTINUE
+    control["requires_human_review"] = strict_action != CONTROL_CONTINUE or bool(execution.get("human_review_required"))
+    control["execution"] = execution
+    return control
+
+
+def _normalize_control_mode_param(value: str) -> str:
+    mode = str(value or "").strip().lower()
+    if not mode:
+        return MODE_REVIEW_AND_FIX
+    if mode in {MODE_REVIEW_ONLY, MODE_REVIEW_AND_FIX, "manual", "auto_pr", "auto_merge"}:
+        return mode
+    return ""
 
 
 def _highest_changed_path_risk(changed_paths: list[str], policy: dict[str, Any]) -> str:
@@ -535,12 +634,13 @@ def _automation_triage_snapshot(
     repo: str,
     *,
     task: str = "",
+    requested_mode: str = MODE_REVIEW_AND_FIX,
     failure_category: str = "",
     error: str = "",
     changed_paths: list[str] | None = None,
     run_id: str = "",
 ) -> dict[str, Any]:
-    control = _automation_control_snapshot(repo)
+    control = _automation_control_snapshot(repo, task_name=task, requested_mode=requested_mode)
     policy = load_autonomy_policy()
     normalized_paths = [
         normalized
@@ -554,7 +654,9 @@ def _automation_triage_snapshot(
     if not category and error:
         category = service_failure_category(error)
 
-    control_action = str(control.get("action") or CONTROL_REVIEW_ONLY)
+    control_action = str(control.get("effective_action") or control.get("action") or CONTROL_REVIEW_ONLY)
+    execution = control.get("execution") if isinstance(control.get("execution"), dict) else {}
+    execution_auto_fix_allowed = bool(control.get("auto_fix_allowed")) and bool(execution.get("auto_fix_allowed"))
     retry_allowed = False
     deploy_allowed = False
     auto_fix_allowed = False
@@ -586,7 +688,7 @@ def _automation_triage_snapshot(
             incident_class = "degraded"
             recommended_action = "open_issue"
             next_step = "pause_auto_fix"
-        elif control_action == CONTROL_CONTINUE:
+        elif control_action == CONTROL_CONTINUE and execution_auto_fix_allowed:
             incident_class = "investigate"
             recommended_action = "open_fix_pr" if path_risk in {RISK_LOW, RISK_MEDIUM} else "open_issue"
             next_step = "open_fix_pr" if path_risk in {RISK_LOW, RISK_MEDIUM} else "open_issue"
@@ -595,7 +697,7 @@ def _automation_triage_snapshot(
             recommended_action = "open_issue"
             next_step = "open_issue"
 
-    if control_action == CONTROL_CONTINUE and category == "" and path_risk in {RISK_LOW, RISK_MEDIUM}:
+    if execution_auto_fix_allowed and category == "" and path_risk in {RISK_LOW, RISK_MEDIUM}:
         auto_fix_allowed = True
         deploy_allowed = True
     if path_risk in {RISK_HIGH, RISK_CRITICAL}:
@@ -648,24 +750,37 @@ def _automation_triage_snapshot(
 def _record_job_automation_run(job: dict[str, Any]) -> None:
     try:
         repo = str(job.get("source_repository") or job.get("repository") or "unknown")
-        control = _automation_control_snapshot(repo)
+        task_name = str(job.get("task") or "")
+        task_state = job_task_state(job)
+        metadata = {
+            "origin": "service_job",
+            "repository": repo,
+            "source_repository": str(job.get("source_repository") or ""),
+            "caller_repository": str(job.get("repository") or ""),
+            "source_ref": str(job.get("source_ref") or ""),
+            "mode": str(job.get("mode") or ""),
+            "failure_category": str(job.get("failure_category") or ""),
+        }
+        control = _automation_control_snapshot(
+            repo,
+            task_name=task_name,
+            requested_mode=str(job.get("mode") or MODE_REVIEW_AND_FIX),
+            pending_run={
+                "run_id": str(job.get("job_id") or ""),
+                "task_name": task_name,
+                "task_state": task_state,
+                "metadata": metadata,
+            },
+        )
         get_automation_run_ledger().record(
             str(job.get("job_id") or ""),
-            job_task_state(job),
-            task_name=str(job.get("task") or ""),
-            suggested_action=str(control.get("action") or ""),
+            task_state,
+            task_name=task_name,
+            suggested_action=str(control.get("effective_action") or control.get("action") or ""),
             service_health=str(control.get("service_health") or ""),
             quota_status=str(control.get("quota_status") or ""),
             org_health_status=str(control.get("org_health_status") or ""),
-            metadata={
-                "origin": "service_job",
-                "repository": repo,
-                "source_repository": str(job.get("source_repository") or ""),
-                "caller_repository": str(job.get("repository") or ""),
-                "source_ref": str(job.get("source_ref") or ""),
-                "mode": str(job.get("mode") or ""),
-                "failure_category": str(job.get("failure_category") or ""),
-            },
+            metadata=metadata,
             owner_repository=repo,
         )
     except Exception as exc:
@@ -781,6 +896,9 @@ def _automation_snapshot_for_claims(
     )
     terminal_runs = sum(1 for run in visible_runs if str(run.get("task_state", "")).strip().lower() in TERMINAL_STATES)
     summary = dict(snapshot.get("summary") or {})
+    retention = summary.get("retention")
+    if isinstance(retention, dict):
+        summary["retention"] = {key: value for key, value in retention.items() if key != "evicted_runs_by_repo"}
     summary.update(
         {
             "total_runs": len(visible_runs),
@@ -1410,7 +1528,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             _json_response(self, HTTPStatus.UNAUTHORIZED, {"status": "error", "error": str(exc)})
             return
         parsed = urlparse(self.path)
-        params = parse_qs(parsed.query)
+        params = parse_qs(parsed.query, keep_blank_values=True)
         repo = str(params.get("repo", [""])[0] or "")
         if not _automation_operator_claims(claims):
             claims_repo = str(claims.get("repository") or "")
@@ -1426,7 +1544,12 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             else:
                 repo = claims_repo
         repo = repo or "unknown"
-        _json_response(self, HTTPStatus.OK, {"status": "ok", "control": _automation_control_snapshot(repo)})
+        raw_mode = params["mode"][0] if "mode" in params else MODE_REVIEW_AND_FIX
+        mode = _normalize_control_mode_param(str(raw_mode if raw_mode is not None else ""))
+        if not mode:
+            _json_response(self, HTTPStatus.BAD_REQUEST, {"status": "error", "error": "invalid mode"})
+            return
+        _json_response(self, HTTPStatus.OK, {"status": "ok", "control": _automation_control_snapshot(repo, requested_mode=mode)})
 
     def _handle_automation_triage(self, claims: dict[str, Any], payload: dict[str, Any]) -> None:
         from urllib.parse import parse_qs, urlparse
@@ -1437,9 +1560,14 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             if not _automation_operator_claims(claims):
                 _validate_source_repo_org(claims, source_repo)
         parsed = urlparse(self.path)
-        params = parse_qs(parsed.query)
+        params = parse_qs(parsed.query, keep_blank_values=True)
         repo = str(payload.get("source_repository") or params.get("repo", [""])[0] or claims.get("repository") or "unknown")
         task = str(payload.get("task") or params.get("task", [""])[0] or "")
+        raw_mode = payload.get("mode") if "mode" in payload else params["mode"][0] if "mode" in params else MODE_REVIEW_AND_FIX
+        requested_mode = _normalize_control_mode_param(str(raw_mode if raw_mode is not None else ""))
+        if not requested_mode:
+            _json_response(self, HTTPStatus.BAD_REQUEST, {"status": "error", "error": "invalid mode"})
+            return
         failure_category = str(payload.get("failure_category") or params.get("failure_category", [""])[0] or "")
         error = str(payload.get("error") or params.get("error", [""])[0] or "")
         run_id = str(payload.get("run_id") or params.get("run_id", [""])[0] or "")
@@ -1449,6 +1577,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         triage = _automation_triage_snapshot(
             repo,
             task=task,
+            requested_mode=requested_mode,
             failure_category=failure_category,
             error=error,
             changed_paths=[str(item) for item in changed_paths_raw if isinstance(item, str)],
@@ -1504,8 +1633,12 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 _validate_source_repo_org(claims, source_repo)
                 _assert_source_repository_owner_or_operator(claims, source_repo)
         repo = source_repo or str(claims.get("repository") or "unknown")
-        control = _automation_control_snapshot(repo)
         metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+        metadata = {
+            key: value
+            for key, value in metadata.items()
+            if str(key).strip().lower() not in {"requested_mode", "mode"}
+        }
         ledger = get_automation_run_ledger()
         run_id = str(payload.get("run_id") or payload.get("job_id") or "")
         if not run_id.strip():
@@ -1519,23 +1652,42 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             if existing_metadata.get("origin") == "service_job":
                 raise PermissionError("automation run is service-owned")
             _assert_automation_run_access(existing, claims)
+        task_name = str(payload.get("task") or payload.get("task_name") or "")
+        existing_state = str(existing.get("task_state") or "") if isinstance(existing, dict) else ""
+        task_state = str(payload.get("task_state") or payload.get("state") or existing_state or "running")
+        existing_metadata = existing.get("metadata") if isinstance(existing, dict) and isinstance(existing.get("metadata"), dict) else {}
+        mode_from_payload = "mode" in payload and str(payload.get("mode") or "").strip() != ""
+        raw_mode = (
+            payload.get("mode")
+            if mode_from_payload
+            else existing_metadata.get("requested_mode")
+        )
+        default_mode = MODE_REVIEW_AND_FIX
+        requested_mode = _normalize_control_mode_param(str(raw_mode if raw_mode is not None and raw_mode != "" else ("" if mode_from_payload else default_mode)))
+        if mode_from_payload and not requested_mode:
+            raise ValueError("invalid mode")
+        run_metadata = {
+            **metadata,
+            "origin": "external_workflow",
+            "repository": repo,
+            "source_repository": source_repo,
+            "caller_repository": str(claims.get("repository") or ""),
+        }
+        run_metadata["requested_mode"] = requested_mode
+        pending_run = {"run_id": run_id, "task_name": task_name, "task_state": task_state, "metadata": run_metadata}
+        control = _automation_control_snapshot(repo, task_name=task_name, requested_mode=requested_mode, pending_run=pending_run)
         record = get_automation_run_ledger().record(
             run_id,
-            str(payload.get("task_state") or payload.get("state") or "running"),
-            task_name=str(payload.get("task") or payload.get("task_name") or ""),
-            suggested_action=str(control.get("action") or ""),
+            task_state,
+            task_name=task_name,
+            suggested_action=str(control.get("effective_action") or control.get("action") or ""),
             service_health=str(control.get("service_health") or ""),
             quota_status=control.get("quota_status") or "",
             org_health_status=str(control.get("org_health_status") or ""),
-            metadata={
-                **metadata,
-                "origin": "external_workflow",
-                "repository": repo,
-                "source_repository": source_repo,
-                "caller_repository": str(claims.get("repository") or ""),
-            },
+            metadata=run_metadata,
             owner_repository=repo,
         )
+        control = _automation_control_snapshot(repo, task_name=task_name, requested_mode=requested_mode, pending_run=record)
         _json_response(self, HTTPStatus.OK, {"status": "ok", "run": record, "control": control})
 
     def _handle_automation_authority(self, claims: dict[str, Any], payload: dict[str, Any]) -> None:

@@ -184,7 +184,7 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
         self.assertEqual([run["run_id"] for run in filtered["runs"]], ["run-a"])
 
     def test_automation_run_update_rejects_owner_mismatch_even_for_operator(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(dir=".") as tmp:
             env = {
                 "CODEX_AUDIT_SERVICE_AUTH": "none",
                 "CODEX_AUDIT_SERVICE_ALLOW_NO_AUTH_FOR_LOCAL_TESTS": "true",
@@ -372,6 +372,30 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
                 )
                 with urllib.request.urlopen(request, timeout=5) as response:
                     self.assertEqual(response.status, 200)
+                    control = json.loads(response.read().decode("utf-8"))["control"]
+                self.assertIn("execution", control)
+                self.assertEqual(control["execution"]["repo"], "QuantStrategyLab/TargetRepo")
+                self.assertEqual(control["execution"]["requested_mode"], "review_and_fix")
+                self.assertEqual(control["execution"]["effective_mode"], "review_only")
+                self.assertFalse(control["execution"]["auto_fix_allowed"])
+
+                for legacy_mode, expected_mode in {"manual": "review_only", "auto_pr": "review_and_fix", "auto_merge": "review_and_fix"}.items():
+                    legacy_mode_request = urllib.request.Request(
+                        f"{base_url}/v1/ai/automation/control?repo=QuantStrategyLab/TargetRepo&mode={legacy_mode}",
+                        headers={"Authorization": f"Bearer {token}"},
+                    )
+                    with urllib.request.urlopen(legacy_mode_request, timeout=5) as response:
+                        self.assertEqual(response.status, 200)
+                        legacy_control = json.loads(response.read().decode("utf-8"))["control"]
+                    self.assertEqual(legacy_control["execution"]["requested_mode"], expected_mode)
+
+                invalid_mode_request = urllib.request.Request(
+                    f"{base_url}/v1/ai/automation/control?repo=QuantStrategyLab/TargetRepo&mode=bad",
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                with self.assertRaises(urllib.error.HTTPError) as ctx:
+                    urllib.request.urlopen(invalid_mode_request, timeout=5)
+                self.assertEqual(ctx.exception.code, 400)
 
                 missing_repo_request = urllib.request.Request(
                     f"{base_url}/v1/ai/automation/control",
@@ -558,14 +582,55 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
                         self.assertEqual(response.status, 200)
                         recorded = json.loads(response.read().decode("utf-8"))
                     self.assertEqual(recorded["run"]["run_id"], "platform-health-run-1")
-                    self.assertEqual(recorded["run"]["suggested_action"], recorded["control"]["action"])
+                    self.assertEqual(recorded["run"]["suggested_action"], recorded["control"]["effective_action"])
+                    self.assertEqual(recorded["control"]["execution"]["requested_mode"], "review_and_fix")
+                    self.assertEqual(recorded["run"]["metadata"]["requested_mode"], "review_and_fix")
                     self.assertEqual(recorded["run"]["service_health"], recorded["control"]["service_health"])
                     self.assertEqual(recorded["run"]["quota_status"], recorded["control"]["quota_status"])
                     self.assertEqual(recorded["run"]["org_health_status"], recorded["control"]["org_health_status"])
 
+                    manual_payload = {**payload, "run_id": "platform-health-run-manual", "mode": "manual"}
+                    manual_request = urllib.request.Request(
+                        f"{base_url}/v1/ai/automation/runs",
+                        data=json.dumps(manual_payload).encode("utf-8"),
+                        method="POST",
+                        headers={"Content-Type": "application/json"},
+                    )
+                    with urllib.request.urlopen(manual_request, timeout=5) as response:
+                        manual_recorded = json.loads(response.read().decode("utf-8"))
+                    self.assertEqual(manual_recorded["control"]["execution"]["requested_mode"], "review_only")
+                    self.assertEqual(manual_recorded["run"]["metadata"]["requested_mode"], "manual")
+
+                    manual_update_payload = {
+                        **payload,
+                        "run_id": "platform-health-run-manual",
+                        "task_state": "failed",
+                        "metadata": {"requested_mode": "auto_merge", "mode": "auto_merge"},
+                    }
+                    manual_update_request = urllib.request.Request(
+                        f"{base_url}/v1/ai/automation/runs",
+                        data=json.dumps(manual_update_payload).encode("utf-8"),
+                        method="POST",
+                        headers={"Content-Type": "application/json"},
+                    )
+                    with urllib.request.urlopen(manual_update_request, timeout=5) as response:
+                        manual_updated = json.loads(response.read().decode("utf-8"))
+                    self.assertEqual(manual_updated["control"]["execution"]["requested_mode"], "review_only")
+                    self.assertEqual(manual_updated["run"]["metadata"]["requested_mode"], "manual")
+
+                    invalid_mode_payload = {**payload, "run_id": "platform-health-run-invalid", "mode": ""}
+                    invalid_mode_request = urllib.request.Request(
+                        f"{base_url}/v1/ai/automation/runs",
+                        data=json.dumps(invalid_mode_payload).encode("utf-8"),
+                        method="POST",
+                        headers={"Content-Type": "application/json"},
+                    )
+                    with urllib.request.urlopen(invalid_mode_request, timeout=5) as response:
+                        self.assertEqual(response.status, 200)
+
                     with urllib.request.urlopen(f"{base_url}/v1/ai/automation/runs?include_events=true", timeout=5) as response:
                         ledger = json.loads(response.read().decode("utf-8"))["ledger"]
-                    self.assertEqual(ledger["summary"]["total_runs"], 1)
+                    self.assertEqual(ledger["summary"]["total_runs"], 3)
                     self.assertEqual(ledger["runs"][0]["task_name"], "platform-health")
                     self.assertIn("events", ledger["runs"][0])
 
@@ -576,16 +641,33 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
                     with urllib.request.urlopen(f"{base_url}/v1/ai/automation/control?repo=local/repo", timeout=5) as response:
                         control = json.loads(response.read().decode("utf-8"))["control"]
                     self.assertIn(control["action"], {"continue", "review_only", "pause_auto_fix", "escalate"})
+                    self.assertIn("execution", control)
                 finally:
                     server.shutdown()
                     server.server_close()
 
     def test_automation_triage_reports_retryable_incident(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(dir=".") as tmp:
+            policy_path = os.path.join(tmp, "execution_policy.json")
+            with open(policy_path, "w", encoding="utf-8") as handle:
+                json.dump(
+                    {
+                        "default": {
+                            "max_autonomy": "auto_pr",
+                            "max_consecutive_failures": 3,
+                            "low_cost_model": "gpt-5.4-mini",
+                            "low_cost_provider": "openai",
+                        },
+                        "repositories": {},
+                    },
+                    handle,
+                )
             env = {
                 "CODEX_AUDIT_SERVICE_AUTH": "none",
                 "CODEX_AUDIT_SERVICE_ALLOW_NO_AUTH_FOR_LOCAL_TESTS": "true",
                 "CODEX_AUDIT_SERVICE_JOB_DIR": tmp,
+                "CODEX_AUDIT_SERVICE_EXECUTION_POLICY_PATH": policy_path,
+                "CODEX_AUDIT_SERVICE_EXECUTION_POLICY_OWNER": f"{os.getuid()}:{os.getgid()}",
                 "CODEX_AUDIT_SERVICE_AUTOMATION_OPERATOR_REPOSITORIES": "local",
             }
             with patch.dict(os.environ, env, clear=False):
@@ -601,6 +683,7 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
                         "error": "codex service timed out waiting for a background job",
                         "changed_paths": ["docs/runbook.md"],
                         "run_id": "incident-123",
+                        "mode": "manual",
                     }
                     request = urllib.request.Request(
                         f"{base_url}/v1/ai/automation/triage",
@@ -618,6 +701,7 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
                     self.assertTrue(triage["retry_allowed"])
                     self.assertEqual(triage["recommended_action"], "retry")
                     self.assertEqual(triage["file_risk"], "low")
+                    self.assertEqual(triage["control"]["execution"]["action"], "review_only")
                     self.assertIn("run_id=incident-123", triage["summary"])
                 finally:
                     server.shutdown()
