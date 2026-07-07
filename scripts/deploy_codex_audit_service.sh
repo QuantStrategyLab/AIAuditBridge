@@ -324,6 +324,10 @@ except Exception:
             os.close(fd)
         except OSError:
             pass
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
     raise
 PY
 }
