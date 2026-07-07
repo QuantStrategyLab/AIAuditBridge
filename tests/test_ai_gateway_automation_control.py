@@ -225,7 +225,7 @@ class TestAutomationControlSnapshot(unittest.TestCase):
                             "history_completeness_unknown": True,
                             "may_be_truncated": True,
                             "evicted_runs": 1,
-                            "evicted_runs_by_repo": {"quantstrategylab/targetrepo": 1},
+                            "evicted_runs_by_repo": {"quantstrategylab/targetrepo": 0},
                         }
                     },
                 }

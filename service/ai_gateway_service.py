@@ -559,7 +559,7 @@ def _automation_control_snapshot(
     failure_history_complete = (
         not ledger_unavailable
         and not storage_unavailable
-        and (not bool(retention.get("history_completeness_unknown")) or (repo_evictions > 0 and repo_history_has_terminal_boundary))
+        and (not bool(retention.get("history_completeness_unknown")) or repo_history_has_terminal_boundary)
         and (repo_evictions <= 0 or repo_history_has_terminal_boundary)
     )
     execution = decide_automation_execution(
