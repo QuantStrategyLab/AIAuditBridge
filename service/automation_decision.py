@@ -309,8 +309,6 @@ def consecutive_failure_count(
             continue
         state = str(run.get("task_state") or "").strip().lower()
         if origin not in TRUSTED_FAILURE_ORIGINS:
-            if origin == "external_workflow" and state not in {"failed", "queued", "running", "pending", "in_progress"}:
-                break
             continue
         if state == "failed":
             count += 1
@@ -413,7 +411,7 @@ def decide_automation_execution(
     if quota in {"low", "constrained"}:
         if action in {EXECUTION_HUMAN_REVIEW, EXECUTION_DEFER}:
             reasons.append(f"quota status is {quota}; execution already blocked")
-        elif quota_low_behavior == "defer" and action == EXECUTION_RUN and AUTONOMY_RANK[requested_autonomy] > AUTONOMY_RANK[AUTONOMY_REVIEW_ONLY]:
+        elif quota_low_behavior == "defer" and action == EXECUTION_RUN and AUTONOMY_RANK[effective_autonomy] > AUTONOMY_RANK[AUTONOMY_REVIEW_ONLY]:
             action = EXECUTION_DEFER
             defer = True
             effective_mode = MODE_REVIEW_ONLY

@@ -237,7 +237,7 @@ class TestAutomationControlSnapshot(unittest.TestCase):
             {
                 "snapshot": lambda self, limit=None: {
                     "runs": [
-                        {"run_id": "merged-1", "task_state": "merged", "metadata": {"origin": "external_workflow", "source_repository": "QuantStrategyLab/TargetRepo"}}
+                        {"run_id": "merged-1", "task_state": "merged", "metadata": {"origin": "service_job", "source_repository": "QuantStrategyLab/TargetRepo"}}
                     ],
                     "summary": {
                         "retention": {
