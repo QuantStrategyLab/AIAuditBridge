@@ -551,7 +551,7 @@ def _automation_control_snapshot(
     repo_history_has_terminal_boundary = any(
         str(run.get("task_state") or "").strip().lower() not in {"failed", "blocked", "queued", "running", "pending", "in_progress"}
         and _automation_run_owner_repository(run).strip().lower() == normalized_repo
-        and str((run.get("metadata") if isinstance(run.get("metadata"), dict) else {}).get("origin") or "") == "service_job"
+        and str((run.get("metadata") if isinstance(run.get("metadata"), dict) else {}).get("origin") or "") in {"service_job", "external_workflow"}
         for run in recent_runs
         if isinstance(run, dict)
     )
@@ -1652,7 +1652,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         existing_state = str(existing.get("task_state") or "") if isinstance(existing, dict) else ""
         task_state = str(payload.get("task_state") or payload.get("state") or existing_state or "running")
         existing_metadata = existing.get("metadata") if isinstance(existing, dict) and isinstance(existing.get("metadata"), dict) else {}
-        mode_from_payload = "mode" in payload
+        mode_from_payload = "mode" in payload and str(payload.get("mode") or "").strip() != ""
         raw_mode = (
             payload.get("mode")
             if mode_from_payload

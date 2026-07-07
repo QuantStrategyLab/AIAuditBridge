@@ -221,7 +221,7 @@ class TestAutomationDecision(unittest.TestCase):
             {"task_name": "monthly", "task_state": "failed", "metadata": {"origin": "service_job", "source_repository": "QuantStrategyLab/AIAuditBridge"}},
         ]
 
-        self.assertEqual(consecutive_failure_count(runs, repo="QuantStrategyLab/AIAuditBridge"), 2)
+        self.assertEqual(consecutive_failure_count(runs, repo="QuantStrategyLab/AIAuditBridge"), 1)
 
     def test_invalid_repo_autonomy_fails_closed(self) -> None:
         result = decide_automation_execution(

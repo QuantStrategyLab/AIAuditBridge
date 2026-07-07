@@ -315,8 +315,7 @@ def consecutive_failure_count(
             continue
         if state in {"queued", "running", "pending", "in_progress"}:
             continue
-        if origin == "service_job":
-            break
+        break
     return count
 
 
