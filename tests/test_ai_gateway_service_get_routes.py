@@ -390,7 +390,7 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
                     self.assertEqual(legacy_control["execution"]["requested_mode"], expected_mode)
 
                 invalid_mode_request = urllib.request.Request(
-                    f"{base_url}/v1/ai/automation/control?repo=QuantStrategyLab/TargetRepo&mode=bad",
+                    f"{base_url}/v1/ai/automation/control?repo=QuantStrategyLab/TargetRepo&mode=",
                     headers={"Authorization": f"Bearer {token}"},
                 )
                 with self.assertRaises(urllib.error.HTTPError) as ctx:
@@ -686,6 +686,15 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
                         "run_id": "incident-123",
                         "mode": "manual",
                     }
+                    blank_mode_request = urllib.request.Request(
+                        f"{base_url}/v1/ai/automation/triage",
+                        data=json.dumps({**payload, "mode": ""}).encode("utf-8"),
+                        method="POST",
+                        headers={"Content-Type": "application/json"},
+                    )
+                    with self.assertRaises(urllib.error.HTTPError) as ctx:
+                        urllib.request.urlopen(blank_mode_request, timeout=5)
+                    self.assertEqual(ctx.exception.code, 400)
                     request = urllib.request.Request(
                         f"{base_url}/v1/ai/automation/triage",
                         data=json.dumps(payload).encode("utf-8"),

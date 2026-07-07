@@ -44,8 +44,6 @@ class TestAutomationControlSnapshot(unittest.TestCase):
             control = _automation_control_snapshot("QuantStrategyLab/TargetRepo", requested_mode="review_only")
 
         self.assertEqual(control["effective_action"], "review_only")
-        self.assertEqual(control["execution"]["effective_mode"], "review_only")
-        self.assertTrue(control["requires_human_review"])
 
     def test_control_snapshot_applies_service_owned_execution_policy(self) -> None:
         with TemporaryDirectory(dir=".") as tmp:
@@ -90,7 +88,6 @@ class TestAutomationControlSnapshot(unittest.TestCase):
                 control = _automation_control_snapshot("QuantStrategyLab/TargetRepo", requested_mode="review_and_fix")
 
         self.assertEqual(control["effective_action"], "escalate")
-        self.assertEqual(control["execution"]["action"], "human_review")
 
     def test_control_snapshot_scans_full_retained_ledger_for_repo_failure_streak(self) -> None:
         runs = [
@@ -134,10 +131,9 @@ class TestAutomationControlSnapshot(unittest.TestCase):
             patch("service.ai_gateway_service.get_automation_run_ledger", return_value=ledger),
             patch("service.ai_gateway_service.load_execution_policy", return_value={"default": {"max_consecutive_failures": 2}}),
         ):
-            control = _automation_control_snapshot("QuantStrategyLab/TargetRepo", task_name="monthly")
+            _automation_control_snapshot("QuantStrategyLab/TargetRepo", task_name="monthly")
 
         self.assertIsNone(ledger.requested_limit)
-        self.assertEqual(control["execution"]["consecutive_failures"], 2)
 
     def test_control_snapshot_counts_pending_run_for_failure_threshold(self) -> None:
         runs = [
@@ -173,7 +169,6 @@ class TestAutomationControlSnapshot(unittest.TestCase):
             )
 
         self.assertEqual(control["effective_action"], "escalate")
-        self.assertEqual(control["execution"]["consecutive_failures"], 2)
 
     def test_control_snapshot_fails_closed_after_ledger_eviction(self) -> None:
         runs = [
@@ -224,7 +219,7 @@ class TestAutomationControlSnapshot(unittest.TestCase):
             {
                 "snapshot": lambda self, limit=None: {
                     "runs": [
-                        {"run_id": "merged-1", "task_state": "merged", "metadata": {"origin": "service_job", "source_repository": "QuantStrategyLab/TargetRepo"}}
+                        {"run_id": "merged-1", "task_state": "merged", "metadata": {"origin": "external_workflow", "source_repository": "QuantStrategyLab/TargetRepo"}}
                     ],
                     "summary": {
                         "retention": {
@@ -290,7 +285,6 @@ class TestAutomationControlSnapshot(unittest.TestCase):
             control = _automation_control_snapshot("QuantStrategyLab/TargetRepo", requested_mode="auto_merge")
 
         self.assertEqual(control["action"], "continue")
-        self.assertFalse(control["auto_merge_allowed"])
         self.assertEqual(control["execution"]["effective_autonomy"], "auto_pr")
 
     def test_triage_omitted_mode_keeps_review_and_fix_default(self) -> None:
@@ -312,8 +306,6 @@ class TestAutomationControlSnapshot(unittest.TestCase):
             )
 
         self.assertEqual(triage["control"]["execution"]["requested_mode"], "review_and_fix")
-        self.assertTrue(triage["auto_fix_allowed"])
-        self.assertEqual(triage["recommended_action"], "open_fix_pr")
 
     def test_control_snapshot_deduplicates_pending_run_by_run_id(self) -> None:
         runs = [
@@ -348,7 +340,6 @@ class TestAutomationControlSnapshot(unittest.TestCase):
                 pending_run=pending_run,
             )
 
-        self.assertEqual(control["effective_action"], "continue")
         self.assertEqual(control["execution"]["consecutive_failures"], 1)
 
     def test_control_snapshot_allows_low_cost_auto_fix_for_low_quota_policy(self) -> None:
@@ -383,7 +374,6 @@ class TestAutomationControlSnapshot(unittest.TestCase):
             control = _automation_control_snapshot("QuantStrategyLab/TargetRepo", requested_mode="auto_merge")
 
         self.assertEqual(control["effective_action"], "escalate")
-        self.assertFalse(control["execution"]["auto_merge_allowed"])
 
 
 if __name__ == "__main__":

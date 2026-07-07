@@ -552,7 +552,7 @@ def _automation_control_snapshot(
     repo_history_has_terminal_boundary = any(
         str(run.get("task_state") or "").strip().lower() in {"merged", "completed", "succeeded"}
         and _automation_run_owner_repository(run).strip().lower() == normalized_repo
-        and str((run.get("metadata") if isinstance(run.get("metadata"), dict) else {}).get("origin") or "") == "service_job"
+        and str((run.get("metadata") if isinstance(run.get("metadata"), dict) else {}).get("origin") or "") in {"service_job", "external_workflow"}
         for run in recent_runs
         if isinstance(run, dict)
     )
@@ -1543,6 +1543,9 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 repo = claims_repo
         repo = repo or "unknown"
         raw_mode = params["mode"][0] if "mode" in params else MODE_REVIEW_AND_FIX
+        if "mode" in params and not str(raw_mode or "").strip():
+            _json_response(self, HTTPStatus.BAD_REQUEST, {"status": "error", "error": "invalid mode"})
+            return
         mode = _normalize_control_mode_param(str(raw_mode if raw_mode is not None else ""))
         if not mode:
             _json_response(self, HTTPStatus.BAD_REQUEST, {"status": "error", "error": "invalid mode"})
@@ -1561,7 +1564,11 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         params = parse_qs(parsed.query, keep_blank_values=True)
         repo = str(payload.get("source_repository") or params.get("repo", [""])[0] or claims.get("repository") or "unknown")
         task = str(payload.get("task") or params.get("task", [""])[0] or "")
+        mode_supplied = "mode" in payload or "mode" in params
         raw_mode = payload.get("mode") if "mode" in payload else params["mode"][0] if "mode" in params else MODE_REVIEW_AND_FIX
+        if mode_supplied and not str(raw_mode or "").strip():
+            _json_response(self, HTTPStatus.BAD_REQUEST, {"status": "error", "error": "invalid mode"})
+            return
         requested_mode = _normalize_control_mode_param(str(raw_mode if raw_mode is not None else ""))
         if not requested_mode:
             _json_response(self, HTTPStatus.BAD_REQUEST, {"status": "error", "error": "invalid mode"})
