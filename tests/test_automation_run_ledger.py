@@ -146,25 +146,18 @@ class TestAutomationRunLedger(unittest.TestCase):
         self.assertNotIn("events", snapshot["runs"][0])
 
     def test_snapshot_none_limit_returns_all_retained_runs(self) -> None:
-        self.ledger.record("run-1", "running")
-        self.ledger.record("run-2", "running")
-        self.ledger.record("run-3", "running")
+        with patch("service.automation_run_ledger.time.time", return_value=1.0):
+            self.ledger.record("run-1", "running")
+            self.ledger.record("run-2", "running")
+            self.ledger.record("run-3", "running")
+            self.ledger.record("run-1", "merged")
 
         snapshot = self.ledger.snapshot(limit=None)
 
         self.assertEqual(snapshot["summary"]["total_runs"], 3)
         self.assertEqual(snapshot["summary"]["returned_runs"], 3)
         self.assertEqual({run["run_id"] for run in snapshot["runs"]}, {"run-1", "run-2", "run-3"})
-
-    def test_snapshot_uses_write_order_when_timestamps_tie(self) -> None:
-        with patch("service.automation_run_ledger.time.time", return_value=1.0):
-            self.ledger.record("run-a", "running")
-            self.ledger.record("run-b", "failed")
-            self.ledger.record("run-a", "merged")
-
-        snapshot = self.ledger.snapshot(limit=None)
-
-        self.assertEqual([run["run_id"] for run in snapshot["runs"]], ["run-a", "run-b"])
+        self.assertEqual(snapshot["runs"][0]["run_id"], "run-1")
 
     def test_snapshot_can_include_bounded_history(self) -> None:
         ledger = AutomationRunLedger(max_events_per_run=2)

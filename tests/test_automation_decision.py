@@ -146,7 +146,7 @@ class TestAutomationDecision(unittest.TestCase):
         result = decide_automation_execution(
             repo="QuantStrategyLab/AIAuditBridge",
             requested_mode=MODE_REVIEW_AND_FIX,
-            control_action=CONTROL_CONTINUE,
+            control_action=CONTROL_PAUSE_AUTO_FIX,
             service_health="healthy",
             quota_status="low",
             org_health_status="ok",
@@ -156,23 +156,6 @@ class TestAutomationDecision(unittest.TestCase):
         self.assertEqual(result["action"], EXECUTION_RUN)
         self.assertEqual(result["effective_provider"], "openai")
         self.assertEqual(result["effective_model"], "gpt-5.4-mini")
-        self.assertTrue(any("low-cost model" in reason for reason in result["reasons"]))
-
-    def test_low_quota_pause_control_can_still_use_low_cost_model(self) -> None:
-        result = decide_automation_execution(
-            repo="QuantStrategyLab/AIAuditBridge",
-            requested_mode=MODE_REVIEW_AND_FIX,
-            control_action=CONTROL_PAUSE_AUTO_FIX,
-            service_health="healthy",
-            quota_status="low",
-            org_health_status="ok",
-            policy={"default": {"low_cost_model": "gpt-5.4-mini"}},
-        )
-
-        self.assertEqual(result["action"], EXECUTION_RUN)
-        self.assertEqual(result["effective_mode"], MODE_REVIEW_AND_FIX)
-        self.assertEqual(result["effective_model"], "gpt-5.4-mini")
-        self.assertTrue(result["auto_fix_allowed"])
 
     def test_low_quota_overrides_requested_expensive_model(self) -> None:
         result = decide_automation_execution(

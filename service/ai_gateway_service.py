@@ -73,14 +73,7 @@ from service.automation_run_ledger import (
     get_automation_run_ledger,
     suggest_control_action,
 )
-from service.automation_decision import (
-    EXECUTION_DEFER,
-    EXECUTION_HUMAN_REVIEW,
-    EXECUTION_REVIEW_ONLY,
-    EXECUTION_RUN,
-    decide_automation_execution,
-    load_execution_policy,
-)
+from service.automation_decision import EXECUTION_DEFER, EXECUTION_HUMAN_REVIEW, EXECUTION_REVIEW_ONLY, decide_automation_execution, load_execution_policy
 from service.strategy_automation_registry import (
     apply_strategy_registry_guard,
     summarize_strategy_registry_context,
@@ -597,7 +590,7 @@ def _automation_control_snapshot(
         strict_action = CONTROL_REVIEW_ONLY
     elif execution.get("action") == EXECUTION_DEFER:
         strict_action = CONTROL_PAUSE_AUTO_FIX
-    elif execution.get("action") == EXECUTION_RUN and execution.get("auto_fix_allowed"):
+    elif execution.get("action") == "run" and execution.get("auto_fix_allowed"):
         strict_action = CONTROL_CONTINUE
     elif execution.get("effective_mode") == MODE_REVIEW_ONLY and strict_action == CONTROL_CONTINUE:
         strict_action = CONTROL_REVIEW_ONLY

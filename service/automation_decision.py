@@ -361,13 +361,8 @@ def decide_automation_execution(
     service = _normalize_status(service_health)
     quota = _normalize_quota_status(quota_status)
     org_health = _normalize_status(org_health_status)
-    low_quota_pause_only = (
-        control_action == CONTROL_PAUSE_AUTO_FIX
-        and quota in {"low", "constrained"}
-        and quota_low_behavior != "defer"
-        and service in {"healthy", "ok"}
-        and org_health in {"healthy", "ok"}
-    )
+    low_quota_pause_only = control_action == CONTROL_PAUSE_AUTO_FIX and quota in {"low", "constrained"} and quota_low_behavior != "defer"
+    low_quota_pause_only = low_quota_pause_only and service in {"healthy", "ok"} and org_health in {"healthy", "ok"}
     failures = consecutive_failure_count(
         recent_runs or [],
         repo=repo,
@@ -404,8 +399,6 @@ def decide_automation_execution(
     ):
         effective_mode = MODE_REVIEW_ONLY
         reasons.append(f"runtime control action is {control_action}")
-    elif control_action == CONTROL_PAUSE_AUTO_FIX:
-        reasons.append(f"runtime control action is {control_action}; applying low-quota policy")
     if control_action == CONTROL_ESCALATE:
         action = EXECUTION_HUMAN_REVIEW
         human_review_required = True
