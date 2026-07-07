@@ -255,8 +255,8 @@ def main() -> int:
         print(json.dumps({"status": "skipped", "reason": "strategy metrics input not configured"}, sort_keys=True))
         return 0
     if not input_path.exists():
-        print(json.dumps({"status": "error", "error": "strategy metrics input not found"}, sort_keys=True))
-        return 2
+        print(json.dumps({"status": "skipped", "reason": "strategy metrics input not found — this is expected when the source repository has not yet published metrics"}, sort_keys=True))
+        return 0
     if not input_path.is_file():
         print(json.dumps({"status": "error", "error": "strategy metrics input is not a file"}, sort_keys=True))
         return 2
