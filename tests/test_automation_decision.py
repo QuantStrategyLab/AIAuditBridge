@@ -212,6 +212,7 @@ class TestAutomationDecision(unittest.TestCase):
 
     def test_external_workflow_success_does_not_break_repo_failure_streak(self) -> None:
         runs = [
+            {"task_name": "monthly", "task_state": "failed", "metadata": {"origin": "external_workflow", "source_repository": "QuantStrategyLab/AIAuditBridge"}},
             {
                 "task_name": "monthly",
                 "task_state": "merged",
@@ -220,7 +221,7 @@ class TestAutomationDecision(unittest.TestCase):
             {"task_name": "monthly", "task_state": "failed", "metadata": {"origin": "service_job", "source_repository": "QuantStrategyLab/AIAuditBridge"}},
         ]
 
-        self.assertEqual(consecutive_failure_count(runs, repo="QuantStrategyLab/AIAuditBridge"), 1)
+        self.assertEqual(consecutive_failure_count(runs, repo="QuantStrategyLab/AIAuditBridge"), 2)
 
     def test_invalid_repo_autonomy_fails_closed(self) -> None:
         result = decide_automation_execution(

@@ -32,7 +32,7 @@ DEFAULT_LOW_COST_PROVIDER = "openai"
 EXECUTION_POLICY_PATH_ENV = "CODEX_AUDIT_SERVICE_EXECUTION_POLICY_PATH"
 EXECUTION_POLICY_OWNER_ENV = "CODEX_AUDIT_SERVICE_EXECUTION_POLICY_OWNER"
 POLICY_LOAD_ERROR_KEY = "_load_error"
-TRUSTED_FAILURE_ORIGINS = frozenset({"service_job"})
+TRUSTED_FAILURE_ORIGINS = frozenset({"service_job", "external_workflow"})
 POLICY_ALLOWED_KEYS = frozenset({"max_autonomy", "max_consecutive_failures", "low_cost_model", "low_cost_provider", "quota_low_behavior"})
 POLICY_REQUIRED_DEFAULT_KEYS = frozenset({"max_autonomy", "max_consecutive_failures", "low_cost_model", "low_cost_provider"})
 POLICY_LOW_QUOTA_BEHAVIORS = frozenset({"low_cost_model", "defer"})
@@ -315,7 +315,8 @@ def consecutive_failure_count(
             continue
         if state in {"queued", "running", "pending", "in_progress"}:
             continue
-        break
+        if origin == "service_job":
+            break
     return count
 
 
