@@ -284,7 +284,7 @@ class TestAutomationRunLedger(unittest.TestCase):
             with patch("service.automation_run_ledger.time.time", side_effect=[1.0, 2.0]):
                 ledger_a.record("run-1", "queued", metadata={"source_repository": "QuantStrategyLab/RepoA"})
                 ledger_a.record("run-2", "queued", metadata={"source_repository": "QuantStrategyLab/RepoA"})
-            ledger_b = AutomationRunLedger(max_runs=2, storage_path=path)
+            ledger_b = AutomationRunLedger(max_runs=3, storage_path=path)
             with patch("service.automation_run_ledger.time.time", return_value=3.0):
                 ledger_a.record("run-3", "queued", metadata={"source_repository": "QuantStrategyLab/RepoA"})
             with patch("service.automation_run_ledger.time.time", return_value=4.0):

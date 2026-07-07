@@ -271,8 +271,6 @@ class AutomationRunLedger:
             self._evicted_runs_by_repo[repo_key] = max(self._evicted_runs_by_repo.get(repo_key, 0), int(count))
 
     def _drop_runs_evicted_on_disk_locked(self, disk_runs: dict[str, dict[str, Any]], *, preserve_run_id: str = "") -> None:
-        if len(disk_runs) < self._max_runs:
-            return
         disk_run_ids = set(disk_runs)
         for run_id in list(self._runs):
             if run_id != preserve_run_id and run_id not in disk_run_ids:
@@ -350,7 +348,7 @@ class AutomationRunLedger:
                 disk_owner = _entry_owner_repository(disk_entry) if isinstance(disk_entry, dict) else ""
                 if owner_repository and disk_owner and disk_owner != owner_repository:
                     raise PermissionError("automation run_id belongs to another repository")
-                if guard_preexisting and disk_entry is None and len(disk_runs) >= self._max_runs:
+                if guard_preexisting and disk_entry is None and self._storage_file_seen:
                     raise ValueError("automation run was evicted from retained ledger")
             self._drop_runs_evicted_on_disk_locked(disk_runs, preserve_run_id=guard_run_id)
             for run_id, disk_entry in disk_runs.items():
