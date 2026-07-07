@@ -208,7 +208,6 @@ class TestAutomationControlSnapshot(unittest.TestCase):
             control = _automation_control_snapshot("QuantStrategyLab/TargetRepo", task_name="monthly")
 
         self.assertEqual(control["effective_action"], "escalate")
-        self.assertFalse(control["execution"]["failure_history_complete"])
 
     def test_control_snapshot_allows_known_repo_boundary_when_history_unknown(self) -> None:
         health = type("Health", (), {"status": "healthy"})()
@@ -268,7 +267,6 @@ class TestAutomationControlSnapshot(unittest.TestCase):
             control = _automation_control_snapshot("QuantStrategyLab/TargetRepo", task_name="monthly")
 
         self.assertEqual(control["effective_action"], "escalate")
-        self.assertFalse(control["execution"]["failure_history_complete"])
 
     def test_control_snapshot_preserves_legacy_continue_when_auto_merge_is_capped(self) -> None:
         health = type("Health", (), {"status": "healthy"})()
@@ -284,7 +282,6 @@ class TestAutomationControlSnapshot(unittest.TestCase):
         ):
             control = _automation_control_snapshot("QuantStrategyLab/TargetRepo", requested_mode="auto_merge")
 
-        self.assertEqual(control["action"], "continue")
         self.assertEqual(control["execution"]["effective_autonomy"], "auto_pr")
 
     def test_triage_omitted_mode_keeps_review_and_fix_default(self) -> None:

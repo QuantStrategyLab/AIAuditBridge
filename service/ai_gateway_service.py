@@ -596,6 +596,9 @@ def _automation_control_snapshot(
         strict_action = CONTROL_CONTINUE
     elif execution.get("effective_mode") == MODE_REVIEW_ONLY and strict_action == CONTROL_CONTINUE:
         strict_action = CONTROL_REVIEW_ONLY
+    action_rank = {CONTROL_CONTINUE: 0, CONTROL_PAUSE_AUTO_FIX: 1, CONTROL_REVIEW_ONLY: 2, CONTROL_ESCALATE: 3}
+    if strict_action != CONTROL_CONTINUE and action_rank.get(strict_action, 2) < action_rank.get(original_action, 2):
+        strict_action = original_action
     control["runtime_action"] = original_action
     control["effective_action"] = strict_action
     if strict_action != original_action and strict_action != CONTROL_CONTINUE:
@@ -1667,7 +1670,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         raw_mode = (
             payload.get("mode")
             if mode_from_payload
-            else existing_metadata.get("requested_mode") or existing_metadata.get("mode")
+            else existing_metadata.get("requested_mode")
         )
         default_mode = MODE_REVIEW_AND_FIX
         requested_mode = _normalize_control_mode_param(str(raw_mode if raw_mode is not None and raw_mode != "" else ("" if mode_from_payload else default_mode)))
