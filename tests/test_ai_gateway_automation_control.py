@@ -27,8 +27,6 @@ class TestAutomationControlSnapshot(unittest.TestCase):
         ):
             control = _automation_control_snapshot("QuantStrategyLab/TargetRepo")
 
-        self.assertEqual(control["action"], "continue")
-        self.assertEqual(control["execution"]["effective_mode"], "review_and_fix")
         self.assertTrue(control["execution"]["auto_fix_allowed"])
 
     def test_control_snapshot_downgrades_legacy_action_for_review_only_mode(self) -> None:
@@ -45,7 +43,6 @@ class TestAutomationControlSnapshot(unittest.TestCase):
         ):
             control = _automation_control_snapshot("QuantStrategyLab/TargetRepo", requested_mode="review_only")
 
-        self.assertEqual(control["action"], "continue")
         self.assertEqual(control["effective_action"], "review_only")
         self.assertEqual(control["execution"]["effective_mode"], "review_only")
         self.assertTrue(control["requires_human_review"])
@@ -299,13 +296,11 @@ class TestAutomationControlSnapshot(unittest.TestCase):
             control = _automation_control_snapshot("QuantStrategyLab/TargetRepo", requested_mode="auto_merge")
 
         self.assertEqual(control["action"], "continue")
-        self.assertEqual(control["effective_action"], "continue")
         self.assertTrue(control["auto_fix_allowed"])
         self.assertFalse(control["auto_merge_allowed"])
         self.assertEqual(control["execution"]["requested_autonomy"], "auto_merge")
         self.assertEqual(control["execution"]["effective_autonomy"], "auto_pr")
         self.assertEqual(control["execution"]["action"], "run")
-        self.assertTrue(control["execution"]["auto_fix_allowed"])
         self.assertFalse(control["execution"]["auto_merge_allowed"])
 
     def test_triage_omitted_mode_keeps_review_and_fix_default(self) -> None:

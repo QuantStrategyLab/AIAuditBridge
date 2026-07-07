@@ -598,6 +598,8 @@ def _automation_control_snapshot(
         strict_action = CONTROL_REVIEW_ONLY
     control["runtime_action"] = original_action
     control["effective_action"] = strict_action
+    if strict_action != original_action and strict_action != CONTROL_CONTINUE:
+        control["action"] = strict_action
     control["auto_fix_allowed"] = bool(execution.get("auto_fix_allowed")) and strict_action == CONTROL_CONTINUE
     control["auto_merge_allowed"] = bool(execution.get("auto_merge_allowed")) and strict_action == CONTROL_CONTINUE
     control["requires_human_review"] = strict_action != CONTROL_CONTINUE or bool(execution.get("human_review_required"))
@@ -1647,7 +1649,9 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         existing_state = str(existing.get("task_state") or "") if isinstance(existing, dict) else ""
         task_state = str(payload.get("task_state") or payload.get("state") or existing_state or "running")
         existing_metadata = existing.get("metadata") if isinstance(existing, dict) and isinstance(existing.get("metadata"), dict) else {}
-        mode_from_payload = "mode" in payload and str(payload.get("mode") or "").strip() != ""
+        mode_from_payload = "mode" in payload
+        if mode_from_payload and not str(payload.get("mode") or "").strip():
+            raise ValueError("invalid mode")
         raw_mode = (
             payload.get("mode")
             if mode_from_payload

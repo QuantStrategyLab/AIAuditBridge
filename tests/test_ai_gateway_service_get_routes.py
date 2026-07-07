@@ -624,12 +624,13 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
                         method="POST",
                         headers={"Content-Type": "application/json"},
                     )
-                    with urllib.request.urlopen(invalid_mode_request, timeout=5) as response:
-                        self.assertEqual(response.status, 200)
+                    with self.assertRaises(urllib.error.HTTPError) as ctx:
+                        urllib.request.urlopen(invalid_mode_request, timeout=5)
+                    self.assertEqual(ctx.exception.code, 400)
 
                     with urllib.request.urlopen(f"{base_url}/v1/ai/automation/runs?include_events=true", timeout=5) as response:
                         ledger = json.loads(response.read().decode("utf-8"))["ledger"]
-                    self.assertEqual(ledger["summary"]["total_runs"], 3)
+                    self.assertEqual(ledger["summary"]["total_runs"], 2)
                     self.assertEqual(ledger["runs"][0]["task_name"], "platform-health")
                     self.assertIn("events", ledger["runs"][0])
 
