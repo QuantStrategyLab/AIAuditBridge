@@ -70,11 +70,32 @@ class DualReviewOrchestratorTests(unittest.TestCase):
                 "drift_score": 0.9,
                 "primary_review": {"verdict": "approve", "confidence": 0.4},
             },
-            secondary_review={"verdict": "fail", "confidence": 0.9},
+            secondary_review={
+                "gpt": {"verdict": "reject", "confidence": 0.9},
+                "claude": {"verdict": "reject", "confidence": 0.88},
+            },
         )
         self.assertIsNotNone(result)
         assert result is not None
         self.assertEqual(result.outcome, VERDICT_DISAGREEMENT)
+        self.assertEqual(result.comparison.get("mode"), "dual_api")
+
+    def test_three_way_unanimous_pass(self) -> None:
+        result = orchestrate_from_payload(
+            {
+                "trigger": "promotion",
+                "strategy_profile": "cn_demo",
+                "old_status": "shadow_candidate",
+                "new_status": "live_candidate",
+                "primary_review": {"verdict": "approve", "confidence": 0.55},
+            },
+            secondary_review={
+                "gpt": {"verdict": "pass", "confidence": 0.9},
+                "claude": {"verdict": "approve", "confidence": 0.88},
+            },
+        )
+        assert result is not None
+        self.assertEqual(result.outcome, VERDICT_PASS)
 
     def test_primary_high_confidence_fail(self) -> None:
         request = DualReviewRequest(

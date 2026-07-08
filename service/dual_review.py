@@ -84,6 +84,43 @@ def should_escalate(confidence: float, threshold: float = DEFAULT_ESCALATION_THR
     return value < cutoff
 
 
+def compare_three_reviews(
+    primary: dict[str, Any],
+    gpt_review: dict[str, Any],
+    claude_review: dict[str, Any],
+) -> dict[str, Any]:
+    """Compare Codex primary with parallel GPT + Claude secondary reviews."""
+    primary_verdict = _extract_verdict(primary)
+    gpt_verdict = _extract_verdict(gpt_review)
+    claude_verdict = _extract_verdict(claude_review)
+
+    if primary_verdict is None or gpt_verdict is None or claude_verdict is None:
+        verdict = VERDICT_DISAGREEMENT
+        reason = "missing or unrecognized review verdict in primary/gpt/claude"
+    elif primary_verdict == gpt_verdict == claude_verdict:
+        verdict = primary_verdict
+        reason = "codex, gpt, and claude unanimous"
+    else:
+        verdict = VERDICT_DISAGREEMENT
+        reason = (
+            f"split decision: codex={primary_verdict}, "
+            f"gpt={gpt_verdict}, claude={claude_verdict}"
+        )
+
+    return {
+        "verdict": verdict,
+        "reason": reason,
+        "mode": "dual_api",
+        "primary_verdict": primary_verdict,
+        "gpt_verdict": gpt_verdict,
+        "claude_verdict": claude_verdict,
+        "primary_confidence": _extract_confidence(primary),
+        "gpt_confidence": _extract_confidence(gpt_review),
+        "claude_confidence": _extract_confidence(claude_review),
+        "agreement": verdict != VERDICT_DISAGREEMENT,
+    }
+
+
 def compare_reviews(primary: dict[str, Any], secondary: dict[str, Any]) -> dict[str, Any]:
     """Compare two independent review payloads and return a reconciled verdict."""
     primary_verdict = _extract_verdict(primary)

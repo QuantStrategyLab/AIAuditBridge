@@ -26,7 +26,14 @@ class RunDualReviewCliTests(unittest.TestCase):
                 "--payload",
                 json.dumps(payload),
                 "--secondary-review",
-                json.dumps({"verdict": "reject", "confidence": 0.91}),
+                json.dumps(
+                    {
+                        "gpt": {"verdict": "reject", "confidence": 0.91},
+                        "claude": {"verdict": "reject", "confidence": 0.9},
+                    }
+                ),
+                "--secondary-mode",
+                "stub",
             ],
             cwd=ROOT,
             capture_output=True,

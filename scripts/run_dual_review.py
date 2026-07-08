@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -33,11 +34,19 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--secondary-review",
-        help="Optional secondary review JSON (file path or inline) for deterministic tests",
+        help="Optional secondary review JSON (file path or inline). "
+        "Use {\"gpt\":{...},\"claude\":{...}} for plan-B injection.",
+    )
+    parser.add_argument(
+        "--secondary-mode",
+        choices=("dual_api", "stub"),
+        default=os.environ.get("DUAL_REVIEW_SECONDARY_MODE", "dual_api"),
+        help="Secondary reviewer backend (default: dual_api = GPT+Claude parallel)",
     )
     parser.add_argument("--dispatch", action="store_true", help="Open GitHub issue on disagreement")
     parser.add_argument("--dry-run", action="store_true", help="Do not create GitHub issues")
     args = parser.parse_args(argv)
+    os.environ["DUAL_REVIEW_SECONDARY_MODE"] = args.secondary_mode
 
     payloads: list[dict[str, Any]] = []
     if args.payload:

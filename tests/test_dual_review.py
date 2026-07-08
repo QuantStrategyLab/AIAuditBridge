@@ -11,6 +11,7 @@ from service.dual_review import (
     VERDICT_PASS,
     DualReviewTrigger,
     compare_reviews,
+    compare_three_reviews,
     should_escalate,
 )
 
@@ -71,6 +72,26 @@ class TestCompareReviews(unittest.TestCase):
         )
         self.assertEqual(result["primary_confidence"], 0.72)
         self.assertEqual(result["secondary_confidence"], 0.91)
+
+
+class TestCompareThreeReviews(unittest.TestCase):
+    def test_unanimous_pass(self) -> None:
+        result = compare_three_reviews(
+            {"verdict": "approve", "confidence": 0.6},
+            {"verdict": "pass", "confidence": 0.85},
+            {"verdict": "approved", "confidence": 0.82},
+        )
+        self.assertEqual(result["verdict"], VERDICT_PASS)
+        self.assertTrue(result["agreement"])
+
+    def test_split_decision(self) -> None:
+        result = compare_three_reviews(
+            {"verdict": "approve", "confidence": 0.6},
+            {"verdict": "pass", "confidence": 0.85},
+            {"verdict": "reject", "confidence": 0.9},
+        )
+        self.assertEqual(result["verdict"], VERDICT_DISAGREEMENT)
+        self.assertIn("split decision", result["reason"])
 
 
 class TestDualReviewTrigger(unittest.TestCase):
