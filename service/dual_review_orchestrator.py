@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -18,6 +19,7 @@ from service.dual_review import (
     should_escalate,
 )
 from service.dual_review_secondary import dual_api_secondary_reviewer, is_dual_api_secondary
+from service.dual_review_gateway import gateway_dual_api_secondary_reviewer, gateway_secondary_available
 from service.dual_review_triggers import resolve_trigger
 from service.model_router import route_model
 
@@ -104,6 +106,11 @@ def resolve_secondary_reviewer(
 ) -> SecondaryReviewer:
     if explicit is not None:
         return explicit
+    mode = str(os.environ.get("DUAL_REVIEW_SECONDARY_MODE", "dual_api")).strip().lower()
+    if mode == "stub":
+        return default_secondary_reviewer
+    if gateway_secondary_available():
+        return gateway_dual_api_secondary_reviewer
     return dual_api_secondary_reviewer
 
 
