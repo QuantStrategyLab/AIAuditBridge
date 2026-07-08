@@ -7,6 +7,7 @@ outcomes into pass / fail / disagreement.
 
 from __future__ import annotations
 
+import math
 from enum import Enum
 from typing import Any
 
@@ -53,21 +54,32 @@ def _extract_confidence(review: dict[str, Any]) -> float | None:
         if key not in review:
             continue
         try:
-            return float(review[key])
+            value = float(review[key])
         except (TypeError, ValueError):
             continue
+        if not math.isfinite(value):
+            continue
+        return value
     return None
 
 
 def should_escalate(confidence: float, threshold: float = DEFAULT_ESCALATION_THRESHOLD) -> bool:
-    """Return True when confidence is below threshold and a second review is needed."""
+    """Return True when confidence is below threshold and a second review is needed.
+
+    Invalid / non-finite confidence fails closed (escalate). Corrupted threshold
+    falls back to DEFAULT_ESCALATION_THRESHOLD.
+    """
     try:
         value = float(confidence)
     except (TypeError, ValueError):
         return True
+    if not math.isfinite(value):
+        return True
     try:
         cutoff = float(threshold)
     except (TypeError, ValueError):
+        cutoff = DEFAULT_ESCALATION_THRESHOLD
+    if not math.isfinite(cutoff):
         cutoff = DEFAULT_ESCALATION_THRESHOLD
     return value < cutoff
 

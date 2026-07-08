@@ -30,6 +30,12 @@ class TestShouldEscalate(unittest.TestCase):
 
     def test_invalid_confidence_fails_closed(self) -> None:
         self.assertTrue(should_escalate("oops"))  # type: ignore[arg-type]
+        self.assertTrue(should_escalate(float("nan")))
+        self.assertTrue(should_escalate("nan"))  # type: ignore[arg-type]
+
+    def test_non_finite_threshold_falls_back(self) -> None:
+        self.assertFalse(should_escalate(0.9, threshold=float("nan")))
+        self.assertTrue(should_escalate(0.7, threshold="nan"))  # type: ignore[arg-type]
 
     def test_default_threshold_constant(self) -> None:
         self.assertEqual(DEFAULT_ESCALATION_THRESHOLD, 0.8)
