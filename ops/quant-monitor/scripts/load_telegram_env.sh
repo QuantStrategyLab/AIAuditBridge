@@ -19,11 +19,11 @@ fi
 install -d -m 0750 "$(dirname "$OUT")"
 TOKEN="$(
   gcloud secrets versions access latest \
-    --secret="$SECRET_NAME" \
+    --secret "$SECRET_NAME" \
     --project="$GCP_PROJECT" 2>/dev/null | tr -d '\n'
 )"
 if [[ -z "$TOKEN" ]]; then
-  echo "load_telegram_env: failed to read secret $SECRET_NAME (project=$GCP_PROJECT)" >&2
+  echo "load_telegram_env: failed to read GCP secret name=$SECRET_NAME (project=$GCP_PROJECT)" >&2
   exit 1
 fi
 if ! curl -fsS "https://api.telegram.org/bot${TOKEN}/getMe" | grep -q '"ok":true'; then
