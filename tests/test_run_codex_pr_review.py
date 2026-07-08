@@ -200,7 +200,7 @@ class RunCodexPrReviewTests(unittest.TestCase):
 
         direct_api.assert_not_called()
 
-    def test_main_fails_closed_on_review_infra_error_for_high_risk_changes(self) -> None:
+    def test_main_allows_high_risk_on_review_infra_error_with_human_note(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             event_path = self._write_event(tmpdir, ["src/app.py"])
             env = {
@@ -216,7 +216,7 @@ class RunCodexPrReviewTests(unittest.TestCase):
                 patch("scripts.run_codex_pr_review.run_codex_review_with_fallback", side_effect=ReviewError("Codex service job timed out")),
                 patch("scripts.run_codex_pr_review.upsert_pr_comment") as comment,
             ):
-                self.assertEqual(run_codex_pr_review.main(), 1)
+                self.assertEqual(run_codex_pr_review.main(), 0)
 
         comment.assert_called_once()
 
