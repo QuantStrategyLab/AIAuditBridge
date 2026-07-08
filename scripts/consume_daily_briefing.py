@@ -9,6 +9,9 @@ from pathlib import Path
 
 from service.briefing_consumer import consume_briefing_dir
 from service.briefing_dispatch import dispatch_briefing_result
+from service.dual_review_briefing import collect_dual_review_payloads, summarize_dual_review_runs
+from service.dual_review_dispatch import dispatch_dual_review_result
+from service.dual_review_orchestrator import orchestrate_from_payload
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -25,6 +28,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Send Telegram / GitHub notifications per briefing severity",
     )
     parser.add_argument("--dry-run", action="store_true", help="Print dispatch actions without sending")
+    parser.add_argument(
+        "--dual-review",
+        action="store_true",
+        help="Run dual-review orchestration for briefing strategies with primary_review metadata",
+    )
     args = parser.parse_args(argv)
 
     report_dir = Path(args.report_dir)
@@ -36,8 +44,22 @@ def main(argv: list[str] | None = None) -> int:
     payload: dict = result.to_dict()
     if args.dispatch:
         payload["dispatch"] = dispatch_briefing_result(result, dry_run=args.dry_run)
+    if args.dual_review:
+        dual_results = []
+        for item in collect_dual_review_payloads(report_dir):
+            outcome = orchestrate_from_payload(item)
+            if outcome is None:
+                continue
+            entry = outcome.to_dict()
+            if args.dispatch:
+                entry["dispatch"] = dispatch_dual_review_result(outcome, dry_run=args.dry_run)
+            dual_results.append(entry)
+        payload["dual_review"] = summarize_dual_review_runs(dual_results)
     print(json.dumps(payload, ensure_ascii=False, indent=2))
-    return 0 if result.action.value == "quiet" else 2
+    exit_code = 0 if result.action.value == "quiet" else 2
+    if args.dual_review and payload.get("dual_review", {}).get("disagreements"):
+        exit_code = 2
+    return exit_code
 
 
 if __name__ == "__main__":
