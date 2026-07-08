@@ -31,37 +31,38 @@ def _load_json(value: str) -> dict[str, Any]:
     return loaded
 
 
-def _profile_from_evidence(path: Path) -> str:
+def _load_evidence_package(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        raise ValueError(f"evidence file not found: {path}")
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        if isinstance(data, dict):
-            profile = str(data.get("strategy_profile") or data.get("profile") or "").strip()
-            if profile:
-                return profile
-    except (OSError, json.JSONDecodeError):
-        pass
-    return path.stem
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"evidence file is not valid JSON: {path}") from exc
+    if not isinstance(loaded, dict):
+        raise ValueError(f"evidence file must be a JSON object: {path}")
+    return loaded
+
+
+def _profile_from_evidence(path: Path) -> str:
+    evidence = _load_evidence_package(path)
+    profile = str(evidence.get("strategy_profile") or evidence.get("profile") or "").strip()
+    return profile or path.stem
 
 
 def _evidence_summary_from_path(path: Path) -> dict[str, Any]:
-    try:
-        evidence = json.loads(path.read_text(encoding="utf-8"))
-        if isinstance(evidence, dict):
-            return {
-                k: evidence.get(k)
-                for k in (
-                    "strategy_profile",
-                    "status",
-                    "oos_sharpe",
-                    "max_drawdown",
-                    "hit_rate",
-                    "evidence_version",
-                )
-                if evidence.get(k) not in (None, "")
-            }
-    except (OSError, json.JSONDecodeError):
-        pass
-    return {}
+    evidence = _load_evidence_package(path)
+    return {
+        k: evidence.get(k)
+        for k in (
+            "strategy_profile",
+            "status",
+            "oos_sharpe",
+            "max_drawdown",
+            "hit_rate",
+            "evidence_version",
+        )
+        if evidence.get(k) not in (None, "")
+    }
 
 
 def _build_payload(
@@ -86,6 +87,14 @@ def _pipeline_enabled() -> bool:
     return True
 
 
+def _primary_skip_allowed() -> bool:
+    return str(os.environ.get("DUAL_REVIEW_GATE_ALLOW_SKIP", "")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+
+
 def run_pipeline(
     *,
     trigger: str,
@@ -101,7 +110,9 @@ def run_pipeline(
 
     if primary_review is None:
         if not primary_review_available():
-            return {"ok": True, "skipped": ["codex_primary_unconfigured"]}
+            if _primary_skip_allowed():
+                return {"ok": True, "skipped": ["codex_primary_unconfigured"]}
+            return {"ok": False, "error": "codex_primary_unconfigured"}
         prompt = build_primary_prompt(
             trigger=trigger,
             strategy_profile=strategy_profile,
@@ -163,14 +174,17 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.from_evidence:
         evidence_path = Path(args.from_evidence)
-        trigger = "promotion"
-        profile = _profile_from_evidence(evidence_path)
-        context.setdefault("repository", os.environ.get("GITHUB_REPOSITORY", ""))
-        context.setdefault("old_status", "shadow_candidate")
-        context.setdefault("new_status", "live_candidate")
-        summary = _evidence_summary_from_path(evidence_path)
-        if summary:
-            context.setdefault("evidence_summary", summary)
+        try:
+            trigger = "promotion"
+            profile = _profile_from_evidence(evidence_path)
+            context.setdefault("repository", os.environ.get("GITHUB_REPOSITORY", ""))
+            context.setdefault("old_status", "shadow_candidate")
+            context.setdefault("new_status", "live_candidate")
+            summary = _evidence_summary_from_path(evidence_path)
+            if summary:
+                context.setdefault("evidence_summary", summary)
+        except ValueError as exc:
+            parser.error(str(exc))
     elif not trigger or not profile:
         parser.error("--trigger and --strategy-profile are required unless --from-evidence is set")
 

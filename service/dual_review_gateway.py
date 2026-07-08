@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
 
 def gateway_service_url() -> str:
-    for key in ("AI_GATEWAY_SERVICE_URL", "DUAL_REVIEW_GATEWAY_URL", "CODEX_AUDIT_SERVICE_URL"):
+    for key in ("AI_GATEWAY_SERVICE_URL", "DUAL_REVIEW_GATEWAY_URL"):
         value = str(os.environ.get(key) or "").strip()
         if value:
             return value.rstrip("/")
@@ -64,13 +64,20 @@ def run_gateway_dual_api_secondary_review(request: "DualReviewRequest") -> dict[
     )
     client = AiGatewayClient(config)
 
-    gpt_result = client.analyze(user_prompt, model=gpt_model, system=_SECONDARY_SYSTEM)
-    claude_result = client.analyze(user_prompt, model=claude_model, system=_SECONDARY_SYSTEM)
+    def _analyze(model: str) -> dict[str, Any]:
+        try:
+            result = client.analyze(user_prompt, model=model, system=_SECONDARY_SYSTEM)
+            return _result_to_review(_ai_result_to_llm(result))
+        except Exception as exc:
+            return {"verdict": "reject", "confidence": 0.0, "error": str(exc)}
+
+    gpt_review = _analyze(gpt_model)
+    claude_review = _analyze(claude_model)
 
     return {
         "mode": "dual_api_gateway",
-        "gpt": _result_to_review(_ai_result_to_llm(gpt_result)),
-        "claude": _result_to_review(_ai_result_to_llm(claude_result)),
+        "gpt": gpt_review,
+        "claude": claude_review,
         "prompt": user_prompt,
         "gateway_url": service_url,
     }
