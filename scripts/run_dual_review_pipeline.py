@@ -43,6 +43,27 @@ def _profile_from_evidence(path: Path) -> str:
     return path.stem
 
 
+def _evidence_summary_from_path(path: Path) -> dict[str, Any]:
+    try:
+        evidence = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(evidence, dict):
+            return {
+                k: evidence.get(k)
+                for k in (
+                    "strategy_profile",
+                    "status",
+                    "oos_sharpe",
+                    "max_drawdown",
+                    "hit_rate",
+                    "evidence_version",
+                )
+                if evidence.get(k) not in (None, "")
+            }
+    except (OSError, json.JSONDecodeError):
+        pass
+    return {}
+
+
 def _build_payload(
     *,
     trigger: str,
@@ -122,8 +143,8 @@ def _exit_code(result: dict[str, Any]) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run Codex primary + dual API secondary review pipeline.")
-    parser.add_argument("--trigger", required=True, choices=("promotion", "hit_rate", "drift"))
-    parser.add_argument("--strategy-profile", required=True)
+    parser.add_argument("--trigger", choices=("promotion", "hit_rate", "drift"))
+    parser.add_argument("--strategy-profile")
     parser.add_argument("--context-json", default="{}", help="Inline JSON or file path for trigger context")
     parser.add_argument("--evidence-file", help="Evidence package path (promotion)")
     parser.add_argument("--primary-review", help="Precomputed primary review JSON (skip Codex)")
@@ -147,6 +168,11 @@ def main(argv: list[str] | None = None) -> int:
         context.setdefault("repository", os.environ.get("GITHUB_REPOSITORY", ""))
         context.setdefault("old_status", "shadow_candidate")
         context.setdefault("new_status", "live_candidate")
+        summary = _evidence_summary_from_path(evidence_path)
+        if summary:
+            context.setdefault("evidence_summary", summary)
+    elif not trigger or not profile:
+        parser.error("--trigger and --strategy-profile are required unless --from-evidence is set")
 
     primary = _load_json(args.primary_review) if args.primary_review else None
     result = run_pipeline(

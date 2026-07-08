@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import urllib.error
 from pathlib import Path
 from typing import Any
 
@@ -92,7 +93,7 @@ def run_codex_primary_review(
             timeout_minutes=timeout,
             complexity="high",
         )
-    except ReviewError as exc:
+    except (ReviewError, urllib.error.URLError, json.JSONDecodeError, OSError) as exc:
         return {
             "source": "codex_primary",
             "verdict": "reject",

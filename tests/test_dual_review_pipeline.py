@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
-from scripts.run_dual_review_pipeline import run_pipeline
+from scripts.run_dual_review_pipeline import main, run_pipeline
 
 
 class DualReviewPipelineTests(unittest.TestCase):
@@ -48,6 +51,28 @@ class DualReviewPipelineTests(unittest.TestCase):
             primary_review={"verdict": "approve", "confidence": 0.4},
         )
         self.assertEqual(result.get("outcome"), "disagreement")
+
+    @patch.dict("os.environ", {"DUAL_REVIEW_GATE_SKIP": "1"}, clear=False)
+    def test_from_evidence_cli_without_trigger_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "demo.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "strategy_profile": "demo",
+                        "oos_sharpe": 1.1,
+                        "max_drawdown": 0.12,
+                        "hit_rate": 0.55,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch("sys.stdout") as stdout:
+                code = main(["--from-evidence", str(path)])
+            self.assertEqual(code, 0)
+            output = "".join(call.args[0] for call in stdout.write.call_args_list)
+            payload = json.loads(output)
+            self.assertIn("dual_review_gate_disabled", payload.get("skipped", []))
 
 
 if __name__ == "__main__":

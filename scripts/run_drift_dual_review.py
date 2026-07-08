@@ -62,7 +62,8 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"ok": True, "count": 0, "results": []}))
         return 0
 
-    pipeline = Path(args.aab_root) / "scripts" / "run_dual_review_pipeline.py"
+    aab_root = Path(args.aab_root).resolve()
+    pipeline = aab_root / "scripts" / "run_dual_review_pipeline.py"
     if not pipeline.is_file():
         print(json.dumps({"ok": False, "error": f"pipeline_not_found: {pipeline}"}))
         return 1
@@ -86,8 +87,8 @@ def main(argv: list[str] | None = None) -> int:
             cmd.append("--dry-run")
         proc = subprocess.run(
             cmd,
-            cwd=str(Path(args.aab_root)),
-            env={**os.environ, "PYTHONPATH": str(Path(args.aab_root))},
+            cwd=str(aab_root),
+            env={**os.environ, "PYTHONPATH": str(aab_root)},
             capture_output=True,
             text=True,
             check=False,
