@@ -493,6 +493,19 @@ def _allow_unconfigured_backend() -> bool:
     return parse_bool(env_value("CODEX_PR_REVIEW_ALLOW_UNCONFIGURED_BACKEND"))
 
 
+def _review_infrastructure_failure(exc: ReviewError) -> bool:
+    message = str(exc).lower()
+    return any(
+        signal in message
+        for signal in (
+            "codex exec failed",
+            "codex service job failed",
+            "codex service job timed out",
+            "unexpected codex service status",
+        )
+    )
+
+
 def _api_fallback_enabled() -> bool:
     return parse_bool(env_value("CODEX_PR_REVIEW_API_FALLBACK_ENABLED", "true"))
 
@@ -1030,6 +1043,9 @@ def main() -> int:
         upsert_pr_comment(token, repo, pr_number, warning_body)
         if _review_backend_is_unconfigured(exc) and _allow_unconfigured_backend():
             print("::warning::Codex review backend is not configured; leaving human-review note without failing the workflow.")
+            return 0
+        if _review_infrastructure_failure(exc):
+            print("::warning::Codex review infrastructure failure; leaving human-review note without failing the workflow.")
             return 0
         return 1
 
