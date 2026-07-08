@@ -1,28 +1,44 @@
 # VPS Quant Monitor AGENTS
 
-VPS Codex (`codex-quant.service`) 每 30 分钟执行本清单。通知走「量化哨兵」Telegram bot。
+VPS Codex 定时监控（`codex-quant.timer` 每 30 分钟）+ 收盘简报（`codex-daily-briefing.timer` 22:30 UTC）。
 
-路径：`AIAuditBridge/ops/quant-monitor`（VPS 上通常为 `~/Projects/AIAuditBridge/ops/quant-monitor`）。
+路径：`AIAuditBridge/ops/quant-monitor`
 
 ## 环境变量
 
-量化哨兵凭证从 GCP Secret Manager 加载（见 `scripts/load_telegram_env.sh`），**不要**手填 token 到 git。
-
 | 变量 | 说明 |
 |------|------|
-| `QUANT_SENTINEL_TELEGRAM_SECRET_NAME` | 默认 `quant-sentinel-telegram-bot-token` |
-| `QUANT_SENTINEL_GCP_PROJECT` | VPS 可读 secret 的 GCP 项目 |
-| `GLOBAL_TELEGRAM_CHAT_ID` | **必填**（systemd Environment，勿提交到仓库） |
-| `GH_TOKEN` | 只读同步策略仓库 + 开 Issue |
-| `QUANT_MONITOR_ROOT` | 本目录绝对路径 |
+| `QUANT_MONITOR_ROOT` | 本目录 |
+| `AIAUDIT_BRIDGE_ROOT` | `~/Projects/AIAuditBridge` |
+| `QUANT_PLATFORM_KIT_ROOT` | `~/Projects/QuantPlatformKit` |
+| `GLOBAL_TELEGRAM_CHAT_ID` | systemd 注入，勿提交 git |
+| `GH_TOKEN` | `gh` 拉仓 + 开 Issue |
+| `QSL_MONITOR_ISSUE_OWNER` | 3σ 漂移 Issue @ 的用户（默认 `Pigbibi`） |
 
-## 每 30 分钟
+凭证：`scripts/load_telegram_env.sh` 从 GCP `quant-sentinel-telegram-bot-token` 加载。
 
-1. `bash scripts/sync_strategy_repos.sh`
-2. `bash scripts/health_check.sh`
-3. 若 `strategy_health_score < 60` → Telegram 报警
-4. 若 drift ≥ 2σ → 开 GitHub Issue；≥ 3σ → Issue @owner 并 Telegram
+## 每 30 分钟（health_check.sh）
 
-## 收盘后（daily）
+1. `sync_strategy_repos.sh` — `git pull` 四策略仓 + QPK
+2. `health_cycle.py` — `build_dashboard` + `run_drift_detection`
+3. `overall_score < 60` → Telegram 量化哨兵
+4. drift ≥ 0.50（~2σ）→ `create_issues_for_domain` 开 Issue（不 @）
+5. drift ≥ 0.75（~3σ）→ Telegram + Issue **@owner**
 
-`bash scripts/daily_briefing_pipeline.sh` → 写 `data/daily-reports/YYYY-MM-DD/<market>.json` → `AIAuditBridge` consume + dispatch
+## 每日收盘后（daily_briefing_pipeline.sh）
+
+1. `daily_briefing_builder.py` → `data/daily-reports/YYYY-MM-DD/<domain>.json`
+2. `AIAuditBridge/scripts/consume_daily_briefing.py --dispatch`
+3. 正常 → quiet；review → Issue；critical → Telegram
+
+## 部署
+
+```bash
+bash ops/quant-monitor/scripts/deploy_to_vps.sh
+```
+
+## Codex 执行纪律
+
+- 不要手填 token/chat id 到仓库
+- 报警只走量化哨兵 bot
+- 日报默认不通知人，除非 `briefing_consumer` 判定 critical

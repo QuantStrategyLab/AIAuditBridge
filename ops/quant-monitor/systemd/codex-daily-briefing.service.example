@@ -1,5 +1,5 @@
 [Unit]
-Description=QuantStrategyLab Codex Quant Monitor
+Description=QuantStrategyLab daily strategy briefing (task 10)
 After=network-online.target
 Wants=network-online.target
 
@@ -13,15 +13,13 @@ Environment=AIAUDIT_BRIDGE_ROOT=/home/ubuntu/Projects/AIAuditBridge
 Environment=QUANT_PLATFORM_KIT_ROOT=/home/ubuntu/Projects/QuantPlatformKit
 Environment=QUANT_SENTINEL_TELEGRAM_SECRET_NAME=quant-sentinel-telegram-bot-token
 Environment=QUANT_SENTINEL_GCP_PROJECT=firstradequant
-# Set on VPS only — do not commit real chat id to git:
 Environment=GLOBAL_TELEGRAM_CHAT_ID=
 Environment=QSL_GITHUB_REPO=QuantStrategyLab/CnEquityStrategies
-Environment=QSL_MONITOR_ISSUE_OWNER=Pigbibi
 RuntimeDirectory=quant-monitor
 RuntimeDirectoryMode=0750
 ExecStartPre=/bin/bash /home/ubuntu/Projects/AIAuditBridge/ops/quant-monitor/scripts/load_telegram_env.sh /run/quant-monitor/telegram.env
 EnvironmentFile=-/run/quant-monitor/telegram.env
-ExecStart=/bin/bash /home/ubuntu/Projects/AIAuditBridge/ops/quant-monitor/scripts/health_check.sh
+ExecStart=/bin/bash /home/ubuntu/Projects/AIAuditBridge/ops/quant-monitor/scripts/daily_briefing_pipeline.sh
 
 [Install]
 WantedBy=multi-user.target

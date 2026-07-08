@@ -16,7 +16,7 @@ if [[ -z "$CHAT_ID" ]]; then
   exit 1
 fi
 
-install -d -m 0750 "$(dirname "$OUT")"
+install -d -m 0700 "$(dirname "$OUT")" 2>/dev/null || mkdir -p "$(dirname "$OUT")"
 TOKEN="$(
   gcloud secrets versions access latest \
     --secret "$SECRET_NAME" \

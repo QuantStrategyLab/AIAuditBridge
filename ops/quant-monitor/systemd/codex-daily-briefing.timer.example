@@ -1,0 +1,10 @@
+[Unit]
+Description=Run daily strategy briefing after major market closes (UTC)
+
+[Timer]
+OnCalendar=*-*-* 22:30:00 UTC
+Persistent=true
+Unit=codex-daily-briefing.service
+
+[Install]
+WantedBy=timers.target
