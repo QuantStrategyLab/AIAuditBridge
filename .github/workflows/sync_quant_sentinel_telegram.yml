@@ -1,0 +1,48 @@
+name: Sync QuantSentinel Telegram Secret
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-quant-sentinel-secret
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Sync org TG_TOKEN to GCP sentinel secrets
+    runs-on:
+      - self-hosted
+      - codex-vps
+    timeout-minutes: 10
+    steps:
+      - name: Sync sentinel secret across GCP projects
+        env:
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          SECRET_NAME: quant-sentinel-telegram-bot-token
+        run: |
+          set -euo pipefail
+          if [[ -z "${TG_TOKEN}" ]]; then
+            echo "TG_TOKEN is not configured for this repository." >&2
+            exit 1
+          fi
+          echo "::add-mask::${TG_TOKEN}"
+          if ! curl -fsS "https://api.telegram.org/bot${TG_TOKEN}/getMe" | grep -q '"ok":true'; then
+            echo "TG_TOKEN failed Telegram getMe validation." >&2
+            exit 1
+          fi
+          for project in firstradequant longbridgequant charlesschwabquant interactivebrokersquant; do
+            printf '%s' "${TG_TOKEN}" | gcloud secrets versions add "${SECRET_NAME}" \
+              --project="${project}" \
+              --data-file=-
+            echo "synced ${SECRET_NAME} in ${project}"
+          done
+
+      - name: Refresh VPS telegram env
+        run: |
+          set -euo pipefail
+          bash /home/ubuntu/Projects/quant-monitor/scripts/load_telegram_env.sh
+          systemctl restart codex-quant.service
+          systemctl is-active codex-quant.service
