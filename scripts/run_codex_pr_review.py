@@ -42,6 +42,7 @@ CODEX_SERVICE_FALLBACK_SIGNALS = (
     "too many requests",
     "rate limit",
     "quota",
+    "codex exec failed",
 )
 NO_REVIEW_BACKEND_CONFIGURED = (
     "No Codex service URL or API key configured. "

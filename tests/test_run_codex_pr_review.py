@@ -304,6 +304,29 @@ class RunCodexPrReviewTests(unittest.TestCase):
 
         direct_api.assert_not_called()
 
+    def test_service_exec_failure_falls_back_to_direct_api(self) -> None:
+        with (
+            patch.dict(os.environ, {"CODEX_AUDIT_SERVICE_URL": "https://service.example"}, clear=True),
+            patch(
+                "scripts.run_codex_pr_review.run_codex_service_review",
+                side_effect=ReviewError("Codex service job failed: codex exec failed (rc=1): boom"),
+            ),
+            patch(
+                "scripts.run_codex_pr_review.run_direct_api_review",
+                return_value='{"findings":[]}',
+            ) as direct_api,
+        ):
+            output = run_codex_review_with_fallback(
+                "Review this PR.",
+                timeout_minutes=20,
+                complexity="high",
+                changed_file_count=3,
+                changed_line_count=120,
+            )
+
+        direct_api.assert_called_once()
+        self.assertEqual(output, '{"findings":[]}')
+
     def test_service_review_refreshes_oidc_token_while_polling(self) -> None:
         responses = [
             {"job_id": "job-1"},
