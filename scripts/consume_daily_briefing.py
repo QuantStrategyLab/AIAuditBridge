@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 
 from service.briefing_consumer import consume_briefing_dir
+from service.briefing_dispatch import dispatch_briefing_result
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -18,6 +19,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Directory containing domain JSON files (e.g. data/daily-reports/2026-07-08)",
     )
     parser.add_argument("--day", default="", help="Report day label (defaults to directory name)")
+    parser.add_argument(
+        "--dispatch",
+        action="store_true",
+        help="Send Telegram / GitHub notifications per briefing severity",
+    )
+    parser.add_argument("--dry-run", action="store_true", help="Print dispatch actions without sending")
     args = parser.parse_args(argv)
 
     report_dir = Path(args.report_dir)
@@ -26,7 +33,10 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     result = consume_briefing_dir(report_dir, day=args.day)
-    print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+    payload: dict = result.to_dict()
+    if args.dispatch:
+        payload["dispatch"] = dispatch_briefing_result(result, dry_run=args.dry_run)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0 if result.action.value == "quiet" else 2
 
 
