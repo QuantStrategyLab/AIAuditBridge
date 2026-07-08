@@ -110,3 +110,13 @@ def compare_reviews(primary: dict[str, Any], secondary: dict[str, Any]) -> dict[
         "secondary_confidence": secondary_confidence,
         "agreement": verdict != VERDICT_DISAGREEMENT,
     }
+
+
+def extract_verdict(review: dict[str, Any]) -> str | None:
+    """Public helper for orchestration layers."""
+    return _extract_verdict(review)
+
+
+def extract_confidence(review: dict[str, Any]) -> float | None:
+    """Public helper for orchestration layers."""
+    return _extract_confidence(review)
