@@ -6,7 +6,7 @@ delegates to ``quota.recommend_model`` when quota is constrained.
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Mapping
 
 from service.quota import recommend_model
 
