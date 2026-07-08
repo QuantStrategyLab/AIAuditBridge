@@ -35,4 +35,4 @@ cat >"$OUT" <<EOF
 TELEGRAM_TOKEN=$TOKEN
 GLOBAL_TELEGRAM_CHAT_ID=$CHAT_ID
 EOF
-echo "[load_telegram_env] wrote $OUT (secret=$SECRET_NAME project=$GCP_PROJECT)"
+echo "[load_telegram_env] wrote $OUT (name=$SECRET_NAME project=$GCP_PROJECT)"
