@@ -43,15 +43,32 @@ def _format_disagreement_body(result: DualReviewResult) -> str:
         ]
     )
     if result.secondary_review is not None:
-        lines.extend(
-            [
-                "### Secondary review",
-                "```json",
-                json.dumps(result.secondary_review, ensure_ascii=False, indent=2),
-                "```",
-                "",
-            ]
-        )
+        secondary = result.secondary_review
+        if isinstance(secondary, dict) and "gpt" in secondary and "claude" in secondary:
+            lines.extend(
+                [
+                    "### Secondary review — GPT",
+                    "```json",
+                    json.dumps(secondary.get("gpt"), ensure_ascii=False, indent=2),
+                    "```",
+                    "",
+                    "### Secondary review — Claude",
+                    "```json",
+                    json.dumps(secondary.get("claude"), ensure_ascii=False, indent=2),
+                    "```",
+                    "",
+                ]
+            )
+        else:
+            lines.extend(
+                [
+                    "### Secondary review",
+                    "```json",
+                    json.dumps(secondary, ensure_ascii=False, indent=2),
+                    "```",
+                    "",
+                ]
+            )
     if result.comparison is not None:
         lines.extend(
             [

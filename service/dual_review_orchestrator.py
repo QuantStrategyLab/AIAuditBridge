@@ -12,10 +12,12 @@ from service.dual_review import (
     VERDICT_PASS,
     DualReviewTrigger,
     compare_reviews,
+    compare_three_reviews,
     extract_confidence,
     extract_verdict,
     should_escalate,
 )
+from service.dual_review_secondary import dual_api_secondary_reviewer, is_dual_api_secondary
 from service.dual_review_triggers import resolve_trigger
 from service.model_router import route_model
 
@@ -97,13 +99,21 @@ def default_secondary_reviewer(request: DualReviewRequest) -> dict[str, Any]:
     }
 
 
+def resolve_secondary_reviewer(
+    explicit: SecondaryReviewer | None,
+) -> SecondaryReviewer:
+    if explicit is not None:
+        return explicit
+    return dual_api_secondary_reviewer
+
+
 def orchestrate_dual_review(
     request: DualReviewRequest,
     *,
     secondary_reviewer: SecondaryReviewer | None = None,
 ) -> DualReviewResult:
     """Run primary confidence gate, optional secondary review, and reconciliation."""
-    reviewer = secondary_reviewer or default_secondary_reviewer
+    reviewer = resolve_secondary_reviewer(secondary_reviewer)
     route = route_model("dual_review")
     result = DualReviewResult(
         trigger=request.trigger,
@@ -134,7 +144,16 @@ def orchestrate_dual_review(
 
     secondary = reviewer(request)
     result.secondary_review = secondary
-    comparison = compare_reviews(request.primary_review, secondary)
+    if is_dual_api_secondary(secondary):
+        comparison = compare_three_reviews(
+            request.primary_review,
+            secondary["gpt"],
+            secondary["claude"],
+        )
+    else:
+        legacy = secondary.get("legacy") if isinstance(secondary, dict) else None
+        compare_target = legacy if isinstance(legacy, dict) else secondary
+        comparison = compare_reviews(request.primary_review, compare_target)
     result.comparison = comparison
     result.outcome = str(comparison.get("verdict") or VERDICT_DISAGREEMENT)
     if result.outcome == VERDICT_DISAGREEMENT:
@@ -155,6 +174,18 @@ def orchestrate_from_payload(
     if request is None:
         return None
     if secondary_review is not None:
+        if is_dual_api_secondary(secondary_review):
+            fixed = {
+                "mode": "dual_api",
+                "gpt": dict(secondary_review["gpt"]),
+                "claude": dict(secondary_review["claude"]),
+            }
+
+            def reviewer(_req: DualReviewRequest) -> dict[str, Any]:
+                return fixed
+
+            return orchestrate_dual_review(request, secondary_reviewer=reviewer)
+
         fixed_secondary = dict(secondary_review)
 
         def reviewer(_req: DualReviewRequest) -> dict[str, Any]:
