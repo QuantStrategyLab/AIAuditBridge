@@ -9,7 +9,7 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
-from service.briefing_consumer import BriefingAction, BriefingConsumptionResult, BriefingFinding
+from service.briefing_consumer import BriefingAction, BriefingConsumptionResult
 
 
 def _telegram_token() -> str:
