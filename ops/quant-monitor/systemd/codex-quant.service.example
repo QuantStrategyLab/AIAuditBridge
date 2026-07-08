@@ -1,0 +1,21 @@
+[Unit]
+Description=QuantStrategyLab Codex Quant Monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/ubuntu/Projects/AIAuditBridge/ops/quant-monitor
+Environment=QUANT_MONITOR_ROOT=/home/ubuntu/Projects/AIAuditBridge/ops/quant-monitor
+Environment=QUANT_SENTINEL_TELEGRAM_SECRET_NAME=quant-sentinel-telegram-bot-token
+Environment=QUANT_SENTINEL_GCP_PROJECT=firstradequant
+# Set chat id on VPS only — do not commit real value to git:
+Environment=GLOBAL_TELEGRAM_CHAT_ID=
+RuntimeDirectory=quant-monitor
+RuntimeDirectoryMode=0750
+ExecStartPre=/bin/bash /home/ubuntu/Projects/AIAuditBridge/ops/quant-monitor/scripts/load_telegram_env.sh /run/quant-monitor/telegram.env
+EnvironmentFile=-/run/quant-monitor/telegram.env
+ExecStart=/bin/bash /home/ubuntu/Projects/AIAuditBridge/ops/quant-monitor/scripts/health_check.sh
+
+[Install]
+WantedBy=multi-user.target

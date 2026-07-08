@@ -41,8 +41,15 @@ jobs:
           done
 
       - name: Refresh VPS telegram env
+        env:
+          GLOBAL_TELEGRAM_CHAT_ID: ${{ vars.GLOBAL_TELEGRAM_CHAT_ID }}
         run: |
           set -euo pipefail
-          bash /home/ubuntu/Projects/quant-monitor/scripts/load_telegram_env.sh
+          export QUANT_SENTINEL_GCP_PROJECT="${QUANT_SENTINEL_GCP_PROJECT:-firstradequant}"
+          if [[ -z "${GLOBAL_TELEGRAM_CHAT_ID:-}" ]]; then
+            echo "GLOBAL_TELEGRAM_CHAT_ID org/repo variable required" >&2
+            exit 1
+          fi
+          bash /home/ubuntu/Projects/AIAuditBridge/ops/quant-monitor/scripts/load_telegram_env.sh
           systemctl restart codex-quant.service
           systemctl is-active codex-quant.service
