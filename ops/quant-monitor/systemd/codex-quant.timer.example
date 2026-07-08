@@ -1,0 +1,10 @@
+[Unit]
+Description=Run quant monitor every 30 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=30min
+Unit=codex-quant.service
+
+[Install]
+WantedBy=timers.target
