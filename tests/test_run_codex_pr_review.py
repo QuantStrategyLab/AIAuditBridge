@@ -274,6 +274,104 @@ class RunCodexPrReviewTests(unittest.TestCase):
             frozenset({"review-ack", "ship-it"}),
         )
 
+    def test_auto_converge_threshold_defaults_and_parses(self) -> None:
+        self.assertEqual(run_codex_pr_review.auto_converge_after_from_policy({"version": 1}), 3)
+        self.assertEqual(
+            run_codex_pr_review.auto_converge_after_from_policy(
+                {"version": 1, "pr_review": {"auto_converge_after": 2}}
+            ),
+            2,
+        )
+        self.assertEqual(
+            run_codex_pr_review.auto_converge_after_from_policy(
+                {"version": 1, "pr_review": {"auto_converge_after": 0}}
+            ),
+            0,
+        )
+
+    def test_blocking_streak_advances_and_auto_converges(self) -> None:
+        self.assertEqual(run_codex_pr_review.parse_blocking_streak(""), 0)
+        self.assertEqual(
+            run_codex_pr_review.parse_blocking_streak(
+                "<!-- codex-pr-review -->\n<!-- codex-pr-review-streak:2 -->\n"
+            ),
+            2,
+        )
+        self.assertEqual(run_codex_pr_review.next_blocking_streak(2, blocked=True), 3)
+        self.assertEqual(run_codex_pr_review.next_blocking_streak(2, blocked=False), 0)
+        self.assertTrue(run_codex_pr_review.should_auto_converge(3, blocked=True, threshold=3))
+        self.assertFalse(run_codex_pr_review.should_auto_converge(2, blocked=True, threshold=3))
+        self.assertFalse(run_codex_pr_review.should_auto_converge(3, blocked=False, threshold=3))
+
+    def test_main_auto_converges_after_threshold_without_ack_label(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            event = {
+                "pull_request": {
+                    "number": 7,
+                    "title": "feat: risky",
+                    "body": "",
+                    "html_url": "https://example.test/pr/7",
+                    "labels": [],
+                    "head": {"sha": "abc123"},
+                    "base": {"sha": "base123", "repo": {"full_name": "org/repo"}},
+                }
+            }
+            event_path = Path(tmpdir) / "event.json"
+            event_path.write_text(json.dumps(event), encoding="utf-8")
+            env = {
+                "GH_TOKEN": "token",
+                "GITHUB_REPOSITORY": "org/repo",
+                "GITHUB_EVENT_PATH": str(event_path),
+                "GITHUB_EVENT_NAME": "pull_request",
+            }
+            review_json = json.dumps(
+                {
+                    "summary": "blocking issue",
+                    "findings": [
+                        {
+                            "severity": "high",
+                            "category": "security",
+                            "file": "scripts/run_codex_pr_review.py",
+                            "line": 1,
+                            "description": "example blocking finding",
+                            "suggestion": "fix it",
+                        }
+                    ],
+                }
+            )
+            prior_comment = (
+                "<!-- codex-pr-review -->\n"
+                "<!-- codex-pr-review-streak:2 -->\n"
+                "## prior\n"
+            )
+            with (
+                patch.dict(os.environ, env, clear=True),
+                patch(
+                    "scripts.run_codex_pr_review.fetch_pr_files",
+                    return_value=[{"filename": "scripts/run_codex_pr_review.py"}],
+                ),
+                patch(
+                    "scripts.run_codex_pr_review.fetch_pr_diff",
+                    return_value="diff --git a/scripts/run_codex_pr_review.py b/scripts/run_codex_pr_review.py",
+                ),
+                patch("scripts.run_codex_pr_review.fetch_pr_labels", return_value=[]),
+                patch(
+                    "scripts.run_codex_pr_review.find_existing_review_comment",
+                    return_value=(99, prior_comment),
+                ),
+                patch(
+                    "scripts.run_codex_pr_review.run_codex_review_with_fallback",
+                    return_value=review_json,
+                ),
+                patch("scripts.run_codex_pr_review.upsert_pr_comment") as comment,
+            ):
+                self.assertEqual(run_codex_pr_review.main(), 0)
+
+        comment.assert_called_once()
+        body = comment.call_args.args[3]
+        self.assertIn("codex-pr-review-streak:3", body)
+        self.assertIn("Auto-converged", body)
+
     def test_pr_has_ack_label_matches_configured_label(self) -> None:
         policy = {"version": 1, "pr_review": {"ack_labels": ["review-ack"]}}
         matched, label = run_codex_pr_review.pr_has_ack_label(
@@ -338,6 +436,10 @@ class RunCodexPrReviewTests(unittest.TestCase):
                 patch(
                     "scripts.run_codex_pr_review.fetch_pr_labels",
                     return_value=[{"name": "review-ack"}],
+                ),
+                patch(
+                    "scripts.run_codex_pr_review.find_existing_review_comment",
+                    return_value=(None, ""),
                 ),
                 patch(
                     "scripts.run_codex_pr_review.run_codex_review_with_fallback",
