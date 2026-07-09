@@ -40,6 +40,8 @@ class ModelCatalogScoringTests(unittest.TestCase):
             validate_catalog_path(Path("/etc/passwd"))
         with self.assertRaises(ValueError):
             validate_catalog_path(Path("/tmp/not-model-catalog.json"))
+        with self.assertRaises(ValueError):
+            validate_catalog_path(Path("/tmp/evil/nested/model_catalog.json"))
 
     def test_flagship_scores_higher_than_mini(self) -> None:
         self.assertGreater(capability_score_for("gpt-5.5"), capability_score_for("gpt-5.4-mini"))

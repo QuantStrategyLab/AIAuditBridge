@@ -26,21 +26,22 @@ _VPS_CATALOG = Path("/var/lib/codex-audit-bridge/model_catalog.json")
 _CATALOG_FILENAME = "model_catalog.json"
 
 
-def _allowed_catalog_roots() -> tuple[Path, ...]:
-    return (
-        Path("/var/lib/codex-audit-bridge").resolve(),
-        _DEFAULT_REPO_CATALOG.parent.resolve(),
-        Path(tempfile.gettempdir()).resolve(),
-    )
-
-
 def validate_catalog_path(path: Path) -> Path:
     resolved = path.expanduser().resolve()
     if resolved.name != _CATALOG_FILENAME:
         raise ValueError(f"model catalog path must be named {_CATALOG_FILENAME}: {resolved}")
-    if not any(root == resolved.parent or root in resolved.parents for root in _allowed_catalog_roots()):
-        raise ValueError(f"model catalog path outside allowed directories: {resolved}")
-    return resolved
+    parent = resolved.parent
+    allowed_exact = {
+        Path("/var/lib/codex-audit-bridge").resolve(),
+        _DEFAULT_REPO_CATALOG.parent.resolve(),
+    }
+    if parent in allowed_exact:
+        return resolved
+    # TemporaryDirectory layout: <tmpdir>/<random>/model_catalog.json
+    tmp_root = Path(tempfile.gettempdir()).resolve()
+    if parent.parent == tmp_root and parent != tmp_root:
+        return resolved
+    raise ValueError(f"model catalog path outside allowed directories: {resolved}")
 
 
 def seed_catalog_path() -> Path:
@@ -170,7 +171,9 @@ class ModelCatalog:
         if not self.synced_at:
             return float("inf")
         synced = datetime.fromisoformat(self.synced_at.replace("Z", "+00:00"))
-        return (datetime.now(timezone.utc) - synced).total_seconds() / 86400.0
+        age = (datetime.now(timezone.utc) - synced).total_seconds() / 86400.0
+        # Future timestamps (clock skew / manual edits) are treated as age 0.
+        return max(0.0, age)
 
     def is_stale(self) -> bool:
         return self.age_days() > float(self.stale_threshold_days)
@@ -196,6 +199,8 @@ def save_catalog_atomic(catalog: ModelCatalog, path: Path | None = None) -> Path
     target = validate_catalog_path(path) if path is not None else catalog_path()
     target.parent.mkdir(parents=True, exist_ok=True)
     previous = target.with_name(target.name + ".prev")
+    if previous.parent != target.parent or not previous.name.endswith(".prev"):
+        raise ValueError(f"invalid catalog backup path: {previous}")
     if target.is_file():
         _write_atomic_text(previous, target.read_text(encoding="utf-8"))
     payload = json.dumps(catalog.to_dict(), indent=2, sort_keys=True) + "\n"
@@ -348,7 +353,8 @@ def apply_sticky_assignments(
     discovered_ids: set[str],
     sticky_days: int,
 ) -> dict[str, TierAssignment]:
-    if previous is None or previous.age_days() > float(sticky_days):
+    age = previous.age_days() if previous is not None else float("inf")
+    if previous is None or age > float(sticky_days) or age < 0:
         return new_tiers
     merged = dict(new_tiers)
     for tier, old_assignment in previous.tiers.items():

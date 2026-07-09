@@ -9,7 +9,7 @@ import threading
 from typing import Mapping
 
 from service.model_catalog import ModelCatalog, catalog_path, seed_catalog_path
-from service.model_catalog_sync import CatalogSyncError, sync_catalog
+from service.model_catalog_sync import sync_catalog
 
 logger = logging.getLogger(__name__)
 
@@ -94,22 +94,20 @@ def _load_or_sync_catalog() -> ModelCatalog:
         ):
             return _catalog_cache
         _catalog_loading = True
+        load_path = path
 
     try:
         try:
-            catalog, mtime_ns = _load_catalog_with_mtime(path)
+            catalog, mtime_ns = _load_catalog_with_mtime(load_path)
         except FileNotFoundError:
             seed = seed_catalog_path()
-            if path.resolve() != seed.resolve() and seed.is_file():
+            if load_path.resolve() != seed.resolve() and seed.is_file():
                 # Never persist bootstrap into a production/runtime path on cold start.
                 catalog, mtime_ns = _load_catalog_with_mtime(seed)
             else:
+                catalog = sync_catalog(output_path=str(load_path), force=True)
                 try:
-                    catalog = sync_catalog(output_path=str(path), force=True)
-                except CatalogSyncError:
-                    raise
-                try:
-                    mtime_ns = path.stat().st_mtime_ns
+                    mtime_ns = load_path.stat().st_mtime_ns
                 except OSError:
                     mtime_ns = None
     except Exception:

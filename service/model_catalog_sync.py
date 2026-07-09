@@ -27,6 +27,7 @@ from service.model_catalog import (
     is_production_catalog_path,
     load_catalog,
     save_catalog_atomic,
+    validate_catalog_path,
 )
 
 logger = logging.getLogger(__name__)
@@ -213,11 +214,10 @@ def update_absence_counts(
     if previous is not None:
         absence_counts = dict(previous.absence_counts)
         prior_deprecated = set(previous.deprecated)
-        known_models = set(previous.models)
         deprecated = [
             model_id
             for model_id in previous.deprecated
-            if model_id not in discovered_ids and model_id in known_models
+            if model_id not in discovered_ids
         ]
     for model_id in discovered_ids:
         absence_counts.pop(model_id, None)
@@ -293,7 +293,11 @@ def _now_iso() -> str:
 def _record_failed_sync_attempt(previous: ModelCatalog, target) -> ModelCatalog:
     updated = deepcopy(previous)
     updated.last_sync_attempt_at = _now_iso()
-    save_catalog_atomic(updated, target)
+    try:
+        validated = validate_catalog_path(target)
+        save_catalog_atomic(updated, validated)
+    except (OSError, ValueError) as exc:
+        logger.warning("failed to persist last_sync_attempt_at for %s: %s", target, exc)
     logger.warning(
         "model discovery returned no records; preserved catalog synced_at=%s attempt_at=%s",
         updated.synced_at,
@@ -317,7 +321,7 @@ def sync_catalog(*, output_path: str | None = None, force: bool = False) -> Mode
 
     from service.model_catalog import catalog_path
 
-    target = Path(output_path) if output_path else catalog_path()
+    target = validate_catalog_path(Path(output_path)) if output_path else catalog_path()
     previous: ModelCatalog | None = None
     if target.is_file():
         previous = load_catalog(target)
