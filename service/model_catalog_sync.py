@@ -1,0 +1,446 @@
+"""Discover provider models and rebuild the auto-maintained catalog."""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import re
+import ssl
+import urllib.error
+import urllib.request
+from copy import deepcopy
+from datetime import datetime, timezone
+from typing import Any
+
+from service.model_catalog import (
+    CATALOG_VERSION,
+    DEFAULT_STICKY_DAYS,
+    ModelCatalog,
+    ModelRecord,
+    apply_sticky_assignments,
+    assign_tiers,
+    capability_score_for,
+    estimate_cost_per_1m,
+    is_chat_candidate,
+    is_likely_subscription_available,
+    is_production_catalog_path,
+    load_catalog,
+    save_catalog_atomic,
+    validate_catalog_path,
+)
+
+logger = logging.getLogger(__name__)
+
+_MAX_HTTP_RESPONSE_BYTES = 10 * 1024 * 1024
+_API_KEY_RE = re.compile(r"^[A-Za-z0-9_\-.]{10,256}$")
+
+
+def _sanitize_api_key(value: str) -> str:
+    raw = value or ""
+    if not raw.strip():
+        return ""
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in raw):
+        logger.warning("rejecting API key with control characters")
+        return ""
+    cleaned = raw.strip()
+    if cleaned.lower().startswith("bearer "):
+        cleaned = cleaned[7:].strip()
+    if cleaned.startswith(("-", ".")):
+        logger.warning("rejecting API key with unsafe leading character")
+        return ""
+    if not cleaned.startswith("sk-"):
+        logger.warning("rejecting API key that does not start with sk-")
+        return ""
+    if not _API_KEY_RE.fullmatch(cleaned):
+        logger.warning("rejecting API key that failed format validation")
+        return ""
+    return cleaned
+
+
+def _read_response_limited(response: Any, *, limit: int) -> bytes:
+    content_length = response.headers.get("Content-Length")
+    if content_length is not None:
+        try:
+            declared = int(content_length)
+        except ValueError:
+            declared = None
+        else:
+            if declared > limit:
+                raise ValueError(f"response Content-Length exceeds {limit} bytes")
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = response.read(65536)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > limit:
+            raise ValueError(f"response exceeds {limit} bytes")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _http_get_json(url: str, headers: dict[str, str]) -> dict[str, Any]:
+    request = urllib.request.Request(url, headers=headers)
+    ssl_context = ssl.create_default_context()
+    try:
+        with urllib.request.urlopen(request, timeout=30, context=ssl_context) as response:
+            raw = _read_response_limited(response, limit=_MAX_HTTP_RESPONSE_BYTES)
+    except urllib.error.HTTPError as exc:
+        if 400 <= int(exc.code) < 500:
+            logger.warning("model discovery HTTP %s for %s", exc.code, url)
+        raise
+    return json.loads(raw.decode("utf-8"))
+
+
+def discover_codex_models() -> list[ModelRecord]:
+    """Codex CLI discovery disabled; OpenAI/Anthropic APIs are the source of truth."""
+    return []
+
+
+class ProviderDiscoveryResult:
+    def __init__(self, provider: str, *, configured: bool, ok: bool, records: list[ModelRecord]) -> None:
+        self.provider = provider
+        self.configured = configured
+        self.ok = ok
+        self.records = records
+
+
+def discover_openai_models() -> list[ModelRecord]:
+    return discover_openai_provider().records
+
+
+def discover_openai_provider() -> ProviderDiscoveryResult:
+    api_key = _sanitize_api_key(os.environ.get("OPENAI_API_KEY", ""))
+    if not api_key:
+        return ProviderDiscoveryResult("openai", configured=False, ok=True, records=[])
+    try:
+        payload = _http_get_json(
+            "https://api.openai.com/v1/models",
+            {"Authorization": f"Bearer {api_key}"},
+        )
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, ValueError):
+        return ProviderDiscoveryResult("openai", configured=True, ok=False, records=[])
+    records: list[ModelRecord] = []
+    for item in payload.get("data") or []:
+        if not isinstance(item, dict):
+            continue
+        model_id = str(item.get("id") or "").strip()
+        if not model_id or not is_chat_candidate(model_id):
+            continue
+        created_at = int(item["created"]) if item.get("created") is not None else None
+        input_cost, output_cost = estimate_cost_per_1m(model_id)
+        records.append(
+            ModelRecord(
+                model_id=model_id,
+                provider="openai",
+                created_at=created_at,
+                capability_score=capability_score_for(model_id, created_at=created_at),
+                input_cost_per_1m=input_cost,
+                output_cost_per_1m=output_cost,
+                available_on_subscription=is_likely_subscription_available(model_id),
+            )
+        )
+    return ProviderDiscoveryResult("openai", configured=True, ok=True, records=records)
+
+
+def discover_anthropic_models() -> list[ModelRecord]:
+    return discover_anthropic_provider().records
+
+
+def discover_anthropic_provider() -> ProviderDiscoveryResult:
+    api_key = _sanitize_api_key(os.environ.get("ANTHROPIC_API_KEY", ""))
+    if not api_key:
+        return ProviderDiscoveryResult("anthropic", configured=False, ok=True, records=[])
+    try:
+        payload = _http_get_json(
+            "https://api.anthropic.com/v1/models",
+            {
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+            },
+        )
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, ValueError):
+        return ProviderDiscoveryResult("anthropic", configured=True, ok=False, records=[])
+    records: list[ModelRecord] = []
+    for item in payload.get("data") or []:
+        if not isinstance(item, dict):
+            continue
+        model_id = str(item.get("id") or "").strip()
+        if not model_id or not is_chat_candidate(model_id):
+            continue
+        created_at = None
+        if item.get("created_at"):
+            try:
+                created_at = int(
+                    datetime.fromisoformat(str(item["created_at"]).replace("Z", "+00:00")).timestamp()
+                )
+            except ValueError:
+                created_at = None
+        input_cost, output_cost = estimate_cost_per_1m(model_id)
+        records.append(
+            ModelRecord(
+                model_id=model_id,
+                provider="anthropic",
+                created_at=created_at,
+                capability_score=capability_score_for(model_id, created_at=created_at),
+                input_cost_per_1m=input_cost,
+                output_cost_per_1m=output_cost,
+                available_on_subscription=is_likely_subscription_available(model_id),
+            )
+        )
+    return ProviderDiscoveryResult("anthropic", configured=True, ok=True, records=records)
+
+
+def merge_records(*groups: list[ModelRecord]) -> list[ModelRecord]:
+    merged: dict[str, ModelRecord] = {}
+    for group in groups:
+        for record in group:
+            existing = merged.get(record.model_id)
+            if existing is None or record.capability_score > existing.capability_score:
+                merged[record.model_id] = record
+    return list(merged.values())
+
+
+def bootstrap_records() -> list[ModelRecord]:
+    """Offline fallback when provider discovery returns nothing."""
+    seeds = (
+        ("gpt-5.4-mini", "openai"),
+        ("gpt-5.4", "openai"),
+        ("gpt-5.5", "openai"),
+        ("gpt-5.6-luna", "openai"),
+        ("gpt-5.6-sol", "openai"),
+        ("claude-sonnet-4-6", "anthropic"),
+        ("claude-fable-5", "anthropic"),
+    )
+    records: list[ModelRecord] = []
+    for model_id, provider in seeds:
+        input_cost, output_cost = estimate_cost_per_1m(model_id)
+        records.append(
+            ModelRecord(
+                model_id=model_id,
+                provider=provider,
+                capability_score=capability_score_for(model_id),
+                input_cost_per_1m=input_cost,
+                output_cost_per_1m=output_cost,
+                available_on_subscription=True,
+            )
+        )
+    return records
+
+
+def update_absence_counts(
+    previous: ModelCatalog | None,
+    discovered_ids: set[str],
+    *,
+    deprecation_misses: int,
+) -> tuple[dict[str, int], list[str], dict[str, int]]:
+    absence_counts: dict[str, int] = {}
+    presence_counts: dict[str, int] = {}
+    deprecated: list[str] = []
+    prior_deprecated: set[str] = set()
+    if previous is not None:
+        absence_counts = dict(previous.absence_counts)
+        presence_counts = dict(previous.presence_counts)
+        prior_deprecated = set(previous.deprecated)
+        deprecated = list(previous.deprecated)
+    for model_id in discovered_ids:
+        absence_counts.pop(model_id, None)
+        if model_id in prior_deprecated:
+            presence_counts[model_id] = int(presence_counts.get(model_id, 0)) + 1
+            if presence_counts[model_id] >= deprecation_misses:
+                deprecated = [item for item in deprecated if item != model_id]
+                presence_counts.pop(model_id, None)
+        else:
+            presence_counts.pop(model_id, None)
+    for model_id in list(presence_counts):
+        if model_id not in discovered_ids:
+            presence_counts.pop(model_id, None)
+    if previous is not None:
+        for model_id in previous.models:
+            if model_id in discovered_ids:
+                continue
+            if model_id in prior_deprecated:
+                continue
+            absence_counts[model_id] = int(absence_counts.get(model_id, 0)) + 1
+            if absence_counts[model_id] >= deprecation_misses and model_id not in deprecated:
+                deprecated.append(model_id)
+    return absence_counts, deprecated, presence_counts
+
+
+def build_catalog(
+    records: list[ModelRecord],
+    *,
+    previous: ModelCatalog | None = None,
+    catalog_source: str = "live",
+) -> ModelCatalog:
+    if not records:
+        raise ValueError("build_catalog requires at least one discovered model record")
+    discovered_ids = {record.model_id for record in records}
+    tiers = assign_tiers(records)
+    sticky_days = previous.sticky_days if previous is not None else DEFAULT_STICKY_DAYS
+    tiers = apply_sticky_assignments(tiers, previous, discovered_ids=discovered_ids, sticky_days=sticky_days)
+    absence_counts, deprecated, presence_counts = update_absence_counts(
+        previous,
+        discovered_ids,
+        deprecation_misses=previous.deprecation_misses if previous else 2,
+    )
+    active_records = [record for record in records if record.model_id not in deprecated]
+    if not active_records:
+        raise ValueError("all discovered models are deprecated; refusing empty active catalog")
+    # Keep sticky-held models in the models map even if they missed this discovery cycle.
+    models: dict[str, ModelRecord] = {record.model_id: record for record in active_records}
+    if previous is not None:
+        for assignment in tiers.values():
+            model_id = assignment.model
+            if model_id in models or model_id in deprecated:
+                continue
+            prior = previous.models.get(model_id)
+            if prior is not None:
+                models[model_id] = prior
+    replacements: dict[str, Any] = {}
+    try:
+        replacement_tiers = assign_tiers(active_records)
+    except ValueError:
+        replacement_tiers = {}
+    for tier_name, assignment in tiers.items():
+        if assignment.model in deprecated and tier_name in replacement_tiers:
+            replacements[tier_name] = replacement_tiers[tier_name]
+    if replacements:
+        tiers.update(replacements)
+    return ModelCatalog(
+        version=CATALOG_VERSION,
+        synced_at=datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        sync_interval_days=previous.sync_interval_days if previous else 30,
+        stale_threshold_days=previous.stale_threshold_days if previous else 35,
+        sticky_days=sticky_days,
+        deprecation_misses=previous.deprecation_misses if previous else 2,
+        catalog_source=catalog_source,
+        tiers=tiers,
+        models=models,
+        deprecated=deprecated,
+        absence_counts=absence_counts,
+        presence_counts=presence_counts,
+    )
+
+
+def discover_all_providers() -> list[ProviderDiscoveryResult]:
+    return [discover_openai_provider(), discover_anthropic_provider()]
+
+
+def discover_all_records() -> list[ModelRecord]:
+    return merge_records(*(result.records for result in discover_all_providers()))
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _record_failed_sync_attempt(previous: ModelCatalog, target) -> ModelCatalog:
+    updated = deepcopy(previous)
+    updated.last_sync_attempt_at = _now_iso()
+    try:
+        validated = validate_catalog_path(target)
+        save_catalog_atomic(updated, validated)
+    except (OSError, ValueError) as exc:
+        logger.error("failed to persist last_sync_attempt_at for %s: %s", target, exc)
+    logger.warning(
+        "model discovery returned no records; preserved catalog synced_at=%s attempt_at=%s",
+        updated.synced_at,
+        updated.last_sync_attempt_at,
+    )
+    return updated
+
+
+class CatalogSyncError(RuntimeError):
+    """Raised when live discovery cannot proceed as expected."""
+
+
+def _provider_keys_configured() -> bool:
+    return bool(_sanitize_api_key(os.environ.get("OPENAI_API_KEY", ""))) or bool(
+        _sanitize_api_key(os.environ.get("ANTHROPIC_API_KEY", ""))
+    )
+
+
+def sync_catalog(*, output_path: str | None = None, force: bool = False) -> ModelCatalog:
+    from pathlib import Path
+
+    from service.model_catalog import catalog_path
+
+    target = validate_catalog_path(Path(output_path)) if output_path else catalog_path()
+    previous: ModelCatalog | None = None
+    if target.is_file():
+        previous = load_catalog(target)
+        if not force and previous.age_days() < float(previous.sync_interval_days):
+            return previous
+    # Monthly VPS sync (--force with an existing catalog) must have provider keys.
+    # Cold bootstrap without keys remains allowed for local/CI seed generation.
+    if force and previous is not None and not _provider_keys_configured():
+        raise CatalogSyncError(
+            "OPENAI_API_KEY or ANTHROPIC_API_KEY required for live model catalog sync "
+            "(configure /etc/codex-audit-bridge/model-catalog.env)"
+        )
+    provider_results = discover_all_providers()
+    configured_failures = [item for item in provider_results if item.configured and not item.ok]
+    empty_configured = [
+        item for item in provider_results if item.configured and item.ok and not item.records
+    ]
+    records = merge_records(*(item.records for item in provider_results))
+    catalog_source = "live"
+    if configured_failures and previous is not None:
+        logger.warning(
+            "provider discovery failed for %s; preserving previous catalog",
+            ",".join(item.provider for item in configured_failures),
+        )
+        return _record_failed_sync_attempt(previous, target)
+    if configured_failures and previous is None and is_production_catalog_path(target):
+        raise CatalogSyncError(
+            f"provider discovery failed for {','.join(item.provider for item in configured_failures)}; "
+            f"refusing to bootstrap production catalog at {target}"
+        )
+    if empty_configured and previous is not None:
+        logger.warning(
+            "configured provider returned empty inventory for %s; preserving previous catalog",
+            ",".join(item.provider for item in empty_configured),
+        )
+        return _record_failed_sync_attempt(previous, target)
+    if empty_configured and previous is None and is_production_catalog_path(target):
+        raise CatalogSyncError(
+            f"configured provider returned empty inventory for "
+            f"{','.join(item.provider for item in empty_configured)}; "
+            f"refusing to bootstrap production catalog at {target}"
+        )
+    if not records:
+        if previous is not None:
+            return _record_failed_sync_attempt(previous, target)
+        if is_production_catalog_path(target):
+            raise CatalogSyncError(
+                f"refusing to bootstrap production catalog at {target}; "
+                "live discovery required (set OPENAI_API_KEY/ANTHROPIC_API_KEY)"
+            )
+        records = bootstrap_records()
+        catalog_source = "bootstrap"
+    try:
+        catalog = build_catalog(records, previous=previous, catalog_source=catalog_source)
+    except (ValueError, RuntimeError):
+        logger.warning("build_catalog failed; preserving previous catalog if available")
+        if previous is not None:
+            return _record_failed_sync_attempt(previous, target)
+        if is_production_catalog_path(target):
+            raise CatalogSyncError(f"refusing to bootstrap production catalog at {target}")
+        catalog = build_catalog(bootstrap_records(), catalog_source="bootstrap")
+    save_catalog_atomic(catalog, target)
+    return catalog
+
+
+__all__ = [
+    "CatalogSyncError",
+    "bootstrap_records",
+    "build_catalog",
+    "discover_all_records",
+    "discover_anthropic_models",
+    "discover_codex_models",
+    "discover_openai_models",
+    "sync_catalog",
+]

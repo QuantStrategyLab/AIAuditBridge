@@ -1,0 +1,10 @@
+[Unit]
+Description=Run model catalog sync monthly
+
+[Timer]
+OnCalendar=*-*-01 06:00:00 UTC
+Persistent=true
+Unit=model-catalog-sync.service
+
+[Install]
+WantedBy=timers.target
