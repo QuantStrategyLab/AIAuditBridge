@@ -53,6 +53,9 @@ NO_REVIEW_BACKEND_CONFIGURED = (
 BLOCK_SEVERITIES = frozenset({"critical", "high"})
 COMMENT_SEVERITIES = frozenset({"critical", "high", "medium", "low"})
 DEFAULT_ACK_LABELS = ("review-ack",)
+DEFAULT_AUTO_CONVERGE_AFTER = 3
+STREAK_MARKER_PREFIX = "<!-- codex-pr-review-streak:"
+STREAK_MARKER_SUFFIX = " -->"
 
 
 class ReviewError(RuntimeError):
@@ -167,6 +170,7 @@ def _default_policy() -> dict[str, Any]:
         "max_changed_lines": 2000,
         "pr_review": {
             "ack_labels": list(DEFAULT_ACK_LABELS),
+            "auto_converge_after": DEFAULT_AUTO_CONVERGE_AFTER,
         },
     }
 
@@ -180,6 +184,22 @@ def ack_labels_from_policy(policy: dict[str, Any]) -> frozenset[str]:
     if not isinstance(raw, list):
         return frozenset()
     return frozenset(str(item).strip() for item in raw if str(item).strip())
+
+
+def auto_converge_after_from_policy(policy: dict[str, Any]) -> int:
+    """Consecutive blocking review rounds before the check auto-passes.
+
+    Set ``pr_review.auto_converge_after`` to ``0`` to disable.
+    """
+    pr_review = policy.get("pr_review") if isinstance(policy.get("pr_review"), dict) else {}
+    raw = pr_review.get("auto_converge_after") if isinstance(pr_review, dict) else None
+    if raw is None:
+        return DEFAULT_AUTO_CONVERGE_AFTER
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_AUTO_CONVERGE_AFTER
+    return max(0, value)
 
 
 def pr_has_ack_label(
@@ -875,21 +895,44 @@ def build_pr_comment(
     pr_url: str,
     *,
     ack_label: str = "",
+    blocking_streak: int = 0,
+    auto_converged: bool = False,
+    auto_converge_after: int = 0,
 ) -> str:
     """Build a markdown comment to post on the PR."""
     lines = [
         "<!-- codex-pr-review -->",
+        f"{STREAK_MARKER_PREFIX}{int(blocking_streak)}{STREAK_MARKER_SUFFIX}",
         "## 🤖 Codex PR Review",
         "",
         decision["summary"],
         "",
     ]
 
-    if ack_label:
+    if auto_converged:
+        lines.extend(
+            [
+                f"> Auto-converged after **{blocking_streak}** consecutive blocking review "
+                f"rounds (threshold `{auto_converge_after}`). Findings are still reported, "
+                "but the review check will not block merge.",
+                "",
+            ]
+        )
+    elif ack_label:
         lines.extend(
             [
                 f"> Human ack label `{ack_label}` is present. Findings are still reported, "
                 "but the review check will not block merge.",
+                "",
+            ]
+        )
+    elif decision.get("blocked") and auto_converge_after > 0:
+        remaining = max(0, auto_converge_after - blocking_streak)
+        lines.extend(
+            [
+                f"> Blocking streak `{blocking_streak}/{auto_converge_after}`. "
+                f"Auto-converge in **{remaining}** more consecutive blocking round(s) "
+                "if findings keep oscillating without a clean pass.",
                 "",
             ]
         )
@@ -899,9 +942,15 @@ def build_pr_comment(
         lines.extend([
             "### 🚫 Blocking Issues",
             "",
-            "These issues must be fixed before this PR can be merged:"
-            if not ack_label
-            else "These issues were reported as blocking; merge is allowed because of the ack label:",
+            (
+                "These issues were reported as blocking; merge is allowed because of auto-converge:"
+                if auto_converged
+                else (
+                    "These issues were reported as blocking; merge is allowed because of the ack label:"
+                    if ack_label
+                    else "These issues must be fixed before this PR can be merged:"
+                )
+            ),
             "",
         ])
         for i, f in enumerate(blocking, 1):
@@ -954,8 +1003,11 @@ def _format_finding(index: int, finding: dict[str, Any]) -> list[str]:
 
 def find_existing_review_comment(
     token: str, repo: str, pr_number: int
-) -> int | None:
-    """Find an existing Codex review comment on the PR."""
+) -> tuple[int | None, str]:
+    """Find an existing Codex review comment on the PR.
+
+    Returns ``(comment_id, body)``. ``comment_id`` is ``None`` when absent.
+    """
     marker = "<!-- codex-pr-review -->"
     page = 1
     while True:
@@ -968,18 +1020,49 @@ def find_existing_review_comment(
             break
         for comment in comments:
             if isinstance(comment, dict) and marker in str(comment.get("body", "")):
-                return comment.get("id")
+                return comment.get("id"), str(comment.get("body") or "")
         if len(comments) < 100:
             break
         page += 1
-    return None
+    return None, ""
+
+
+def parse_blocking_streak(body: str) -> int:
+    """Read consecutive blocking-round counter from a prior review comment."""
+    match = re.search(
+        rf"{re.escape(STREAK_MARKER_PREFIX)}(\d+){re.escape(STREAK_MARKER_SUFFIX)}",
+        body or "",
+    )
+    if not match:
+        return 0
+    try:
+        return max(0, int(match.group(1)))
+    except ValueError:
+        return 0
+
+
+def next_blocking_streak(previous_streak: int, *, blocked: bool) -> int:
+    """Advance or reset the consecutive blocking streak."""
+    if not blocked:
+        return 0
+    return previous_streak + 1
+
+
+def should_auto_converge(
+    streak: int,
+    *,
+    blocked: bool,
+    threshold: int,
+) -> bool:
+    """True when this round is blocked and streak has reached the threshold."""
+    return bool(blocked and threshold > 0 and streak >= threshold)
 
 
 def upsert_pr_comment(
     token: str, repo: str, pr_number: int, body: str
 ) -> None:
     """Create or update the Codex review comment on the PR."""
-    existing_id = find_existing_review_comment(token, repo, pr_number)
+    existing_id, _existing_body = find_existing_review_comment(token, repo, pr_number)
     if existing_id:
         github_request(
             token,
@@ -1062,6 +1145,13 @@ def main() -> int:
     ack_matched, ack_label = pr_has_ack_label(live_labels, policy)
     if ack_matched:
         print(f"PR has ack label `{ack_label}`; review findings will not fail the check.")
+    auto_converge_after = auto_converge_after_from_policy(policy)
+    try:
+        _existing_id, previous_comment = find_existing_review_comment(token, repo, pr_number)
+    except ReviewError as exc:
+        print(f"::warning::Failed to fetch prior review comment: {exc}")
+        previous_comment = ""
+    previous_streak = parse_blocking_streak(previous_comment)
 
     # First pass: classify files. If all files are low-risk, skip review.
     all_low_risk = changed_files_are_low_risk(changed_paths, policy)
@@ -1074,7 +1164,18 @@ def main() -> int:
             "total_findings": 0,
             "summary": "✅ **Merge allowed**: All changes are in docs/tests — Codex review skipped.",
         }
-        upsert_pr_comment(token, repo, pr_number, build_pr_comment(decision, pr_url, ack_label=ack_label if ack_matched else ""))
+        upsert_pr_comment(
+            token,
+            repo,
+            pr_number,
+            build_pr_comment(
+                decision,
+                pr_url,
+                ack_label=ack_label if ack_matched else "",
+                blocking_streak=0,
+                auto_converge_after=auto_converge_after,
+            ),
+        )
         return 0
 
     # Fetch PR diff
@@ -1154,12 +1255,22 @@ def main() -> int:
 
     # Evaluate findings
     decision = evaluate_findings(findings, changed_files, policy)
+    blocking_streak = next_blocking_streak(previous_streak, blocked=bool(decision["blocked"]))
+    auto_converged = should_auto_converge(
+        blocking_streak,
+        blocked=bool(decision["blocked"]),
+        threshold=auto_converge_after,
+    )
+    bypass = bool(ack_matched or auto_converged)
 
     # Post comment
     comment_body = build_pr_comment(
         decision,
         pr_url,
         ack_label=ack_label if ack_matched else "",
+        blocking_streak=blocking_streak,
+        auto_converged=auto_converged,
+        auto_converge_after=auto_converge_after,
     )
     upsert_pr_comment(token, repo, pr_number, comment_body)
 
@@ -1170,6 +1281,10 @@ def main() -> int:
         **decision,
         "ack_label": ack_label if ack_matched else "",
         "ack_bypass": bool(ack_matched and decision["blocked"]),
+        "blocking_streak": blocking_streak,
+        "auto_converge_after": auto_converge_after,
+        "auto_converged": auto_converged,
+        "ack_bypass_or_auto": bool(bypass and decision["blocked"]),
     }
     (output_dir / "decision.json").write_text(
         json.dumps(decision_payload, ensure_ascii=False, indent=2) + "\n",
@@ -1180,10 +1295,19 @@ def main() -> int:
     github_output = os.environ.get("GITHUB_OUTPUT")
     if github_output:
         with open(github_output, "a", encoding="utf-8") as f:
-            f.write(f"blocked={'true' if decision['blocked'] and not ack_matched else 'false'}\n")
+            f.write(f"blocked={'true' if decision['blocked'] and not bypass else 'false'}\n")
             f.write(f"total_findings={decision['total_findings']}\n")
             f.write(f"blocking_count={len(decision['blocking_findings'])}\n")
             f.write(f"ack_bypass={'true' if ack_matched and decision['blocked'] else 'false'}\n")
+            f.write(f"auto_converged={'true' if auto_converged else 'false'}\n")
+            f.write(f"blocking_streak={blocking_streak}\n")
+
+    if decision["blocked"] and auto_converged:
+        print(
+            f"::warning::Codex found blocking issues for {blocking_streak} consecutive rounds; "
+            f"auto-converging at threshold {auto_converge_after}."
+        )
+        return 0
 
     if decision["blocked"] and ack_matched:
         print(
@@ -1193,7 +1317,10 @@ def main() -> int:
         return 0
 
     if decision["blocked"]:
-        print("::error::Merge blocked: serious issues found")
+        print(
+            f"::error::Merge blocked: serious issues found "
+            f"(streak {blocking_streak}/{auto_converge_after or '∞'})"
+        )
         return 1
 
     print("Review passed: no blocking issues")
