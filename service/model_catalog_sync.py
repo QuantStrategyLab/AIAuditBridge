@@ -210,6 +210,7 @@ def bootstrap_records() -> list[ModelRecord]:
         ("gpt-5.4", "openai"),
         ("gpt-5.5", "openai"),
         ("gpt-5.6-luna", "openai"),
+        ("gpt-5.6-terra", "openai"),
         ("gpt-5.6-sol", "openai"),
         ("claude-sonnet-4-6", "anthropic"),
         ("claude-fable-5", "anthropic"),
@@ -280,7 +281,14 @@ def build_catalog(
     discovered_ids = {record.model_id for record in records}
     tiers = assign_tiers(records)
     sticky_days = previous.sticky_days if previous is not None else DEFAULT_STICKY_DAYS
-    tiers = apply_sticky_assignments(tiers, previous, discovered_ids=discovered_ids, sticky_days=sticky_days)
+    model_scores = {record.model_id: float(record.capability_score) for record in records}
+    tiers = apply_sticky_assignments(
+        tiers,
+        previous,
+        discovered_ids=discovered_ids,
+        sticky_days=sticky_days,
+        model_scores=model_scores,
+    )
     absence_counts, deprecated, presence_counts = update_absence_counts(
         previous,
         discovered_ids,

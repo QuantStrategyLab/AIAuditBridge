@@ -86,10 +86,32 @@ from pathlib import Path
 path = Path("/var/lib/codex-audit-bridge/model_catalog.json")
 payload = json.loads(path.read_text(encoding="utf-8"))
 tiers = {name: spec.get("model") for name, spec in (payload.get("tiers") or {}).items()}
+models = payload.get("models") or {}
+top = sorted(
+    models.values(),
+    key=lambda item: (float(item.get("capability_score") or 0.0), str(item.get("model_id") or "")),
+    reverse=True,
+)[:12]
 print(f"catalog_source={payload.get('catalog_source')}")
 print(f"synced_at={payload.get('synced_at')}")
 print(f"tiers={json.dumps(tiers, sort_keys=True)}")
 print(f"deprecated={payload.get('deprecated')}")
+print(f"inventory_count={len(models)}")
+print(f"has_gpt_5_6={any('5.6' in str(mid) for mid in models)}")
+print(
+    "top_models="
+    + json.dumps(
+        [
+            {
+                "model": item.get("model_id"),
+                "provider": item.get("provider"),
+                "score": round(float(item.get("capability_score") or 0.0), 4),
+            }
+            for item in top
+        ],
+        sort_keys=True,
+    )
+)
 PY
 }
 
