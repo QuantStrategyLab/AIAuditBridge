@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import threading
-from pathlib import Path
 from typing import Mapping
 
 from service.model_catalog import ModelCatalog, catalog_path, load_catalog
