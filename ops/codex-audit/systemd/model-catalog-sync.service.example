@@ -1,0 +1,15 @@
+[Unit]
+Description=Monthly auto-sync of AI model catalog
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/codex-audit-bridge
+Environment=MODEL_CATALOG_PATH=/var/lib/codex-audit-bridge/model_catalog.json
+ExecStart=/opt/codex-audit-bridge/.venv/bin/python scripts/sync_model_catalog.py --force
+User=codex-audit
+Group=codex-audit
+
+[Install]
+WantedBy=multi-user.target

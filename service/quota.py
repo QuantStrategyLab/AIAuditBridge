@@ -173,19 +173,18 @@ def estimate_cost(model: str, tokens_input: int, tokens_output: int = 0) -> floa
 
 
 def recommend_model(budget_remaining: float, min_confidence: float = 0.0) -> str:
-    """Recommend the best model that fits within the remaining budget.
+    """Recommend the best model that fits within the remaining budget."""
+    try:
+        from service.model_resolver import recommend_model as _catalog_recommend_model
 
-    Escalation logic:
-    - budget < $0.01 → gpt-5.4-mini (cheapest)
-    - budget < $0.05 → claude-sonnet-4-6
-    - budget ≥ $0.05 → claude-fable-5 / gpt-5.4
-    - codex-cli always requires explicit budget
-    """
+        return _catalog_recommend_model(budget_remaining, min_confidence=min_confidence)
+    except Exception:
+        pass
     if budget_remaining < 0.01:
         return "gpt-5.4-mini"
     if budget_remaining < 0.05:
         return "claude-sonnet-4-6"
-    return "claude-sonnet-4-6"  # default
+    return "claude-sonnet-4-6"
 
 
 # ── quota store ─────────────────────────────────────────────────────────

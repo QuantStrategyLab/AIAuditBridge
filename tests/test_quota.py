@@ -56,17 +56,45 @@ class TestCostEstimation(unittest.TestCase):
 class TestRecommendModel(unittest.TestCase):
     """Model recommendation based on remaining budget."""
 
+    @classmethod
+    def setUpClass(cls) -> None:
+        catalog = Path(__file__).resolve().parents[1] / "generated" / "model_catalog.json"
+        if not catalog.is_file():
+            raise unittest.SkipTest("generated/model_catalog.json missing")
+        cls._catalog_path = str(catalog)
+
+    def setUp(self) -> None:
+        os.environ["MODEL_CATALOG_PATH"] = self._catalog_path
+
+    def tearDown(self) -> None:
+        os.environ.pop("MODEL_CATALOG_PATH", None)
+        from service.model_resolver import reset_catalog_cache
+
+        reset_catalog_cache()
+
     def test_recommend_cheapest_for_low_budget(self) -> None:
+        from service.model_catalog import load_catalog
+        from service.model_resolver import tier_for_budget
+
+        catalog = load_catalog(Path(self._catalog_path))
         model = recommend_model(0.005)
-        self.assertEqual(model, "gpt-5.4-mini")
+        self.assertEqual(model, catalog.model_for_tier(tier_for_budget(0.005)))
 
     def test_recommend_standard_for_moderate_budget(self) -> None:
+        from service.model_catalog import load_catalog
+        from service.model_resolver import tier_for_budget
+
+        catalog = load_catalog(Path(self._catalog_path))
         model = recommend_model(0.02)
-        self.assertEqual(model, "claude-sonnet-4-6")
+        self.assertEqual(model, catalog.model_for_tier(tier_for_budget(0.02)))
 
     def test_recommend_default_for_high_budget(self) -> None:
+        from service.model_catalog import load_catalog
+        from service.model_resolver import tier_for_budget
+
+        catalog = load_catalog(Path(self._catalog_path))
         model = recommend_model(1.0)
-        self.assertEqual(model, "claude-sonnet-4-6")
+        self.assertEqual(model, catalog.model_for_tier(tier_for_budget(1.0)))
 
 
 class TestQuotaRecord(unittest.TestCase):
