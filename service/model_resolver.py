@@ -84,7 +84,8 @@ def _load_or_sync_catalog() -> ModelCatalog:
                     with _catalog_lock:
                         _catalog_cache = refreshed
                 finally:
-                    _refresh_inflight = False
+                    with _catalog_lock:
+                        _refresh_inflight = False
 
             thread = threading.Thread(target=_background_refresh, daemon=True)
             thread.start()

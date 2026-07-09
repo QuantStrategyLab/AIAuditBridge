@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import urllib.error
 import urllib.request
@@ -25,10 +24,34 @@ from service.model_catalog import (
 )
 
 
+_MAX_HTTP_RESPONSE_BYTES = 10 * 1024 * 1024
+_CODEX_BIN_CANDIDATES = (
+    "/usr/local/bin/codex",
+    "/usr/bin/codex",
+    "/opt/homebrew/bin/codex",
+)
+
+
 def _http_get_json(url: str, headers: dict[str, str]) -> dict[str, Any]:
     request = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(request, timeout=30) as response:
-        return json.loads(response.read().decode("utf-8"))
+        raw = response.read(_MAX_HTTP_RESPONSE_BYTES + 1)
+    if len(raw) > _MAX_HTTP_RESPONSE_BYTES:
+        raise ValueError(f"response exceeds {_MAX_HTTP_RESPONSE_BYTES} bytes")
+    return json.loads(raw.decode("utf-8"))
+
+
+def _resolve_codex_bin() -> str | None:
+    for env_name in ("CODEX_CLI_PATH", "CODEX_BIN"):
+        explicit = os.environ.get(env_name, "").strip()
+        if explicit and os.path.isfile(explicit) and os.access(explicit, os.X_OK):
+            return os.path.realpath(explicit)
+    home_candidate = os.path.expanduser("~/.local/bin/codex")
+    candidates = (*_CODEX_BIN_CANDIDATES, home_candidate)
+    for candidate in candidates:
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return os.path.realpath(candidate)
+    return None
 
 
 def discover_openai_models() -> list[ModelRecord]:
@@ -110,7 +133,7 @@ def discover_anthropic_models() -> list[ModelRecord]:
 
 
 def discover_codex_models() -> list[ModelRecord]:
-    codex_bin = shutil.which("codex") or shutil.which("codex-cli")
+    codex_bin = _resolve_codex_bin()
     if not codex_bin:
         return []
     try:
@@ -232,9 +255,13 @@ def build_catalog(
         discovered_ids,
         deprecation_misses=previous.deprecation_misses if previous else 2,
     )
+    active_records = [record for record in records if record.model_id not in deprecated]
     for tier_name, assignment in list(tiers.items()):
-        if assignment.model in deprecated:
-            tiers[tier_name] = assign_tiers([r for r in records if r.model_id not in deprecated])[tier_name]
+        if assignment.model in deprecated and active_records:
+            try:
+                tiers[tier_name] = assign_tiers(active_records)[tier_name]
+            except ValueError:
+                continue
     return ModelCatalog(
         version=CATALOG_VERSION,
         synced_at=datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
@@ -242,6 +269,7 @@ def build_catalog(
         stale_threshold_days=previous.stale_threshold_days if previous else 35,
         sticky_days=sticky_days,
         deprecation_misses=previous.deprecation_misses if previous else 2,
+        catalog_source="live",
         tiers=tiers,
         models={record.model_id: record for record in records},
         deprecated=deprecated,
@@ -273,11 +301,14 @@ def sync_catalog(*, output_path: str | None = None, force: bool = False) -> Mode
         if not force and previous.age_days() < float(previous.sync_interval_days):
             return previous
     records = discover_all_records()
+    catalog_source = "live"
     if not records:
         if previous is not None:
             return previous
         records = bootstrap_records()
+        catalog_source = "bootstrap"
     catalog = build_catalog(records, previous=previous)
+    catalog.catalog_source = catalog_source
     save_catalog_atomic(catalog, target)
     return catalog
 

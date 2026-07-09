@@ -67,6 +67,7 @@ class ModelCatalog:
     stale_threshold_days: int = DEFAULT_STALE_THRESHOLD_DAYS
     sticky_days: int = DEFAULT_STICKY_DAYS
     deprecation_misses: int = DEFAULT_DEPRECATION_MISSES
+    catalog_source: str = "live"
     tiers: dict[str, TierAssignment] = field(default_factory=dict)
     models: dict[str, ModelRecord] = field(default_factory=dict)
     deprecated: list[str] = field(default_factory=list)
@@ -80,6 +81,7 @@ class ModelCatalog:
             "stale_threshold_days": self.stale_threshold_days,
             "sticky_days": self.sticky_days,
             "deprecation_misses": self.deprecation_misses,
+            "catalog_source": self.catalog_source,
             "tiers": {name: assignment.to_dict() for name, assignment in self.tiers.items()},
             "models": {model_id: record.to_dict() for model_id, record in self.models.items()},
             "deprecated": list(self.deprecated),
@@ -124,6 +126,7 @@ class ModelCatalog:
             stale_threshold_days=int(payload.get("stale_threshold_days") or DEFAULT_STALE_THRESHOLD_DAYS),
             sticky_days=int(payload.get("sticky_days") or DEFAULT_STICKY_DAYS),
             deprecation_misses=int(payload.get("deprecation_misses") or DEFAULT_DEPRECATION_MISSES),
+            catalog_source=str(payload.get("catalog_source") or "live"),
             tiers=tiers,
             models=models,
             deprecated=[str(item) for item in (payload.get("deprecated") or [])],
@@ -164,13 +167,17 @@ def save_catalog_atomic(catalog: ModelCatalog, path: Path | None = None) -> Path
     target.parent.mkdir(parents=True, exist_ok=True)
     previous = target.with_name(target.name + ".prev")
     if target.is_file():
-        previous.write_text(target.read_text(encoding="utf-8"), encoding="utf-8")
+        _write_atomic_text(previous, target.read_text(encoding="utf-8"))
     payload = json.dumps(catalog.to_dict(), indent=2, sort_keys=True) + "\n"
+    _write_atomic_text(target, payload)
+    return target
+
+
+def _write_atomic_text(target: Path, content: str) -> None:
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=target.parent, delete=False) as handle:
-        handle.write(payload)
+        handle.write(content)
         temp_name = handle.name
     os.replace(temp_name, target)
-    return target
 
 
 _NAME_HINT_SCORES: tuple[tuple[re.Pattern[str], float], ...] = (
@@ -217,7 +224,7 @@ def is_chat_candidate(model_id: str) -> bool:
     if any(token in lowered for token in ("embed", "tts", "whisper", "dall-e", "moderation", "realtime", "transcribe")):
         return False
     return bool(
-        re.search(r"gpt-|claude|o[134]|chatgpt|fable", lowered)
+        re.search(r"(?:^|[/_-])(gpt-|claude-|claude|chatgpt|fable|o[1-4](?:-|$))", lowered)
     )
 
 
@@ -283,6 +290,9 @@ def apply_sticky_assignments(
         return new_tiers
     merged = dict(new_tiers)
     for tier, old_assignment in previous.tiers.items():
+        new_assignment = merged.get(tier)
+        if new_assignment is None or new_assignment.model == old_assignment.model:
+            continue
         model_id = old_assignment.model
         if model_id in discovered_ids and model_id not in previous.deprecated:
             merged[tier] = old_assignment

@@ -1,6 +1,5 @@
 {
   "absence_counts": {},
-  "catalog_source": "bootstrap",
   "deprecated": [],
   "deprecation_misses": 2,
   "models": {
@@ -53,7 +52,7 @@
   "stale_threshold_days": 35,
   "sticky_days": 30,
   "sync_interval_days": 30,
-  "synced_at": "2026-07-09T20:02:55Z",
+  "synced_at": "2026-07-09T19:46:41Z",
   "tiers": {
     "capable": {
       "effort": "high",

@@ -77,7 +77,7 @@ class ModelCatalogSyncTests(unittest.TestCase):
         )
         self.assertIn("gpt-5.5", deprecated)
 
-    def test_sticky_keeps_previous_assignment(self) -> None:
+    def test_sticky_keeps_previous_assignment_only_when_tier_changes(self) -> None:
         previous = build_catalog(bootstrap_records())
         records = merge_records(
             bootstrap_records(),
@@ -99,6 +99,7 @@ class ModelCatalogSyncTests(unittest.TestCase):
             sticky_days=30,
         )
         self.assertEqual(merged["flagship"].model, previous.tiers["flagship"].model)
+        self.assertNotEqual(new_tiers["flagship"].model, previous.tiers["flagship"].model)
 
 
 class ModelResolverTests(unittest.TestCase):

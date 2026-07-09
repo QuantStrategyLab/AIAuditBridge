@@ -178,8 +178,10 @@ def recommend_model(budget_remaining: float, min_confidence: float = 0.0) -> str
         from service.model_resolver import recommend_model as _catalog_recommend_model
 
         return _catalog_recommend_model(budget_remaining, min_confidence=min_confidence)
-    except Exception:
-        pass
+    except Exception as exc:
+        import logging
+
+        logging.getLogger(__name__).warning("catalog recommend_model failed: %s", exc)
     if budget_remaining < 0.01:
         return "gpt-5.4-mini"
     if budget_remaining < 0.05:
