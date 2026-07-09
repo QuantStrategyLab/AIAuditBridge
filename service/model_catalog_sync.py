@@ -23,6 +23,8 @@ from service.model_catalog import (
     capability_score_for,
     estimate_cost_per_1m,
     is_chat_candidate,
+    is_likely_subscription_available,
+    is_production_catalog_path,
     load_catalog,
     save_catalog_atomic,
 )
@@ -112,7 +114,7 @@ def discover_openai_models() -> list[ModelRecord]:
                 capability_score=capability_score_for(model_id, created_at=created_at),
                 input_cost_per_1m=input_cost,
                 output_cost_per_1m=output_cost,
-                available_on_subscription=True,
+                available_on_subscription=is_likely_subscription_available(model_id),
             )
         )
     return records
@@ -156,7 +158,7 @@ def discover_anthropic_models() -> list[ModelRecord]:
                 capability_score=capability_score_for(model_id, created_at=created_at),
                 input_cost_per_1m=input_cost,
                 output_cost_per_1m=output_cost,
-                available_on_subscription=True,
+                available_on_subscription=is_likely_subscription_available(model_id),
             )
         )
     return records
@@ -178,6 +180,8 @@ def bootstrap_records() -> list[ModelRecord]:
         ("gpt-5.4-mini", "openai"),
         ("gpt-5.4", "openai"),
         ("gpt-5.5", "openai"),
+        ("gpt-5.6-luna", "openai"),
+        ("gpt-5.6-sol", "openai"),
         ("claude-sonnet-4-6", "anthropic"),
         ("claude-fable-5", "anthropic"),
     )
@@ -331,6 +335,11 @@ def sync_catalog(*, output_path: str | None = None, force: bool = False) -> Mode
     if not records:
         if previous is not None:
             return _record_failed_sync_attempt(previous, target)
+        if is_production_catalog_path(target):
+            raise CatalogSyncError(
+                f"refusing to bootstrap production catalog at {target}; "
+                "live discovery required (set OPENAI_API_KEY/ANTHROPIC_API_KEY)"
+            )
         records = bootstrap_records()
         catalog_source = "bootstrap"
     try:
@@ -339,6 +348,8 @@ def sync_catalog(*, output_path: str | None = None, force: bool = False) -> Mode
         logger.warning("build_catalog failed; preserving previous catalog if available")
         if previous is not None:
             return _record_failed_sync_attempt(previous, target)
+        if is_production_catalog_path(target):
+            raise CatalogSyncError(f"refusing to bootstrap production catalog at {target}")
         catalog = build_catalog(bootstrap_records(), catalog_source="bootstrap")
     save_catalog_atomic(catalog, target)
     return catalog

@@ -43,6 +43,15 @@ def validate_catalog_path(path: Path) -> Path:
     return resolved
 
 
+def seed_catalog_path() -> Path:
+    return _DEFAULT_REPO_CATALOG
+
+
+def is_production_catalog_path(path: Path) -> bool:
+    resolved = path.expanduser().resolve()
+    return resolved == _VPS_CATALOG.resolve() or resolved.parent == Path("/var/lib/codex-audit-bridge").resolve()
+
+
 def catalog_path() -> Path:
     raw = os.environ.get("MODEL_CATALOG_PATH", "").strip()
     if raw:
@@ -202,9 +211,10 @@ def _write_atomic_text(target: Path, content: str) -> None:
 
 
 _NAME_HINT_SCORES: tuple[tuple[re.Pattern[str], float], ...] = (
-    (re.compile(r"opus|o3|5\.5", re.I), 1.0),
-    (re.compile(r"sonnet|fable|5\.4(?!-mini)", re.I), 0.72),
-    (re.compile(r"gpt-5|gpt-4o", re.I), 0.68),
+    (re.compile(r"gpt-5\.6[-.]?(sol|terra)|claude-opus|o3(?!-mini)", re.I), 1.0),
+    (re.compile(r"gpt-5\.6[-.]?luna|gpt-5\.5|claude-fable|fable-5", re.I), 0.93),
+    (re.compile(r"claude-sonnet|gpt-5\.4(?!-mini)|o[14](?!-mini)", re.I), 0.74),
+    (re.compile(r"gpt-5(?!\.[456])|gpt-4o", re.I), 0.66),
     (re.compile(r"mini|haiku", re.I), 0.38),
     (re.compile(r"nano|flash-lite", re.I), 0.22),
 )
@@ -216,9 +226,13 @@ def estimate_cost_per_1m(model_id: str) -> tuple[float, float]:
         return 0.10, 0.40
     if "mini" in lowered or "haiku" in lowered:
         return 0.15, 0.60
-    if "sonnet" in lowered or "fable" in lowered:
+    if re.search(r"5\.6[-.]?(sol|terra)", lowered) or "opus" in lowered:
+        return 6.0, 30.0
+    if re.search(r"5\.6[-.]?luna", lowered) or "fable" in lowered or "5.5" in lowered:
+        return 4.0, 20.0
+    if "sonnet" in lowered:
         return 3.0, 15.0
-    if "opus" in lowered or "5.5" in lowered or lowered.startswith("o"):
+    if lowered.startswith("o"):
         return 5.0, 25.0
     if "5.4" in lowered:
         return 2.5, 10.0
@@ -237,7 +251,15 @@ def capability_score_for(model_id: str, *, created_at: int | None = None) -> flo
         score += max(0.0, 0.15 - age_years * 0.05)
     input_cost, _output_cost = estimate_cost_per_1m(model_id)
     score += min(0.2, input_cost / 40.0)
-    return min(1.0, score)
+    return min(1.5, score)
+
+
+def is_likely_subscription_available(model_id: str) -> bool:
+    """Conservative gate: only promote stable chat families into tiers."""
+    lowered = model_id.lower().strip()
+    if any(token in lowered for token in ("preview", "alpha", "beta", "experimental", "instruct")):
+        return False
+    return is_chat_candidate(lowered)
 
 
 def is_chat_candidate(model_id: str) -> bool:
@@ -348,7 +370,10 @@ __all__ = [
     "capability_score_for",
     "catalog_path",
     "is_chat_candidate",
+    "is_likely_subscription_available",
+    "is_production_catalog_path",
     "load_catalog",
     "save_catalog_atomic",
+    "seed_catalog_path",
     "validate_catalog_path",
 ]

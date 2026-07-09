@@ -55,7 +55,12 @@ class ModelCatalogScoringTests(unittest.TestCase):
         records = bootstrap_records()
         tiers = assign_tiers(records)
         self.assertEqual(set(tiers), {"nano", "fast", "standard", "capable", "flagship"})
-        self.assertEqual(tiers["flagship"].model, "gpt-5.5")
+        self.assertEqual(tiers["flagship"].model, "gpt-5.6-sol")
+
+    def test_gpt56_family_scores_above_legacy_flagship(self) -> None:
+        self.assertGreater(capability_score_for("gpt-5.6-sol"), capability_score_for("gpt-5.5"))
+        self.assertGreater(capability_score_for("gpt-5.6-sol"), capability_score_for("gpt-5.6-luna"))
+        self.assertGreater(capability_score_for("claude-fable-5"), capability_score_for("claude-sonnet-4-6"))
 
 
 class ModelCatalogPersistenceTests(unittest.TestCase):
@@ -140,11 +145,11 @@ class ModelCatalogSyncTests(unittest.TestCase):
             bootstrap_records(),
             [
                 ModelRecord(
-                    model_id="gpt-6.0",
+                    model_id="gpt-6.0-sol",
                     provider="openai",
-                    capability_score=1.0,
-                    input_cost_per_1m=5.0,
-                    output_cost_per_1m=20.0,
+                    capability_score=1.4,
+                    input_cost_per_1m=8.0,
+                    output_cost_per_1m=32.0,
                 )
             ],
         )
