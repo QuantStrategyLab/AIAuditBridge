@@ -22,15 +22,33 @@ TIER_NAMES = ("nano", "fast", "standard", "capable", "flagship")
 _DEFAULT_REPO_CATALOG = (
     Path(__file__).resolve().parents[1] / "generated" / "model_catalog.json"
 )
+_VPS_CATALOG = Path("/var/lib/codex-audit-bridge/model_catalog.json")
+_CATALOG_FILENAME = "model_catalog.json"
+
+
+def _allowed_catalog_roots() -> tuple[Path, ...]:
+    return (
+        Path("/var/lib/codex-audit-bridge").resolve(),
+        _DEFAULT_REPO_CATALOG.parent.resolve(),
+        Path(tempfile.gettempdir()).resolve(),
+    )
+
+
+def validate_catalog_path(path: Path) -> Path:
+    resolved = path.expanduser().resolve()
+    if resolved.name != _CATALOG_FILENAME:
+        raise ValueError(f"model catalog path must be named {_CATALOG_FILENAME}: {resolved}")
+    if not any(root == resolved.parent or root in resolved.parents for root in _allowed_catalog_roots()):
+        raise ValueError(f"model catalog path outside allowed directories: {resolved}")
+    return resolved
 
 
 def catalog_path() -> Path:
     raw = os.environ.get("MODEL_CATALOG_PATH", "").strip()
     if raw:
-        return Path(raw)
-    vps = Path("/var/lib/codex-audit-bridge/model_catalog.json")
-    if vps.is_file():
-        return vps
+        return validate_catalog_path(Path(raw))
+    if _VPS_CATALOG.is_file():
+        return _VPS_CATALOG
     return _DEFAULT_REPO_CATALOG
 
 
@@ -158,7 +176,7 @@ class ModelCatalog:
 
 
 def load_catalog(path: Path | None = None) -> ModelCatalog:
-    target = path or catalog_path()
+    target = validate_catalog_path(path) if path is not None else catalog_path()
     if not target.is_file():
         raise FileNotFoundError(f"model catalog not found: {target}")
     payload = json.loads(target.read_text(encoding="utf-8"))
@@ -166,7 +184,7 @@ def load_catalog(path: Path | None = None) -> ModelCatalog:
 
 
 def save_catalog_atomic(catalog: ModelCatalog, path: Path | None = None) -> Path:
-    target = path or catalog_path()
+    target = validate_catalog_path(path) if path is not None else catalog_path()
     target.parent.mkdir(parents=True, exist_ok=True)
     previous = target.with_name(target.name + ".prev")
     if target.is_file():
@@ -212,7 +230,7 @@ def capability_score_for(model_id: str, *, created_at: int | None = None) -> flo
     for pattern, weight in _NAME_HINT_SCORES:
         if pattern.search(model_id):
             score = max(score, weight)
-    if created_at:
+    if created_at is not None:
         # newer models get a small boost (unix timestamp)
         now = datetime.now(timezone.utc).timestamp()
         age_years = max(0.0, (now - float(created_at)) / (86400.0 * 365.0))
@@ -332,4 +350,5 @@ __all__ = [
     "is_chat_candidate",
     "load_catalog",
     "save_catalog_atomic",
+    "validate_catalog_path",
 ]

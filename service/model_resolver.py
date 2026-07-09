@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 from typing import Mapping
 
@@ -50,40 +51,42 @@ _catalog_cache_mtime_ns: int | None = None
 _catalog_loading = False
 
 
-def _catalog_mtime_ns(path) -> int | None:
+def _load_catalog_with_mtime(path) -> tuple[ModelCatalog, int | None]:
     from pathlib import Path
 
-    target = Path(path)
-    try:
-        return target.stat().st_mtime_ns
-    except OSError:
-        return None
-
-
-def _load_catalog_from_disk(path) -> ModelCatalog:
-    from pathlib import Path
+    from service.model_catalog import ModelCatalog as CatalogCls
 
     target = Path(path)
     backup = target.with_name(target.name + ".prev")
+
+    def _read(candidate: Path) -> tuple[ModelCatalog, int | None]:
+        with candidate.open("rb") as handle:
+            payload = json.loads(handle.read().decode("utf-8"))
+            mtime_ns = os.fstat(handle.fileno()).st_mtime_ns
+        return CatalogCls.from_dict(payload), int(mtime_ns)
+
     try:
-        return load_catalog(target)
+        return _read(target)
     except FileNotFoundError:
         if backup.is_file():
-            return load_catalog(backup)
+            return _read(backup)
         raise
     except (json.JSONDecodeError, ValueError, TypeError, KeyError, OSError, UnicodeDecodeError):
         if backup.is_file():
-            return load_catalog(backup)
+            return _read(backup)
         raise
 
 
 def _load_or_sync_catalog() -> ModelCatalog:
     global _catalog_cache, _catalog_cache_mtime_ns, _catalog_loading
     path = catalog_path()
-    current_mtime = _catalog_mtime_ns(path)
     with _catalog_ready:
         while _catalog_loading:
             _catalog_ready.wait()
+        try:
+            current_mtime = path.stat().st_mtime_ns
+        except OSError:
+            current_mtime = None
         if (
             _catalog_cache is not None
             and current_mtime is not None
@@ -94,10 +97,13 @@ def _load_or_sync_catalog() -> ModelCatalog:
 
     try:
         try:
-            catalog = _load_catalog_from_disk(path)
+            catalog, mtime_ns = _load_catalog_with_mtime(path)
         except FileNotFoundError:
             catalog = sync_catalog(output_path=str(path), force=True)
-        mtime_ns = _catalog_mtime_ns(path)
+            try:
+                mtime_ns = path.stat().st_mtime_ns
+            except OSError:
+                mtime_ns = None
     except Exception:
         with _catalog_ready:
             _catalog_loading = False

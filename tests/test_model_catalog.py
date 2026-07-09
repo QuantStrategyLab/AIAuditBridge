@@ -33,6 +33,14 @@ class ModelCatalogScoringTests(unittest.TestCase):
         self.assertEqual(_sanitize_api_key("sk-evil\r\ninjected"), "")
         self.assertEqual(_sanitize_api_key("not a key"), "")
 
+    def test_catalog_path_rejects_outside_allowed_roots(self) -> None:
+        from service.model_catalog import validate_catalog_path
+
+        with self.assertRaises(ValueError):
+            validate_catalog_path(Path("/etc/passwd"))
+        with self.assertRaises(ValueError):
+            validate_catalog_path(Path("/tmp/not-model-catalog.json"))
+
     def test_flagship_scores_higher_than_mini(self) -> None:
         self.assertGreater(capability_score_for("gpt-5.5"), capability_score_for("gpt-5.4-mini"))
 

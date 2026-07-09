@@ -44,14 +44,34 @@ def _sanitize_api_key(value: str) -> str:
     return cleaned
 
 
+def _read_response_limited(response: Any, *, limit: int) -> bytes:
+    content_length = response.headers.get("Content-Length")
+    if content_length is not None:
+        try:
+            if int(content_length) > limit:
+                raise ValueError(f"response Content-Length exceeds {limit} bytes")
+        except ValueError as exc:
+            if "exceeds" in str(exc):
+                raise
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = response.read(65536)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > limit:
+            raise ValueError(f"response exceeds {limit} bytes")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 def _http_get_json(url: str, headers: dict[str, str]) -> dict[str, Any]:
     request = urllib.request.Request(url, headers=headers)
     ssl_context = ssl.create_default_context()
     try:
         with urllib.request.urlopen(request, timeout=30, context=ssl_context) as response:
-            raw = response.read(_MAX_HTTP_RESPONSE_BYTES)
-            if len(raw) == _MAX_HTTP_RESPONSE_BYTES and response.read(1):
-                raise ValueError(f"response exceeds {_MAX_HTTP_RESPONSE_BYTES} bytes")
+            raw = _read_response_limited(response, limit=_MAX_HTTP_RESPONSE_BYTES)
     except urllib.error.HTTPError as exc:
         if 400 <= int(exc.code) < 500:
             logger.warning("model discovery HTTP %s for %s", exc.code, url)
