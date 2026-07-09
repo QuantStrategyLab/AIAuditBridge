@@ -5,15 +5,17 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import ssl
 import urllib.error
 import urllib.request
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any
 
 from service.model_catalog import (
     CATALOG_VERSION,
-    DEFAULT_STALE_THRESHOLD_DAYS,
+    DEFAULT_STICKY_DAYS,
     ModelCatalog,
     ModelRecord,
     apply_sticky_assignments,
@@ -28,10 +30,18 @@ from service.model_catalog import (
 logger = logging.getLogger(__name__)
 
 _MAX_HTTP_RESPONSE_BYTES = 10 * 1024 * 1024
+_API_KEY_RE = re.compile(r"^[A-Za-z0-9_\-.]{10,256}$")
 
 
-def _sanitize_header_value(value: str) -> str:
-    return value.replace("\r", "").replace("\n", "").strip()
+def _sanitize_api_key(value: str) -> str:
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+        return ""
+    cleaned = value.strip()
+    if cleaned.lower().startswith("bearer "):
+        cleaned = cleaned[7:].strip()
+    if not _API_KEY_RE.fullmatch(cleaned):
+        return ""
+    return cleaned
 
 
 def _http_get_json(url: str, headers: dict[str, str]) -> dict[str, Any]:
@@ -39,13 +49,13 @@ def _http_get_json(url: str, headers: dict[str, str]) -> dict[str, Any]:
     ssl_context = ssl.create_default_context()
     try:
         with urllib.request.urlopen(request, timeout=30, context=ssl_context) as response:
-            raw = response.read(_MAX_HTTP_RESPONSE_BYTES + 1)
+            raw = response.read(_MAX_HTTP_RESPONSE_BYTES)
+            if len(raw) == _MAX_HTTP_RESPONSE_BYTES and response.read(1):
+                raise ValueError(f"response exceeds {_MAX_HTTP_RESPONSE_BYTES} bytes")
     except urllib.error.HTTPError as exc:
         if 400 <= int(exc.code) < 500:
             logger.warning("model discovery HTTP %s for %s", exc.code, url)
         raise
-    if len(raw) > _MAX_HTTP_RESPONSE_BYTES:
-        raise ValueError(f"response exceeds {_MAX_HTTP_RESPONSE_BYTES} bytes")
     return json.loads(raw.decode("utf-8"))
 
 
@@ -55,7 +65,7 @@ def discover_codex_models() -> list[ModelRecord]:
 
 
 def discover_openai_models() -> list[ModelRecord]:
-    api_key = _sanitize_header_value(os.environ.get("OPENAI_API_KEY", ""))
+    api_key = _sanitize_api_key(os.environ.get("OPENAI_API_KEY", ""))
     if not api_key:
         return []
     try:
@@ -89,7 +99,7 @@ def discover_openai_models() -> list[ModelRecord]:
 
 
 def discover_anthropic_models() -> list[ModelRecord]:
-    api_key = _sanitize_header_value(os.environ.get("ANTHROPIC_API_KEY", ""))
+    api_key = _sanitize_api_key(os.environ.get("ANTHROPIC_API_KEY", ""))
     if not api_key:
         return []
     try:
@@ -211,7 +221,7 @@ def build_catalog(
         raise ValueError("build_catalog requires at least one discovered model record")
     discovered_ids = {record.model_id for record in records}
     tiers = assign_tiers(records)
-    sticky_days = previous.sticky_days if previous is not None else DEFAULT_STALE_THRESHOLD_DAYS
+    sticky_days = previous.sticky_days if previous is not None else DEFAULT_STICKY_DAYS
     tiers = apply_sticky_assignments(tiers, previous, discovered_ids=discovered_ids, sticky_days=sticky_days)
     absence_counts, deprecated = update_absence_counts(
         previous,
@@ -257,14 +267,15 @@ def _now_iso() -> str:
 
 
 def _record_failed_sync_attempt(previous: ModelCatalog, target) -> ModelCatalog:
-    previous.last_sync_attempt_at = _now_iso()
-    save_catalog_atomic(previous, target)
+    updated = deepcopy(previous)
+    updated.last_sync_attempt_at = _now_iso()
+    save_catalog_atomic(updated, target)
     logger.warning(
         "model discovery returned no records; preserved catalog synced_at=%s attempt_at=%s",
-        previous.synced_at,
-        previous.last_sync_attempt_at,
+        updated.synced_at,
+        updated.last_sync_attempt_at,
     )
-    return previous
+    return updated
 
 
 def sync_catalog(*, output_path: str | None = None, force: bool = False) -> ModelCatalog:
@@ -287,10 +298,10 @@ def sync_catalog(*, output_path: str | None = None, force: bool = False) -> Mode
         catalog_source = "bootstrap"
     try:
         catalog = build_catalog(records, previous=previous, catalog_source=catalog_source)
-    except ValueError:
+    except (ValueError, RuntimeError):
         logger.warning("build_catalog failed; preserving previous catalog if available")
         if previous is not None:
-            return previous
+            return _record_failed_sync_attempt(previous, target)
         catalog = build_catalog(bootstrap_records(), catalog_source="bootstrap")
     save_catalog_atomic(catalog, target)
     return catalog

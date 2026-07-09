@@ -44,7 +44,9 @@ _EFFORT_TIER_FALLBACK: dict[str, str] = {
 }
 
 _catalog_lock = threading.Lock()
+_catalog_ready = threading.Condition(_catalog_lock)
 _catalog_cache: ModelCatalog | None = None
+_catalog_loading = False
 
 
 def _load_catalog_from_disk(path) -> ModelCatalog:
@@ -58,34 +60,46 @@ def _load_catalog_from_disk(path) -> ModelCatalog:
         if backup.is_file():
             return load_catalog(backup)
         raise
-    except (json.JSONDecodeError, ValueError, TypeError, KeyError):
+    except (json.JSONDecodeError, ValueError, TypeError, KeyError, OSError, UnicodeDecodeError):
         if backup.is_file():
             return load_catalog(backup)
         raise
 
 
 def _load_or_sync_catalog() -> ModelCatalog:
-    global _catalog_cache
-    with _catalog_lock:
+    global _catalog_cache, _catalog_loading
+    with _catalog_ready:
+        while _catalog_loading:
+            _catalog_ready.wait()
         if _catalog_cache is not None:
             return _catalog_cache
+        _catalog_loading = True
 
-    path = catalog_path()
     try:
-        catalog = _load_catalog_from_disk(path)
-    except FileNotFoundError:
-        catalog = sync_catalog(output_path=str(path), force=True)
+        path = catalog_path()
+        try:
+            catalog = _load_catalog_from_disk(path)
+        except FileNotFoundError:
+            catalog = sync_catalog(output_path=str(path), force=True)
+    except Exception:
+        with _catalog_ready:
+            _catalog_loading = False
+            _catalog_ready.notify_all()
+        raise
 
-    with _catalog_lock:
-        if _catalog_cache is None:
-            _catalog_cache = catalog
+    with _catalog_ready:
+        _catalog_cache = catalog
+        _catalog_loading = False
+        _catalog_ready.notify_all()
         return _catalog_cache
 
 
 def reset_catalog_cache() -> None:
-    global _catalog_cache
-    with _catalog_lock:
+    global _catalog_cache, _catalog_loading
+    with _catalog_ready:
         _catalog_cache = None
+        _catalog_loading = False
+        _catalog_ready.notify_all()
 
 
 def tier_for_task(task_type: str) -> str:

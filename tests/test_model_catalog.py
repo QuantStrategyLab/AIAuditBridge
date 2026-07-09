@@ -14,11 +14,24 @@ from service.model_catalog import (
     load_catalog,
     save_catalog_atomic,
 )
-from service.model_catalog_sync import bootstrap_records, build_catalog, merge_records, sync_catalog, update_absence_counts
+from service.model_catalog_sync import (
+    _sanitize_api_key,
+    bootstrap_records,
+    build_catalog,
+    merge_records,
+    sync_catalog,
+    update_absence_counts,
+)
 from service.model_resolver import reset_catalog_cache, resolve_model, tier_for_budget
 
 
 class ModelCatalogScoringTests(unittest.TestCase):
+    def test_api_key_sanitizer_rejects_injection(self) -> None:
+        self.assertEqual(_sanitize_api_key("sk-test_key-1234567890"), "sk-test_key-1234567890")
+        self.assertEqual(_sanitize_api_key("Bearer sk-test_key-1234567890"), "sk-test_key-1234567890")
+        self.assertEqual(_sanitize_api_key("sk-evil\r\ninjected"), "")
+        self.assertEqual(_sanitize_api_key("not a key"), "")
+
     def test_flagship_scores_higher_than_mini(self) -> None:
         self.assertGreater(capability_score_for("gpt-5.5"), capability_score_for("gpt-5.4-mini"))
 
