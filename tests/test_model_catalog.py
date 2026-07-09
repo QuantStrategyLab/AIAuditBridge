@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from service.model_catalog import (
     ModelRecord,
+    allow_catalog_parent,
     apply_sticky_assignments,
     assign_tiers,
     capability_score_for,
@@ -41,6 +42,8 @@ class ModelCatalogScoringTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_catalog_path(Path("/tmp/not-model-catalog.json"))
         with self.assertRaises(ValueError):
+            validate_catalog_path(Path("/tmp/evil/model_catalog.json"))
+        with self.assertRaises(ValueError):
             validate_catalog_path(Path("/tmp/evil/nested/model_catalog.json"))
 
     def test_flagship_scores_higher_than_mini(self) -> None:
@@ -69,6 +72,7 @@ class ModelCatalogPersistenceTests(unittest.TestCase):
     def test_save_and_load_roundtrip(self) -> None:
         catalog = build_catalog(bootstrap_records())
         with tempfile.TemporaryDirectory() as tmp:
+            allow_catalog_parent(Path(tmp))
             path = Path(tmp) / "model_catalog.json"
             save_catalog_atomic(catalog, path)
             loaded = load_catalog(path)
@@ -91,6 +95,7 @@ class ModelCatalogSyncTests(unittest.TestCase):
     def test_sync_keeps_previous_catalog_when_discovery_empty(self) -> None:
         previous = build_catalog(bootstrap_records())
         with tempfile.TemporaryDirectory() as tmp:
+            allow_catalog_parent(Path(tmp))
             path = Path(tmp) / "model_catalog.json"
             save_catalog_atomic(previous, path)
             with (
@@ -106,6 +111,7 @@ class ModelCatalogSyncTests(unittest.TestCase):
 
         previous = build_catalog(bootstrap_records())
         with tempfile.TemporaryDirectory() as tmp:
+            allow_catalog_parent(Path(tmp))
             path = Path(tmp) / "model_catalog.json"
             save_catalog_atomic(previous, path)
             with (
@@ -142,7 +148,7 @@ class ModelCatalogSyncTests(unittest.TestCase):
         self.assertIn("gpt-5.5", deprecated)
 
     def test_sticky_keeps_previous_assignment_only_when_tier_changes(self) -> None:
-        previous = build_catalog(bootstrap_records())
+        previous = build_catalog(bootstrap_records(), catalog_source="live")
         records = merge_records(
             bootstrap_records(),
             [
@@ -207,6 +213,7 @@ class ModelResolverTests(unittest.TestCase):
         first = resolve_model(task_type="dual_review")
         self.assertEqual(first["model"], catalog.tiers["flagship"].model)
         with tempfile.TemporaryDirectory() as tmp:
+            allow_catalog_parent(Path(tmp))
             path = Path(tmp) / "model_catalog.json"
             mutated = build_catalog(bootstrap_records())
             mutated.tiers["flagship"] = TierAssignment(

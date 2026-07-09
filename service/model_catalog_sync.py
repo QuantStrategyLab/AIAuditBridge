@@ -51,11 +51,12 @@ def _read_response_limited(response: Any, *, limit: int) -> bytes:
     content_length = response.headers.get("Content-Length")
     if content_length is not None:
         try:
-            if int(content_length) > limit:
+            declared = int(content_length)
+        except ValueError:
+            declared = None
+        else:
+            if declared > limit:
                 raise ValueError(f"response Content-Length exceeds {limit} bytes")
-        except ValueError as exc:
-            if "exceeds" in str(exc):
-                raise
     chunks: list[bytes] = []
     total = 0
     while True:
@@ -273,7 +274,7 @@ def build_catalog(
         deprecation_misses=previous.deprecation_misses if previous else 2,
         catalog_source=catalog_source,
         tiers=tiers,
-        models={record.model_id: record for record in records},
+        models={record.model_id: record for record in active_records or records},
         deprecated=deprecated,
         absence_counts=absence_counts,
     )
@@ -297,7 +298,7 @@ def _record_failed_sync_attempt(previous: ModelCatalog, target) -> ModelCatalog:
         validated = validate_catalog_path(target)
         save_catalog_atomic(updated, validated)
     except (OSError, ValueError) as exc:
-        logger.warning("failed to persist last_sync_attempt_at for %s: %s", target, exc)
+        logger.error("failed to persist last_sync_attempt_at for %s: %s", target, exc)
     logger.warning(
         "model discovery returned no records; preserved catalog synced_at=%s attempt_at=%s",
         updated.synced_at,

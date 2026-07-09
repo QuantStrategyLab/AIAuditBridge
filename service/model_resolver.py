@@ -98,6 +98,7 @@ def _load_or_sync_catalog() -> ModelCatalog:
 
     try:
         try:
+            # mtime comes from the open fd after read, avoiding TOCTOU with the earlier cache check.
             catalog, mtime_ns = _load_catalog_with_mtime(load_path)
         except FileNotFoundError:
             seed = seed_catalog_path()

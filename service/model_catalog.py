@@ -24,6 +24,14 @@ _DEFAULT_REPO_CATALOG = (
 )
 _VPS_CATALOG = Path("/var/lib/codex-audit-bridge/model_catalog.json")
 _CATALOG_FILENAME = "model_catalog.json"
+_EXTRA_ALLOWED_PARENTS: set[Path] = set()
+
+
+def allow_catalog_parent(path: Path) -> Path:
+    """Register an exact parent directory for catalog writes (tests / local tooling)."""
+    resolved = path.expanduser().resolve()
+    _EXTRA_ALLOWED_PARENTS.add(resolved)
+    return resolved
 
 
 def validate_catalog_path(path: Path) -> Path:
@@ -34,12 +42,9 @@ def validate_catalog_path(path: Path) -> Path:
     allowed_exact = {
         Path("/var/lib/codex-audit-bridge").resolve(),
         _DEFAULT_REPO_CATALOG.parent.resolve(),
+        *_EXTRA_ALLOWED_PARENTS,
     }
     if parent in allowed_exact:
-        return resolved
-    # TemporaryDirectory layout: <tmpdir>/<random>/model_catalog.json
-    tmp_root = Path(tempfile.gettempdir()).resolve()
-    if parent.parent == tmp_root and parent != tmp_root:
         return resolved
     raise ValueError(f"model catalog path outside allowed directories: {resolved}")
 
@@ -179,11 +184,16 @@ class ModelCatalog:
         return self.age_days() > float(self.stale_threshold_days)
 
     def model_for_tier(self, tier: str) -> str:
+        deprecated = set(self.deprecated)
         assignment = self.tiers.get(tier) or self.tiers.get("standard")
-        if assignment and assignment.model:
+        if assignment and assignment.model and assignment.model not in deprecated:
             return assignment.model
-        if self.models:
-            return next(iter(self.models))
+        for candidate in self.tiers.values():
+            if candidate.model and candidate.model not in deprecated:
+                return candidate.model
+        for model_id in self.models:
+            if model_id not in deprecated:
+                return model_id
         raise RuntimeError("model catalog has no tier assignments")
 
 
@@ -353,8 +363,12 @@ def apply_sticky_assignments(
     discovered_ids: set[str],
     sticky_days: int,
 ) -> dict[str, TierAssignment]:
-    age = previous.age_days() if previous is not None else float("inf")
-    if previous is None or age > float(sticky_days) or age < 0:
+    if previous is None:
+        return new_tiers
+    if previous.catalog_source == "bootstrap":
+        return new_tiers
+    age = previous.age_days()
+    if age > float(sticky_days):
         return new_tiers
     merged = dict(new_tiers)
     for tier, old_assignment in previous.tiers.items():
@@ -371,6 +385,7 @@ __all__ = [
     "ModelCatalog",
     "ModelRecord",
     "TierAssignment",
+    "allow_catalog_parent",
     "apply_sticky_assignments",
     "assign_tiers",
     "capability_score_for",
