@@ -69,13 +69,17 @@ def _load_or_sync_catalog() -> ModelCatalog:
     with _catalog_lock:
         if _catalog_cache is not None:
             return _catalog_cache
-        path = catalog_path()
-        try:
-            catalog = _load_catalog_from_disk(path)
-        except FileNotFoundError:
-            catalog = sync_catalog(output_path=str(path), force=True)
-        _catalog_cache = catalog
-        return catalog
+
+    path = catalog_path()
+    try:
+        catalog = _load_catalog_from_disk(path)
+    except FileNotFoundError:
+        catalog = sync_catalog(output_path=str(path), force=True)
+
+    with _catalog_lock:
+        if _catalog_cache is None:
+            _catalog_cache = catalog
+        return _catalog_cache
 
 
 def reset_catalog_cache() -> None:

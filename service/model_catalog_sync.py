@@ -6,7 +6,6 @@ import json
 import logging
 import os
 import ssl
-import subprocess
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -29,33 +28,10 @@ from service.model_catalog import (
 logger = logging.getLogger(__name__)
 
 _MAX_HTTP_RESPONSE_BYTES = 10 * 1024 * 1024
-_CODEX_BIN_CANDIDATES = (
-    "/usr/local/bin/codex",
-    "/usr/bin/codex",
-    "/opt/homebrew/bin/codex",
-)
-_ALLOWED_CODEX_NAMES = frozenset({"codex", "codex-cli"})
-_ALLOWED_PROVIDERS = frozenset({"codex", "openai", "anthropic"})
 
 
-def _allowed_codex_parent_dirs() -> set[str]:
-    return {os.path.realpath(os.path.dirname(path)) for path in _CODEX_BIN_CANDIDATES}
-
-
-def _is_allowed_codex_binary(path: str) -> bool:
-    resolved = os.path.realpath(path)
-    if not os.path.isfile(resolved) or not os.access(resolved, os.X_OK):
-        return False
-    if os.path.basename(resolved) not in _ALLOWED_CODEX_NAMES:
-        return False
-    if os.path.dirname(resolved) not in _allowed_codex_parent_dirs():
-        return False
-    try:
-        if os.stat(resolved).st_uid != os.getuid():
-            return False
-    except OSError:
-        return False
-    return True
+def _sanitize_header_value(value: str) -> str:
+    return value.replace("\r", "").replace("\n", "").strip()
 
 
 def _http_get_json(url: str, headers: dict[str, str]) -> dict[str, Any]:
@@ -73,19 +49,13 @@ def _http_get_json(url: str, headers: dict[str, str]) -> dict[str, Any]:
     return json.loads(raw.decode("utf-8"))
 
 
-def _resolve_codex_bin() -> str | None:
-    for env_name in ("CODEX_CLI_PATH", "CODEX_BIN"):
-        explicit = os.environ.get(env_name, "").strip()
-        if explicit and _is_allowed_codex_binary(explicit):
-            return os.path.realpath(explicit)
-    for candidate in _CODEX_BIN_CANDIDATES:
-        if _is_allowed_codex_binary(candidate):
-            return os.path.realpath(candidate)
-    return None
+def discover_codex_models() -> list[ModelRecord]:
+    """Codex CLI discovery disabled; OpenAI/Anthropic APIs are the source of truth."""
+    return []
 
 
 def discover_openai_models() -> list[ModelRecord]:
-    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    api_key = _sanitize_header_value(os.environ.get("OPENAI_API_KEY", ""))
     if not api_key:
         return []
     try:
@@ -119,7 +89,7 @@ def discover_openai_models() -> list[ModelRecord]:
 
 
 def discover_anthropic_models() -> list[ModelRecord]:
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    api_key = _sanitize_header_value(os.environ.get("ANTHROPIC_API_KEY", ""))
     if not api_key:
         return []
     try:
@@ -154,55 +124,6 @@ def discover_anthropic_models() -> list[ModelRecord]:
                 provider="anthropic",
                 created_at=created_at,
                 capability_score=capability_score_for(model_id, created_at=created_at),
-                input_cost_per_1m=input_cost,
-                output_cost_per_1m=output_cost,
-                available_on_subscription=True,
-            )
-        )
-    return records
-
-
-def discover_codex_models() -> list[ModelRecord]:
-    codex_bin = _resolve_codex_bin()
-    if not codex_bin:
-        return []
-    try:
-        completed = subprocess.run(
-            [codex_bin, "models", "list", "--json"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return []
-    if completed.returncode != 0 or not completed.stdout.strip():
-        return []
-    try:
-        payload = json.loads(completed.stdout)
-    except json.JSONDecodeError:
-        return []
-    items = payload if isinstance(payload, list) else payload.get("models") or payload.get("data") or []
-    records: list[ModelRecord] = []
-    for item in items:
-        if isinstance(item, str):
-            model_id = item.strip()
-            provider = "codex"
-        elif isinstance(item, dict):
-            model_id = str(item.get("id") or item.get("model") or "").strip()
-            provider = str(item.get("provider") or "codex").strip().lower()
-            if provider not in _ALLOWED_PROVIDERS:
-                provider = "codex"
-        else:
-            continue
-        if not model_id or not is_chat_candidate(model_id):
-            continue
-        input_cost, output_cost = estimate_cost_per_1m(model_id)
-        records.append(
-            ModelRecord(
-                model_id=model_id,
-                provider=provider,
-                capability_score=capability_score_for(model_id),
                 input_cost_per_1m=input_cost,
                 output_cost_per_1m=output_cost,
                 available_on_subscription=True,
@@ -254,8 +175,10 @@ def update_absence_counts(
 ) -> tuple[dict[str, int], list[str]]:
     absence_counts: dict[str, int] = {}
     deprecated: list[str] = []
+    prior_deprecated: set[str] = set()
     if previous is not None:
         absence_counts = dict(previous.absence_counts)
+        prior_deprecated = set(previous.deprecated)
         known_models = set(previous.models)
         deprecated = [
             model_id
@@ -267,6 +190,10 @@ def update_absence_counts(
     if previous is not None:
         for model_id in previous.models:
             if model_id in discovered_ids:
+                continue
+            if model_id in prior_deprecated:
+                if model_id not in deprecated:
+                    deprecated.append(model_id)
                 continue
             absence_counts[model_id] = int(absence_counts.get(model_id, 0)) + 1
             if absence_counts[model_id] >= deprecation_misses and model_id not in deprecated:
@@ -322,12 +249,22 @@ def discover_all_records() -> list[ModelRecord]:
     return merge_records(
         discover_openai_models(),
         discover_anthropic_models(),
-        discover_codex_models(),
     )
 
 
-class CatalogSyncError(RuntimeError):
-    """Raised when live discovery fails but a prior catalog exists."""
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _record_failed_sync_attempt(previous: ModelCatalog, target) -> ModelCatalog:
+    previous.last_sync_attempt_at = _now_iso()
+    save_catalog_atomic(previous, target)
+    logger.warning(
+        "model discovery returned no records; preserved catalog synced_at=%s attempt_at=%s",
+        previous.synced_at,
+        previous.last_sync_attempt_at,
+    )
+    return previous
 
 
 def sync_catalog(*, output_path: str | None = None, force: bool = False) -> ModelCatalog:
@@ -345,7 +282,7 @@ def sync_catalog(*, output_path: str | None = None, force: bool = False) -> Mode
     catalog_source = "live"
     if not records:
         if previous is not None:
-            return previous
+            return _record_failed_sync_attempt(previous, target)
         records = bootstrap_records()
         catalog_source = "bootstrap"
     try:
@@ -357,6 +294,10 @@ def sync_catalog(*, output_path: str | None = None, force: bool = False) -> Mode
         catalog = build_catalog(bootstrap_records(), catalog_source="bootstrap")
     save_catalog_atomic(catalog, target)
     return catalog
+
+
+class CatalogSyncError(RuntimeError):
+    """Raised when live discovery fails but a prior catalog exists."""
 
 
 __all__ = [

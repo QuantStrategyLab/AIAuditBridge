@@ -68,6 +68,7 @@ class ModelCatalog:
     sticky_days: int = DEFAULT_STICKY_DAYS
     deprecation_misses: int = DEFAULT_DEPRECATION_MISSES
     catalog_source: str = "live"
+    last_sync_attempt_at: str = ""
     tiers: dict[str, TierAssignment] = field(default_factory=dict)
     models: dict[str, ModelRecord] = field(default_factory=dict)
     deprecated: list[str] = field(default_factory=list)
@@ -82,6 +83,7 @@ class ModelCatalog:
             "sticky_days": self.sticky_days,
             "deprecation_misses": self.deprecation_misses,
             "catalog_source": self.catalog_source,
+            "last_sync_attempt_at": self.last_sync_attempt_at,
             "tiers": {name: assignment.to_dict() for name, assignment in self.tiers.items()},
             "models": {model_id: record.to_dict() for model_id, record in self.models.items()},
             "deprecated": list(self.deprecated),
@@ -127,6 +129,7 @@ class ModelCatalog:
             sticky_days=int(payload.get("sticky_days") or DEFAULT_STICKY_DAYS),
             deprecation_misses=int(payload.get("deprecation_misses") or DEFAULT_DEPRECATION_MISSES),
             catalog_source=str(payload.get("catalog_source") or "live"),
+            last_sync_attempt_at=str(payload.get("last_sync_attempt_at") or ""),
             tiers=tiers,
             models=models,
             deprecated=[str(item) for item in (payload.get("deprecated") or [])],

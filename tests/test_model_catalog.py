@@ -60,6 +60,18 @@ class ModelCatalogSyncTests(unittest.TestCase):
             with patch("service.model_catalog_sync.discover_all_records", return_value=[]):
                 result = sync_catalog(output_path=str(path), force=True)
             self.assertEqual(result.synced_at, previous.synced_at)
+            self.assertTrue(result.last_sync_attempt_at)
+
+    def test_deprecated_model_stays_deprecated_when_still_absent(self) -> None:
+        previous = build_catalog(bootstrap_records())
+        previous.deprecated = ["gpt-5.5"]
+        previous.absence_counts = {"gpt-5.5": 2}
+        _, deprecated = update_absence_counts(
+            previous,
+            discovered_ids={"gpt-5.4-mini"},
+            deprecation_misses=2,
+        )
+        self.assertIn("gpt-5.5", deprecated)
 
     def test_deprecation_after_two_misses(self) -> None:
         previous = build_catalog(bootstrap_records())
