@@ -276,7 +276,8 @@ def _write_atomic_text(target: Path, content: str) -> None:
 
 
 _NAME_HINT_SCORES: tuple[tuple[re.Pattern[str], float], ...] = (
-    (re.compile(r"gpt-5\.6[-.]?(sol|terra)|claude-opus|o3(?!-mini)", re.I), 1.0),
+    (re.compile(r"gpt-5\.6[-.]?sol|claude-opus-4-8|o3(?!-mini)", re.I), 1.0),
+    (re.compile(r"gpt-5\.6[-.]?terra|claude-opus(?!-4-8)", re.I), 0.97),
     (re.compile(r"gpt-5\.6[-.]?luna|gpt-5\.5|claude-fable|fable-5", re.I), 0.93),
     (re.compile(r"claude-sonnet|gpt-5\.4(?!-mini)|o[14](?!-mini)", re.I), 0.74),
     (re.compile(r"gpt-5(?!\.[456])|gpt-4o", re.I), 0.66),
@@ -291,8 +292,10 @@ def estimate_cost_per_1m(model_id: str) -> tuple[float, float]:
         return 0.10, 0.40
     if "mini" in lowered or "haiku" in lowered:
         return 0.15, 0.60
-    if re.search(r"5\.6[-.]?(sol|terra)", lowered) or "opus" in lowered:
+    if re.search(r"5\.6[-.]?sol", lowered) or re.search(r"opus-4-8", lowered):
         return 6.0, 30.0
+    if re.search(r"5\.6[-.]?terra", lowered) or "opus" in lowered:
+        return 5.0, 25.0
     if re.search(r"5\.6[-.]?luna", lowered) or "fable" in lowered or "5.5" in lowered:
         return 4.0, 20.0
     if "sonnet" in lowered:
@@ -406,13 +409,32 @@ def assign_tiers(records: list[ModelRecord]) -> dict[str, TierAssignment]:
     }
 
 
+_STICKY_UPGRADE_SCORE_DELTA = 0.05
+
+
+def _model_capability(catalog: ModelCatalog | None, model_id: str) -> float | None:
+    if catalog is None:
+        return None
+    record = catalog.models.get(model_id)
+    if record is None:
+        return None
+    return float(record.capability_score)
+
+
 def apply_sticky_assignments(
     new_tiers: dict[str, TierAssignment],
     previous: ModelCatalog | None,
     *,
     discovered_ids: set[str],
     sticky_days: int,
+    model_scores: dict[str, float] | None = None,
 ) -> dict[str, TierAssignment]:
+    """Hold tier assignments steady, but allow clear capability upgrades.
+
+    Sticky exists to avoid thrashing between near-equal models and to survive
+    temporary inventory gaps. It must not block a real generation bump
+    (for example GPT-5.5 → GPT-5.6 Sol).
+    """
     if previous is None:
         return new_tiers
     if previous.catalog_source == "bootstrap":
@@ -420,6 +442,7 @@ def apply_sticky_assignments(
     age = previous.age_days()
     if age > float(sticky_days):
         return new_tiers
+    scores = dict(model_scores or {})
     merged = dict(new_tiers)
     for tier, old_assignment in previous.tiers.items():
         new_assignment = merged.get(tier)
@@ -427,10 +450,20 @@ def apply_sticky_assignments(
             continue
         model_id = old_assignment.model
         # Keep sticky through temporary absence until the model is deprecated.
-        if model_id not in previous.deprecated and (
-            model_id in discovered_ids or model_id in previous.models
-        ):
-            merged[tier] = old_assignment
+        if model_id in previous.deprecated:
+            continue
+        if model_id not in discovered_ids and model_id not in previous.models:
+            continue
+
+        old_score = scores.get(model_id)
+        if old_score is None:
+            old_score = _model_capability(previous, model_id)
+        new_score = scores.get(new_assignment.model)
+        if old_score is not None and new_score is not None:
+            if float(new_score) >= float(old_score) + _STICKY_UPGRADE_SCORE_DELTA:
+                # Clear upgrade — accept the new assignment.
+                continue
+        merged[tier] = old_assignment
     return merged
 
 

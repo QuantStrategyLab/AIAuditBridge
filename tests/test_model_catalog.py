@@ -63,6 +63,8 @@ class ModelCatalogScoringTests(unittest.TestCase):
         self.assertEqual(tiers["flagship"].model, "gpt-5.6-sol")
 
     def test_gpt56_family_scores_above_legacy_flagship(self) -> None:
+        self.assertGreater(capability_score_for("gpt-5.6-sol"), capability_score_for("gpt-5.6-terra"))
+        self.assertGreater(capability_score_for("gpt-5.6-terra"), capability_score_for("gpt-5.6-luna"))
         self.assertGreater(capability_score_for("gpt-5.6-sol"), capability_score_for("gpt-5.5"))
         self.assertGreater(capability_score_for("gpt-5.6-sol"), capability_score_for("gpt-5.6-luna"))
         self.assertGreater(capability_score_for("claude-fable-5"), capability_score_for("claude-sonnet-4-6"))
@@ -162,27 +164,46 @@ class ModelCatalogSyncTests(unittest.TestCase):
 
     def test_sticky_keeps_previous_assignment_only_when_tier_changes(self) -> None:
         previous = build_catalog(bootstrap_records(), catalog_source="live")
-        records = merge_records(
-            bootstrap_records(),
-            [
-                ModelRecord(
-                    model_id="gpt-6.0-sol",
-                    provider="openai",
-                    capability_score=1.4,
-                    input_cost_per_1m=8.0,
-                    output_cost_per_1m=32.0,
-                )
-            ],
+        # Near-equal peer: sticky should hold the previous flagship.
+        peer = ModelRecord(
+            model_id="gpt-5.6-peer",
+            provider="openai",
+            capability_score=float(previous.models[previous.tiers["flagship"].model].capability_score) + 0.01,
+            input_cost_per_1m=6.0,
+            output_cost_per_1m=30.0,
         )
+        records = merge_records(bootstrap_records(), [peer])
         new_tiers = assign_tiers(records)
         merged = apply_sticky_assignments(
             new_tiers,
             previous,
             discovered_ids={record.model_id for record in records},
             sticky_days=30,
+            model_scores={record.model_id: float(record.capability_score) for record in records},
         )
         self.assertEqual(merged["flagship"].model, previous.tiers["flagship"].model)
         self.assertNotEqual(new_tiers["flagship"].model, previous.tiers["flagship"].model)
+
+    def test_sticky_allows_clear_capability_upgrade(self) -> None:
+        previous = build_catalog(bootstrap_records(), catalog_source="live")
+        upgrade = ModelRecord(
+            model_id="gpt-6.0-sol",
+            provider="openai",
+            capability_score=1.4,
+            input_cost_per_1m=8.0,
+            output_cost_per_1m=32.0,
+        )
+        records = merge_records(bootstrap_records(), [upgrade])
+        new_tiers = assign_tiers(records)
+        merged = apply_sticky_assignments(
+            new_tiers,
+            previous,
+            discovered_ids={record.model_id for record in records},
+            sticky_days=30,
+            model_scores={record.model_id: float(record.capability_score) for record in records},
+        )
+        self.assertEqual(merged["flagship"].model, "gpt-6.0-sol")
+        self.assertEqual(new_tiers["flagship"].model, "gpt-6.0-sol")
 
     def test_sticky_keeps_assignment_when_model_temporarily_missing(self) -> None:
         previous = build_catalog(bootstrap_records(), catalog_source="live")
@@ -194,6 +215,7 @@ class ModelCatalogSyncTests(unittest.TestCase):
             previous,
             discovered_ids={record.model_id for record in remaining},
             sticky_days=30,
+            model_scores={record.model_id: float(record.capability_score) for record in remaining},
         )
         self.assertEqual(merged["flagship"].model, old_flagship)
 
