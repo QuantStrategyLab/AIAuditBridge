@@ -52,6 +52,7 @@ NO_REVIEW_BACKEND_CONFIGURED = (
 # Risk → block mapping
 BLOCK_SEVERITIES = frozenset({"critical", "high"})
 COMMENT_SEVERITIES = frozenset({"critical", "high", "medium", "low"})
+DEFAULT_ACK_LABELS = ("review-ack",)
 
 
 class ReviewError(RuntimeError):
@@ -164,7 +165,40 @@ def _default_policy() -> dict[str, Any]:
         },
         "max_changed_files": 30,
         "max_changed_lines": 2000,
+        "pr_review": {
+            "ack_labels": list(DEFAULT_ACK_LABELS),
+        },
     }
+
+
+def ack_labels_from_policy(policy: dict[str, Any]) -> frozenset[str]:
+    """Labels that acknowledge Codex findings and allow merge despite blocking issues."""
+    pr_review = policy.get("pr_review") if isinstance(policy.get("pr_review"), dict) else {}
+    raw = pr_review.get("ack_labels") if isinstance(pr_review, dict) else None
+    if raw is None:
+        return frozenset(DEFAULT_ACK_LABELS)
+    if not isinstance(raw, list):
+        return frozenset()
+    return frozenset(str(item).strip() for item in raw if str(item).strip())
+
+
+def pr_has_ack_label(pr: dict[str, Any], policy: dict[str, Any]) -> tuple[bool, str]:
+    """Return (matched, label_name) when the PR carries a configured ack label."""
+    wanted = ack_labels_from_policy(policy)
+    if not wanted:
+        return False, ""
+    labels = pr.get("labels") or []
+    if not isinstance(labels, list):
+        return False, ""
+    for item in labels:
+        name = ""
+        if isinstance(item, dict):
+            name = str(item.get("name") or "").strip()
+        elif isinstance(item, str):
+            name = item.strip()
+        if name in wanted:
+            return True, name
+    return False, ""
 
 
 def _fail_closed(reason: str) -> dict[str, Any]:
@@ -818,7 +852,12 @@ def evaluate_findings(
 # ---------------------------------------------------------------------------
 
 
-def build_pr_comment(decision: dict[str, Any], pr_url: str) -> str:
+def build_pr_comment(
+    decision: dict[str, Any],
+    pr_url: str,
+    *,
+    ack_label: str = "",
+) -> str:
     """Build a markdown comment to post on the PR."""
     lines = [
         "<!-- codex-pr-review -->",
@@ -828,12 +867,23 @@ def build_pr_comment(decision: dict[str, Any], pr_url: str) -> str:
         "",
     ]
 
+    if ack_label:
+        lines.extend(
+            [
+                f"> Human ack label `{ack_label}` is present. Findings are still reported, "
+                "but the review check will not block merge.",
+                "",
+            ]
+        )
+
     blocking = decision["blocking_findings"]
     if blocking:
         lines.extend([
             "### 🚫 Blocking Issues",
             "",
-            "These issues must be fixed before this PR can be merged:",
+            "These issues must be fixed before this PR can be merged:"
+            if not ack_label
+            else "These issues were reported as blocking; merge is allowed because of the ack label:",
             "",
         ])
         for i, f in enumerate(blocking, 1):
@@ -984,6 +1034,10 @@ def main() -> int:
     if policy.get("policy_errors"):
         print(f"::warning::Policy errors: {policy['policy_errors']}")
 
+    ack_matched, ack_label = pr_has_ack_label(pr, policy)
+    if ack_matched:
+        print(f"PR has ack label `{ack_label}`; review findings will not fail the check.")
+
     # First pass: classify files. If all files are low-risk, skip review.
     all_low_risk = changed_files_are_low_risk(changed_paths, policy)
     if all_low_risk and changed_paths:
@@ -995,7 +1049,7 @@ def main() -> int:
             "total_findings": 0,
             "summary": "✅ **Merge allowed**: All changes are in docs/tests — Codex review skipped.",
         }
-        upsert_pr_comment(token, repo, pr_number, build_pr_comment(decision, pr_url))
+        upsert_pr_comment(token, repo, pr_number, build_pr_comment(decision, pr_url, ack_label=ack_label if ack_matched else ""))
         return 0
 
     # Fetch PR diff
@@ -1077,14 +1131,23 @@ def main() -> int:
     decision = evaluate_findings(findings, changed_files, policy)
 
     # Post comment
-    comment_body = build_pr_comment(decision, pr_url)
+    comment_body = build_pr_comment(
+        decision,
+        pr_url,
+        ack_label=ack_label if ack_matched else "",
+    )
     upsert_pr_comment(token, repo, pr_number, comment_body)
 
     # Write decision for downstream use
     output_dir = Path("data/output/codex_pr_review")
     output_dir.mkdir(parents=True, exist_ok=True)
+    decision_payload = {
+        **decision,
+        "ack_label": ack_label if ack_matched else "",
+        "ack_bypass": bool(ack_matched and decision["blocked"]),
+    }
     (output_dir / "decision.json").write_text(
-        json.dumps(decision, ensure_ascii=False, indent=2) + "\n",
+        json.dumps(decision_payload, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
 
@@ -1092,9 +1155,17 @@ def main() -> int:
     github_output = os.environ.get("GITHUB_OUTPUT")
     if github_output:
         with open(github_output, "a", encoding="utf-8") as f:
-            f.write(f"blocked={'true' if decision['blocked'] else 'false'}\n")
+            f.write(f"blocked={'true' if decision['blocked'] and not ack_matched else 'false'}\n")
             f.write(f"total_findings={decision['total_findings']}\n")
             f.write(f"blocking_count={len(decision['blocking_findings'])}\n")
+            f.write(f"ack_bypass={'true' if ack_matched and decision['blocked'] else 'false'}\n")
+
+    if decision["blocked"] and ack_matched:
+        print(
+            f"::warning::Codex found blocking issues, but ack label `{ack_label}` "
+            "allows the review check to pass."
+        )
+        return 0
 
     if decision["blocked"]:
         print("::error::Merge blocked: serious issues found")

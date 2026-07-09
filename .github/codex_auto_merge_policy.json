@@ -30,6 +30,9 @@
       "critical",
       "high"
     ],
+    "ack_labels": [
+      "review-ack"
+    ],
     "skip_paths": [
       "docs/**",
       "**.md",

@@ -262,6 +262,91 @@ class RunCodexPrReviewTests(unittest.TestCase):
         comment.assert_called_once()
         self.assertIn("Human review required", comment.call_args.args[3])
 
+    def test_ack_labels_default_to_review_ack(self) -> None:
+        self.assertEqual(
+            run_codex_pr_review.ack_labels_from_policy({"version": 1}),
+            frozenset({"review-ack"}),
+        )
+        self.assertEqual(
+            run_codex_pr_review.ack_labels_from_policy(
+                {"version": 1, "pr_review": {"ack_labels": ["review-ack", "ship-it"]}}
+            ),
+            frozenset({"review-ack", "ship-it"}),
+        )
+
+    def test_pr_has_ack_label_matches_configured_label(self) -> None:
+        policy = {"version": 1, "pr_review": {"ack_labels": ["review-ack"]}}
+        matched, label = run_codex_pr_review.pr_has_ack_label(
+            {"labels": [{"name": "review-ack"}]},
+            policy,
+        )
+        self.assertTrue(matched)
+        self.assertEqual(label, "review-ack")
+        matched, label = run_codex_pr_review.pr_has_ack_label(
+            {"labels": [{"name": "enhancement"}]},
+            policy,
+        )
+        self.assertFalse(matched)
+        self.assertEqual(label, "")
+
+    def test_main_passes_when_ack_label_present_despite_blocking_findings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            event = {
+                "pull_request": {
+                    "number": 7,
+                    "title": "feat: risky",
+                    "body": "",
+                    "html_url": "https://example.test/pr/7",
+                    "labels": [{"name": "review-ack"}],
+                    "head": {"sha": "abc123"},
+                    "base": {"sha": "base123", "repo": {"full_name": "org/repo"}},
+                }
+            }
+            event_path = Path(tmpdir) / "event.json"
+            event_path.write_text(json.dumps(event), encoding="utf-8")
+            env = {
+                "GH_TOKEN": "token",
+                "GITHUB_REPOSITORY": "org/repo",
+                "GITHUB_EVENT_PATH": str(event_path),
+                "GITHUB_EVENT_NAME": "pull_request",
+            }
+            review_json = json.dumps(
+                {
+                    "summary": "blocking issue",
+                    "findings": [
+                        {
+                            "severity": "high",
+                            "category": "security",
+                            "file": "scripts/run_codex_pr_review.py",
+                            "line": 1,
+                            "description": "example blocking finding",
+                            "suggestion": "fix it",
+                        }
+                    ],
+                }
+            )
+            with (
+                patch.dict(os.environ, env, clear=True),
+                patch(
+                    "scripts.run_codex_pr_review.fetch_pr_files",
+                    return_value=[{"filename": "scripts/run_codex_pr_review.py"}],
+                ),
+                patch(
+                    "scripts.run_codex_pr_review.fetch_pr_diff",
+                    return_value="diff --git a/scripts/run_codex_pr_review.py b/scripts/run_codex_pr_review.py",
+                ),
+                patch(
+                    "scripts.run_codex_pr_review.run_codex_review_with_fallback",
+                    return_value=review_json,
+                ),
+                patch("scripts.run_codex_pr_review.upsert_pr_comment") as comment,
+            ):
+                self.assertEqual(run_codex_pr_review.main(), 0)
+
+        comment.assert_called_once()
+        body = comment.call_args.args[3]
+        self.assertIn("review-ack", body)
+        self.assertIn("will not block merge", body)
 
     def test_main_fails_closed_on_unconfigured_backend_without_opt_in(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
