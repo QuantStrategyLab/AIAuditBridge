@@ -43,11 +43,8 @@ _EFFORT_TIER_FALLBACK: dict[str, str] = {
     "xhigh": "flagship",
 }
 
-_BUDGET_TIER_ORDER = ("nano", "fast", "standard", "capable", "flagship")
-
 _catalog_lock = threading.Lock()
 _catalog_cache: ModelCatalog | None = None
-_refresh_inflight = False
 
 
 def _load_catalog_from_disk(path) -> ModelCatalog:
@@ -68,32 +65,15 @@ def _load_catalog_from_disk(path) -> ModelCatalog:
 
 
 def _load_or_sync_catalog() -> ModelCatalog:
-    global _catalog_cache, _refresh_inflight
+    global _catalog_cache
     with _catalog_lock:
-        if _catalog_cache is not None and not _catalog_cache.is_stale():
+        if _catalog_cache is not None:
             return _catalog_cache
         path = catalog_path()
         try:
             catalog = _load_catalog_from_disk(path)
         except FileNotFoundError:
             catalog = sync_catalog(output_path=str(path), force=True)
-        if catalog.is_stale() and not _refresh_inflight:
-            _refresh_inflight = True
-
-            def _background_refresh() -> None:
-                global _catalog_cache, _refresh_inflight
-                try:
-                    refreshed = sync_catalog(output_path=str(path), force=True)
-                    with _catalog_lock:
-                        _catalog_cache = refreshed
-                except Exception as exc:
-                    logger.warning("background model catalog refresh failed: %s", exc)
-                finally:
-                    with _catalog_lock:
-                        _refresh_inflight = False
-
-            thread = threading.Thread(target=_background_refresh, daemon=True)
-            thread.start()
         _catalog_cache = catalog
         return catalog
 

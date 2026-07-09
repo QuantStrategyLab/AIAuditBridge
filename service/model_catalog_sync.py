@@ -14,6 +14,7 @@ from typing import Any
 
 from service.model_catalog import (
     CATALOG_VERSION,
+    DEFAULT_STALE_THRESHOLD_DAYS,
     ModelCatalog,
     ModelRecord,
     apply_sticky_assignments,
@@ -34,12 +35,11 @@ _CODEX_BIN_CANDIDATES = (
     "/opt/homebrew/bin/codex",
 )
 _ALLOWED_CODEX_NAMES = frozenset({"codex", "codex-cli"})
+_ALLOWED_PROVIDERS = frozenset({"codex", "openai", "anthropic"})
 
 
 def _allowed_codex_parent_dirs() -> set[str]:
-    parents = {os.path.realpath(os.path.dirname(path)) for path in _CODEX_BIN_CANDIDATES}
-    parents.add(os.path.realpath(os.path.expanduser("~/.local/bin")))
-    return parents
+    return {os.path.realpath(os.path.dirname(path)) for path in _CODEX_BIN_CANDIDATES}
 
 
 def _is_allowed_codex_binary(path: str) -> bool:
@@ -48,7 +48,14 @@ def _is_allowed_codex_binary(path: str) -> bool:
         return False
     if os.path.basename(resolved) not in _ALLOWED_CODEX_NAMES:
         return False
-    return os.path.dirname(resolved) in _allowed_codex_parent_dirs()
+    if os.path.dirname(resolved) not in _allowed_codex_parent_dirs():
+        return False
+    try:
+        if os.stat(resolved).st_uid != os.getuid():
+            return False
+    except OSError:
+        return False
+    return True
 
 
 def _http_get_json(url: str, headers: dict[str, str]) -> dict[str, Any]:
@@ -71,9 +78,7 @@ def _resolve_codex_bin() -> str | None:
         explicit = os.environ.get(env_name, "").strip()
         if explicit and _is_allowed_codex_binary(explicit):
             return os.path.realpath(explicit)
-    home_candidate = os.path.expanduser("~/.local/bin/codex")
-    candidates = (*_CODEX_BIN_CANDIDATES, home_candidate)
-    for candidate in candidates:
+    for candidate in _CODEX_BIN_CANDIDATES:
         if _is_allowed_codex_binary(candidate):
             return os.path.realpath(candidate)
     return None
@@ -185,7 +190,9 @@ def discover_codex_models() -> list[ModelRecord]:
             provider = "codex"
         elif isinstance(item, dict):
             model_id = str(item.get("id") or item.get("model") or "").strip()
-            provider = str(item.get("provider") or "codex")
+            provider = str(item.get("provider") or "codex").strip().lower()
+            if provider not in _ALLOWED_PROVIDERS:
+                provider = "codex"
         else:
             continue
         if not model_id or not is_chat_candidate(model_id):
@@ -249,7 +256,12 @@ def update_absence_counts(
     deprecated: list[str] = []
     if previous is not None:
         absence_counts = dict(previous.absence_counts)
-        deprecated = [model_id for model_id in previous.deprecated if model_id not in discovered_ids]
+        known_models = set(previous.models)
+        deprecated = [
+            model_id
+            for model_id in previous.deprecated
+            if model_id not in discovered_ids and model_id in known_models
+        ]
     for model_id in discovered_ids:
         absence_counts.pop(model_id, None)
     if previous is not None:
@@ -272,7 +284,7 @@ def build_catalog(
         raise ValueError("build_catalog requires at least one discovered model record")
     discovered_ids = {record.model_id for record in records}
     tiers = assign_tiers(records)
-    sticky_days = previous.sticky_days if previous is not None else 37
+    sticky_days = previous.sticky_days if previous is not None else DEFAULT_STALE_THRESHOLD_DAYS
     tiers = apply_sticky_assignments(tiers, previous, discovered_ids=discovered_ids, sticky_days=sticky_days)
     absence_counts, deprecated = update_absence_counts(
         previous,
