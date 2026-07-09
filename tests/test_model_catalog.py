@@ -84,13 +84,26 @@ class ModelCatalogSyncTests(unittest.TestCase):
         previous = build_catalog(bootstrap_records())
         previous.deprecated = ["gpt-5.5"]
         previous.absence_counts = {"gpt-5.5": 2}
-        absence_counts, deprecated = update_absence_counts(
+        previous.presence_counts = {}
+        absence_counts, deprecated, presence_counts = update_absence_counts(
+            previous,
+            discovered_ids={"gpt-5.5", "gpt-5.4-mini"},
+            deprecation_misses=2,
+        )
+        # First rediscovery keeps deprecated (hysteresis).
+        self.assertIn("gpt-5.5", deprecated)
+        self.assertEqual(presence_counts.get("gpt-5.5"), 1)
+        previous.absence_counts = absence_counts
+        previous.deprecated = deprecated
+        previous.presence_counts = presence_counts
+        absence_counts, deprecated, presence_counts = update_absence_counts(
             previous,
             discovered_ids={"gpt-5.5", "gpt-5.4-mini"},
             deprecation_misses=2,
         )
         self.assertNotIn("gpt-5.5", deprecated)
         self.assertNotIn("gpt-5.5", absence_counts)
+        self.assertNotIn("gpt-5.5", presence_counts)
 
     def test_sync_keeps_previous_catalog_when_discovery_empty(self) -> None:
         previous = build_catalog(bootstrap_records())
@@ -124,7 +137,7 @@ class ModelCatalogSyncTests(unittest.TestCase):
         previous = build_catalog(bootstrap_records())
         previous.deprecated = ["gpt-5.5"]
         previous.absence_counts = {"gpt-5.5": 2}
-        _, deprecated = update_absence_counts(
+        _, deprecated, _ = update_absence_counts(
             previous,
             discovered_ids={"gpt-5.4-mini"},
             deprecation_misses=2,
@@ -133,14 +146,14 @@ class ModelCatalogSyncTests(unittest.TestCase):
 
     def test_deprecation_after_two_misses(self) -> None:
         previous = build_catalog(bootstrap_records())
-        absence_counts, deprecated = update_absence_counts(
+        absence_counts, deprecated, _ = update_absence_counts(
             previous,
             discovered_ids={"gpt-5.4-mini"},
             deprecation_misses=2,
         )
         previous.absence_counts = absence_counts
         previous.deprecated = deprecated
-        _, deprecated = update_absence_counts(
+        _, deprecated, _ = update_absence_counts(
             previous,
             discovered_ids={"gpt-5.4-mini"},
             deprecation_misses=2,

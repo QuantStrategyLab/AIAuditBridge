@@ -81,15 +81,15 @@ def _load_or_sync_catalog() -> ModelCatalog:
         load_path = path
         stale_cache = cached
 
+    catalog: ModelCatalog | None = None
+    mtime_ns: int | None = None
     try:
         try:
             catalog, mtime_ns = _load_catalog_with_mtime(load_path)
         except FileNotFoundError:
             seed = seed_catalog_path()
             if load_path.resolve() != seed.resolve() and seed.is_file():
-                # Never persist bootstrap into a production/runtime path on cold start.
                 catalog, _seed_mtime = _load_catalog_with_mtime(seed)
-                # Keep cache unstable until the runtime path exists.
                 mtime_ns = None
             else:
                 catalog = sync_catalog(output_path=str(load_path), force=True)
@@ -100,23 +100,18 @@ def _load_or_sync_catalog() -> ModelCatalog:
         except (OSError, json.JSONDecodeError, ValueError, TypeError, KeyError, UnicodeDecodeError) as exc:
             if stale_cache is not None:
                 logger.warning("catalog reload failed (%s); serving stale cache", exc)
-                with _catalog_ready:
-                    _catalog_loading = False
-                    _catalog_ready.notify_all()
                 return stale_cache
             raise
-    except Exception:
+    finally:
         with _catalog_ready:
+            if catalog is not None:
+                _catalog_cache = catalog
+                _catalog_cache_mtime_ns = mtime_ns
             _catalog_loading = False
             _catalog_ready.notify_all()
-        raise
 
-    with _catalog_ready:
-        _catalog_cache = catalog
-        _catalog_cache_mtime_ns = mtime_ns
-        _catalog_loading = False
-        _catalog_ready.notify_all()
-        return catalog
+    assert catalog is not None
+    return catalog
 
 
 def reset_catalog_cache() -> None:

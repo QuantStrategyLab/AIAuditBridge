@@ -44,7 +44,15 @@ def validate_catalog_path(path: Path) -> Path:
     if os.path.normpath(raw) == str(_VPS_CATALOG):
         return _VPS_CATALOG
 
-    # Resolve first, then allowlist the fully-resolved file path.
+    # Detect symlink leaves before resolve() follows them.
+    try:
+        if candidate.exists(follow_symlinks=False) and candidate.is_symlink():
+            raise ValueError(f"model catalog path must not be a symlink: {candidate}")
+    except TypeError:
+        # Python <3.12 Path.exists has no follow_symlinks kwarg.
+        if candidate.is_symlink():
+            raise ValueError(f"model catalog path must not be a symlink: {candidate}") from None
+
     resolved = candidate.resolve()
     if resolved.name != _CATALOG_FILENAME:
         raise ValueError(f"model catalog path must be named {_CATALOG_FILENAME}: {resolved}")
@@ -54,8 +62,6 @@ def validate_catalog_path(path: Path) -> Path:
     }
     if resolved not in allowed_files:
         raise ValueError(f"model catalog path outside allowed directories: {candidate}")
-    if resolved.exists() and resolved.is_symlink():
-        raise ValueError(f"model catalog path must not be a symlink: {resolved}")
     return resolved
 
 
@@ -116,6 +122,7 @@ class ModelCatalog:
     models: dict[str, ModelRecord] = field(default_factory=dict)
     deprecated: list[str] = field(default_factory=list)
     absence_counts: dict[str, int] = field(default_factory=dict)
+    presence_counts: dict[str, int] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -131,6 +138,7 @@ class ModelCatalog:
             "models": {model_id: record.to_dict() for model_id, record in self.models.items()},
             "deprecated": list(self.deprecated),
             "absence_counts": dict(self.absence_counts),
+            "presence_counts": dict(self.presence_counts),
         }
 
     @classmethod
@@ -180,6 +188,10 @@ class ModelCatalog:
                 str(key): int(value)
                 for key, value in (payload.get("absence_counts") or {}).items()
             },
+            presence_counts={
+                str(key): int(value)
+                for key, value in (payload.get("presence_counts") or {}).items()
+            },
         )
 
     def age_days(self) -> float:
@@ -226,17 +238,19 @@ def load_catalog(path: Path | None = None) -> ModelCatalog:
 
 def save_catalog_atomic(catalog: ModelCatalog, path: Path | None = None) -> Path:
     target = validate_catalog_path(path) if path is not None else catalog_path()
-    if target.exists() and target.is_symlink():
+    if target.is_symlink():
         raise ValueError(f"refusing to overwrite symlink catalog path: {target}")
     target.parent.mkdir(parents=True, exist_ok=True)
-    # Single atomic replace; no sidecar .prev (avoids unvalidated backup writes).
     payload = json.dumps(catalog.to_dict(), indent=2, sort_keys=True) + "\n"
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=target.parent, delete=False) as handle:
         handle.write(payload)
         temp_name = handle.name
     try:
-        if target.exists() and target.is_symlink():
-            raise ValueError(f"refusing to overwrite symlink catalog path: {target}")
+        try:
+            if os.path.lexists(target) and os.path.islink(target):
+                raise ValueError(f"refusing to overwrite symlink catalog path: {target}")
+        except OSError as exc:
+            raise ValueError(f"unable to inspect catalog path: {target}") from exc
         os.replace(temp_name, target)
     except Exception:
         try:

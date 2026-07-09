@@ -235,23 +235,30 @@ def update_absence_counts(
     discovered_ids: set[str],
     *,
     deprecation_misses: int,
-) -> tuple[dict[str, int], list[str]]:
+) -> tuple[dict[str, int], list[str], dict[str, int]]:
     absence_counts: dict[str, int] = {}
+    presence_counts: dict[str, int] = {}
     deprecated: list[str] = []
     prior_deprecated: set[str] = set()
     if previous is not None:
         absence_counts = dict(previous.absence_counts)
+        presence_counts = dict(previous.presence_counts)
         prior_deprecated = set(previous.deprecated)
-        deprecated = [
-            model_id
-            for model_id in previous.deprecated
-            if model_id not in discovered_ids
-        ]
+        deprecated = list(previous.deprecated)
     for model_id in discovered_ids:
         absence_counts.pop(model_id, None)
+        if model_id in prior_deprecated:
+            presence_counts[model_id] = int(presence_counts.get(model_id, 0)) + 1
+            if presence_counts[model_id] >= deprecation_misses:
+                deprecated = [item for item in deprecated if item != model_id]
+                presence_counts.pop(model_id, None)
+        else:
+            presence_counts.pop(model_id, None)
+    for model_id in list(presence_counts):
+        if model_id not in discovered_ids:
+            presence_counts.pop(model_id, None)
     if previous is not None:
         for model_id in previous.models:
-            # Ordering: rediscovered → skip; still-deprecated → keep; else count misses.
             if model_id in discovered_ids:
                 continue
             if model_id in prior_deprecated:
@@ -259,7 +266,7 @@ def update_absence_counts(
             absence_counts[model_id] = int(absence_counts.get(model_id, 0)) + 1
             if absence_counts[model_id] >= deprecation_misses and model_id not in deprecated:
                 deprecated.append(model_id)
-    return absence_counts, deprecated
+    return absence_counts, deprecated, presence_counts
 
 
 def build_catalog(
@@ -274,7 +281,7 @@ def build_catalog(
     tiers = assign_tiers(records)
     sticky_days = previous.sticky_days if previous is not None else DEFAULT_STICKY_DAYS
     tiers = apply_sticky_assignments(tiers, previous, discovered_ids=discovered_ids, sticky_days=sticky_days)
-    absence_counts, deprecated = update_absence_counts(
+    absence_counts, deprecated, presence_counts = update_absence_counts(
         previous,
         discovered_ids,
         deprecation_misses=previous.deprecation_misses if previous else 2,
@@ -314,6 +321,7 @@ def build_catalog(
         models=models,
         deprecated=deprecated,
         absence_counts=absence_counts,
+        presence_counts=presence_counts,
     )
 
 

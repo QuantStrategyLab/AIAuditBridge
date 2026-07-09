@@ -69,10 +69,11 @@
       "provider": "openai"
     }
   },
+  "presence_counts": {},
   "stale_threshold_days": 35,
   "sticky_days": 35,
   "sync_interval_days": 30,
-  "synced_at": "2026-07-09T20:53:38Z",
+  "synced_at": "2026-07-09T21:28:50Z",
   "tiers": {
     "capable": {
       "effort": "high",
