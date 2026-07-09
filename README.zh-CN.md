@@ -37,9 +37,14 @@ AIAuditBridge 是 QuantStrategyLab 组织内的 AI 审计调用边界。各 sour
 
 Codex 执行现在只走 service backend：workflow 从 GitHub-hosted runner 调用 QuantStrategyLab 自有的 HTTPS/443 Codex audit service。service 只返回 review 文本或结构化 patch 建议；clone、路径校验、patch apply、commit、push、PR 和 issue comment 仍由 AIAuditBridge 负责。
 
-当 `CODEX_AUDIT_AUTO_MERGE=true` 时，bridge 会先检查变更文件面和总增删行数，只在低风险或中风险且未超过 policy 上限时给生成的 PR 添加 `auto-merge-ok` label，请求源仓库的受控自动合并。bridge 会在打标前按需创建配置的 label；如果源仓 token 没有创建 label 的权限，需要先手动创建该 label。若 source checkout 里存在 `.github/codex_auto_merge_policy.json`，bridge 会在 Codex 执行修改前读取基线策略，否则才使用内置默认值。高风险、未知文件面、策略文件变更、文件移除/重命名/复制或无效 policy 配置不会添加 `auto-merge-ok`，而是给 PR 添加配置的人工复核 label（默认 `human-review-required`），并在源 issue 评论中列出风险原因和文件，等待人工复核。bridge 不会直接调用 GitHub native auto-merge。最终是否合并仍由源仓库自己的 CI 和 merge-guard workflow 决定。
+PR review 死循环收敛：
 
-PR review 死循环收敛：若人工已审阅 Codex blocking findings 并接受剩余风险，可给 PR 打上 `review-ack`（可由 `pr_review.ack_labels` 配置）。Codex 仍会发评论，但 `review` check 不再因此失败。复用 `AIAuditBridge` 的 `codex_pr_review.yml@main` 的仓库会自动继承该行为。
+- **自动（默认）**：同一 PR 连续 `pr_review.auto_converge_after` 轮（默认 3）仍为 blocking 时，`review` check 自动放行，仍会发 findings 评论。设为 `0` 可关闭。
+- **可选人工**：也可打 `review-ack`（`pr_review.ack_labels`）立即放行。
+
+复用 `AIAuditBridge` 的 `codex_pr_review.yml@main` 的仓库会自动继承该行为。
+
+当 `CODEX_AUDIT_AUTO_MERGE=true` 时，bridge 会先检查变更文件面和总增删行数，只在低风险或中风险且未超过 policy 上限时给生成的 PR 添加 `auto-merge-ok` label，请求源仓库的受控自动合并。bridge 会在打标前按需创建配置的 label；如果源仓 token 没有创建 label 的权限，需要先手动创建该 label。若 source checkout 里存在 `.github/codex_auto_merge_policy.json`，bridge 会在 Codex 执行修改前读取基线策略，否则才使用内置默认值。高风险、未知文件面、策略文件变更、文件移除/重命名/复制或无效 policy 配置不会添加 `auto-merge-ok`，而是给 PR 添加配置的人工复核 label（默认 `human-review-required`），并在源 issue 评论中列出风险原因和文件，等待人工复核。bridge 不会直接调用 GitHub native auto-merge。最终是否合并仍由源仓库自己的 CI 和 merge-guard workflow 决定。
 
 当源 issue 中出现 CI 失败或 requested-changes review 产生的 `codex-pr-feedback` marker 时，bridge 会把本次运行视为有界重试。只要 marker 指向的 PR 仍然 open、同仓、base 是请求的 source ref，并且 head 分支属于同一个 monthly issue，bridge 会更新现有 PR 分支，而不是再创建一个新 PR。在清理该 PR 上旧的受控自动合并 label 前，bridge 会复用 baseline policy label；如果 policy 无效，或 auto-merge / human-review label 无法安全区分，则跳过 label mutation。
 
