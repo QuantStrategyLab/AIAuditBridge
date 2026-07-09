@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 from typing import Mapping
 
@@ -46,6 +47,23 @@ _catalog_cache: ModelCatalog | None = None
 _refresh_inflight = False
 
 
+def _load_catalog_from_disk(path) -> ModelCatalog:
+    from pathlib import Path
+
+    target = Path(path)
+    backup = target.with_name(target.name + ".prev")
+    try:
+        return load_catalog(target)
+    except FileNotFoundError:
+        if backup.is_file():
+            return load_catalog(backup)
+        raise
+    except (json.JSONDecodeError, ValueError, TypeError, KeyError):
+        if backup.is_file():
+            return load_catalog(backup)
+        raise
+
+
 def _load_or_sync_catalog() -> ModelCatalog:
     global _catalog_cache, _refresh_inflight
     with _catalog_lock:
@@ -53,7 +71,7 @@ def _load_or_sync_catalog() -> ModelCatalog:
             return _catalog_cache
         path = catalog_path()
         try:
-            catalog = load_catalog(path)
+            catalog = _load_catalog_from_disk(path)
         except FileNotFoundError:
             catalog = sync_catalog(output_path=str(path), force=True)
         if catalog.is_stale() and not _refresh_inflight:
@@ -82,7 +100,7 @@ def reset_catalog_cache() -> None:
 
 def tier_for_task(task_type: str) -> str:
     normalized = str(task_type or "").strip().lower() or "daily_monitor"
-    return _TASK_TIERS.get(normalized, "standard")
+    return _TASK_TIERS.get(normalized, "nano")
 
 
 def effort_for_task(task_type: str) -> str:

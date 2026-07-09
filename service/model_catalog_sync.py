@@ -202,9 +202,10 @@ def update_absence_counts(
     if previous is not None:
         absence_counts = dict(previous.absence_counts)
         deprecated = list(previous.deprecated)
-    for model_id in list(absence_counts):
-        if model_id in discovered_ids:
-            absence_counts.pop(model_id, None)
+    for model_id in discovered_ids:
+        absence_counts.pop(model_id, None)
+        if model_id in deprecated:
+            deprecated.remove(model_id)
     if previous is not None:
         for model_id in previous.models:
             if model_id in discovered_ids:
@@ -221,7 +222,7 @@ def build_catalog(
     previous: ModelCatalog | None = None,
 ) -> ModelCatalog:
     if not records:
-        records = bootstrap_records()
+        raise ValueError("build_catalog requires at least one discovered model record")
     discovered_ids = {record.model_id for record in records}
     tiers = assign_tiers(records)
     sticky_days = previous.sticky_days if previous is not None else 30
@@ -249,12 +250,15 @@ def build_catalog(
 
 
 def discover_all_records() -> list[ModelRecord]:
-    records = merge_records(
+    return merge_records(
         discover_openai_models(),
         discover_anthropic_models(),
         discover_codex_models(),
     )
-    return records or bootstrap_records()
+
+
+class CatalogSyncError(RuntimeError):
+    """Raised when live discovery fails but a prior catalog exists."""
 
 
 def sync_catalog(*, output_path: str | None = None, force: bool = False) -> ModelCatalog:
@@ -269,6 +273,10 @@ def sync_catalog(*, output_path: str | None = None, force: bool = False) -> Mode
         if not force and previous.age_days() < float(previous.sync_interval_days):
             return previous
     records = discover_all_records()
+    if not records:
+        if previous is not None:
+            return previous
+        records = bootstrap_records()
     catalog = build_catalog(records, previous=previous)
     save_catalog_atomic(catalog, target)
     return catalog

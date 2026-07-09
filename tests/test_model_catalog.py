@@ -4,6 +4,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from service.model_catalog import (
     ModelRecord,
@@ -13,7 +14,7 @@ from service.model_catalog import (
     load_catalog,
     save_catalog_atomic,
 )
-from service.model_catalog_sync import bootstrap_records, build_catalog, merge_records, update_absence_counts
+from service.model_catalog_sync import bootstrap_records, build_catalog, merge_records, sync_catalog, update_absence_counts
 from service.model_resolver import reset_catalog_cache, resolve_model, tier_for_budget
 
 
@@ -39,6 +40,27 @@ class ModelCatalogPersistenceTests(unittest.TestCase):
 
 
 class ModelCatalogSyncTests(unittest.TestCase):
+    def test_rediscovered_model_removed_from_deprecated(self) -> None:
+        previous = build_catalog(bootstrap_records())
+        previous.deprecated = ["gpt-5.5"]
+        previous.absence_counts = {"gpt-5.5": 2}
+        absence_counts, deprecated = update_absence_counts(
+            previous,
+            discovered_ids={"gpt-5.5", "gpt-5.4-mini"},
+            deprecation_misses=2,
+        )
+        self.assertNotIn("gpt-5.5", deprecated)
+        self.assertNotIn("gpt-5.5", absence_counts)
+
+    def test_sync_keeps_previous_catalog_when_discovery_empty(self) -> None:
+        previous = build_catalog(bootstrap_records())
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "model_catalog.json"
+            save_catalog_atomic(previous, path)
+            with patch("service.model_catalog_sync.discover_all_records", return_value=[]):
+                result = sync_catalog(output_path=str(path), force=True)
+            self.assertEqual(result.synced_at, previous.synced_at)
+
     def test_deprecation_after_two_misses(self) -> None:
         previous = build_catalog(bootstrap_records())
         absence_counts, deprecated = update_absence_counts(
