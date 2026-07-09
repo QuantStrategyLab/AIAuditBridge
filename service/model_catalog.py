@@ -35,18 +35,25 @@ def allow_catalog_parent(path: Path) -> Path:
 
 
 def validate_catalog_path(path: Path) -> Path:
-    resolved = path.expanduser().resolve()
-    if resolved.name != _CATALOG_FILENAME:
-        raise ValueError(f"model catalog path must be named {_CATALOG_FILENAME}: {resolved}")
-    parent = resolved.parent
+    candidate = path.expanduser()
+    if candidate.name != _CATALOG_FILENAME:
+        raise ValueError(f"model catalog path must be named {_CATALOG_FILENAME}: {candidate}")
+    # Reject symlink leaves / parents inside the allowlisted directory.
+    # Do not walk system ancestors (/var -> /private/var on macOS).
+    if candidate.exists() and candidate.is_symlink():
+        raise ValueError(f"model catalog path must not be a symlink: {candidate}")
+    parent = candidate.parent
+    if parent.exists() and parent.is_symlink():
+        raise ValueError(f"model catalog parent must not be a symlink: {parent}")
+    resolved_parent = parent.resolve()
     allowed_exact = {
         Path("/var/lib/codex-audit-bridge").resolve(),
         _DEFAULT_REPO_CATALOG.parent.resolve(),
         *_EXTRA_ALLOWED_PARENTS,
     }
-    if parent in allowed_exact:
-        return resolved
-    raise ValueError(f"model catalog path outside allowed directories: {resolved}")
+    if resolved_parent not in allowed_exact:
+        raise ValueError(f"model catalog path outside allowed directories: {candidate}")
+    return resolved_parent / _CATALOG_FILENAME
 
 
 def seed_catalog_path() -> Path:
@@ -207,12 +214,10 @@ def load_catalog(path: Path | None = None) -> ModelCatalog:
 
 def save_catalog_atomic(catalog: ModelCatalog, path: Path | None = None) -> Path:
     target = validate_catalog_path(path) if path is not None else catalog_path()
+    if target.exists() and target.is_symlink():
+        raise ValueError(f"refusing to overwrite symlink catalog path: {target}")
     target.parent.mkdir(parents=True, exist_ok=True)
-    previous = target.with_name(target.name + ".prev")
-    if previous.parent != target.parent or not previous.name.endswith(".prev"):
-        raise ValueError(f"invalid catalog backup path: {previous}")
-    if target.is_file():
-        _write_atomic_text(previous, target.read_text(encoding="utf-8"))
+    # Single atomic replace; no sidecar .prev (avoids unvalidated backup writes).
     payload = json.dumps(catalog.to_dict(), indent=2, sort_keys=True) + "\n"
     _write_atomic_text(target, payload)
     return target

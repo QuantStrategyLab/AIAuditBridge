@@ -57,24 +57,10 @@ def _load_catalog_with_mtime(path) -> tuple[ModelCatalog, int | None]:
     from service.model_catalog import ModelCatalog as CatalogCls
 
     target = Path(path)
-    backup = target.with_name(target.name + ".prev")
-
-    def _read(candidate: Path) -> tuple[ModelCatalog, int | None]:
-        with candidate.open("rb") as handle:
-            payload = json.loads(handle.read().decode("utf-8"))
-            mtime_ns = os.fstat(handle.fileno()).st_mtime_ns
-        return CatalogCls.from_dict(payload), int(mtime_ns)
-
-    try:
-        return _read(target)
-    except FileNotFoundError:
-        if backup.is_file():
-            return _read(backup)
-        raise
-    except (json.JSONDecodeError, ValueError, TypeError, KeyError, OSError, UnicodeDecodeError):
-        if backup.is_file():
-            return _read(backup)
-        raise
+    with target.open("rb") as handle:
+        payload = json.loads(handle.read().decode("utf-8"))
+        mtime_ns = os.fstat(handle.fileno()).st_mtime_ns
+    return CatalogCls.from_dict(payload), int(mtime_ns)
 
 
 def _load_or_sync_catalog() -> ModelCatalog:
@@ -83,28 +69,27 @@ def _load_or_sync_catalog() -> ModelCatalog:
     with _catalog_ready:
         while _catalog_loading:
             _catalog_ready.wait()
-        try:
-            current_mtime = path.stat().st_mtime_ns
-        except OSError:
-            current_mtime = None
-        if (
-            _catalog_cache is not None
-            and current_mtime is not None
-            and _catalog_cache_mtime_ns == current_mtime
-        ):
-            return _catalog_cache
+        cached = _catalog_cache
+        cached_mtime = _catalog_cache_mtime_ns
+        if cached is not None and cached_mtime is not None:
+            try:
+                if path.stat().st_mtime_ns == cached_mtime:
+                    return cached
+            except OSError:
+                pass
         _catalog_loading = True
         load_path = path
 
     try:
         try:
-            # mtime comes from the open fd after read, avoiding TOCTOU with the earlier cache check.
             catalog, mtime_ns = _load_catalog_with_mtime(load_path)
         except FileNotFoundError:
             seed = seed_catalog_path()
             if load_path.resolve() != seed.resolve() and seed.is_file():
                 # Never persist bootstrap into a production/runtime path on cold start.
-                catalog, mtime_ns = _load_catalog_with_mtime(seed)
+                catalog, _seed_mtime = _load_catalog_with_mtime(seed)
+                # Keep cache unstable until the runtime path exists.
+                mtime_ns = None
             else:
                 catalog = sync_catalog(output_path=str(load_path), force=True)
                 try:

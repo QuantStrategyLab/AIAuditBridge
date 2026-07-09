@@ -224,11 +224,10 @@ def update_absence_counts(
         absence_counts.pop(model_id, None)
     if previous is not None:
         for model_id in previous.models:
+            # Ordering: rediscovered → skip; still-deprecated → keep; else count misses.
             if model_id in discovered_ids:
                 continue
             if model_id in prior_deprecated:
-                if model_id not in deprecated:
-                    deprecated.append(model_id)
                 continue
             absence_counts[model_id] = int(absence_counts.get(model_id, 0)) + 1
             if absence_counts[model_id] >= deprecation_misses and model_id not in deprecated:
@@ -254,15 +253,16 @@ def build_catalog(
         deprecation_misses=previous.deprecation_misses if previous else 2,
     )
     active_records = [record for record in records if record.model_id not in deprecated]
+    if not active_records:
+        raise ValueError("all discovered models are deprecated; refusing empty active catalog")
     replacements: dict[str, Any] = {}
-    if active_records:
-        try:
-            replacement_tiers = assign_tiers(active_records)
-        except ValueError:
-            replacement_tiers = {}
-        for tier_name, assignment in tiers.items():
-            if assignment.model in deprecated and tier_name in replacement_tiers:
-                replacements[tier_name] = replacement_tiers[tier_name]
+    try:
+        replacement_tiers = assign_tiers(active_records)
+    except ValueError:
+        replacement_tiers = {}
+    for tier_name, assignment in tiers.items():
+        if assignment.model in deprecated and tier_name in replacement_tiers:
+            replacements[tier_name] = replacement_tiers[tier_name]
     if replacements:
         tiers.update(replacements)
     return ModelCatalog(
@@ -274,7 +274,7 @@ def build_catalog(
         deprecation_misses=previous.deprecation_misses if previous else 2,
         catalog_source=catalog_source,
         tiers=tiers,
-        models={record.model_id: record for record in active_records or records},
+        models={record.model_id: record for record in active_records},
         deprecated=deprecated,
         absence_counts=absence_counts,
     )
