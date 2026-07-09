@@ -42,6 +42,10 @@ def _sanitize_api_key(value: str) -> str:
     cleaned = value.strip()
     if cleaned.lower().startswith("bearer "):
         cleaned = cleaned[7:].strip()
+    if cleaned.startswith(("-", ".")):
+        return ""
+    if not cleaned.startswith("sk-"):
+        return ""
     if not _API_KEY_RE.fullmatch(cleaned):
         return ""
     return cleaned
@@ -354,12 +358,21 @@ def sync_catalog(*, output_path: str | None = None, force: bool = False) -> Mode
         )
     provider_results = discover_all_providers()
     configured_failures = [item for item in provider_results if item.configured and not item.ok]
+    empty_configured = [
+        item for item in provider_results if item.configured and item.ok and not item.records
+    ]
     records = merge_records(*(item.records for item in provider_results))
     catalog_source = "live"
     if configured_failures and previous is not None:
         logger.warning(
             "provider discovery failed for %s; preserving previous catalog",
             ",".join(item.provider for item in configured_failures),
+        )
+        return _record_failed_sync_attempt(previous, target)
+    if empty_configured and previous is not None:
+        logger.warning(
+            "configured provider returned empty inventory for %s; preserving previous catalog",
+            ",".join(item.provider for item in empty_configured),
         )
         return _record_failed_sync_attempt(previous, target)
     if not records:

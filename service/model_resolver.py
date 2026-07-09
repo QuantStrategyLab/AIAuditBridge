@@ -107,7 +107,7 @@ def _load_or_sync_catalog() -> ModelCatalog:
         _catalog_cache_mtime_ns = mtime_ns
         _catalog_loading = False
         _catalog_ready.notify_all()
-        return _catalog_cache
+        return catalog
 
 
 def reset_catalog_cache() -> None:

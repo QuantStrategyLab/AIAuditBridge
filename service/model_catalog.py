@@ -35,25 +35,28 @@ def allow_catalog_parent(path: Path) -> Path:
 
 
 def validate_catalog_path(path: Path) -> Path:
-    candidate = path.expanduser()
+    raw = os.path.expanduser(str(path))
+    candidate = Path(raw)
     if candidate.name != _CATALOG_FILENAME:
         raise ValueError(f"model catalog path must be named {_CATALOG_FILENAME}: {candidate}")
-    # Reject symlink leaves / parents inside the allowlisted directory.
-    # Do not walk system ancestors (/var -> /private/var on macOS).
     if candidate.exists() and candidate.is_symlink():
         raise ValueError(f"model catalog path must not be a symlink: {candidate}")
     parent = candidate.parent
     if parent.exists() and parent.is_symlink():
         raise ValueError(f"model catalog parent must not be a symlink: {parent}")
-    resolved_parent = parent.resolve()
-    allowed_exact = {
-        Path("/var/lib/codex-audit-bridge").resolve(),
-        _DEFAULT_REPO_CATALOG.parent.resolve(),
-        *_EXTRA_ALLOWED_PARENTS,
+
+    # Production path: require the exact canonical string (no alternate symlink paths).
+    if os.path.normpath(raw) == str(_VPS_CATALOG):
+        return _VPS_CATALOG
+
+    resolved = candidate.resolve()
+    allowed_files = {
+        _DEFAULT_REPO_CATALOG.resolve(),
+        *(parent / _CATALOG_FILENAME for parent in _EXTRA_ALLOWED_PARENTS),
     }
-    if resolved_parent not in allowed_exact:
+    if resolved not in allowed_files:
         raise ValueError(f"model catalog path outside allowed directories: {candidate}")
-    return resolved_parent / _CATALOG_FILENAME
+    return resolved
 
 
 def seed_catalog_path() -> Path:
