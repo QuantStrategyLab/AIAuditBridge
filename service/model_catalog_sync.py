@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import ssl
 import subprocess
 import urllib.error
 import urllib.request
@@ -23,6 +25,7 @@ from service.model_catalog import (
     save_catalog_atomic,
 )
 
+logger = logging.getLogger(__name__)
 
 _MAX_HTTP_RESPONSE_BYTES = 10 * 1024 * 1024
 _CODEX_BIN_CANDIDATES = (
@@ -30,12 +33,34 @@ _CODEX_BIN_CANDIDATES = (
     "/usr/bin/codex",
     "/opt/homebrew/bin/codex",
 )
+_ALLOWED_CODEX_NAMES = frozenset({"codex", "codex-cli"})
+
+
+def _allowed_codex_parent_dirs() -> set[str]:
+    parents = {os.path.realpath(os.path.dirname(path)) for path in _CODEX_BIN_CANDIDATES}
+    parents.add(os.path.realpath(os.path.expanduser("~/.local/bin")))
+    return parents
+
+
+def _is_allowed_codex_binary(path: str) -> bool:
+    resolved = os.path.realpath(path)
+    if not os.path.isfile(resolved) or not os.access(resolved, os.X_OK):
+        return False
+    if os.path.basename(resolved) not in _ALLOWED_CODEX_NAMES:
+        return False
+    return os.path.dirname(resolved) in _allowed_codex_parent_dirs()
 
 
 def _http_get_json(url: str, headers: dict[str, str]) -> dict[str, Any]:
     request = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(request, timeout=30) as response:
-        raw = response.read(_MAX_HTTP_RESPONSE_BYTES + 1)
+    ssl_context = ssl.create_default_context()
+    try:
+        with urllib.request.urlopen(request, timeout=30, context=ssl_context) as response:
+            raw = response.read(_MAX_HTTP_RESPONSE_BYTES + 1)
+    except urllib.error.HTTPError as exc:
+        if 400 <= int(exc.code) < 500:
+            logger.warning("model discovery HTTP %s for %s", exc.code, url)
+        raise
     if len(raw) > _MAX_HTTP_RESPONSE_BYTES:
         raise ValueError(f"response exceeds {_MAX_HTTP_RESPONSE_BYTES} bytes")
     return json.loads(raw.decode("utf-8"))
@@ -44,12 +69,12 @@ def _http_get_json(url: str, headers: dict[str, str]) -> dict[str, Any]:
 def _resolve_codex_bin() -> str | None:
     for env_name in ("CODEX_CLI_PATH", "CODEX_BIN"):
         explicit = os.environ.get(env_name, "").strip()
-        if explicit and os.path.isfile(explicit) and os.access(explicit, os.X_OK):
+        if explicit and _is_allowed_codex_binary(explicit):
             return os.path.realpath(explicit)
     home_candidate = os.path.expanduser("~/.local/bin/codex")
     candidates = (*_CODEX_BIN_CANDIDATES, home_candidate)
     for candidate in candidates:
-        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+        if _is_allowed_codex_binary(candidate):
             return os.path.realpath(candidate)
     return None
 
@@ -63,7 +88,7 @@ def discover_openai_models() -> list[ModelRecord]:
             "https://api.openai.com/v1/models",
             {"Authorization": f"Bearer {api_key}"},
         )
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, ValueError):
         return []
     records: list[ModelRecord] = []
     for item in payload.get("data") or []:
@@ -100,7 +125,7 @@ def discover_anthropic_models() -> list[ModelRecord]:
                 "anthropic-version": "2023-06-01",
             },
         )
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, ValueError):
         return []
     records: list[ModelRecord] = []
     for item in payload.get("data") or []:
@@ -224,11 +249,9 @@ def update_absence_counts(
     deprecated: list[str] = []
     if previous is not None:
         absence_counts = dict(previous.absence_counts)
-        deprecated = list(previous.deprecated)
+        deprecated = [model_id for model_id in previous.deprecated if model_id not in discovered_ids]
     for model_id in discovered_ids:
         absence_counts.pop(model_id, None)
-        if model_id in deprecated:
-            deprecated.remove(model_id)
     if previous is not None:
         for model_id in previous.models:
             if model_id in discovered_ids:
@@ -243,12 +266,13 @@ def build_catalog(
     records: list[ModelRecord],
     *,
     previous: ModelCatalog | None = None,
+    catalog_source: str = "live",
 ) -> ModelCatalog:
     if not records:
         raise ValueError("build_catalog requires at least one discovered model record")
     discovered_ids = {record.model_id for record in records}
     tiers = assign_tiers(records)
-    sticky_days = previous.sticky_days if previous is not None else 30
+    sticky_days = previous.sticky_days if previous is not None else 37
     tiers = apply_sticky_assignments(tiers, previous, discovered_ids=discovered_ids, sticky_days=sticky_days)
     absence_counts, deprecated = update_absence_counts(
         previous,
@@ -256,12 +280,17 @@ def build_catalog(
         deprecation_misses=previous.deprecation_misses if previous else 2,
     )
     active_records = [record for record in records if record.model_id not in deprecated]
-    for tier_name, assignment in list(tiers.items()):
-        if assignment.model in deprecated and active_records:
-            try:
-                tiers[tier_name] = assign_tiers(active_records)[tier_name]
-            except ValueError:
-                continue
+    replacements: dict[str, Any] = {}
+    if active_records:
+        try:
+            replacement_tiers = assign_tiers(active_records)
+        except ValueError:
+            replacement_tiers = {}
+        for tier_name, assignment in tiers.items():
+            if assignment.model in deprecated and tier_name in replacement_tiers:
+                replacements[tier_name] = replacement_tiers[tier_name]
+    if replacements:
+        tiers.update(replacements)
     return ModelCatalog(
         version=CATALOG_VERSION,
         synced_at=datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
@@ -269,7 +298,7 @@ def build_catalog(
         stale_threshold_days=previous.stale_threshold_days if previous else 35,
         sticky_days=sticky_days,
         deprecation_misses=previous.deprecation_misses if previous else 2,
-        catalog_source="live",
+        catalog_source=catalog_source,
         tiers=tiers,
         models={record.model_id: record for record in records},
         deprecated=deprecated,
@@ -307,13 +336,19 @@ def sync_catalog(*, output_path: str | None = None, force: bool = False) -> Mode
             return previous
         records = bootstrap_records()
         catalog_source = "bootstrap"
-    catalog = build_catalog(records, previous=previous)
-    catalog.catalog_source = catalog_source
+    try:
+        catalog = build_catalog(records, previous=previous, catalog_source=catalog_source)
+    except ValueError:
+        logger.warning("build_catalog failed; preserving previous catalog if available")
+        if previous is not None:
+            return previous
+        catalog = build_catalog(bootstrap_records(), catalog_source="bootstrap")
     save_catalog_atomic(catalog, target)
     return catalog
 
 
 __all__ = [
+    "CatalogSyncError",
     "bootstrap_records",
     "build_catalog",
     "discover_all_records",

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from typing import Mapping
 
 from service.model_catalog import ModelCatalog, catalog_path, load_catalog
 from service.model_catalog_sync import sync_catalog
+
+logger = logging.getLogger(__name__)
 
 _TASK_TIERS: dict[str, str] = {
     "pipeline_dispatch": "fast",
@@ -83,6 +86,8 @@ def _load_or_sync_catalog() -> ModelCatalog:
                     refreshed = sync_catalog(output_path=str(path), force=True)
                     with _catalog_lock:
                         _catalog_cache = refreshed
+                except Exception as exc:
+                    logger.warning("background model catalog refresh failed: %s", exc)
                 finally:
                     with _catalog_lock:
                         _refresh_inflight = False

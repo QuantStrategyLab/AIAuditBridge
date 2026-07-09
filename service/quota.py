@@ -185,7 +185,7 @@ def recommend_model(budget_remaining: float, min_confidence: float = 0.0) -> str
     if budget_remaining < 0.01:
         return "gpt-5.4-mini"
     if budget_remaining < 0.05:
-        return "claude-sonnet-4-6"
+        return "gpt-5.4-mini"
     return "claude-sonnet-4-6"
 
 

@@ -14,7 +14,7 @@ from typing import Any, Mapping
 CATALOG_VERSION = 1
 DEFAULT_SYNC_INTERVAL_DAYS = 30
 DEFAULT_STALE_THRESHOLD_DAYS = 35
-DEFAULT_STICKY_DAYS = 30
+DEFAULT_STICKY_DAYS = 37
 DEFAULT_DEPRECATION_MISSES = 2
 
 TIER_NAMES = ("nano", "fast", "standard", "capable", "flagship")
@@ -220,12 +220,20 @@ def capability_score_for(model_id: str, *, created_at: int | None = None) -> flo
 
 
 def is_chat_candidate(model_id: str) -> bool:
-    lowered = model_id.lower()
+    lowered = model_id.lower().strip()
     if any(token in lowered for token in ("embed", "tts", "whisper", "dall-e", "moderation", "realtime", "transcribe")):
         return False
-    return bool(
-        re.search(r"(?:^|[/_-])(gpt-|claude-|claude|chatgpt|fable|o[1-4](?:-|$))", lowered)
+    allowed_prefixes = (
+        "gpt-",
+        "chatgpt-",
+        "claude",
+        "fable",
+        "o1",
+        "o2",
+        "o3",
+        "o4",
     )
+    return lowered.startswith(allowed_prefixes)
 
 
 def assign_tiers(records: list[ModelRecord]) -> dict[str, TierAssignment]:
