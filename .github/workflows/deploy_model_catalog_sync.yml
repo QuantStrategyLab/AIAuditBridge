@@ -1,0 +1,70 @@
+name: Deploy Model Catalog Sync
+
+# Fully automatic VPS install for monthly model-catalog sync.
+# Uses repo secrets OPENAI_API_KEY / ANTHROPIC_API_KEY — no manual SSH.
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Operation mode"
+        required: true
+        type: choice
+        default: deploy
+        options:
+          - deploy
+          - inspect
+          - sync-now
+  push:
+    branches: [main]
+    paths:
+      - "ops/codex-audit/**"
+      - "scripts/sync_model_catalog.py"
+      - "service/model_catalog.py"
+      - "service/model_catalog_sync.py"
+      - "service/model_resolver.py"
+      - "generated/model_catalog.json"
+      - ".github/workflows/deploy_model_catalog_sync.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-model-catalog-sync
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on:
+      - self-hosted
+      - codex-vps
+    timeout-minutes: 15
+    steps:
+      - name: Checkout Bridge
+        uses: actions/checkout@v6
+
+      - name: Deploy model catalog sync
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          AIAUDIT_BRIDGE_ROOT: /home/ubuntu/Projects/AIAuditBridge
+        run: |
+          set -euo pipefail
+          mode="${{ github.event_name == 'workflow_dispatch' && inputs.mode || 'deploy' }}"
+          # Keep the long-lived VPS checkout in sync with this workflow revision,
+          # then run the deploy script from that checkout.
+          mkdir -p "$AIAUDIT_BRIDGE_ROOT"
+          if [[ -d "${AIAUDIT_BRIDGE_ROOT}/.git" ]]; then
+            git -C "$AIAUDIT_BRIDGE_ROOT" fetch origin main --quiet
+            git -C "$AIAUDIT_BRIDGE_ROOT" checkout main --quiet
+            git -C "$AIAUDIT_BRIDGE_ROOT" pull --ff-only origin main --quiet
+          else
+            git clone --depth 1 https://github.com/QuantStrategyLab/AIAuditBridge.git "$AIAUDIT_BRIDGE_ROOT"
+          fi
+          # Prefer the just-checked-out workflow tree for the script itself so
+          # first-time deploys work before main has the new script.
+          script="${GITHUB_WORKSPACE}/ops/codex-audit/scripts/deploy_model_catalog_sync.sh"
+          if [[ ! -f "$script" ]]; then
+            script="${AIAUDIT_BRIDGE_ROOT}/ops/codex-audit/scripts/deploy_model_catalog_sync.sh"
+          fi
+          chmod +x "$script"
+          bash "$script" "$mode"

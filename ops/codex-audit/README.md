@@ -9,27 +9,20 @@ Fully automatic monthly model tier maintenance:
 - `service/model_resolver.py` resolves task → tier → concrete model at runtime
 - long-running workers reload when the on-disk catalog mtime changes
 
-Install timer on VPS:
+### Zero-touch VPS deploy
+
+Repo secrets `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` are written to
+`/etc/codex-audit-bridge/model-catalog.env` by the self-hosted workflow
+[Deploy Model Catalog Sync](../../.github/workflows/deploy_model_catalog_sync.yml).
+
+- **auto**: push to `main` that touches catalog paths triggers deploy
+- **manual**: Actions → Deploy Model Catalog Sync → `deploy` / `inspect` / `sync-now`
+
+Local equivalent (on the VPS runner host):
 
 ```bash
-sudo mkdir -p /etc/codex-audit-bridge
-sudo tee /etc/codex-audit-bridge/model-catalog.env >/dev/null <<'EOF'
-OPENAI_API_KEY=sk-...
-ANTHROPIC_API_KEY=sk-ant-...
-EOF
-sudo chmod 600 /etc/codex-audit-bridge/model-catalog.env
-sudo chown root:codex-audit /etc/codex-audit-bridge/model-catalog.env
-
-sudo cp ops/codex-audit/systemd/model-catalog-sync.service.example /etc/systemd/system/model-catalog-sync.service
-sudo cp ops/codex-audit/systemd/model-catalog-sync.timer.example /etc/systemd/system/model-catalog-sync.timer
-sudo systemctl daemon-reload
-# StateDirectory=codex-audit-bridge creates /var/lib/codex-audit-bridge owned by the service user.
-sudo systemctl enable --now model-catalog-sync.timer
+export OPENAI_API_KEY=... ANTHROPIC_API_KEY=...
+bash ops/codex-audit/scripts/deploy_model_catalog_sync.sh deploy
 ```
 
-Manual refresh:
-
-```bash
-set -a && source /etc/codex-audit-bridge/model-catalog.env && set +a
-python scripts/sync_model_catalog.py --force
-```
+Timer schedule: monthly on the 1st at 06:00 UTC (`model-catalog-sync.timer`).

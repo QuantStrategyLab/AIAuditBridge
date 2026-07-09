@@ -5,14 +5,16 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-WorkingDirectory=/opt/codex-audit-bridge
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/Projects/AIAuditBridge
 StateDirectory=codex-audit-bridge
 Environment=MODEL_CATALOG_PATH=/var/lib/codex-audit-bridge/model_catalog.json
-# Provide OPENAI_API_KEY / ANTHROPIC_API_KEY via this env file (mode 0600).
+Environment=PYTHONPATH=/home/ubuntu/Projects/AIAuditBridge
+# Provider keys are written by deploy_model_catalog_sync.sh from GitHub secrets.
 EnvironmentFile=-/etc/codex-audit-bridge/model-catalog.env
-ExecStart=/opt/codex-audit-bridge/.venv/bin/python scripts/sync_model_catalog.py --force
-User=codex-audit
-Group=codex-audit
+ExecStart=/usr/bin/python3 /home/ubuntu/Projects/AIAuditBridge/scripts/sync_model_catalog.py --force
+Nice=10
 
 [Install]
 WantedBy=multi-user.target
