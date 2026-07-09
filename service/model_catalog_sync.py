@@ -278,6 +278,16 @@ def _record_failed_sync_attempt(previous: ModelCatalog, target) -> ModelCatalog:
     return updated
 
 
+class CatalogSyncError(RuntimeError):
+    """Raised when live discovery cannot proceed as expected."""
+
+
+def _provider_keys_configured() -> bool:
+    return bool(_sanitize_api_key(os.environ.get("OPENAI_API_KEY", ""))) or bool(
+        _sanitize_api_key(os.environ.get("ANTHROPIC_API_KEY", ""))
+    )
+
+
 def sync_catalog(*, output_path: str | None = None, force: bool = False) -> ModelCatalog:
     from pathlib import Path
 
@@ -289,6 +299,13 @@ def sync_catalog(*, output_path: str | None = None, force: bool = False) -> Mode
         previous = load_catalog(target)
         if not force and previous.age_days() < float(previous.sync_interval_days):
             return previous
+    # Monthly VPS sync (--force with an existing catalog) must have provider keys.
+    # Cold bootstrap without keys remains allowed for local/CI seed generation.
+    if force and previous is not None and not _provider_keys_configured():
+        raise CatalogSyncError(
+            "OPENAI_API_KEY or ANTHROPIC_API_KEY required for live model catalog sync "
+            "(configure /etc/codex-audit-bridge/model-catalog.env)"
+        )
     records = discover_all_records()
     catalog_source = "live"
     if not records:
@@ -305,10 +322,6 @@ def sync_catalog(*, output_path: str | None = None, force: bool = False) -> Mode
         catalog = build_catalog(bootstrap_records(), catalog_source="bootstrap")
     save_catalog_atomic(catalog, target)
     return catalog
-
-
-class CatalogSyncError(RuntimeError):
-    """Raised when live discovery fails but a prior catalog exists."""
 
 
 __all__ = [

@@ -11,6 +11,7 @@ from service.model_catalog import (
     apply_sticky_assignments,
     assign_tiers,
     capability_score_for,
+    is_chat_candidate,
     load_catalog,
     save_catalog_atomic,
 )
@@ -34,6 +35,13 @@ class ModelCatalogScoringTests(unittest.TestCase):
 
     def test_flagship_scores_higher_than_mini(self) -> None:
         self.assertGreater(capability_score_for("gpt-5.5"), capability_score_for("gpt-5.4-mini"))
+
+    def test_chat_candidate_filters_non_text_models(self) -> None:
+        self.assertTrue(is_chat_candidate("gpt-5.4-mini"))
+        self.assertTrue(is_chat_candidate("claude-sonnet-4-6"))
+        self.assertFalse(is_chat_candidate("gpt-image-1"))
+        self.assertFalse(is_chat_candidate("gpt-4o-audio-preview"))
+        self.assertFalse(is_chat_candidate("gpt-4o-search-preview"))
 
     def test_assign_tiers_picks_distinct_roles(self) -> None:
         records = bootstrap_records()
@@ -70,10 +78,26 @@ class ModelCatalogSyncTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "model_catalog.json"
             save_catalog_atomic(previous, path)
-            with patch("service.model_catalog_sync.discover_all_records", return_value=[]):
+            with (
+                patch("service.model_catalog_sync.discover_all_records", return_value=[]),
+                patch("service.model_catalog_sync._provider_keys_configured", return_value=True),
+            ):
                 result = sync_catalog(output_path=str(path), force=True)
             self.assertEqual(result.synced_at, previous.synced_at)
             self.assertTrue(result.last_sync_attempt_at)
+
+    def test_force_sync_requires_provider_keys_when_catalog_exists(self) -> None:
+        from service.model_catalog_sync import CatalogSyncError
+
+        previous = build_catalog(bootstrap_records())
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "model_catalog.json"
+            save_catalog_atomic(previous, path)
+            with (
+                patch.dict(os.environ, {"OPENAI_API_KEY": "", "ANTHROPIC_API_KEY": ""}, clear=False),
+                self.assertRaises(CatalogSyncError),
+            ):
+                sync_catalog(output_path=str(path), force=True)
 
     def test_deprecated_model_stays_deprecated_when_still_absent(self) -> None:
         previous = build_catalog(bootstrap_records())
@@ -160,6 +184,27 @@ class ModelResolverTests(unittest.TestCase):
         route = resolve_model(task_type="dual_review", budget_remaining=0.0, quota_status="low")
         self.assertEqual(route["tier"], tier_for_budget(0.0))
         self.assertEqual(route["effort"], "low")
+
+    def test_resolver_reloads_when_catalog_mtime_changes(self) -> None:
+        from service.model_catalog import TierAssignment
+
+        catalog = load_catalog(Path(self._catalog_path))
+        first = resolve_model(task_type="dual_review")
+        self.assertEqual(first["model"], catalog.tiers["flagship"].model)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "model_catalog.json"
+            mutated = build_catalog(bootstrap_records())
+            mutated.tiers["flagship"] = TierAssignment(
+                tier="flagship",
+                model="gpt-5.4",
+                provider="openai",
+                effort="xhigh",
+            )
+            save_catalog_atomic(mutated, path)
+            os.environ["MODEL_CATALOG_PATH"] = str(path)
+            # Do not reset cache: mtime mismatch should trigger reload.
+            second = resolve_model(task_type="dual_review")
+            self.assertEqual(second["model"], "gpt-5.4")
 
 
 if __name__ == "__main__":

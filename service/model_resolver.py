@@ -46,7 +46,18 @@ _EFFORT_TIER_FALLBACK: dict[str, str] = {
 _catalog_lock = threading.Lock()
 _catalog_ready = threading.Condition(_catalog_lock)
 _catalog_cache: ModelCatalog | None = None
+_catalog_cache_mtime_ns: int | None = None
 _catalog_loading = False
+
+
+def _catalog_mtime_ns(path) -> int | None:
+    from pathlib import Path
+
+    target = Path(path)
+    try:
+        return target.stat().st_mtime_ns
+    except OSError:
+        return None
 
 
 def _load_catalog_from_disk(path) -> ModelCatalog:
@@ -67,20 +78,26 @@ def _load_catalog_from_disk(path) -> ModelCatalog:
 
 
 def _load_or_sync_catalog() -> ModelCatalog:
-    global _catalog_cache, _catalog_loading
+    global _catalog_cache, _catalog_cache_mtime_ns, _catalog_loading
+    path = catalog_path()
+    current_mtime = _catalog_mtime_ns(path)
     with _catalog_ready:
         while _catalog_loading:
             _catalog_ready.wait()
-        if _catalog_cache is not None:
+        if (
+            _catalog_cache is not None
+            and current_mtime is not None
+            and _catalog_cache_mtime_ns == current_mtime
+        ):
             return _catalog_cache
         _catalog_loading = True
 
     try:
-        path = catalog_path()
         try:
             catalog = _load_catalog_from_disk(path)
         except FileNotFoundError:
             catalog = sync_catalog(output_path=str(path), force=True)
+        mtime_ns = _catalog_mtime_ns(path)
     except Exception:
         with _catalog_ready:
             _catalog_loading = False
@@ -89,15 +106,17 @@ def _load_or_sync_catalog() -> ModelCatalog:
 
     with _catalog_ready:
         _catalog_cache = catalog
+        _catalog_cache_mtime_ns = mtime_ns
         _catalog_loading = False
         _catalog_ready.notify_all()
         return _catalog_cache
 
 
 def reset_catalog_cache() -> None:
-    global _catalog_cache, _catalog_loading
+    global _catalog_cache, _catalog_cache_mtime_ns, _catalog_loading
     with _catalog_ready:
         _catalog_cache = None
+        _catalog_cache_mtime_ns = None
         _catalog_loading = False
         _catalog_ready.notify_all()
 

@@ -224,19 +224,30 @@ def capability_score_for(model_id: str, *, created_at: int | None = None) -> flo
 
 def is_chat_candidate(model_id: str) -> bool:
     lowered = model_id.lower().strip()
-    if any(token in lowered for token in ("embed", "tts", "whisper", "dall-e", "moderation", "realtime", "transcribe")):
-        return False
-    allowed_prefixes = (
-        "gpt-",
-        "chatgpt-",
-        "claude",
-        "fable",
-        "o1",
-        "o2",
-        "o3",
-        "o4",
+    blocked_tokens = (
+        "embed",
+        "tts",
+        "whisper",
+        "dall-e",
+        "moderation",
+        "realtime",
+        "transcribe",
+        "image",
+        "audio",
+        "search",
+        "computer-use",
+        "codex-mini",
     )
-    return lowered.startswith(allowed_prefixes)
+    if any(token in lowered for token in blocked_tokens):
+        return False
+    allowed_patterns = (
+        re.compile(r"^gpt-[4-9](\.|-|o)"),
+        re.compile(r"^chatgpt-"),
+        re.compile(r"^claude-"),
+        re.compile(r"^fable-"),
+        re.compile(r"^o[1-4]($|-)"),
+    )
+    return any(pattern.search(lowered) for pattern in allowed_patterns)
 
 
 def assign_tiers(records: list[ModelRecord]) -> dict[str, TierAssignment]:
