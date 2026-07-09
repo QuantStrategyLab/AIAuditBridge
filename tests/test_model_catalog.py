@@ -171,6 +171,19 @@ class ModelCatalogSyncTests(unittest.TestCase):
         self.assertEqual(merged["flagship"].model, previous.tiers["flagship"].model)
         self.assertNotEqual(new_tiers["flagship"].model, previous.tiers["flagship"].model)
 
+    def test_sticky_keeps_assignment_when_model_temporarily_missing(self) -> None:
+        previous = build_catalog(bootstrap_records(), catalog_source="live")
+        old_flagship = previous.tiers["flagship"].model
+        remaining = [record for record in bootstrap_records() if record.model_id != old_flagship]
+        new_tiers = assign_tiers(remaining)
+        merged = apply_sticky_assignments(
+            new_tiers,
+            previous,
+            discovered_ids={record.model_id for record in remaining},
+            sticky_days=30,
+        )
+        self.assertEqual(merged["flagship"].model, old_flagship)
+
 
 class ModelResolverTests(unittest.TestCase):
     @classmethod

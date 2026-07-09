@@ -12,7 +12,7 @@ Fully automatic monthly model tier maintenance:
 Install timer on VPS:
 
 ```bash
-sudo mkdir -p /etc/codex-audit-bridge /var/lib/codex-audit-bridge
+sudo mkdir -p /etc/codex-audit-bridge
 sudo tee /etc/codex-audit-bridge/model-catalog.env >/dev/null <<'EOF'
 OPENAI_API_KEY=sk-...
 ANTHROPIC_API_KEY=sk-ant-...
@@ -23,6 +23,7 @@ sudo chown root:codex-audit /etc/codex-audit-bridge/model-catalog.env
 sudo cp ops/codex-audit/systemd/model-catalog-sync.service.example /etc/systemd/system/model-catalog-sync.service
 sudo cp ops/codex-audit/systemd/model-catalog-sync.timer.example /etc/systemd/system/model-catalog-sync.timer
 sudo systemctl daemon-reload
+# StateDirectory=codex-audit-bridge creates /var/lib/codex-audit-bridge owned by the service user.
 sudo systemctl enable --now model-catalog-sync.timer
 ```
 

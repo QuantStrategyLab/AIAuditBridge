@@ -381,7 +381,8 @@ def apply_sticky_assignments(
         if new_assignment is None or new_assignment.model == old_assignment.model:
             continue
         model_id = old_assignment.model
-        if model_id in discovered_ids and model_id not in previous.deprecated:
+        # Keep sticky until the model is actually deprecated (two consecutive misses).
+        if model_id not in previous.deprecated:
             merged[tier] = old_assignment
     return merged
 

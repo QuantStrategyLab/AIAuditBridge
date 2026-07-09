@@ -88,17 +88,29 @@ def discover_codex_models() -> list[ModelRecord]:
     return []
 
 
+class ProviderDiscoveryResult:
+    def __init__(self, provider: str, *, configured: bool, ok: bool, records: list[ModelRecord]) -> None:
+        self.provider = provider
+        self.configured = configured
+        self.ok = ok
+        self.records = records
+
+
 def discover_openai_models() -> list[ModelRecord]:
+    return discover_openai_provider().records
+
+
+def discover_openai_provider() -> ProviderDiscoveryResult:
     api_key = _sanitize_api_key(os.environ.get("OPENAI_API_KEY", ""))
     if not api_key:
-        return []
+        return ProviderDiscoveryResult("openai", configured=False, ok=True, records=[])
     try:
         payload = _http_get_json(
             "https://api.openai.com/v1/models",
             {"Authorization": f"Bearer {api_key}"},
         )
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, ValueError):
-        return []
+        return ProviderDiscoveryResult("openai", configured=True, ok=False, records=[])
     records: list[ModelRecord] = []
     for item in payload.get("data") or []:
         if not isinstance(item, dict):
@@ -119,13 +131,17 @@ def discover_openai_models() -> list[ModelRecord]:
                 available_on_subscription=is_likely_subscription_available(model_id),
             )
         )
-    return records
+    return ProviderDiscoveryResult("openai", configured=True, ok=True, records=records)
 
 
 def discover_anthropic_models() -> list[ModelRecord]:
+    return discover_anthropic_provider().records
+
+
+def discover_anthropic_provider() -> ProviderDiscoveryResult:
     api_key = _sanitize_api_key(os.environ.get("ANTHROPIC_API_KEY", ""))
     if not api_key:
-        return []
+        return ProviderDiscoveryResult("anthropic", configured=False, ok=True, records=[])
     try:
         payload = _http_get_json(
             "https://api.anthropic.com/v1/models",
@@ -135,7 +151,7 @@ def discover_anthropic_models() -> list[ModelRecord]:
             },
         )
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, ValueError):
-        return []
+        return ProviderDiscoveryResult("anthropic", configured=True, ok=False, records=[])
     records: list[ModelRecord] = []
     for item in payload.get("data") or []:
         if not isinstance(item, dict):
@@ -163,7 +179,7 @@ def discover_anthropic_models() -> list[ModelRecord]:
                 available_on_subscription=is_likely_subscription_available(model_id),
             )
         )
-    return records
+    return ProviderDiscoveryResult("anthropic", configured=True, ok=True, records=records)
 
 
 def merge_records(*groups: list[ModelRecord]) -> list[ModelRecord]:
@@ -280,11 +296,12 @@ def build_catalog(
     )
 
 
+def discover_all_providers() -> list[ProviderDiscoveryResult]:
+    return [discover_openai_provider(), discover_anthropic_provider()]
+
+
 def discover_all_records() -> list[ModelRecord]:
-    return merge_records(
-        discover_openai_models(),
-        discover_anthropic_models(),
-    )
+    return merge_records(*(result.records for result in discover_all_providers()))
 
 
 def _now_iso() -> str:
@@ -335,8 +352,16 @@ def sync_catalog(*, output_path: str | None = None, force: bool = False) -> Mode
             "OPENAI_API_KEY or ANTHROPIC_API_KEY required for live model catalog sync "
             "(configure /etc/codex-audit-bridge/model-catalog.env)"
         )
-    records = discover_all_records()
+    provider_results = discover_all_providers()
+    configured_failures = [item for item in provider_results if item.configured and not item.ok]
+    records = merge_records(*(item.records for item in provider_results))
     catalog_source = "live"
+    if configured_failures and previous is not None:
+        logger.warning(
+            "provider discovery failed for %s; preserving previous catalog",
+            ",".join(item.provider for item in configured_failures),
+        )
+        return _record_failed_sync_attempt(previous, target)
     if not records:
         if previous is not None:
             return _record_failed_sync_attempt(previous, target)

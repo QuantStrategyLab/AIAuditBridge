@@ -6,6 +6,7 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/codex-audit-bridge
+StateDirectory=codex-audit-bridge
 Environment=MODEL_CATALOG_PATH=/var/lib/codex-audit-bridge/model_catalog.json
 # Provide OPENAI_API_KEY / ANTHROPIC_API_KEY via this env file (mode 0600).
 EnvironmentFile=-/etc/codex-audit-bridge/model-catalog.env
