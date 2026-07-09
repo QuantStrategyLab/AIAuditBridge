@@ -37,16 +37,23 @@ _API_KEY_RE = re.compile(r"^[A-Za-z0-9_\-.]{10,256}$")
 
 
 def _sanitize_api_key(value: str) -> str:
-    if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+    raw = value or ""
+    if not raw.strip():
         return ""
-    cleaned = value.strip()
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in raw):
+        logger.warning("rejecting API key with control characters")
+        return ""
+    cleaned = raw.strip()
     if cleaned.lower().startswith("bearer "):
         cleaned = cleaned[7:].strip()
     if cleaned.startswith(("-", ".")):
+        logger.warning("rejecting API key with unsafe leading character")
         return ""
     if not cleaned.startswith("sk-"):
+        logger.warning("rejecting API key that does not start with sk-")
         return ""
     if not _API_KEY_RE.fullmatch(cleaned):
+        logger.warning("rejecting API key that failed format validation")
         return ""
     return cleaned
 
@@ -275,6 +282,16 @@ def build_catalog(
     active_records = [record for record in records if record.model_id not in deprecated]
     if not active_records:
         raise ValueError("all discovered models are deprecated; refusing empty active catalog")
+    # Keep sticky-held models in the models map even if they missed this discovery cycle.
+    models: dict[str, ModelRecord] = {record.model_id: record for record in active_records}
+    if previous is not None:
+        for assignment in tiers.values():
+            model_id = assignment.model
+            if model_id in models or model_id in deprecated:
+                continue
+            prior = previous.models.get(model_id)
+            if prior is not None:
+                models[model_id] = prior
     replacements: dict[str, Any] = {}
     try:
         replacement_tiers = assign_tiers(active_records)
@@ -294,7 +311,7 @@ def build_catalog(
         deprecation_misses=previous.deprecation_misses if previous else 2,
         catalog_source=catalog_source,
         tiers=tiers,
-        models={record.model_id: record for record in active_records},
+        models=models,
         deprecated=deprecated,
         absence_counts=absence_counts,
     )
@@ -369,12 +386,23 @@ def sync_catalog(*, output_path: str | None = None, force: bool = False) -> Mode
             ",".join(item.provider for item in configured_failures),
         )
         return _record_failed_sync_attempt(previous, target)
+    if configured_failures and previous is None and is_production_catalog_path(target):
+        raise CatalogSyncError(
+            f"provider discovery failed for {','.join(item.provider for item in configured_failures)}; "
+            f"refusing to bootstrap production catalog at {target}"
+        )
     if empty_configured and previous is not None:
         logger.warning(
             "configured provider returned empty inventory for %s; preserving previous catalog",
             ",".join(item.provider for item in empty_configured),
         )
         return _record_failed_sync_attempt(previous, target)
+    if empty_configured and previous is None and is_production_catalog_path(target):
+        raise CatalogSyncError(
+            f"configured provider returned empty inventory for "
+            f"{','.join(item.provider for item in empty_configured)}; "
+            f"refusing to bootstrap production catalog at {target}"
+        )
     if not records:
         if previous is not None:
             return _record_failed_sync_attempt(previous, target)

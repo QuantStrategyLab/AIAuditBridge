@@ -39,23 +39,23 @@ def validate_catalog_path(path: Path) -> Path:
     candidate = Path(raw)
     if candidate.name != _CATALOG_FILENAME:
         raise ValueError(f"model catalog path must be named {_CATALOG_FILENAME}: {candidate}")
-    if candidate.exists() and candidate.is_symlink():
-        raise ValueError(f"model catalog path must not be a symlink: {candidate}")
-    parent = candidate.parent
-    if parent.exists() and parent.is_symlink():
-        raise ValueError(f"model catalog parent must not be a symlink: {parent}")
 
-    # Production path: require the exact canonical string (no alternate symlink paths).
+    # Exact production path string (no alternate symlink spellings).
     if os.path.normpath(raw) == str(_VPS_CATALOG):
         return _VPS_CATALOG
 
+    # Resolve first, then allowlist the fully-resolved file path.
     resolved = candidate.resolve()
+    if resolved.name != _CATALOG_FILENAME:
+        raise ValueError(f"model catalog path must be named {_CATALOG_FILENAME}: {resolved}")
     allowed_files = {
         _DEFAULT_REPO_CATALOG.resolve(),
         *(parent / _CATALOG_FILENAME for parent in _EXTRA_ALLOWED_PARENTS),
     }
     if resolved not in allowed_files:
         raise ValueError(f"model catalog path outside allowed directories: {candidate}")
+    if resolved.exists() and resolved.is_symlink():
+        raise ValueError(f"model catalog path must not be a symlink: {resolved}")
     return resolved
 
 
@@ -64,8 +64,8 @@ def seed_catalog_path() -> Path:
 
 
 def is_production_catalog_path(path: Path) -> bool:
-    resolved = path.expanduser().resolve()
-    return resolved == _VPS_CATALOG.resolve() or resolved.parent == Path("/var/lib/codex-audit-bridge").resolve()
+    raw = os.path.normpath(os.path.expanduser(str(path)))
+    return raw == str(_VPS_CATALOG) or Path(raw).resolve() == _VPS_CATALOG.resolve()
 
 
 def catalog_path() -> Path:
@@ -196,10 +196,19 @@ class ModelCatalog:
     def model_for_tier(self, tier: str) -> str:
         deprecated = set(self.deprecated)
         assignment = self.tiers.get(tier) or self.tiers.get("standard")
-        if assignment and assignment.model and assignment.model not in deprecated:
+        if (
+            assignment
+            and assignment.model
+            and assignment.model not in deprecated
+            and assignment.model in self.models
+        ):
             return assignment.model
         for candidate in self.tiers.values():
-            if candidate.model and candidate.model not in deprecated:
+            if (
+                candidate.model
+                and candidate.model not in deprecated
+                and candidate.model in self.models
+            ):
                 return candidate.model
         for model_id in self.models:
             if model_id not in deprecated:
@@ -222,7 +231,19 @@ def save_catalog_atomic(catalog: ModelCatalog, path: Path | None = None) -> Path
     target.parent.mkdir(parents=True, exist_ok=True)
     # Single atomic replace; no sidecar .prev (avoids unvalidated backup writes).
     payload = json.dumps(catalog.to_dict(), indent=2, sort_keys=True) + "\n"
-    _write_atomic_text(target, payload)
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=target.parent, delete=False) as handle:
+        handle.write(payload)
+        temp_name = handle.name
+    try:
+        if target.exists() and target.is_symlink():
+            raise ValueError(f"refusing to overwrite symlink catalog path: {target}")
+        os.replace(temp_name, target)
+    except Exception:
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
+        raise
     return target
 
 
@@ -230,7 +251,14 @@ def _write_atomic_text(target: Path, content: str) -> None:
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=target.parent, delete=False) as handle:
         handle.write(content)
         temp_name = handle.name
-    os.replace(temp_name, target)
+    try:
+        os.replace(temp_name, target)
+    except Exception:
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
+        raise
 
 
 _NAME_HINT_SCORES: tuple[tuple[re.Pattern[str], float], ...] = (
@@ -384,8 +412,10 @@ def apply_sticky_assignments(
         if new_assignment is None or new_assignment.model == old_assignment.model:
             continue
         model_id = old_assignment.model
-        # Keep sticky until the model is actually deprecated (two consecutive misses).
-        if model_id not in previous.deprecated:
+        # Keep sticky through temporary absence until the model is deprecated.
+        if model_id not in previous.deprecated and (
+            model_id in discovered_ids or model_id in previous.models
+        ):
             merged[tier] = old_assignment
     return merged
 

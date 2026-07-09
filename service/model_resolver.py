@@ -79,6 +79,7 @@ def _load_or_sync_catalog() -> ModelCatalog:
                 pass
         _catalog_loading = True
         load_path = path
+        stale_cache = cached
 
     try:
         try:
@@ -96,6 +97,14 @@ def _load_or_sync_catalog() -> ModelCatalog:
                     mtime_ns = load_path.stat().st_mtime_ns
                 except OSError:
                     mtime_ns = None
+        except (OSError, json.JSONDecodeError, ValueError, TypeError, KeyError, UnicodeDecodeError) as exc:
+            if stale_cache is not None:
+                logger.warning("catalog reload failed (%s); serving stale cache", exc)
+                with _catalog_ready:
+                    _catalog_loading = False
+                    _catalog_ready.notify_all()
+                return stale_cache
+            raise
     except Exception:
         with _catalog_ready:
             _catalog_loading = False
