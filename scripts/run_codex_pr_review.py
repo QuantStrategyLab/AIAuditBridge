@@ -182,12 +182,18 @@ def ack_labels_from_policy(policy: dict[str, Any]) -> frozenset[str]:
     return frozenset(str(item).strip() for item in raw if str(item).strip())
 
 
-def pr_has_ack_label(pr: dict[str, Any], policy: dict[str, Any]) -> tuple[bool, str]:
+def pr_has_ack_label(
+    pr_or_labels: dict[str, Any] | list[Any],
+    policy: dict[str, Any],
+) -> tuple[bool, str]:
     """Return (matched, label_name) when the PR carries a configured ack label."""
     wanted = ack_labels_from_policy(policy)
     if not wanted:
         return False, ""
-    labels = pr.get("labels") or []
+    if isinstance(pr_or_labels, dict):
+        labels = pr_or_labels.get("labels") or []
+    else:
+        labels = pr_or_labels
     if not isinstance(labels, list):
         return False, ""
     for item in labels:
@@ -307,6 +313,18 @@ def fetch_pr_files(token: str, repo: str, pr_number: int) -> list[dict[str, Any]
             break
         page += 1
     return files
+
+
+def fetch_pr_labels(token: str, repo: str, pr_number: int) -> list[dict[str, Any]]:
+    """Fetch current PR labels from the API (not the possibly-stale event payload)."""
+    payload = github_request(
+        token,
+        "GET",
+        f"/repos/{repo}/issues/{pr_number}/labels?per_page=100",
+    )
+    if not isinstance(payload, list):
+        return []
+    return [item for item in payload if isinstance(item, dict)]
 
 
 # ---------------------------------------------------------------------------
@@ -1034,7 +1052,14 @@ def main() -> int:
     if policy.get("policy_errors"):
         print(f"::warning::Policy errors: {policy['policy_errors']}")
 
-    ack_matched, ack_label = pr_has_ack_label(pr, policy)
+    # Prefer live labels from the API: pull_request_target event payloads can be
+    # stale after a label is added without a new push.
+    try:
+        live_labels = fetch_pr_labels(token, repo, pr_number)
+    except ReviewError as exc:
+        print(f"::warning::Failed to fetch live PR labels: {exc}")
+        live_labels = pr.get("labels") or []
+    ack_matched, ack_label = pr_has_ack_label(live_labels, policy)
     if ack_matched:
         print(f"PR has ack label `{ack_label}`; review findings will not fail the check.")
 

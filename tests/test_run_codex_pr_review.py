@@ -336,6 +336,10 @@ class RunCodexPrReviewTests(unittest.TestCase):
                     return_value="diff --git a/scripts/run_codex_pr_review.py b/scripts/run_codex_pr_review.py",
                 ),
                 patch(
+                    "scripts.run_codex_pr_review.fetch_pr_labels",
+                    return_value=[{"name": "review-ack"}],
+                ),
+                patch(
                     "scripts.run_codex_pr_review.run_codex_review_with_fallback",
                     return_value=review_json,
                 ),
