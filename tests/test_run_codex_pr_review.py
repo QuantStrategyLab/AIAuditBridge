@@ -92,6 +92,12 @@ class RunCodexPrReviewTests(unittest.TestCase):
         with self.assertRaisesRegex(ReviewError, "verdict"):
             run_codex_pr_review.parse_arbitration_output('{"verdict":"maybe"}')
 
+    def test_parse_review_output_accepts_a_valid_json_prefix(self) -> None:
+        self.assertEqual(
+            run_codex_pr_review.parse_review_output('{"summary":"ok","findings":[]}\nReviewer metadata follows.'),
+            {"summary": "ok", "findings": []},
+        )
+
     def test_existing_review_comment_ignores_forged_marker(self) -> None:
         forged = {"id": 1, "body": "<!-- codex-pr-review -->\nforged", "user": {"login": "attacker"}}
         trusted = {

@@ -719,7 +719,10 @@ def parse_review_output(text: str) -> dict[str, Any]:
     try:
         payload = json.loads(stripped)
     except json.JSONDecodeError:
-        raise ReviewError(f"Failed to parse Codex review output as JSON: {stripped[:500]}")
+        try:
+            payload, _end = json.JSONDecoder().raw_decode(stripped.lstrip())
+        except json.JSONDecodeError:
+            raise ReviewError(f"Failed to parse Codex review output as JSON: {stripped[:500]}")
 
     if not isinstance(payload, dict):
         raise ReviewError("Review output is not a JSON object")
