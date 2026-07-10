@@ -1163,6 +1163,7 @@ def _submit_job(claims: dict[str, Any], payload: dict[str, Any]) -> dict[str, ob
         "expires_at": now + ttl_seconds,
         "repository": str(claims.get("repository") or ""),
         "run_id": str(claims.get("run_id") or ""),
+        "run_attempt": str(claims.get("run_attempt") or ""),
         "actor": str(claims.get("actor") or ""),
         "source_repository": str(payload.get("source_repository") or ""),
         "source_ref": str(payload.get("source_ref") or ""),
