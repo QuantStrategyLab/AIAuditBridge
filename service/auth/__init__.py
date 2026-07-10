@@ -172,6 +172,20 @@ def verify_github_oidc(
     _require_allowed_claim(payload, "CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES", "repository", "repository")
     _require_allowed_claim(payload, "CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS", "workflow_ref", "workflow_ref")
     _require_allowed_claim(payload, "CODEX_AUDIT_SERVICE_ALLOWED_REFS", "ref", "ref")
+    if payload.get("job_workflow_ref"):
+        _require_allowed_claim(
+            payload,
+            "CODEX_AUDIT_SERVICE_ALLOWED_JOB_WORKFLOW_REFS",
+            "job_workflow_ref",
+            "job workflow ref",
+        )
+    else:
+        _require_allowed_claim(
+            payload,
+            "CODEX_AUDIT_SERVICE_ALLOWED_DIRECT_REPOSITORIES",
+            "repository",
+            "direct repository",
+        )
     _require_optional_allowed_claim(
         payload, "CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORY_VISIBILITIES", "repository_visibility", "repository visibility"
     )

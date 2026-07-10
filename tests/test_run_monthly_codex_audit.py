@@ -286,6 +286,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
                 "QuantStrategyLab/AIAuditBridge/.github/workflows/codex_audit.yml@refs/heads/main"
             ),
             "CODEX_AUDIT_SERVICE_ALLOWED_REFS": "refs/heads/main",
+            "CODEX_AUDIT_SERVICE_ALLOWED_DIRECT_REPOSITORIES": "QuantStrategyLab/AIAuditBridge",
             "CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORY_VISIBILITIES": "public",
         }
         with (
@@ -314,6 +315,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         env = {
             "CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES": "QuantStrategyLab/AIAuditBridge",
             "CODEX_AUDIT_SERVICE_ALLOWED_REFS": "refs/heads/main",
+            "CODEX_AUDIT_SERVICE_ALLOWED_DIRECT_REPOSITORIES": "QuantStrategyLab/AIAuditBridge",
         }
         with (
             patch.dict(os.environ, env, clear=True),
@@ -345,6 +347,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
                 "QuantStrategyLab/QuantRuntimeSettings/.github/workflows/codex_pr_review.yml@refs/heads/main"
             ),
             "CODEX_AUDIT_SERVICE_ALLOWED_REFS": "refs/heads/main,refs/pull/*/merge",
+            "CODEX_AUDIT_SERVICE_ALLOWED_DIRECT_REPOSITORIES": "QuantStrategyLab/AIAuditBridge",
             "CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORY_VISIBILITIES": "public",
         }
         with (
@@ -2387,6 +2390,8 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertIn("CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES", workflow)
         self.assertIn("CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS", workflow)
         self.assertIn("CODEX_AUDIT_SERVICE_ALLOWED_REFS", workflow)
+        self.assertIn("CODEX_AUDIT_SERVICE_ALLOWED_JOB_WORKFLOW_REFS", workflow)
+        self.assertIn("CODEX_AUDIT_SERVICE_ALLOWED_DIRECT_REPOSITORIES", workflow)
         self.assertIn("CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES", workflow)
         self.assertIn("CODEX_AUDIT_SERVICE_CODEX_ACCOUNT_USAGE", workflow)
         self.assertIn("CODEX_AUDIT_SERVICE_OPENAI_USAGE_WINDOW_DAYS", workflow)
@@ -2425,6 +2430,8 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertIn("nginx config test failed; restoring previous config", deploy_script)
         self.assertIn("zzzz-managed-allowlists.conf", deploy_script)
         self.assertIn('Environment="CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES=${ALLOWED_REPOSITORIES}"', deploy_script)
+        self.assertIn('Environment="CODEX_AUDIT_SERVICE_ALLOWED_JOB_WORKFLOW_REFS=${ALLOWED_JOB_WORKFLOW_REFS}"', deploy_script)
+        self.assertIn('Environment="CODEX_AUDIT_SERVICE_ALLOWED_DIRECT_REPOSITORIES=${ALLOWED_DIRECT_REPOSITORIES}"', deploy_script)
         self.assertIn("systemctl_environment_brief", deploy_script)
         self.assertIn('sed -E "s/^[\\"', deploy_script)
         self.assertIn('s/[\\"\']$//"', deploy_script)
