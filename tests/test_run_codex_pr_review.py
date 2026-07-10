@@ -3,6 +3,8 @@ from __future__ import annotations
 import base64
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -33,6 +35,22 @@ class RunCodexPrReviewTests(unittest.TestCase):
         prompt = run_codex_pr_review.build_review_prompt("diff", "title", "", "org/repo")
         self.assertIn("`job_workflow_ref` is absent for explicit direct callers", prompt)
         self.assertIn("Do not emit a finding that concludes no code change is needed", prompt)
+
+    def test_review_script_never_imports_from_the_pr_checkout(self) -> None:
+        source = Path(run_codex_pr_review.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("SOURCE_ROOT = BRIDGE_ROOT.parent / \"source\"", source)
+
+    def test_isolated_review_runtime_imports_from_the_trusted_bridge(self) -> None:
+        result = subprocess.run(
+            [sys.executable, "-I", str(Path(run_codex_pr_review.__file__))],
+            env={"GITHUB_EVENT_PATH": "does-not-exist"},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("GH_TOKEN or GITHUB_TOKEN is required", result.stderr)
+        self.assertNotIn("ModuleNotFoundError", result.stderr)
 
     def test_repeated_findings_are_fingerprinted_before_arbitration(self) -> None:
         findings = [
@@ -744,6 +762,7 @@ class CodexPrReviewWorkflowTest(unittest.TestCase):
         self.assertIn("must be true or false", workflow)
         self.assertIn("tr '[:upper:]' '[:lower:]'", workflow)
         self.assertIn('if ! api_fallback_enabled="$(resolve_boolean', workflow)
+        self.assertIn('python -I "${script_path}"', workflow)
         self.assertIn("inputs.caller_concurrency_key || github.event.pull_request.number || github.run_id", workflow)
         self.assertNotIn("Validate bridge checkout token", workflow)
         self.assertIn("required: false", workflow)
