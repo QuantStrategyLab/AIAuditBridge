@@ -583,7 +583,9 @@ def _service_review_should_fallback(exc: ReviewError) -> bool:
 
 
 def _review_backend_is_unconfigured(exc: ReviewError) -> bool:
-    return str(exc).strip() == NO_REVIEW_BACKEND_CONFIGURED
+    message = str(exc).strip()
+    normalized = message.lower()
+    return message == NO_REVIEW_BACKEND_CONFIGURED or "oidc repository is not allowed" in normalized
 
 
 def _allow_unconfigured_backend() -> bool:

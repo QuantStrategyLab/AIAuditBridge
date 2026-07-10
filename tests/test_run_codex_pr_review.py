@@ -576,6 +576,10 @@ class RunCodexPrReviewTests(unittest.TestCase):
 
         direct_api.assert_not_called()
 
+    def test_oidc_repo_not_allowed_counts_as_unconfigured_backend(self) -> None:
+        exc = ReviewError('Codex service request failed: 401 {"status":"error","error":"OIDC repository is not allowed"}')
+        self.assertTrue(run_codex_pr_review._review_backend_is_unconfigured(exc))
+
     def test_service_exec_failure_falls_back_to_direct_api(self) -> None:
         with (
             patch.dict(os.environ, {"CODEX_AUDIT_SERVICE_URL": "https://service.example"}, clear=True),
