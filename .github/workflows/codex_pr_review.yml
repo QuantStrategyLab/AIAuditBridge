@@ -144,7 +144,7 @@ jobs:
           fi
           CODEX_PR_REVIEW_API_FALLBACK_ENABLED="${api_fallback_enabled}" \
           CODEX_PR_REVIEW_DIRECT_API_PRIMARY_ENABLED="${direct_api_primary_enabled}" \
-            python "${script_path}"
+            python -I "${script_path}"
 
       - name: Upload review diagnostics
         if: always()
