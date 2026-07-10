@@ -29,6 +29,11 @@ class RunCodexPrReviewTests(unittest.TestCase):
         self.assertTrue(run_codex_pr_review.changed_files_are_low_risk(["docs/guide.md", "tests/test_x.py"], policy))
         self.assertFalse(run_codex_pr_review.changed_files_are_low_risk(["src/app.py"], policy))
 
+    def test_repository_policy_disables_auto_convergence(self) -> None:
+        policy = run_codex_pr_review.load_policy()
+        self.assertEqual(run_codex_pr_review.auto_converge_after_from_policy(policy), 0)
+        self.assertTrue(run_codex_pr_review.block_on_review_failure_from_policy(policy))
+
     def test_load_policy_uses_trusted_base_ref(self) -> None:
         trusted_policy = {
             "version": 1,
@@ -652,18 +657,20 @@ class CodexPrReviewWorkflowTest(unittest.TestCase):
         self.assertIn("allow_unconfigured_backend", workflow)
         self.assertIn("api_fallback_enabled", workflow)
         self.assertIn("direct_api_primary_enabled", workflow)
-        self.assertIn("Empty defers to repository variables", workflow)
+        self.assertIn("Allow direct API fallback", workflow)
+        self.assertIn("Allow API-only PR review", workflow)
         self.assertIn("default: false", workflow)
-        self.assertIn('default: ""', workflow)
+        self.assertIn("type: boolean", workflow)
         self.assertIn("CODEX_PR_REVIEW_ALLOW_UNCONFIGURED_BACKEND", workflow)
         self.assertIn("CODEX_PR_REVIEW_API_FALLBACK_ENABLED", workflow)
         self.assertIn("CODEX_PR_REVIEW_DIRECT_API_PRIMARY_ENABLED", workflow)
         self.assertIn("CODEX_PR_REVIEW_REUSABLE_CALL", workflow)
         self.assertIn("CODEX_PR_REVIEW_API_FALLBACK_INPUT", workflow)
         self.assertIn("CODEX_PR_REVIEW_DIRECT_API_PRIMARY_INPUT", workflow)
-        self.assertIn("resolve_boolean()", workflow)
+        self.assertIn("resolve_boolean", workflow)
         self.assertIn("must be true or false", workflow)
         self.assertIn("tr '[:upper:]' '[:lower:]'", workflow)
+        self.assertIn('if ! api_fallback_enabled="$(resolve_boolean', workflow)
         self.assertIn("inputs.caller_concurrency_key || github.event.pull_request.number || github.run_id", workflow)
         self.assertNotIn("Validate bridge checkout token", workflow)
         self.assertIn("required: false", workflow)

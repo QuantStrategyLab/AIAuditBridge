@@ -33,7 +33,7 @@
     "ack_labels": [
       "review-ack"
     ],
-    "auto_converge_after": 3,
+    "auto_converge_after": 0,
     "skip_paths": [
       "docs/**",
       "**.md",
