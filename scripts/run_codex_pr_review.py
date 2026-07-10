@@ -28,6 +28,8 @@ from typing import Any
 API_BASE = "https://api.github.com"
 BRIDGE_ROOT = Path(__file__).resolve().parents[1]
 ROOT = Path(os.environ.get("CODEX_PR_REVIEW_REPO_ROOT") or os.environ.get("GITHUB_WORKSPACE") or Path.cwd()).resolve()
+if str(BRIDGE_ROOT) not in sys.path:
+    sys.path.insert(0, str(BRIDGE_ROOT))
 SOURCE_ROOT = BRIDGE_ROOT.parent / "source"
 if SOURCE_ROOT.exists() and str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
