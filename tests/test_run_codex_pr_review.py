@@ -328,15 +328,19 @@ class RunCodexPrReviewTests(unittest.TestCase):
                 patch("scripts.run_codex_pr_review.fetch_pr_diff", return_value="diff --git a/src/app.py b/src/app.py"),
                 patch("scripts.run_codex_pr_review.load_policy", return_value=run_codex_pr_review._default_policy()),
                 patch("scripts.run_codex_pr_review.find_existing_review_comment", return_value=(None, "")),
-                patch("scripts.run_codex_pr_review.run_codex_review_with_fallback", side_effect=ReviewError("Codex service job timed out")),
+                patch(
+                    "scripts.run_codex_pr_review.run_codex_review_with_fallback",
+                    side_effect=ReviewError("Codex service job timed out"),
+                ) as backend,
                 patch("scripts.run_codex_pr_review.upsert_pr_comment") as comment,
             ):
                 self.assertEqual(run_codex_pr_review.main(), 1)
 
         comment.assert_called_once()
+        backend.assert_called_once()
         self.assertIn("Merge blocked", comment.call_args.args[3])
 
-    def test_main_allows_low_risk_docs_on_review_infra_error(self) -> None:
+    def test_main_skips_low_risk_docs_before_calling_review_backend(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             event_path = self._write_event(tmpdir, ["docs/guide.md", "tests/test_x.py"])
             policy = run_codex_pr_review._default_policy()
@@ -351,12 +355,16 @@ class RunCodexPrReviewTests(unittest.TestCase):
                 patch("scripts.run_codex_pr_review.fetch_pr_files", return_value=[{"filename": "docs/guide.md"}, {"filename": "tests/test_x.py"}]),
                 patch("scripts.run_codex_pr_review.load_policy", return_value=policy),
                 patch("scripts.run_codex_pr_review.find_existing_review_comment", return_value=(None, "")),
-                patch("scripts.run_codex_pr_review.run_codex_review_with_fallback", side_effect=ReviewError("Codex service job timed out")),
+                patch(
+                    "scripts.run_codex_pr_review.run_codex_review_with_fallback",
+                    side_effect=ReviewError("Codex service job timed out"),
+                ) as backend,
                 patch("scripts.run_codex_pr_review.upsert_pr_comment") as comment,
             ):
                 self.assertEqual(run_codex_pr_review.main(), 0)
 
         comment.assert_called_once()
+        backend.assert_not_called()
 
 
     def test_main_blocks_unconfigured_backend_even_with_legacy_opt_in(self) -> None:

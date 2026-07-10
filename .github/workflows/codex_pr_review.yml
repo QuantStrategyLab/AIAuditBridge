@@ -119,8 +119,10 @@ jobs:
           resolve_boolean() {
             local name="$1" requested="$2" fallback="$3" value
             if [ "${CODEX_PR_REVIEW_REUSABLE_CALL}" = "true" ]; then
+              # Only consumers reach this branch; their explicit/default input is authoritative.
               value="${requested}"
             else
+              # AIAuditBridge self-review has no workflow_call inputs; retain its local policy.
               value="${fallback}"
             fi
             value="$(printf '%s' "${value}" | tr '[:upper:]' '[:lower:]')"
