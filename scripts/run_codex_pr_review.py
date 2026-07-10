@@ -752,6 +752,7 @@ def blocking_finding_fingerprint(findings: list[dict[str, Any]]) -> str:
             {
                 "category": str(finding.get("category") or "").strip().lower(),
                 "file": str(finding.get("file") or "").strip(),
+                "severity": str(finding.get("severity") or "").strip().lower(),
             }
         )
     if not normalized:

@@ -43,11 +43,13 @@ class RunCodexPrReviewTests(unittest.TestCase):
         reordered = [dict(findings[0], line=42)]
         reworded = [dict(findings[0], description="The retry path incorrectly returns success.")]
         other = [dict(findings[0], file="service/auth.py")]
+        reclassified = [dict(findings[0], severity="critical")]
 
         fingerprint = run_codex_pr_review.blocking_finding_fingerprint(findings)
         self.assertEqual(fingerprint, run_codex_pr_review.blocking_finding_fingerprint(reordered))
         self.assertEqual(fingerprint, run_codex_pr_review.blocking_finding_fingerprint(reworded))
         self.assertNotEqual(fingerprint, run_codex_pr_review.blocking_finding_fingerprint(other))
+        self.assertNotEqual(fingerprint, run_codex_pr_review.blocking_finding_fingerprint(reclassified))
         self.assertEqual(
             run_codex_pr_review.next_blocking_streak(
                 1,
@@ -696,7 +698,7 @@ class CodexPrReviewWorkflowTest(unittest.TestCase):
         self.assertIn("Allow API-only PR review", workflow)
         self.assertIn("default: false", workflow)
         self.assertIn("type: boolean", workflow)
-        self.assertIn("CODEX_PR_REVIEW_ALLOW_UNCONFIGURED_BACKEND", workflow)
+        self.assertNotIn("CODEX_PR_REVIEW_ALLOW_UNCONFIGURED_BACKEND", workflow)
         self.assertIn("CODEX_PR_REVIEW_API_FALLBACK_ENABLED", workflow)
         self.assertIn("CODEX_PR_REVIEW_DIRECT_API_PRIMARY_ENABLED", workflow)
         self.assertIn("CODEX_PR_REVIEW_REUSABLE_CALL", workflow)
