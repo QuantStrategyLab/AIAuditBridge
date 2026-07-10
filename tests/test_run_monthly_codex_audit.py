@@ -52,6 +52,7 @@ from scripts.run_monthly_codex_audit import (
     pr_closing_line,
     remove_issue_label_if_present,
     request_github_oidc_token,
+    request_codex_service,
     request_guarded_auto_merge,
     request_human_review,
     RemediationWorkspace,
@@ -542,6 +543,34 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         )
         with self.assertRaises(BridgeError):
             codex_service_job_url(service_url, "short")
+
+    def test_request_codex_service_includes_router_model(self) -> None:
+        responses = [
+            {"status": "queued", "job_id": "job-1abcdefghijklmno123456"},
+            {"status": "succeeded", "output": "done"},
+        ]
+        with (
+            patch.dict(
+                os.environ,
+                {"CODEX_AUDIT_SERVICE_URL": "https://service.example", "CODEX_AUDIT_SERVICE_AUDIENCE": "aud"},
+                clear=True,
+            ),
+            patch("scripts.run_monthly_codex_audit.request_github_oidc_token", return_value="oidc-token"),
+            patch("scripts.run_monthly_codex_audit.request_codex_service_json", side_effect=responses) as request,
+            patch("scripts.run_monthly_codex_audit.route_model", return_value={"model": "gpt-5.6-sol"}),
+            patch("scripts.run_monthly_codex_audit.time.sleep"),
+        ):
+            output = request_codex_service(
+                source_repo="QuantStrategyLab/CryptoLivePoolPipelines",
+                source_ref="main",
+                task="monthly_snapshot_audit",
+                mode="review_only",
+                prompt="prompt",
+                timeout_minutes=1,
+            )
+
+        self.assertEqual(output, "done")
+        self.assertEqual(request.call_args_list[0].kwargs["payload"]["model"], "gpt-5.6-sol")
 
     def test_service_failure_classification_identifies_infra_failures(self) -> None:
         self.assertEqual(classify_service_failure("OIDC token is expired"), "auth_or_config_failure")

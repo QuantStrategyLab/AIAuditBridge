@@ -40,6 +40,16 @@ class ModelRouterTests(unittest.TestCase):
         self.assertEqual(route["tier"], "flagship")
         self.assertEqual(route["effort"], "xhigh")
 
+    def test_pr_review_uses_flagship_tier(self) -> None:
+        route = route_model("pr_review")
+        self.assertEqual(route["tier"], "flagship")
+        self.assertEqual(route["effort"], "xhigh")
+
+    def test_monthly_snapshot_audit_uses_flagship_tier(self) -> None:
+        route = route_model("monthly_snapshot_audit")
+        self.assertEqual(route["tier"], "flagship")
+        self.assertEqual(route["effort"], "xhigh")
+
     def test_low_quota_overrides_to_recommend_model(self) -> None:
         with patch("service.model_resolver.tier_for_budget", return_value="nano"):
             route = route_model("dual_review", budget_remaining=0.0, quota_status="low")

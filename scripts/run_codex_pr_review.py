@@ -21,6 +21,8 @@ from pathlib import Path
 from string import Template
 from typing import Any
 
+from service.model_router import route_model
+
 # ---------------------------------------------------------------------------
 # Configuration (aligned with CodexAuditBridge)
 # ---------------------------------------------------------------------------
@@ -514,6 +516,7 @@ def run_codex_service_review(prompt: str, timeout_minutes: int, complexity: str 
         "task": "pr_review",
         "mode": "review_only",
         "prompt": prompt,
+        "model": route_model("pr_review").get("model", ""),
         "complexity": _normalize_complexity(complexity) or "auto",
         "changed_files": int(changed_file_count),
         "changed_lines": int(changed_line_count),
