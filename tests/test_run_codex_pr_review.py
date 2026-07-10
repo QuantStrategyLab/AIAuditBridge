@@ -659,11 +659,11 @@ class CodexPrReviewWorkflowTest(unittest.TestCase):
         self.assertIn("CODEX_PR_REVIEW_API_FALLBACK_ENABLED", workflow)
         self.assertIn("CODEX_PR_REVIEW_DIRECT_API_PRIMARY_ENABLED", workflow)
         self.assertIn(
-            "github.event_name == 'workflow_call' && inputs.api_fallback_enabled != '' && inputs.api_fallback_enabled || vars.CODEX_PR_REVIEW_API_FALLBACK_ENABLED || 'true'",
+            "github.event_name == 'workflow_call' && inputs.api_fallback_enabled == 'false' && 'false' || github.event_name == 'workflow_call' && inputs.api_fallback_enabled == 'true' && 'true' || vars.CODEX_PR_REVIEW_API_FALLBACK_ENABLED || 'true'",
             workflow,
         )
         self.assertIn(
-            "github.event_name == 'workflow_call' && inputs.direct_api_primary_enabled != '' && inputs.direct_api_primary_enabled || vars.CODEX_PR_REVIEW_DIRECT_API_PRIMARY_ENABLED || 'true'",
+            "github.event_name == 'workflow_call' && inputs.direct_api_primary_enabled == 'false' && 'false' || github.event_name == 'workflow_call' && inputs.direct_api_primary_enabled == 'true' && 'true' || vars.CODEX_PR_REVIEW_DIRECT_API_PRIMARY_ENABLED || 'true'",
             workflow,
         )
         self.assertIn("inputs.caller_concurrency_key || github.event.pull_request.number || github.run_id", workflow)
