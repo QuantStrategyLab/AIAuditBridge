@@ -208,8 +208,12 @@ class CodexAdapter(AiAdapter):
             env=self._build_env(),
         )
         if completed.returncode != 0:
+            full_output = f"{completed.stdout}\n{completed.stderr}".lower()
+            failure_category = _classify_codex_exec_failure(full_output)
             detail = (completed.stdout[-4000:] + completed.stderr[-4000:]).strip()
-            raise RuntimeError("codex exec failed" + (f":\n{detail}" if detail else ""))
+            raise RuntimeError(
+                f"codex exec failed [{failure_category}]" + (f":\n{detail}" if detail else "")
+            )
 
         if output_path.exists() and output_path.read_text(encoding="utf-8").strip():
             return output_path.read_text(encoding="utf-8")
