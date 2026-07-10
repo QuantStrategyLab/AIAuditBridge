@@ -3,6 +3,8 @@ from __future__ import annotations
 import base64
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -37,6 +39,18 @@ class RunCodexPrReviewTests(unittest.TestCase):
     def test_review_script_never_imports_from_the_pr_checkout(self) -> None:
         source = Path(run_codex_pr_review.__file__).read_text(encoding="utf-8")
         self.assertNotIn("SOURCE_ROOT = BRIDGE_ROOT.parent / \"source\"", source)
+
+    def test_isolated_review_runtime_imports_from_the_trusted_bridge(self) -> None:
+        result = subprocess.run(
+            [sys.executable, "-I", str(Path(run_codex_pr_review.__file__))],
+            env={"GITHUB_EVENT_PATH": "does-not-exist"},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("GH_TOKEN or GITHUB_TOKEN is required", result.stderr)
+        self.assertNotIn("ModuleNotFoundError", result.stderr)
 
     def test_repeated_findings_are_fingerprinted_before_arbitration(self) -> None:
         findings = [
