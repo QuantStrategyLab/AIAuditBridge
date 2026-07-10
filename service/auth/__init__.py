@@ -173,6 +173,8 @@ def verify_github_oidc(
     _require_allowed_claim(payload, "CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS", "workflow_ref", "workflow_ref")
     _require_allowed_claim(payload, "CODEX_AUDIT_SERVICE_ALLOWED_REFS", "ref", "ref")
     job_workflow_ref = str(payload.get("job_workflow_ref") or "")
+    if "job_workflow_ref" in payload and not job_workflow_ref:
+        raise PermissionError("OIDC job workflow ref cannot be empty")
     if job_workflow_ref:
         _require_allowed_claim(
             payload,

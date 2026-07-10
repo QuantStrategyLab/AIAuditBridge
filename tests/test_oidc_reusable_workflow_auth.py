@@ -61,3 +61,7 @@ class ReusableWorkflowOidcAuthTests(unittest.TestCase):
             "CODEX_AUDIT_SERVICE_ALLOWED_JOB_WORKFLOW_REFS": "QuantStrategyLab/AIAuditBridge/.github/workflows/codex_pr_review.yml@refs/heads/main",
         }
         self.assertEqual(self._verify(payload, env)["repository"], "QuantStrategyLab/AIAuditBridge")
+
+        payload["job_workflow_ref"] = ""
+        with self.assertRaisesRegex(PermissionError, "cannot be empty"):
+            self._verify(payload, env)
