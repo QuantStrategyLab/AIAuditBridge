@@ -328,6 +328,38 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         ):
             codex_audit_service._verify_github_oidc("header.payload.signature")
 
+    def test_codex_audit_service_oidc_rejects_pilot_pr_workflow_ref(self) -> None:
+        payload = {
+            "aud": "quant-codex-audit",
+            "iss": codex_audit_service.GITHUB_OIDC_ISSUER,
+            "exp": int(time.time()) + 300,
+            "repository": "QuantStrategyLab/QuantRuntimeSettings",
+            "workflow_ref": "QuantStrategyLab/QuantRuntimeSettings/.github/workflows/codex_pr_review.yml@refs/pull/48/merge",
+            "ref": "refs/pull/48/merge",
+            "repository_visibility": "public",
+        }
+        env = {
+            "CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES": "QuantStrategyLab/AIAuditBridge,QuantStrategyLab/QuantRuntimeSettings",
+            "CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS": (
+                "QuantStrategyLab/AIAuditBridge/.github/workflows/codex_pr_review.yml@refs/heads/main,"
+                "QuantStrategyLab/QuantRuntimeSettings/.github/workflows/codex_pr_review.yml@refs/heads/main"
+            ),
+            "CODEX_AUDIT_SERVICE_ALLOWED_REFS": "refs/heads/main,refs/pull/*/merge",
+            "CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORY_VISIBILITIES": "public",
+        }
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch.object(
+                codex_audit_service,
+                "_jwt_parts",
+                return_value=({"alg": "RS256", "kid": "1"}, payload, b"x", b"y"),
+            ),
+            patch.object(codex_audit_service, "_load_jwks", return_value={"keys": [{"kid": "1", "kty": "RSA"}]}),
+            patch.object(codex_audit_service, "_verify_rs256", return_value=None),
+            self.assertRaisesRegex(PermissionError, "workflow_ref .* not allowed"),
+        ):
+            codex_audit_service._verify_github_oidc("header.payload.signature")
+
     def test_strip_audit_heading_removes_only_leading_heading(self) -> None:
         for heading in ("## Crypto Codex Audit", "## Codex Audit"):
             body = f"{heading}\n\n### Verdict\n\nOK"

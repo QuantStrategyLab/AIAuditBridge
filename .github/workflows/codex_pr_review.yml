@@ -19,12 +19,12 @@ on:
         type: boolean
         default: false
       api_fallback_enabled:
-        description: "Optional true/false override for direct API fallback after a recoverable Codex service failure. Empty defers to repository variables."
+        description: "Optional true/false override for direct API fallback after a recoverable Codex service failure. Empty defers to repository variables; other values fail the review."
         required: false
         type: string
         default: ""
       direct_api_primary_enabled:
-        description: "Optional true/false override for API-only PR review when CODEX_AUDIT_SERVICE_URL is not configured. Empty defers to repository variables."
+        description: "Optional true/false override for API-only PR review when CODEX_AUDIT_SERVICE_URL is not configured. Empty defers to repository variables; other values fail the review."
         required: false
         type: string
         default: ""
@@ -102,8 +102,11 @@ jobs:
           CODEX_AUDIT_SERVICE_AUDIENCE: ${{ vars.CODEX_AUDIT_SERVICE_AUDIENCE || 'quant-codex-audit' }}
           CODEX_PR_REVIEW_REPO_ROOT: ${{ github.workspace }}/source
           CODEX_PR_REVIEW_ALLOW_UNCONFIGURED_BACKEND: ${{ inputs.allow_unconfigured_backend || 'false' }}
-          CODEX_PR_REVIEW_API_FALLBACK_ENABLED: ${{ github.event_name == 'workflow_call' && inputs.api_fallback_enabled == 'false' && 'false' || github.event_name == 'workflow_call' && inputs.api_fallback_enabled == 'true' && 'true' || vars.CODEX_PR_REVIEW_API_FALLBACK_ENABLED || 'true' }}
-          CODEX_PR_REVIEW_DIRECT_API_PRIMARY_ENABLED: ${{ github.event_name == 'workflow_call' && inputs.direct_api_primary_enabled == 'false' && 'false' || github.event_name == 'workflow_call' && inputs.direct_api_primary_enabled == 'true' && 'true' || vars.CODEX_PR_REVIEW_DIRECT_API_PRIMARY_ENABLED || 'true' }}
+          CODEX_PR_REVIEW_REUSABLE_CALL: ${{ github.event_name == 'workflow_call' }}
+          CODEX_PR_REVIEW_API_FALLBACK_INPUT: ${{ inputs.api_fallback_enabled }}
+          CODEX_PR_REVIEW_DIRECT_API_PRIMARY_INPUT: ${{ inputs.direct_api_primary_enabled }}
+          CODEX_PR_REVIEW_API_FALLBACK_DEFAULT: ${{ vars.CODEX_PR_REVIEW_API_FALLBACK_ENABLED || 'true' }}
+          CODEX_PR_REVIEW_DIRECT_API_PRIMARY_DEFAULT: ${{ vars.CODEX_PR_REVIEW_DIRECT_API_PRIMARY_ENABLED || 'true' }}
         working-directory: source
         run: |
           set -euo pipefail
@@ -114,7 +117,23 @@ jobs:
             echo "::error::Trusted Codex review script not found. Ensure the bridge checkout can read QuantStrategyLab/AIAuditBridge." >&2
             exit 1
           fi
-          python "${script_path}"
+          resolve_boolean() {
+            local name="$1" requested="$2" fallback="$3" value
+            if [ "${CODEX_PR_REVIEW_REUSABLE_CALL}" = "true" ] && [ -n "${requested}" ]; then
+              value="${requested}"
+            else
+              value="${fallback}"
+            fi
+            case "${value,,}" in
+              true|false) printf '%s' "${value,,}" ;;
+              *) echo "::error::${name} must be true or false" >&2; return 1 ;;
+            esac
+          }
+          api_fallback_enabled="$(resolve_boolean CODEX_PR_REVIEW_API_FALLBACK_ENABLED "${CODEX_PR_REVIEW_API_FALLBACK_INPUT}" "${CODEX_PR_REVIEW_API_FALLBACK_DEFAULT}")"
+          direct_api_primary_enabled="$(resolve_boolean CODEX_PR_REVIEW_DIRECT_API_PRIMARY_ENABLED "${CODEX_PR_REVIEW_DIRECT_API_PRIMARY_INPUT}" "${CODEX_PR_REVIEW_DIRECT_API_PRIMARY_DEFAULT}")"
+          CODEX_PR_REVIEW_API_FALLBACK_ENABLED="${api_fallback_enabled}" \
+          CODEX_PR_REVIEW_DIRECT_API_PRIMARY_ENABLED="${direct_api_primary_enabled}" \
+            python "${script_path}"
 
       - name: Upload review diagnostics
         if: always()

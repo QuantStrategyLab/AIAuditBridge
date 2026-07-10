@@ -658,14 +658,11 @@ class CodexPrReviewWorkflowTest(unittest.TestCase):
         self.assertIn("CODEX_PR_REVIEW_ALLOW_UNCONFIGURED_BACKEND", workflow)
         self.assertIn("CODEX_PR_REVIEW_API_FALLBACK_ENABLED", workflow)
         self.assertIn("CODEX_PR_REVIEW_DIRECT_API_PRIMARY_ENABLED", workflow)
-        self.assertIn(
-            "github.event_name == 'workflow_call' && inputs.api_fallback_enabled == 'false' && 'false' || github.event_name == 'workflow_call' && inputs.api_fallback_enabled == 'true' && 'true' || vars.CODEX_PR_REVIEW_API_FALLBACK_ENABLED || 'true'",
-            workflow,
-        )
-        self.assertIn(
-            "github.event_name == 'workflow_call' && inputs.direct_api_primary_enabled == 'false' && 'false' || github.event_name == 'workflow_call' && inputs.direct_api_primary_enabled == 'true' && 'true' || vars.CODEX_PR_REVIEW_DIRECT_API_PRIMARY_ENABLED || 'true'",
-            workflow,
-        )
+        self.assertIn("CODEX_PR_REVIEW_REUSABLE_CALL", workflow)
+        self.assertIn("CODEX_PR_REVIEW_API_FALLBACK_INPUT", workflow)
+        self.assertIn("CODEX_PR_REVIEW_DIRECT_API_PRIMARY_INPUT", workflow)
+        self.assertIn("resolve_boolean()", workflow)
+        self.assertIn("must be true or false", workflow)
         self.assertIn("inputs.caller_concurrency_key || github.event.pull_request.number || github.run_id", workflow)
         self.assertNotIn("Validate bridge checkout token", workflow)
         self.assertIn("required: false", workflow)
