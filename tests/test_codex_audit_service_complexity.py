@@ -117,6 +117,12 @@ class TestComplexityModelRouting(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unsupported task='analyze'"):
             _service.resolve_adapter("analyze", "")
 
+    def test_codex_usage_limit_is_classified_as_capacity_failure(self) -> None:
+        self.assertEqual(
+            _service._classify_codex_exec_failure("You have reached your Codex usage limits for code reviews."),
+            "quota_or_capacity_failure",
+        )
+
     def test_direct_api_model_for_complexity_reads_provider_specific_env(self) -> None:
         with mock.patch.dict(
             "os.environ",
