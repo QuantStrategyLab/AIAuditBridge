@@ -698,7 +698,7 @@ def _run_openai_review(prompt: str, api_key: str, model: str = "") -> str:
 # ---------------------------------------------------------------------------
 
 
-def parse_review_output(text: str) -> dict[str, Any]:
+def parse_review_output(text: str, *, require_findings: bool = True) -> dict[str, Any]:
     """Extract the JSON review result from Codex/API output."""
     stripped = text.strip()
 
@@ -726,13 +726,15 @@ def parse_review_output(text: str) -> dict[str, Any]:
 
     if not isinstance(payload, dict):
         raise ReviewError("Review output is not a JSON object")
+    if require_findings and not isinstance(payload.get("findings"), list):
+        raise ReviewError("Review output findings must be a JSON array")
 
     return payload
 
 
 def parse_arbitration_output(text: str) -> dict[str, str]:
     """Parse the independent arbiter's constrained verdict."""
-    payload = parse_review_output(text)
+    payload = parse_review_output(text, require_findings=False)
     verdict = str(payload.get("verdict") or "").strip().lower()
     if verdict not in {"clear", "block", "ambiguous"}:
         raise ReviewError("Arbitration output verdict must be clear, block, or ambiguous")
