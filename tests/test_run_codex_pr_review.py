@@ -100,6 +100,12 @@ class RunCodexPrReviewTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ReviewError, "verdict"):
             run_codex_pr_review.parse_arbitration_output('{"verdict":"maybe"}')
+        self.assertEqual(
+            run_codex_pr_review.parse_arbitration_output(
+                "The pattern is `{7,64}`.\n```json\n{\"verdict\":\"clear\",\"reason\":\"fixed\"}\n```"
+            ),
+            {"verdict": "clear", "reason": "fixed"},
+        )
 
     def test_parse_review_output_accepts_a_valid_json_prefix(self) -> None:
         self.assertEqual(

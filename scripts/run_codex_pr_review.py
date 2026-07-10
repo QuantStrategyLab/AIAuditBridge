@@ -702,7 +702,12 @@ def _run_openai_review(prompt: str, api_key: str, model: str = "") -> str:
 # ---------------------------------------------------------------------------
 
 
-def parse_review_output(text: str, *, require_findings: bool = True) -> dict[str, Any]:
+def parse_review_output(
+    text: str,
+    *,
+    require_findings: bool = True,
+    required_keys: tuple[str, ...] = (),
+) -> dict[str, Any]:
     """Extract the JSON review result from Codex/API output."""
     stripped = text.strip()
 
@@ -713,32 +718,40 @@ def parse_review_output(text: str, *, require_findings: bool = True) -> dict[str
     if fence_match:
         stripped = fence_match.group(1).strip()
 
-    # Try to find JSON object boundaries
-    if not stripped.startswith("{"):
-        start = stripped.find("{")
-        end = stripped.rfind("}")
-        if start >= 0 and end > start:
-            stripped = stripped[start : end + 1]
-
+    candidates: list[dict[str, Any]] = []
     try:
         payload = json.loads(stripped)
+        if isinstance(payload, dict):
+            candidates.append(payload)
     except json.JSONDecodeError:
-        try:
-            payload, _end = json.JSONDecoder().raw_decode(stripped.lstrip())
-        except json.JSONDecodeError:
-            raise ReviewError(f"Failed to parse Codex review output as JSON: {stripped[:500]}")
+        decoder = json.JSONDecoder()
+        for index, char in enumerate(stripped):
+            if char != "{":
+                continue
+            try:
+                payload, _end = decoder.raw_decode(stripped[index:])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict):
+                candidates.append(payload)
 
-    if not isinstance(payload, dict):
-        raise ReviewError("Review output is not a JSON object")
-    if require_findings and not isinstance(payload.get("findings"), list):
-        raise ReviewError("Review output findings must be a JSON array")
+    for payload in candidates:
+        if require_findings and not isinstance(payload.get("findings"), list):
+            continue
+        if any(key not in payload for key in required_keys):
+            continue
+        return payload
 
-    return payload
+    if require_findings:
+        raise ReviewError(f"Failed to parse Codex review output with a findings array: {stripped[:500]}")
+    if required_keys:
+        raise ReviewError(f"Failed to parse Codex review output with required keys: {stripped[:500]}")
+    raise ReviewError(f"Failed to parse Codex review output as JSON: {stripped[:500]}")
 
 
 def parse_arbitration_output(text: str) -> dict[str, str]:
     """Parse the independent arbiter's constrained verdict."""
-    payload = parse_review_output(text, require_findings=False)
+    payload = parse_review_output(text, require_findings=False, required_keys=("verdict", "reason"))
     verdict = str(payload.get("verdict") or "").strip().lower()
     if verdict not in {"clear", "block", "ambiguous"}:
         raise ReviewError("Arbitration output verdict must be clear, block, or ambiguous")
