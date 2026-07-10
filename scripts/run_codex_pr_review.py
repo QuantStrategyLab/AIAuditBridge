@@ -31,7 +31,6 @@ BRIDGE_ROOT = Path(__file__).resolve().parents[1]
 ROOT = Path(os.environ.get("CODEX_PR_REVIEW_REPO_ROOT") or os.environ.get("GITHUB_WORKSPACE") or Path.cwd()).resolve()
 if str(BRIDGE_ROOT) not in sys.path:
     sys.path.insert(0, str(BRIDGE_ROOT))
-from service.model_router import route_model  # noqa: E402
 
 POLICY_PATH = ROOT / ".github" / "codex_auto_merge_policy.json"
 PROMPT_TEMPLATE_PATH = BRIDGE_ROOT / "prompts" / "pr_review.md"
@@ -458,7 +457,9 @@ def run_codex_service_review(prompt: str, timeout_minutes: int, complexity: str 
         "task": "pr_review",
         "mode": "review_only",
         "prompt": prompt,
-        "model": route_model("pr_review").get("model", ""),
+        # The VPS owns the Codex CLI model configuration.  Its configured
+        # model is validated at deployment time; forwarding an API catalog
+        # model here can select one unavailable to the CLI account.
         "complexity": _normalize_complexity(complexity) or "auto",
         "changed_files": int(changed_file_count),
         "changed_lines": int(changed_line_count),
