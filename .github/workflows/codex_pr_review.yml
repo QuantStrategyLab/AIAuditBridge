@@ -19,15 +19,15 @@ on:
         type: boolean
         default: false
       api_fallback_enabled:
-        description: "Allow direct API fallback after a recoverable Codex service failure. Reusable callers default to false and do not inherit repository variables."
+        description: "Optional true/false override for direct API fallback. Reusable callers default to false and do not inherit repository variables."
         required: false
-        type: boolean
-        default: false
+        type: string
+        default: "false"
       direct_api_primary_enabled:
-        description: "Allow API-only PR review when CODEX_AUDIT_SERVICE_URL is not configured. Reusable callers default to false and do not inherit repository variables."
+        description: "Optional true/false override for API-only PR review. Reusable callers default to false and do not inherit repository variables."
         required: false
-        type: boolean
-        default: false
+        type: string
+        default: "false"
     secrets:
       CODEX_AUDIT_REUSABLE_WORKFLOW_TOKEN:
         description: "Token that can read QuantStrategyLab/AIAuditBridge when this workflow is called from another private repo."
@@ -101,9 +101,9 @@ jobs:
           CODEX_AUDIT_SERVICE_URL: ${{ secrets.CODEX_AUDIT_SERVICE_URL }}
           CODEX_AUDIT_SERVICE_AUDIENCE: ${{ vars.CODEX_AUDIT_SERVICE_AUDIENCE || 'quant-codex-audit' }}
           CODEX_PR_REVIEW_REPO_ROOT: ${{ github.workspace }}/source
-          CODEX_PR_REVIEW_REUSABLE_CALL: ${{ github.event_name == 'workflow_call' }}
-          CODEX_PR_REVIEW_API_FALLBACK_INPUT: ${{ inputs.api_fallback_enabled == true && 'true' || 'false' }}
-          CODEX_PR_REVIEW_DIRECT_API_PRIMARY_INPUT: ${{ inputs.direct_api_primary_enabled == true && 'true' || 'false' }}
+          CODEX_PR_REVIEW_REUSABLE_CALL: ${{ github.repository != 'QuantStrategyLab/AIAuditBridge' && 'true' || 'false' }}
+          CODEX_PR_REVIEW_API_FALLBACK_INPUT: ${{ inputs.api_fallback_enabled }}
+          CODEX_PR_REVIEW_DIRECT_API_PRIMARY_INPUT: ${{ inputs.direct_api_primary_enabled }}
           CODEX_PR_REVIEW_API_FALLBACK_DEFAULT: ${{ vars.CODEX_PR_REVIEW_API_FALLBACK_ENABLED || 'true' }}
           CODEX_PR_REVIEW_DIRECT_API_PRIMARY_DEFAULT: ${{ vars.CODEX_PR_REVIEW_DIRECT_API_PRIMARY_ENABLED || 'true' }}
         working-directory: source
