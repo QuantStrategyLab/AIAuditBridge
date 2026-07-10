@@ -2398,7 +2398,10 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertIn("CODEX_AUDIT_SERVICE_ANTHROPIC_USAGE_WINDOW_DAYS", workflow)
         self.assertIn("OPENAI_ADMIN_KEY: ${{ secrets.OPENAI_ADMIN_KEY }}", workflow)
         self.assertIn("ANTHROPIC_ADMIN_KEY: ${{ secrets.ANTHROPIC_ADMIN_KEY }}", workflow)
-        self.assertIn("QuantStrategyLab/AIAuditBridge,QuantStrategyLab/CryptoLivePoolPipelines", workflow)
+        self.assertIn("QuantStrategyLab/AIAuditBridge", workflow)
+        self.assertIn("QuantStrategyLab/QuantRuntimeSettings", workflow)
+        self.assertIn("QuantStrategyLab/QuantPlatformKit", workflow)
+        self.assertIn("QuantStrategyLab/CryptoLivePoolPipelines", workflow)
         self.assertNotIn("QuantStrategyLab/CodexAuditBridge", workflow)
         self.assertIn("actions/checkout@v6.0.3", workflow)
 

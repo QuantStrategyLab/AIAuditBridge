@@ -38,9 +38,26 @@ class ReusableWorkflowOidcAuthTests(unittest.TestCase):
             "CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORY_VISIBILITIES": "public",
         }
 
-        with self.assertRaisesRegex(PermissionError, "direct repository is not allowed"):
+        with self.assertRaisesRegex(PermissionError, "job workflow ref is required"):
             self._verify(payload, env)
 
         payload["job_workflow_ref"] = "QuantStrategyLab/AIAuditBridge/.github/workflows/codex_pr_review.yml@refs/heads/main"
         self.assertEqual(self._verify(payload, env)["repository"], "QuantStrategyLab/QuantRuntimeSettings")
 
+    def test_direct_audit_bridge_caller_does_not_require_reusable_workflow(self) -> None:
+        payload: dict[str, object] = {
+            "aud": "quant-codex-audit",
+            "iss": auth.GITHUB_OIDC_ISSUER,
+            "exp": int(time.time()) + 300,
+            "repository": "QuantStrategyLab/AIAuditBridge",
+            "workflow_ref": "QuantStrategyLab/AIAuditBridge/.github/workflows/codex_pr_review.yml@refs/heads/main",
+            "ref": "refs/heads/main",
+        }
+        env = {
+            "CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES": "QuantStrategyLab/AIAuditBridge",
+            "CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS": "QuantStrategyLab/AIAuditBridge/.github/workflows/codex_pr_review.yml@refs/heads/main",
+            "CODEX_AUDIT_SERVICE_ALLOWED_REFS": "refs/heads/main",
+            "CODEX_AUDIT_SERVICE_ALLOWED_DIRECT_REPOSITORIES": "QuantStrategyLab/AIAuditBridge",
+            "CODEX_AUDIT_SERVICE_ALLOWED_JOB_WORKFLOW_REFS": "QuantStrategyLab/AIAuditBridge/.github/workflows/codex_pr_review.yml@refs/heads/main",
+        }
+        self.assertEqual(self._verify(payload, env)["repository"], "QuantStrategyLab/AIAuditBridge")

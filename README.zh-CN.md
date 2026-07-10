@@ -37,12 +37,7 @@ AIAuditBridge 是 QuantStrategyLab 组织内的 AI 审计调用边界。各 sour
 
 Codex 执行现在只走 service backend：workflow 从 GitHub-hosted runner 调用 QuantStrategyLab 自有的 HTTPS/443 Codex audit service。service 只返回 review 文本或结构化 patch 建议；clone、路径校验、patch apply、commit、push、PR 和 issue comment 仍由 AIAuditBridge 负责。
 
-PR review 死循环收敛：
-
-- **自动（默认）**：同一 PR 连续 `pr_review.auto_converge_after` 轮（默认 3）仍为 blocking 时，`review` check 自动放行，仍会发 findings 评论。设为 `0` 可关闭。
-- **可选人工**：也可打 `review-ack`（`pr_review.ack_labels`）立即放行。
-
-复用 `AIAuditBridge` 的 `codex_pr_review.yml@main` 的仓库会自动继承该行为。
+PR review 采用 fail-closed：blocking finding 不可通过 label 或重试次数绕过。只有同一归一化 finding 在作者提交新 PR head 后仍然存在时，独立 Codex 仲裁才会返回 `clear`、`block` 或 `ambiguous`；只有 `clear` 放行，`block`、`ambiguous` 和仲裁失败都保持 `review` check 失败。复用 `AIAuditBridge` 的 `codex_pr_review.yml@main` 的仓库会自动继承该行为。
 
 当 `CODEX_AUDIT_AUTO_MERGE=true` 时，bridge 会先检查变更文件面和总增删行数，只在低风险或中风险且未超过 policy 上限时给生成的 PR 添加 `auto-merge-ok` label，请求源仓库的受控自动合并。bridge 会在打标前按需创建配置的 label；如果源仓 token 没有创建 label 的权限，需要先手动创建该 label。若 source checkout 里存在 `.github/codex_auto_merge_policy.json`，bridge 会在 Codex 执行修改前读取基线策略，否则才使用内置默认值。高风险、未知文件面、策略文件变更、文件移除/重命名/复制或无效 policy 配置不会添加 `auto-merge-ok`，而是给 PR 添加配置的人工复核 label（默认 `human-review-required`），并在源 issue 评论中列出风险原因和文件，等待人工复核。bridge 不会直接调用 GitHub native auto-merge。最终是否合并仍由源仓库自己的 CI 和 merge-guard workflow 决定。
 

@@ -14,7 +14,7 @@ on:
         required: false
         type: string
       allow_unconfigured_backend:
-        description: "Allow the review job to pass with a human-review note when no AI backend is configured in the caller repository."
+        description: "Deprecated compatibility input. The review check always fails closed when no backend is available."
         required: false
         type: boolean
         default: false
