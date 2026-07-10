@@ -1359,3 +1359,13 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
                 finally:
                     server.shutdown()
                     server.server_close()
+
+
+def test_job_dedupe_key_is_scoped_to_repository_and_workflow_run() -> None:
+    from service.ai_gateway_service import _job_dedupe_key
+
+    payload = {"source_repository": "QuantStrategyLab/QuantPlatformKit", "source_ref": "main", "task": "pr_review", "prompt": "same"}
+    same = _job_dedupe_key(payload, repository="QuantStrategyLab/QuantPlatformKit", run_id="100")
+    assert same == _job_dedupe_key(payload, repository="QuantStrategyLab/QuantPlatformKit", run_id="100")
+    assert same != _job_dedupe_key(payload, repository="QuantStrategyLab/QuantPlatformKit", run_id="101")
+    assert same != _job_dedupe_key(payload, repository="QuantStrategyLab/Other", run_id="100")

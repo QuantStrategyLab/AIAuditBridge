@@ -988,10 +988,12 @@ def _trusted_automation_proof_for_review(payload: dict[str, Any], claims: dict[s
     return {}
 
 
-def _job_dedupe_key(payload: dict[str, Any]) -> str:
+def _job_dedupe_key(payload: dict[str, Any], *, repository: str, run_id: str) -> str:
     issue_number = str(payload.get("issue_number") or "").strip()
     prompt_hash = hashlib.sha256(str(payload.get("prompt") or "").encode("utf-8")).hexdigest()
     parts = [
+        repository,
+        run_id,
         str(payload.get("source_repository") or ""),
         str(payload.get("source_ref") or ""),
         str(payload.get("task") or TASK_EXECUTE),
@@ -1132,7 +1134,11 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
 
 def _submit_job(claims: dict[str, Any], payload: dict[str, Any]) -> dict[str, object]:
     _cleanup_expired_jobs()
-    dedupe_key = _job_dedupe_key(payload)
+    dedupe_key = _job_dedupe_key(
+        payload,
+        repository=str(claims.get("repository") or ""),
+        run_id=str(claims.get("run_id") or ""),
+    )
     existing_job = _find_active_job_by_dedupe_key(dedupe_key)
     if existing_job is not None and existing_job.get("status") in ACTIVE_JOB_STATUSES:
         public = _public_job_payload(existing_job)
