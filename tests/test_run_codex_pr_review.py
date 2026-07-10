@@ -29,6 +29,11 @@ class RunCodexPrReviewTests(unittest.TestCase):
         self.assertTrue(run_codex_pr_review.changed_files_are_low_risk(["docs/guide.md", "tests/test_x.py"], policy))
         self.assertFalse(run_codex_pr_review.changed_files_are_low_risk(["src/app.py"], policy))
 
+    def test_review_prompt_states_direct_oidc_contract(self) -> None:
+        prompt = run_codex_pr_review.build_review_prompt("diff", "title", "", "org/repo")
+        self.assertIn("`job_workflow_ref` is absent for explicit direct callers", prompt)
+        self.assertIn("Do not emit a finding that concludes no code change is needed", prompt)
+
     def test_repeated_findings_are_fingerprinted_before_arbitration(self) -> None:
         findings = [
             {

@@ -315,7 +315,8 @@ ${BODY}
 
 1. Focus on **security vulnerabilities, logic errors, data corruption, crash bugs, race conditions, and API compatibility breaks**.
 2. Do NOT flag: code style, formatting, naming suggestions, minor refactoring preferences, or documentation issues.
-3. For each finding, classify its severity:
+3. Do not emit a finding that concludes no code change is needed. For OIDC, `job_workflow_ref` is absent for explicit direct callers; flag a bypass only when a non-direct repository can reach the direct-caller path despite the allowlists.
+4. For each finding, classify its severity:
    - **critical**: security vulnerability, data loss, production crash
    - **high**: logic error that produces wrong results, API break, memory/connection leak
    - **medium**: missing error handling, performance degradation, race condition
