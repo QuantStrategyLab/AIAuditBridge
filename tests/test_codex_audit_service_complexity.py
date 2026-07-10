@@ -123,6 +123,20 @@ class TestComplexityModelRouting(unittest.TestCase):
             "quota_or_capacity_failure",
         )
 
+    def test_codex_adapter_preserves_quota_category_when_tail_is_truncated(self) -> None:
+        completed = mock.Mock(returncode=1, stdout="usage limits reached\n" + "x" * 5000, stderr="")
+        with (
+            mock.patch.object(_service.shutil, "which", return_value="/usr/bin/codex"),
+            mock.patch.object(_service.subprocess, "run", return_value=completed),
+        ):
+            with self.assertRaisesRegex(RuntimeError, r"codex exec failed \[quota_or_capacity_failure\]"):
+                _service.CodexAdapter().run(
+                    prompt="review",
+                    model="gpt-test",
+                    timeout_seconds=1,
+                    repo_dir=Path(__file__).resolve().parents[1],
+                )
+
     def test_direct_api_model_for_complexity_reads_provider_specific_env(self) -> None:
         with mock.patch.dict(
             "os.environ",
