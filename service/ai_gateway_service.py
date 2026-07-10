@@ -98,7 +98,7 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - optional in CI
     def try_record_platform_execution(*_args, **_kwargs):
         return None
-from service.model_router import route_model
+from service.model_router import default_dual_review_model_for_reviewer
 
 # ── constants ───────────────────────────────────────────────────────────
 
@@ -1087,7 +1087,7 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
             job["status"] == "succeeded",
             str(job.get("failure_category") or job.get("error") or ""),
         )
-        try_record_platform_execution(
+        _record_platform_execution_telemetry(
             str(job.get("strategy_profile") or job.get("task") or job.get("source_repository") or job.get("repository") or ""),
             {
                 "job_id": job_id,
@@ -1115,7 +1115,7 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
         _write_job(job)
         _record_job_automation_run(job)
         get_health_monitor().record("/v1/ai/execute/jobs/run", time.time() - started, False, type(exc).__name__)
-        try_record_platform_execution(
+        _record_platform_execution_telemetry(
             str(job.get("strategy_profile") or job.get("task") or job.get("source_repository") or job.get("repository") or ""),
             {
                 "job_id": job_id,
@@ -1927,17 +1927,19 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
 
 
 def _default_model_for_reviewer(reviewer: str) -> str:
-    route = route_model("dual_review")
-    routed_model = str(route.get("model") or "").strip()
-    reviewer_key = str(reviewer or "").strip().lower()
-    if routed_model:
-        if reviewer_key == "gpt" and routed_model.startswith(("gpt", "o1", "o3")):
-            return routed_model
-        if reviewer_key == "claude" and routed_model.startswith("claude"):
-            return routed_model
-    if reviewer_key == "gpt":
-        return "gpt-5.4-mini"
-    return "claude-sonnet-4-6"
+    return default_dual_review_model_for_reviewer(reviewer)
+
+
+def _record_platform_execution_telemetry(
+    profile: str,
+    payload: dict[str, Any],
+    *,
+    domain: str,
+) -> None:
+    try:
+        try_record_platform_execution(profile, payload, domain=domain)
+    except Exception as exc:  # pragma: no cover - telemetry best effort
+        logging.getLogger(__name__).warning("platform execution telemetry failed: %s", exc)
 
 
 def _extract_confidence_from_output(output: str) -> float:

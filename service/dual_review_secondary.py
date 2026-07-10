@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from service.adapters.llm_adapter import LlmAdapter, LlmResult
 from service.dual_review import VERDICT_FAIL, extract_confidence, extract_verdict
-from service.model_router import route_model
+from service.model_router import default_dual_review_model_for_reviewer
 
 if TYPE_CHECKING:
     from service.dual_review_orchestrator import DualReviewRequest
@@ -96,17 +96,7 @@ def build_secondary_prompt(request: DualReviewRequest) -> str:
 
 
 def _default_model_for_reviewer(reviewer: str) -> str:
-    route = route_model("dual_review")
-    routed_model = str(route.get("model") or "").strip()
-    reviewer_key = str(reviewer or "").strip().lower()
-    if routed_model:
-        if reviewer_key == "gpt" and routed_model.startswith(("gpt", "o1", "o3")):
-            return routed_model
-        if reviewer_key == "claude" and routed_model.startswith("claude"):
-            return routed_model
-    if reviewer_key == "gpt":
-        return _DEFAULT_GPT_MODEL
-    return _DEFAULT_CLAUDE_MODEL
+    return default_dual_review_model_for_reviewer(reviewer)
 
 
 def _result_to_review(result: LlmResult) -> dict[str, Any]:

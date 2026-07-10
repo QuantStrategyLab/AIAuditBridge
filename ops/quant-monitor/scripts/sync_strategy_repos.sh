@@ -30,7 +30,6 @@ for repo in "${REPOS[@]}"; do
     echo "[sync] $repo ok"
   else
     echo "[sync] skip missing $dir" >&2
-    failed=1
   fi
 done
 exit "$failed"

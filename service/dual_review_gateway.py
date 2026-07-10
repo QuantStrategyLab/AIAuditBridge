@@ -11,7 +11,7 @@ from service.dual_review_secondary import (
     build_secondary_prompt,
 )
 from service.adapters.llm_adapter import LlmResult
-from service.model_router import route_model
+from service.model_router import default_dual_review_model_for_reviewer
 
 if TYPE_CHECKING:
     from service.dual_review_orchestrator import DualReviewRequest
@@ -46,17 +46,7 @@ def _ai_result_to_llm(result: Any) -> LlmResult:
 
 
 def _default_model_for_reviewer(reviewer: str) -> str:
-    route = route_model("dual_review")
-    routed_model = str(route.get("model") or "").strip()
-    reviewer_key = str(reviewer or "").strip().lower()
-    if routed_model:
-        if reviewer_key == "gpt" and routed_model.startswith(("gpt", "o1", "o3")):
-            return routed_model
-        if reviewer_key == "claude" and routed_model.startswith("claude"):
-            return routed_model
-    if reviewer_key == "gpt":
-        return "gpt-5.4-mini"
-    return "claude-sonnet-4-6"
+    return default_dual_review_model_for_reviewer(reviewer)
 
 
 def run_gateway_dual_api_secondary_review(request: "DualReviewRequest") -> dict[str, Any]:
