@@ -495,6 +495,10 @@ def _assert_job_access(job: dict[str, Any], claims: dict[str, Any]) -> None:
     job_run_id = str(job.get("run_id") or "")
     if request_run_id and job_run_id and request_run_id != job_run_id:
         raise PermissionError("job run_id is not allowed")
+    request_attempt = str(claims.get("run_attempt") or "")
+    job_attempt = str(job.get("run_attempt") or "")
+    if request_attempt and job_attempt and request_attempt != job_attempt:
+        raise PermissionError("job run_attempt is not allowed")
 
 
 def _public_job_payload(job: dict[str, Any]) -> dict[str, object]:
