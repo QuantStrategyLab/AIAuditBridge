@@ -3,7 +3,8 @@ name: Codex PR Review
 # Runs on PRs AND can be called as a reusable workflow from other repos.
 # Consumer repos use:
 #   uses: QuantStrategyLab/AIAuditBridge/.github/workflows/codex_pr_review.yml@main
-#   secrets: inherit
+#   secrets:
+#     CODEX_AUDIT_SERVICE_URL: ${{ secrets.CODEX_AUDIT_SERVICE_URL }}
 on:
   pull_request_target:
     types: [opened, synchronize, reopened]
