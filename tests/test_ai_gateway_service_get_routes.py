@@ -1359,3 +1359,54 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
                 finally:
                     server.shutdown()
                     server.server_close()
+
+
+def test_job_dedupe_key_is_scoped_to_repository_run_and_attempt() -> None:
+    from service.ai_gateway_service import _job_dedupe_key
+
+    payload = {"source_repository": "QuantStrategyLab/QuantPlatformKit", "source_ref": "main", "task": "pr_review", "prompt": "same"}
+    same = _job_dedupe_key(
+        payload,
+        repository="QuantStrategyLab/QuantPlatformKit",
+        run_id="100",
+        run_attempt="1",
+    )
+    assert same == _job_dedupe_key(
+        payload,
+        repository="QuantStrategyLab/QuantPlatformKit",
+        run_id="100",
+        run_attempt="1",
+    )
+    assert same != _job_dedupe_key(
+        payload,
+        repository="QuantStrategyLab/QuantPlatformKit",
+        run_id="100",
+        run_attempt="2",
+    )
+    assert same != _job_dedupe_key(
+        payload,
+        repository="QuantStrategyLab/QuantPlatformKit",
+        run_id="101",
+        run_attempt="1",
+    )
+    assert same != _job_dedupe_key(
+        payload,
+        repository="QuantStrategyLab/Other",
+        run_id="100",
+        run_attempt="1",
+    )
+
+
+def test_job_access_scopes_new_jobs_to_run_attempt_and_accepts_legacy_jobs() -> None:
+    from service.ai_gateway_service import _assert_job_access
+
+    claims = {
+        "repository": "QuantStrategyLab/QuantPlatformKit",
+        "run_id": "100",
+        "run_attempt": "2",
+    }
+    _assert_job_access({**claims}, claims)
+    _assert_job_access({"repository": claims["repository"], "run_id": claims["run_id"]}, claims)
+
+    with unittest.TestCase().assertRaisesRegex(PermissionError, "job run_attempt is not allowed"):
+        _assert_job_access({**claims, "run_attempt": "1"}, claims)

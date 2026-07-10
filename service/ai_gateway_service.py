@@ -495,6 +495,10 @@ def _assert_job_access(job: dict[str, Any], claims: dict[str, Any]) -> None:
     job_run_id = str(job.get("run_id") or "")
     if request_run_id and job_run_id and request_run_id != job_run_id:
         raise PermissionError("job run_id is not allowed")
+    request_attempt = str(claims.get("run_attempt") or "")
+    job_attempt = str(job.get("run_attempt") or "")
+    if request_attempt and job_attempt and request_attempt != job_attempt:
+        raise PermissionError("job run_attempt is not allowed")
 
 
 def _public_job_payload(job: dict[str, Any]) -> dict[str, object]:
@@ -988,10 +992,19 @@ def _trusted_automation_proof_for_review(payload: dict[str, Any], claims: dict[s
     return {}
 
 
-def _job_dedupe_key(payload: dict[str, Any]) -> str:
+def _job_dedupe_key(
+    payload: dict[str, Any],
+    *,
+    repository: str,
+    run_id: str,
+    run_attempt: str,
+) -> str:
     issue_number = str(payload.get("issue_number") or "").strip()
     prompt_hash = hashlib.sha256(str(payload.get("prompt") or "").encode("utf-8")).hexdigest()
     parts = [
+        repository,
+        run_id,
+        run_attempt,
         str(payload.get("source_repository") or ""),
         str(payload.get("source_ref") or ""),
         str(payload.get("task") or TASK_EXECUTE),
@@ -1132,7 +1145,12 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
 
 def _submit_job(claims: dict[str, Any], payload: dict[str, Any]) -> dict[str, object]:
     _cleanup_expired_jobs()
-    dedupe_key = _job_dedupe_key(payload)
+    dedupe_key = _job_dedupe_key(
+        payload,
+        repository=str(claims.get("repository") or ""),
+        run_id=str(claims.get("run_id") or ""),
+        run_attempt=str(claims.get("run_attempt") or ""),
+    )
     existing_job = _find_active_job_by_dedupe_key(dedupe_key)
     if existing_job is not None and existing_job.get("status") in ACTIVE_JOB_STATUSES:
         public = _public_job_payload(existing_job)
@@ -1157,6 +1175,7 @@ def _submit_job(claims: dict[str, Any], payload: dict[str, Any]) -> dict[str, ob
         "expires_at": now + ttl_seconds,
         "repository": str(claims.get("repository") or ""),
         "run_id": str(claims.get("run_id") or ""),
+        "run_attempt": str(claims.get("run_attempt") or ""),
         "actor": str(claims.get("actor") or ""),
         "source_repository": str(payload.get("source_repository") or ""),
         "source_ref": str(payload.get("source_ref") or ""),
