@@ -65,11 +65,22 @@ jobs:
           ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
 
+      - name: Validate AIAuditBridge self-review ref
+        if: github.repository == 'QuantStrategyLab/AIAuditBridge'
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" != "pull_request_target" ] || [ -z "${PR_HEAD_SHA}" ]; then
+            echo "::error::AIAuditBridge self-review requires pull_request_target with a PR head SHA." >&2
+            exit 1
+          fi
+
       - name: Checkout bridge review scripts
         uses: actions/checkout@v6
         with:
           repository: ${{ github.repository == 'QuantStrategyLab/AIAuditBridge' && 'QuantStrategyLab/AIAuditBridge' || job.workflow_repository }}
-          ref: ${{ github.repository == 'QuantStrategyLab/AIAuditBridge' && github.event.pull_request.head.sha || github.event.pull_request.base.sha || job.workflow_sha }}
+          ref: ${{ github.repository == 'QuantStrategyLab/AIAuditBridge' && github.event.pull_request.head.sha || job.workflow_sha }}
           path: bridge
           token: ${{ secrets.CODEX_AUDIT_REUSABLE_WORKFLOW_TOKEN || github.token }}
           persist-credentials: false
