@@ -176,6 +176,7 @@ def _default_policy() -> dict[str, Any]:
         "pr_review": {
             "ack_labels": list(DEFAULT_ACK_LABELS),
             "auto_converge_after": DEFAULT_AUTO_CONVERGE_AFTER,
+            "block_on_review_failure": True,
         },
     }
 
@@ -205,6 +206,22 @@ def auto_converge_after_from_policy(policy: dict[str, Any]) -> int:
     except (TypeError, ValueError):
         return DEFAULT_AUTO_CONVERGE_AFTER
     return max(0, value)
+
+
+def block_on_review_failure_from_policy(policy: dict[str, Any]) -> bool:
+    """Whether review backend/infrastructure failures should fail closed."""
+    pr_review = policy.get("pr_review") if isinstance(policy.get("pr_review"), dict) else {}
+    raw = pr_review.get("block_on_review_failure")
+    if raw is None:
+        return True
+    if isinstance(raw, bool):
+        return raw
+    text = str(raw).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return True
 
 
 def pr_has_ack_label(
@@ -1152,6 +1169,7 @@ def main() -> int:
     if ack_matched:
         print(f"PR has ack label `{ack_label}`; review findings will not fail the check.")
     auto_converge_after = auto_converge_after_from_policy(policy)
+    block_on_review_failure = block_on_review_failure_from_policy(policy)
     try:
         _existing_id, previous_comment = find_existing_review_comment(token, repo, pr_number)
     except ReviewError as exc:
@@ -1227,10 +1245,14 @@ def main() -> int:
             "Please ensure a human reviewer checks this PR before merging.\n"
         )
         upsert_pr_comment(token, repo, pr_number, warning_body)
-        if _review_backend_is_unconfigured(exc) and _allow_unconfigured_backend():
+        if (
+            not block_on_review_failure
+            and _review_backend_is_unconfigured(exc)
+            and _allow_unconfigured_backend()
+        ):
             print("::warning::Codex review backend is not configured; leaving human-review note without failing the workflow.")
             return 0
-        if _review_infrastructure_failure(exc):
+        if not block_on_review_failure and _review_infrastructure_failure(exc):
             print("::warning::Codex review infrastructure failure; leaving human-review note without failing the workflow.")
             return 0
         return 1

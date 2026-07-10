@@ -23,8 +23,8 @@ class TestQslMetadata(unittest.TestCase):
 
     def test_qsl_metadata_values(self) -> None:
         qsl = self._load_qsl()
-        self.assertEqual(qsl.get("tier"), "ops-tooling")
-        self.assertEqual(qsl.get("ring"), 4)
+        self.assertEqual(qsl.get("tier"), "ops/tooling")
+        self.assertEqual(qsl.get("upgrade_ring"), "ring_e")
         self.assertIs(qsl.get("runtime_dependency"), False)
 
         compat = qsl.get("compat")

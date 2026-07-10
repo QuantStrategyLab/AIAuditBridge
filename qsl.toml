@@ -1,5 +1,5 @@
-tier = "ops-tooling"
-ring = 4
+tier = "ops/tooling"
+upgrade_ring = "ring_e"
 runtime_dependency = false
 
 [compat]

@@ -203,6 +203,8 @@ class RunCodexPrReviewTests(unittest.TestCase):
     def test_main_allows_high_risk_on_review_infra_error_with_human_note(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             event_path = self._write_event(tmpdir, ["src/app.py"])
+            policy = run_codex_pr_review._default_policy()
+            policy["pr_review"]["block_on_review_failure"] = False
             env = {
                 "GH_TOKEN": "token",
                 "GITHUB_REPOSITORY": "org/repo",
@@ -213,6 +215,9 @@ class RunCodexPrReviewTests(unittest.TestCase):
                 patch.dict(os.environ, env, clear=True),
                 patch("scripts.run_codex_pr_review.fetch_pr_files", return_value=[{"filename": "src/app.py"}]),
                 patch("scripts.run_codex_pr_review.fetch_pr_diff", return_value="diff --git a/src/app.py b/src/app.py"),
+                patch("scripts.run_codex_pr_review.fetch_pr_labels", return_value=[]),
+                patch("scripts.run_codex_pr_review.load_policy", return_value=policy),
+                patch("scripts.run_codex_pr_review.find_existing_review_comment", return_value=(None, "")),
                 patch("scripts.run_codex_pr_review.run_codex_review_with_fallback", side_effect=ReviewError("Codex service job timed out")),
                 patch("scripts.run_codex_pr_review.upsert_pr_comment") as comment,
             ):
@@ -223,6 +228,8 @@ class RunCodexPrReviewTests(unittest.TestCase):
     def test_main_allows_low_risk_docs_on_review_infra_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             event_path = self._write_event(tmpdir, ["docs/guide.md", "tests/test_x.py"])
+            policy = run_codex_pr_review._default_policy()
+            policy["pr_review"]["block_on_review_failure"] = False
             env = {
                 "GH_TOKEN": "token",
                 "GITHUB_REPOSITORY": "org/repo",
@@ -232,6 +239,9 @@ class RunCodexPrReviewTests(unittest.TestCase):
             with (
                 patch.dict(os.environ, env, clear=True),
                 patch("scripts.run_codex_pr_review.fetch_pr_files", return_value=[{"filename": "docs/guide.md"}, {"filename": "tests/test_x.py"}]),
+                patch("scripts.run_codex_pr_review.fetch_pr_labels", return_value=[]),
+                patch("scripts.run_codex_pr_review.load_policy", return_value=policy),
+                patch("scripts.run_codex_pr_review.find_existing_review_comment", return_value=(None, "")),
                 patch("scripts.run_codex_pr_review.run_codex_review_with_fallback", side_effect=ReviewError("Codex service job timed out")),
                 patch("scripts.run_codex_pr_review.upsert_pr_comment") as comment,
             ):
@@ -243,6 +253,8 @@ class RunCodexPrReviewTests(unittest.TestCase):
     def test_main_allows_unconfigured_backend_with_explicit_opt_in(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             event_path = self._write_event(tmpdir, ["scripts/run_codex_pr_review.py"])
+            policy = run_codex_pr_review._default_policy()
+            policy["pr_review"]["block_on_review_failure"] = False
             env = {
                 "GH_TOKEN": "token",
                 "GITHUB_REPOSITORY": "org/repo",
@@ -254,6 +266,9 @@ class RunCodexPrReviewTests(unittest.TestCase):
                 patch.dict(os.environ, env, clear=True),
                 patch("scripts.run_codex_pr_review.fetch_pr_files", return_value=[{"filename": "scripts/run_codex_pr_review.py"}]),
                 patch("scripts.run_codex_pr_review.fetch_pr_diff", return_value="diff --git a/scripts/run_codex_pr_review.py b/scripts/run_codex_pr_review.py"),
+                patch("scripts.run_codex_pr_review.fetch_pr_labels", return_value=[]),
+                patch("scripts.run_codex_pr_review.load_policy", return_value=policy),
+                patch("scripts.run_codex_pr_review.find_existing_review_comment", return_value=(None, "")),
                 patch("scripts.run_codex_pr_review.run_codex_review_with_fallback", side_effect=ReviewError(run_codex_pr_review.NO_REVIEW_BACKEND_CONFIGURED)),
                 patch("scripts.run_codex_pr_review.upsert_pr_comment") as comment,
             ):
@@ -287,6 +302,29 @@ class RunCodexPrReviewTests(unittest.TestCase):
                 {"version": 1, "pr_review": {"auto_converge_after": 0}}
             ),
             0,
+        )
+
+    def test_block_on_review_failure_defaults_and_parses(self) -> None:
+        self.assertTrue(run_codex_pr_review.block_on_review_failure_from_policy({"version": 1}))
+        self.assertTrue(
+            run_codex_pr_review.block_on_review_failure_from_policy(
+                {"version": 1, "pr_review": {"block_on_review_failure": True}}
+            )
+        )
+        self.assertTrue(
+            run_codex_pr_review.block_on_review_failure_from_policy(
+                {"version": 1, "pr_review": {"block_on_review_failure": "true"}}
+            )
+        )
+        self.assertFalse(
+            run_codex_pr_review.block_on_review_failure_from_policy(
+                {"version": 1, "pr_review": {"block_on_review_failure": "false"}}
+            )
+        )
+        self.assertTrue(
+            run_codex_pr_review.block_on_review_failure_from_policy(
+                {"version": 1, "pr_review": {"block_on_review_failure": "maybe"}}
+            )
         )
 
     def test_blocking_streak_advances_and_auto_converges(self) -> None:
@@ -355,6 +393,7 @@ class RunCodexPrReviewTests(unittest.TestCase):
                     return_value="diff --git a/scripts/run_codex_pr_review.py b/scripts/run_codex_pr_review.py",
                 ),
                 patch("scripts.run_codex_pr_review.fetch_pr_labels", return_value=[]),
+                patch("scripts.run_codex_pr_review.load_policy", return_value=run_codex_pr_review._default_policy()),
                 patch(
                     "scripts.run_codex_pr_review.find_existing_review_comment",
                     return_value=(99, prior_comment),
@@ -437,6 +476,7 @@ class RunCodexPrReviewTests(unittest.TestCase):
                     "scripts.run_codex_pr_review.fetch_pr_labels",
                     return_value=[{"name": "review-ack"}],
                 ),
+                patch("scripts.run_codex_pr_review.load_policy", return_value=run_codex_pr_review._default_policy()),
                 patch(
                     "scripts.run_codex_pr_review.find_existing_review_comment",
                     return_value=(None, ""),
@@ -467,7 +507,48 @@ class RunCodexPrReviewTests(unittest.TestCase):
                 patch.dict(os.environ, env, clear=True),
                 patch("scripts.run_codex_pr_review.fetch_pr_files", return_value=[{"filename": "scripts/run_codex_pr_review.py"}]),
                 patch("scripts.run_codex_pr_review.fetch_pr_diff", return_value="diff --git a/scripts/run_codex_pr_review.py b/scripts/run_codex_pr_review.py"),
+                patch("scripts.run_codex_pr_review.fetch_pr_labels", return_value=[]),
+                patch("scripts.run_codex_pr_review.load_policy", return_value=run_codex_pr_review._default_policy()),
+                patch("scripts.run_codex_pr_review.find_existing_review_comment", return_value=(None, "")),
                 patch("scripts.run_codex_pr_review.run_codex_review_with_fallback", side_effect=ReviewError(run_codex_pr_review.NO_REVIEW_BACKEND_CONFIGURED)),
+                patch("scripts.run_codex_pr_review.upsert_pr_comment") as comment,
+            ):
+                self.assertEqual(run_codex_pr_review.main(), 1)
+
+        comment.assert_called_once()
+        self.assertIn("Human review required", comment.call_args.args[3])
+
+    def test_main_fails_closed_on_infrastructure_failure_when_policy_requires_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            event_path = self._write_event(tmpdir, ["scripts/run_codex_pr_review.py"])
+            policy_path = Path(tmpdir) / ".github" / "codex_auto_merge_policy.json"
+            policy_path.parent.mkdir(parents=True, exist_ok=True)
+            policy_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "pr_review": {
+                            "block_on_review_failure": True,
+                            "auto_converge_after": 3,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            env = {
+                "GH_TOKEN": "token",
+                "GITHUB_REPOSITORY": "org/repo",
+                "GITHUB_EVENT_PATH": event_path,
+                "GITHUB_EVENT_NAME": "pull_request",
+                "CODEX_PR_REVIEW_REPO_ROOT": tmpdir,
+            }
+            with (
+                patch.dict(os.environ, env, clear=True),
+                patch("scripts.run_codex_pr_review.fetch_pr_files", return_value=[{"filename": "scripts/run_codex_pr_review.py"}]),
+                patch("scripts.run_codex_pr_review.fetch_pr_diff", return_value="diff --git a/scripts/run_codex_pr_review.py b/scripts/run_codex_pr_review.py"),
+                patch("scripts.run_codex_pr_review.fetch_pr_labels", return_value=[]),
+                patch("scripts.run_codex_pr_review.find_existing_review_comment", return_value=(None, "")),
+                patch("scripts.run_codex_pr_review.run_codex_review_with_fallback", side_effect=ReviewError("Codex service job timed out")),
                 patch("scripts.run_codex_pr_review.upsert_pr_comment") as comment,
             ):
                 self.assertEqual(run_codex_pr_review.main(), 1)
@@ -585,8 +666,10 @@ class CodexPrReviewWorkflowTest(unittest.TestCase):
         self.assertNotIn("Validate bridge checkout token", workflow)
         self.assertIn("required: false", workflow)
         self.assertIn("job.workflow_repository", workflow)
-        self.assertIn("github.event.pull_request.base.sha", workflow)
+        self.assertNotIn("github.event.pull_request.base.sha", workflow)
         self.assertIn("github.event.pull_request.head.sha", workflow)
+        self.assertIn("Validate AIAuditBridge self-review ref", workflow)
+        self.assertIn("AIAuditBridge self-review requires pull_request_target with a PR head SHA.", workflow)
         self.assertIn("persist-credentials: false", workflow)
         self.assertIn("job.workflow_sha", workflow)
         self.assertIn("token: ${{ secrets.CODEX_AUDIT_REUSABLE_WORKFLOW_TOKEN || github.token }}", workflow)
