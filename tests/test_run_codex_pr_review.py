@@ -686,4 +686,5 @@ class CodexPrReviewWorkflowTest(unittest.TestCase):
         source = Path("scripts/run_codex_pr_review.py").read_text(encoding="utf-8")
         self.assertIn("CODEX_PR_REVIEW_REPO_ROOT", source)
         self.assertIn("BRIDGE_ROOT = Path(__file__).resolve().parents[1]", source)
+        self.assertIn("if str(BRIDGE_ROOT) not in sys.path:", source)
         self.assertIn('PROMPT_TEMPLATE_PATH = BRIDGE_ROOT / "prompts" / "pr_review.md"', source)
