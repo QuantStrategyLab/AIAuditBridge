@@ -93,7 +93,11 @@ from service.quota import get_quota_manager
 from service.task_state import TERMINAL_STATES, job_task_state
 from service.health import get_health_monitor
 from service.org_health import read_org_health
-from quant_platform_kit.strategy_lifecycle.performance_monitor import try_record_platform_execution
+try:
+    from quant_platform_kit.strategy_lifecycle.performance_monitor import try_record_platform_execution
+except ModuleNotFoundError:  # pragma: no cover - optional in CI
+    def try_record_platform_execution(*_args, **_kwargs):
+        return None
 from service.model_router import route_model
 
 # ── constants ───────────────────────────────────────────────────────────
