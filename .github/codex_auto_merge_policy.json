@@ -30,10 +30,6 @@
       "critical",
       "high"
     ],
-    "ack_labels": [
-      "review-ack"
-    ],
-    "auto_converge_after": 3,
     "skip_paths": [
       "docs/**",
       "**.md",
@@ -47,7 +43,6 @@
       "low"
     ],
     "timeout_minutes": 20,
-    "max_diff_lines": 2400,
-    "block_on_review_failure": true
+    "max_diff_lines": 2400
   }
 }

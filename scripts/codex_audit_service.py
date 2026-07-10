@@ -558,6 +558,25 @@ def _verify_github_oidc(token: str) -> dict[str, Any]:
     _require_allowed_claim(payload, "CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES", "repository", "repository")
     _require_allowed_claim(payload, "CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS", "workflow_ref", "workflow_ref")
     _require_allowed_claim(payload, "CODEX_AUDIT_SERVICE_ALLOWED_REFS", "ref", "ref")
+    raw_job_workflow_ref = payload.get("job_workflow_ref")
+    if raw_job_workflow_ref is not None and not isinstance(raw_job_workflow_ref, str):
+        raise PermissionError("OIDC job workflow ref must be a string")
+    job_workflow_ref = raw_job_workflow_ref.strip() if isinstance(raw_job_workflow_ref, str) else ""
+    if raw_job_workflow_ref is not None and not job_workflow_ref:
+        raise PermissionError("OIDC job workflow ref cannot be empty")
+    if job_workflow_ref:
+        _require_allowed_claim(
+            payload,
+            "CODEX_AUDIT_SERVICE_ALLOWED_JOB_WORKFLOW_REFS",
+            "job_workflow_ref",
+            "job workflow ref",
+        )
+    else:
+        direct_repositories = _split_csv_env("CODEX_AUDIT_SERVICE_ALLOWED_DIRECT_REPOSITORIES")
+        if not direct_repositories:
+            raise PermissionError("CODEX_AUDIT_SERVICE_ALLOWED_DIRECT_REPOSITORIES is required")
+        if not _claim_matches(str(payload.get("repository") or ""), direct_repositories):
+            raise PermissionError("OIDC job workflow ref is required for this repository")
     _require_optional_allowed_claim(payload, "CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORY_VISIBILITIES",
                                     "repository_visibility", "repository visibility")
     return payload

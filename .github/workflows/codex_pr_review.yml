@@ -14,20 +14,20 @@ on:
         required: false
         type: string
       allow_unconfigured_backend:
-        description: "Allow the review job to pass with a human-review note when no AI backend is configured in the caller repository."
+        description: "Deprecated compatibility input. The review check always fails closed when no backend is available."
         required: false
         type: boolean
         default: false
       api_fallback_enabled:
-        description: "Optional true/false override for direct API fallback after a recoverable Codex service failure. Empty defers to repository variables."
+        description: "Optional true/false override for direct API fallback. Reusable callers default to false and do not inherit repository variables."
         required: false
         type: string
-        default: ""
+        default: "false"
       direct_api_primary_enabled:
-        description: "Optional true/false override for API-only PR review when CODEX_AUDIT_SERVICE_URL is not configured. Empty defers to repository variables."
+        description: "Optional true/false override for API-only PR review. Reusable callers default to false and do not inherit repository variables."
         required: false
         type: string
-        default: ""
+        default: "false"
     secrets:
       CODEX_AUDIT_REUSABLE_WORKFLOW_TOKEN:
         description: "Token that can read QuantStrategyLab/AIAuditBridge when this workflow is called from another private repo."
@@ -101,9 +101,11 @@ jobs:
           CODEX_AUDIT_SERVICE_URL: ${{ secrets.CODEX_AUDIT_SERVICE_URL }}
           CODEX_AUDIT_SERVICE_AUDIENCE: ${{ vars.CODEX_AUDIT_SERVICE_AUDIENCE || 'quant-codex-audit' }}
           CODEX_PR_REVIEW_REPO_ROOT: ${{ github.workspace }}/source
-          CODEX_PR_REVIEW_ALLOW_UNCONFIGURED_BACKEND: ${{ inputs.allow_unconfigured_backend || 'false' }}
-          CODEX_PR_REVIEW_API_FALLBACK_ENABLED: ${{ github.event_name == 'workflow_call' && inputs.api_fallback_enabled != '' && inputs.api_fallback_enabled || vars.CODEX_PR_REVIEW_API_FALLBACK_ENABLED || 'true' }}
-          CODEX_PR_REVIEW_DIRECT_API_PRIMARY_ENABLED: ${{ github.event_name == 'workflow_call' && inputs.direct_api_primary_enabled != '' && inputs.direct_api_primary_enabled || vars.CODEX_PR_REVIEW_DIRECT_API_PRIMARY_ENABLED || 'true' }}
+          CODEX_PR_REVIEW_REUSABLE_CALL: ${{ github.repository != 'QuantStrategyLab/AIAuditBridge' && 'true' || 'false' }}
+          CODEX_PR_REVIEW_API_FALLBACK_INPUT: ${{ inputs.api_fallback_enabled }}
+          CODEX_PR_REVIEW_DIRECT_API_PRIMARY_INPUT: ${{ inputs.direct_api_primary_enabled }}
+          CODEX_PR_REVIEW_API_FALLBACK_DEFAULT: ${{ vars.CODEX_PR_REVIEW_API_FALLBACK_ENABLED || 'true' }}
+          CODEX_PR_REVIEW_DIRECT_API_PRIMARY_DEFAULT: ${{ vars.CODEX_PR_REVIEW_DIRECT_API_PRIMARY_ENABLED || 'true' }}
         working-directory: source
         run: |
           set -euo pipefail
@@ -114,7 +116,30 @@ jobs:
             echo "::error::Trusted Codex review script not found. Ensure the bridge checkout can read QuantStrategyLab/AIAuditBridge." >&2
             exit 1
           fi
-          python "${script_path}"
+          resolve_boolean() {
+            local name="$1" requested="$2" fallback="$3" value
+            if [ "${CODEX_PR_REVIEW_REUSABLE_CALL}" = "true" ]; then
+              # Only consumers reach this branch; their explicit/default input is authoritative.
+              value="${requested}"
+            else
+              # AIAuditBridge self-review has no workflow_call inputs; retain its local policy.
+              value="${fallback}"
+            fi
+            value="$(printf '%s' "${value}" | tr '[:upper:]' '[:lower:]')"
+            case "${value}" in
+              true|false) printf '%s' "${value}" ;;
+              *) echo "::error::${name} must be true or false" >&2; return 1 ;;
+            esac
+          }
+          if ! api_fallback_enabled="$(resolve_boolean CODEX_PR_REVIEW_API_FALLBACK_ENABLED "${CODEX_PR_REVIEW_API_FALLBACK_INPUT}" "${CODEX_PR_REVIEW_API_FALLBACK_DEFAULT}")"; then
+            exit 1
+          fi
+          if ! direct_api_primary_enabled="$(resolve_boolean CODEX_PR_REVIEW_DIRECT_API_PRIMARY_ENABLED "${CODEX_PR_REVIEW_DIRECT_API_PRIMARY_INPUT}" "${CODEX_PR_REVIEW_DIRECT_API_PRIMARY_DEFAULT}")"; then
+            exit 1
+          fi
+          CODEX_PR_REVIEW_API_FALLBACK_ENABLED="${api_fallback_enabled}" \
+          CODEX_PR_REVIEW_DIRECT_API_PRIMARY_ENABLED="${direct_api_primary_enabled}" \
+            python "${script_path}"
 
       - name: Upload review diagnostics
         if: always()

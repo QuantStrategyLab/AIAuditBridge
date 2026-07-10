@@ -286,6 +286,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
                 "QuantStrategyLab/AIAuditBridge/.github/workflows/codex_audit.yml@refs/heads/main"
             ),
             "CODEX_AUDIT_SERVICE_ALLOWED_REFS": "refs/heads/main",
+            "CODEX_AUDIT_SERVICE_ALLOWED_DIRECT_REPOSITORIES": "QuantStrategyLab/AIAuditBridge",
             "CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORY_VISIBILITIES": "public",
         }
         with (
@@ -314,6 +315,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         env = {
             "CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES": "QuantStrategyLab/AIAuditBridge",
             "CODEX_AUDIT_SERVICE_ALLOWED_REFS": "refs/heads/main",
+            "CODEX_AUDIT_SERVICE_ALLOWED_DIRECT_REPOSITORIES": "QuantStrategyLab/AIAuditBridge",
         }
         with (
             patch.dict(os.environ, env, clear=True),
@@ -325,6 +327,39 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
             patch.object(codex_audit_service, "_load_jwks", return_value={"keys": [{"kid": "1", "kty": "RSA"}]}),
             patch.object(codex_audit_service, "_verify_rs256", return_value=None),
             self.assertRaisesRegex(PermissionError, "CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS is required"),
+        ):
+            codex_audit_service._verify_github_oidc("header.payload.signature")
+
+    def test_codex_audit_service_oidc_rejects_pilot_pr_workflow_ref(self) -> None:
+        payload = {
+            "aud": "quant-codex-audit",
+            "iss": codex_audit_service.GITHUB_OIDC_ISSUER,
+            "exp": int(time.time()) + 300,
+            "repository": "QuantStrategyLab/QuantRuntimeSettings",
+            "workflow_ref": "QuantStrategyLab/QuantRuntimeSettings/.github/workflows/codex_pr_review.yml@refs/pull/48/merge",
+            "ref": "refs/pull/48/merge",
+            "repository_visibility": "public",
+        }
+        env = {
+            "CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES": "QuantStrategyLab/AIAuditBridge,QuantStrategyLab/QuantRuntimeSettings",
+            "CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS": (
+                "QuantStrategyLab/AIAuditBridge/.github/workflows/codex_pr_review.yml@refs/heads/main,"
+                "QuantStrategyLab/QuantRuntimeSettings/.github/workflows/codex_pr_review.yml@refs/heads/main"
+            ),
+            "CODEX_AUDIT_SERVICE_ALLOWED_REFS": "refs/heads/main,refs/pull/*/merge",
+            "CODEX_AUDIT_SERVICE_ALLOWED_DIRECT_REPOSITORIES": "QuantStrategyLab/AIAuditBridge",
+            "CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORY_VISIBILITIES": "public",
+        }
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch.object(
+                codex_audit_service,
+                "_jwt_parts",
+                return_value=({"alg": "RS256", "kid": "1"}, payload, b"x", b"y"),
+            ),
+            patch.object(codex_audit_service, "_load_jwks", return_value={"keys": [{"kid": "1", "kty": "RSA"}]}),
+            patch.object(codex_audit_service, "_verify_rs256", return_value=None),
+            self.assertRaisesRegex(PermissionError, "workflow_ref .* not allowed"),
         ):
             codex_audit_service._verify_github_oidc("header.payload.signature")
 
@@ -2355,13 +2390,18 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertIn("CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES", workflow)
         self.assertIn("CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS", workflow)
         self.assertIn("CODEX_AUDIT_SERVICE_ALLOWED_REFS", workflow)
+        self.assertIn("CODEX_AUDIT_SERVICE_ALLOWED_JOB_WORKFLOW_REFS", workflow)
+        self.assertIn("CODEX_AUDIT_SERVICE_ALLOWED_DIRECT_REPOSITORIES", workflow)
         self.assertIn("CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES", workflow)
         self.assertIn("CODEX_AUDIT_SERVICE_CODEX_ACCOUNT_USAGE", workflow)
         self.assertIn("CODEX_AUDIT_SERVICE_OPENAI_USAGE_WINDOW_DAYS", workflow)
         self.assertIn("CODEX_AUDIT_SERVICE_ANTHROPIC_USAGE_WINDOW_DAYS", workflow)
         self.assertIn("OPENAI_ADMIN_KEY: ${{ secrets.OPENAI_ADMIN_KEY }}", workflow)
         self.assertIn("ANTHROPIC_ADMIN_KEY: ${{ secrets.ANTHROPIC_ADMIN_KEY }}", workflow)
-        self.assertIn("QuantStrategyLab/AIAuditBridge,QuantStrategyLab/CryptoLivePoolPipelines", workflow)
+        self.assertIn("QuantStrategyLab/AIAuditBridge", workflow)
+        self.assertIn("QuantStrategyLab/QuantRuntimeSettings", workflow)
+        self.assertIn("QuantStrategyLab/QuantPlatformKit", workflow)
+        self.assertIn("QuantStrategyLab/CryptoLivePoolPipelines", workflow)
         self.assertNotIn("QuantStrategyLab/CodexAuditBridge", workflow)
         self.assertIn("actions/checkout@v6.0.3", workflow)
 
@@ -2379,9 +2419,13 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertIn("dir_fd=fd", deploy_script)
         self.assertIn("os.open(component, flags_dir, dir_fd=fd)", deploy_script)
         self.assertIn('"max_consecutive_failures": 3', deploy_script)
-        self.assertIn("codex_pr_review.yml@refs/pull/*/merge", deploy_script)
-        self.assertIn("refs/pull/*/merge", deploy_script)
-        self.assertIn("QuantStrategyLab/AIAuditBridge,QuantStrategyLab/CryptoLivePoolPipelines", deploy_script)
+        self.assertIn("Consumer review workflows use pull_request_target", deploy_script)
+        self.assertIn('ALLOWED_REFS="${CODEX_AUDIT_SERVICE_ALLOWED_REFS:-refs/heads/main,refs/pull/*/merge}"', deploy_script)
+        self.assertNotIn("codex_pr_review.yml@refs/pull/*/merge", deploy_script)
+        self.assertIn("QuantStrategyLab/AIAuditBridge", deploy_script)
+        self.assertIn("QuantStrategyLab/QuantRuntimeSettings", deploy_script)
+        self.assertIn("QuantStrategyLab/QuantPlatformKit", deploy_script)
+        self.assertIn("QuantStrategyLab/CryptoLivePoolPipelines", deploy_script)
         self.assertNotIn("QuantStrategyLab/CodexAuditBridge", deploy_script)
         self.assertIn("proxy_pass http://127.0.0.1:{port}", deploy_script)
         self.assertIn('"# CodexAuditBridge route start" not in block', deploy_script)
@@ -2389,6 +2433,8 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertIn("nginx config test failed; restoring previous config", deploy_script)
         self.assertIn("zzzz-managed-allowlists.conf", deploy_script)
         self.assertIn('Environment="CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES=${ALLOWED_REPOSITORIES}"', deploy_script)
+        self.assertIn('Environment="CODEX_AUDIT_SERVICE_ALLOWED_JOB_WORKFLOW_REFS=${ALLOWED_JOB_WORKFLOW_REFS}"', deploy_script)
+        self.assertIn('Environment="CODEX_AUDIT_SERVICE_ALLOWED_DIRECT_REPOSITORIES=${ALLOWED_DIRECT_REPOSITORIES}"', deploy_script)
         self.assertIn("systemctl_environment_brief", deploy_script)
         self.assertIn('sed -E "s/^[\\"', deploy_script)
         self.assertIn('s/[\\"\']$//"', deploy_script)

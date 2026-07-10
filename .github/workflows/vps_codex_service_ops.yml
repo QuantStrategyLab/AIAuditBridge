@@ -39,10 +39,12 @@ jobs:
       - name: Run VPS service operation
         env:
           CODEX_AUDIT_SSH_UNBAN_IP: ${{ inputs.ssh_unban_ip }}
-          CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES: QuantStrategyLab/AIAuditBridge
-          CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS: QuantStrategyLab/AIAuditBridge/.github/workflows/codex_audit.yml@refs/heads/main,QuantStrategyLab/AIAuditBridge/.github/workflows/codex_pr_review.yml@refs/heads/main,QuantStrategyLab/AIAuditBridge/.github/workflows/codex_pr_review.yml@refs/pull/*/merge
+          CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES: QuantStrategyLab/AIAuditBridge,QuantStrategyLab/QuantRuntimeSettings,QuantStrategyLab/QuantPlatformKit
+          CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS: QuantStrategyLab/AIAuditBridge/.github/workflows/codex_audit.yml@refs/heads/main,QuantStrategyLab/AIAuditBridge/.github/workflows/codex_pr_review.yml@refs/heads/main,QuantStrategyLab/QuantRuntimeSettings/.github/workflows/codex_pr_review.yml@refs/heads/main,QuantStrategyLab/QuantPlatformKit/.github/workflows/codex_pr_review.yml@refs/heads/main
           CODEX_AUDIT_SERVICE_ALLOWED_REFS: refs/heads/main,refs/pull/*/merge
-          CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES: QuantStrategyLab/AIAuditBridge,QuantStrategyLab/CryptoLivePoolPipelines,QuantStrategyLab/HkEquitySnapshotPipelines,QuantStrategyLab/UsEquitySnapshotPipelines,QuantStrategyLab/ResearchSignalContextPipelines
+          CODEX_AUDIT_SERVICE_ALLOWED_JOB_WORKFLOW_REFS: QuantStrategyLab/AIAuditBridge/.github/workflows/codex_pr_review.yml@refs/heads/main
+          CODEX_AUDIT_SERVICE_ALLOWED_DIRECT_REPOSITORIES: QuantStrategyLab/AIAuditBridge
+          CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES: QuantStrategyLab/AIAuditBridge,QuantStrategyLab/QuantRuntimeSettings,QuantStrategyLab/QuantPlatformKit,QuantStrategyLab/CryptoLivePoolPipelines,QuantStrategyLab/HkEquitySnapshotPipelines,QuantStrategyLab/UsEquitySnapshotPipelines,QuantStrategyLab/ResearchSignalContextPipelines
           CODEX_AUDIT_SERVICE_MODEL: ${{ vars.CODEX_AUDIT_SERVICE_MODEL }}
           CODEX_AUDIT_SERVICE_REASONING_EFFORT: ${{ vars.CODEX_AUDIT_SERVICE_REASONING_EFFORT }}
           CODEX_AUDIT_SERVICE_CODEX_ACCOUNT_USAGE: "1"

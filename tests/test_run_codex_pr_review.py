@@ -29,6 +29,119 @@ class RunCodexPrReviewTests(unittest.TestCase):
         self.assertTrue(run_codex_pr_review.changed_files_are_low_risk(["docs/guide.md", "tests/test_x.py"], policy))
         self.assertFalse(run_codex_pr_review.changed_files_are_low_risk(["src/app.py"], policy))
 
+    def test_review_prompt_states_direct_oidc_contract(self) -> None:
+        prompt = run_codex_pr_review.build_review_prompt("diff", "title", "", "org/repo")
+        self.assertIn("`job_workflow_ref` is absent for explicit direct callers", prompt)
+        self.assertIn("Do not emit a finding that concludes no code change is needed", prompt)
+
+    def test_repeated_findings_are_fingerprinted_before_arbitration(self) -> None:
+        findings = [
+            {
+                "severity": "high",
+                "category": "logic",
+                "file": "service/review.py",
+                "line": 11,
+                "description": "Leaves a failing review check green after retry.",
+                "suggestion": "Return a non-zero result.",
+            }
+        ]
+        reordered = [dict(findings[0], line=42)]
+        reworded = [dict(findings[0], description="The retry path incorrectly returns success.")]
+        other = [dict(findings[0], file="service/auth.py")]
+        reclassified = [dict(findings[0], severity="critical")]
+
+        fingerprint = run_codex_pr_review.blocking_finding_fingerprint(findings)
+        fingerprints = run_codex_pr_review.blocking_finding_fingerprints(findings)
+        self.assertEqual(fingerprint, run_codex_pr_review.blocking_finding_fingerprint(reordered))
+        self.assertEqual(fingerprint, run_codex_pr_review.blocking_finding_fingerprint(reworded))
+        self.assertNotEqual(fingerprint, run_codex_pr_review.blocking_finding_fingerprint(other))
+        self.assertNotEqual(fingerprint, run_codex_pr_review.blocking_finding_fingerprint(reclassified))
+        self.assertEqual(fingerprints, run_codex_pr_review.blocking_finding_fingerprints(reworded))
+        self.assertEqual(
+            run_codex_pr_review.next_blocking_streak(
+                1,
+                blocked=True,
+                previous_fingerprint=fingerprint,
+                current_fingerprint=fingerprint,
+                previous_head_sha="deadbeef",
+                current_head_sha="feedface",
+            ),
+            2,
+        )
+        self.assertEqual(
+            run_codex_pr_review.next_blocking_streak(
+                2,
+                blocked=True,
+                previous_fingerprint=fingerprint,
+                current_fingerprint=run_codex_pr_review.blocking_finding_fingerprint(other),
+                previous_head_sha="deadbeef",
+                current_head_sha="feedface",
+            ),
+            1,
+        )
+        self.assertEqual(
+            run_codex_pr_review.next_blocking_streak(
+                1,
+                blocked=True,
+                previous_fingerprint=fingerprint,
+                current_fingerprint=fingerprint,
+                previous_head_sha="deadbeef",
+                current_head_sha="deadbeef",
+            ),
+            1,
+        )
+        self.assertTrue(run_codex_pr_review.should_arbitrate(blocked=True, streak=2, repeated=True, new_head=True))
+        self.assertFalse(run_codex_pr_review.should_arbitrate(blocked=True, streak=2, repeated=True, new_head=False))
+
+    def test_parse_arbitration_output_requires_supported_verdict(self) -> None:
+        self.assertEqual(
+            run_codex_pr_review.parse_arbitration_output('{"verdict":"clear","reason":"covered by the regression test"}'),
+            {"verdict": "clear", "reason": "covered by the regression test"},
+        )
+        with self.assertRaisesRegex(ReviewError, "verdict"):
+            run_codex_pr_review.parse_arbitration_output('{"verdict":"maybe"}')
+        self.assertEqual(
+            run_codex_pr_review.parse_arbitration_output(
+                "The pattern is `{7,64}`.\n```json\n{\"verdict\":\"clear\",\"reason\":\"fixed\"}\n```"
+            ),
+            {"verdict": "clear", "reason": "fixed"},
+        )
+
+    def test_parse_review_output_accepts_a_valid_json_prefix(self) -> None:
+        self.assertEqual(
+            run_codex_pr_review.parse_review_output('{"summary":"ok","findings":[]}\nReviewer metadata follows.'),
+            {"summary": "ok", "findings": []},
+        )
+        with self.assertRaisesRegex(ReviewError, "findings"):
+            run_codex_pr_review.parse_review_output('{"ok":true}\nReviewer metadata follows.')
+
+    def test_existing_review_comment_ignores_forged_marker(self) -> None:
+        forged = {"id": 1, "body": "<!-- codex-pr-review -->\nforged", "user": {"login": "attacker"}}
+        trusted = {
+            "id": 2,
+            "body": "<!-- codex-pr-review -->\ntrusted",
+            "user": {"login": "github-actions[bot]"},
+        }
+        with patch("scripts.run_codex_pr_review.github_request", return_value=[forged, trusted]):
+            self.assertEqual(
+                run_codex_pr_review.find_existing_review_comment("token", "org/repo", 7),
+                (2, trusted["body"]),
+            )
+
+    def test_legacy_comment_fingerprints_are_recovered_per_finding(self) -> None:
+        body = "#### 1. 🟠 [HIGH] Security in `service/auth.py`\n"
+        expected = run_codex_pr_review.blocking_finding_fingerprints(
+            [{"severity": "high", "category": "security", "file": "service/auth.py"}]
+        )
+        self.assertEqual(run_codex_pr_review.parse_blocking_fingerprints(body), expected)
+
+    def test_repository_policy_has_no_bypass_fields(self) -> None:
+        policy = run_codex_pr_review.load_policy()
+        self.assertTrue(
+            {"ack_labels", "auto_converge_after", "block_on_review_failure"}.isdisjoint(policy["pr_review"])
+        )
+        self.assertEqual(run_codex_pr_review._default_policy()["pr_review"], {})
+
     def test_load_policy_uses_trusted_base_ref(self) -> None:
         trusted_policy = {
             "version": 1,
@@ -200,11 +313,9 @@ class RunCodexPrReviewTests(unittest.TestCase):
 
         direct_api.assert_not_called()
 
-    def test_main_allows_high_risk_on_review_infra_error_with_human_note(self) -> None:
+    def test_main_blocks_high_risk_on_review_infra_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             event_path = self._write_event(tmpdir, ["src/app.py"])
-            policy = run_codex_pr_review._default_policy()
-            policy["pr_review"]["block_on_review_failure"] = False
             env = {
                 "GH_TOKEN": "token",
                 "GITHUB_REPOSITORY": "org/repo",
@@ -215,21 +326,24 @@ class RunCodexPrReviewTests(unittest.TestCase):
                 patch.dict(os.environ, env, clear=True),
                 patch("scripts.run_codex_pr_review.fetch_pr_files", return_value=[{"filename": "src/app.py"}]),
                 patch("scripts.run_codex_pr_review.fetch_pr_diff", return_value="diff --git a/src/app.py b/src/app.py"),
-                patch("scripts.run_codex_pr_review.fetch_pr_labels", return_value=[]),
-                patch("scripts.run_codex_pr_review.load_policy", return_value=policy),
+                patch("scripts.run_codex_pr_review.load_policy", return_value=run_codex_pr_review._default_policy()),
                 patch("scripts.run_codex_pr_review.find_existing_review_comment", return_value=(None, "")),
-                patch("scripts.run_codex_pr_review.run_codex_review_with_fallback", side_effect=ReviewError("Codex service job timed out")),
+                patch(
+                    "scripts.run_codex_pr_review.run_codex_review_with_fallback",
+                    side_effect=ReviewError("Codex service job timed out"),
+                ) as backend,
                 patch("scripts.run_codex_pr_review.upsert_pr_comment") as comment,
             ):
-                self.assertEqual(run_codex_pr_review.main(), 0)
+                self.assertEqual(run_codex_pr_review.main(), 1)
 
         comment.assert_called_once()
+        backend.assert_called_once()
+        self.assertIn("Merge blocked", comment.call_args.args[3])
 
-    def test_main_allows_low_risk_docs_on_review_infra_error(self) -> None:
+    def test_main_skips_low_risk_docs_before_calling_review_backend(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             event_path = self._write_event(tmpdir, ["docs/guide.md", "tests/test_x.py"])
             policy = run_codex_pr_review._default_policy()
-            policy["pr_review"]["block_on_review_failure"] = False
             env = {
                 "GH_TOKEN": "token",
                 "GITHUB_REPOSITORY": "org/repo",
@@ -239,22 +353,23 @@ class RunCodexPrReviewTests(unittest.TestCase):
             with (
                 patch.dict(os.environ, env, clear=True),
                 patch("scripts.run_codex_pr_review.fetch_pr_files", return_value=[{"filename": "docs/guide.md"}, {"filename": "tests/test_x.py"}]),
-                patch("scripts.run_codex_pr_review.fetch_pr_labels", return_value=[]),
                 patch("scripts.run_codex_pr_review.load_policy", return_value=policy),
                 patch("scripts.run_codex_pr_review.find_existing_review_comment", return_value=(None, "")),
-                patch("scripts.run_codex_pr_review.run_codex_review_with_fallback", side_effect=ReviewError("Codex service job timed out")),
+                patch(
+                    "scripts.run_codex_pr_review.run_codex_review_with_fallback",
+                    side_effect=ReviewError("Codex service job timed out"),
+                ) as backend,
                 patch("scripts.run_codex_pr_review.upsert_pr_comment") as comment,
             ):
                 self.assertEqual(run_codex_pr_review.main(), 0)
 
         comment.assert_called_once()
+        backend.assert_not_called()
 
 
-    def test_main_allows_unconfigured_backend_with_explicit_opt_in(self) -> None:
+    def test_main_blocks_unconfigured_backend_even_with_legacy_opt_in(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             event_path = self._write_event(tmpdir, ["scripts/run_codex_pr_review.py"])
-            policy = run_codex_pr_review._default_policy()
-            policy["pr_review"]["block_on_review_failure"] = False
             env = {
                 "GH_TOKEN": "token",
                 "GITHUB_REPOSITORY": "org/repo",
@@ -266,68 +381,17 @@ class RunCodexPrReviewTests(unittest.TestCase):
                 patch.dict(os.environ, env, clear=True),
                 patch("scripts.run_codex_pr_review.fetch_pr_files", return_value=[{"filename": "scripts/run_codex_pr_review.py"}]),
                 patch("scripts.run_codex_pr_review.fetch_pr_diff", return_value="diff --git a/scripts/run_codex_pr_review.py b/scripts/run_codex_pr_review.py"),
-                patch("scripts.run_codex_pr_review.fetch_pr_labels", return_value=[]),
-                patch("scripts.run_codex_pr_review.load_policy", return_value=policy),
+                patch("scripts.run_codex_pr_review.load_policy", return_value=run_codex_pr_review._default_policy()),
                 patch("scripts.run_codex_pr_review.find_existing_review_comment", return_value=(None, "")),
                 patch("scripts.run_codex_pr_review.run_codex_review_with_fallback", side_effect=ReviewError(run_codex_pr_review.NO_REVIEW_BACKEND_CONFIGURED)),
                 patch("scripts.run_codex_pr_review.upsert_pr_comment") as comment,
             ):
-                self.assertEqual(run_codex_pr_review.main(), 0)
+                self.assertEqual(run_codex_pr_review.main(), 1)
 
         comment.assert_called_once()
-        self.assertIn("Human review required", comment.call_args.args[3])
+        self.assertIn("Merge blocked", comment.call_args.args[3])
 
-    def test_ack_labels_default_to_review_ack(self) -> None:
-        self.assertEqual(
-            run_codex_pr_review.ack_labels_from_policy({"version": 1}),
-            frozenset({"review-ack"}),
-        )
-        self.assertEqual(
-            run_codex_pr_review.ack_labels_from_policy(
-                {"version": 1, "pr_review": {"ack_labels": ["review-ack", "ship-it"]}}
-            ),
-            frozenset({"review-ack", "ship-it"}),
-        )
-
-    def test_auto_converge_threshold_defaults_and_parses(self) -> None:
-        self.assertEqual(run_codex_pr_review.auto_converge_after_from_policy({"version": 1}), 3)
-        self.assertEqual(
-            run_codex_pr_review.auto_converge_after_from_policy(
-                {"version": 1, "pr_review": {"auto_converge_after": 2}}
-            ),
-            2,
-        )
-        self.assertEqual(
-            run_codex_pr_review.auto_converge_after_from_policy(
-                {"version": 1, "pr_review": {"auto_converge_after": 0}}
-            ),
-            0,
-        )
-
-    def test_block_on_review_failure_defaults_and_parses(self) -> None:
-        self.assertTrue(run_codex_pr_review.block_on_review_failure_from_policy({"version": 1}))
-        self.assertTrue(
-            run_codex_pr_review.block_on_review_failure_from_policy(
-                {"version": 1, "pr_review": {"block_on_review_failure": True}}
-            )
-        )
-        self.assertTrue(
-            run_codex_pr_review.block_on_review_failure_from_policy(
-                {"version": 1, "pr_review": {"block_on_review_failure": "true"}}
-            )
-        )
-        self.assertFalse(
-            run_codex_pr_review.block_on_review_failure_from_policy(
-                {"version": 1, "pr_review": {"block_on_review_failure": "false"}}
-            )
-        )
-        self.assertTrue(
-            run_codex_pr_review.block_on_review_failure_from_policy(
-                {"version": 1, "pr_review": {"block_on_review_failure": "maybe"}}
-            )
-        )
-
-    def test_blocking_streak_advances_and_auto_converges(self) -> None:
+    def test_blocking_streak_requires_a_matching_fingerprint(self) -> None:
         self.assertEqual(run_codex_pr_review.parse_blocking_streak(""), 0)
         self.assertEqual(
             run_codex_pr_review.parse_blocking_streak(
@@ -335,13 +399,29 @@ class RunCodexPrReviewTests(unittest.TestCase):
             ),
             2,
         )
-        self.assertEqual(run_codex_pr_review.next_blocking_streak(2, blocked=True), 3)
+        self.assertEqual(
+            run_codex_pr_review.next_blocking_streak(
+                2,
+                blocked=True,
+                previous_fingerprint="same",
+                current_fingerprint="same",
+                previous_head_sha="deadbeef",
+                current_head_sha="feedface",
+            ),
+            3,
+        )
+        self.assertEqual(
+            run_codex_pr_review.next_blocking_streak(
+                2,
+                blocked=True,
+                previous_fingerprint="old",
+                current_fingerprint="new",
+            ),
+            1,
+        )
         self.assertEqual(run_codex_pr_review.next_blocking_streak(2, blocked=False), 0)
-        self.assertTrue(run_codex_pr_review.should_auto_converge(3, blocked=True, threshold=3))
-        self.assertFalse(run_codex_pr_review.should_auto_converge(2, blocked=True, threshold=3))
-        self.assertFalse(run_codex_pr_review.should_auto_converge(3, blocked=False, threshold=3))
 
-    def test_main_auto_converges_after_threshold_without_ack_label(self) -> None:
+    def test_main_clears_repeated_finding_only_after_arbitration(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             event = {
                 "pull_request": {
@@ -377,9 +457,14 @@ class RunCodexPrReviewTests(unittest.TestCase):
                     ],
                 }
             )
+            fingerprint = run_codex_pr_review.blocking_finding_fingerprint(json.loads(review_json)["findings"])
+            fingerprints = run_codex_pr_review.blocking_finding_fingerprints(json.loads(review_json)["findings"])
             prior_comment = (
                 "<!-- codex-pr-review -->\n"
-                "<!-- codex-pr-review-streak:2 -->\n"
+                "<!-- codex-pr-review-streak:1 -->\n"
+                f"<!-- codex-pr-review-fingerprint:{fingerprint} -->\n"
+                f"<!-- codex-pr-review-fingerprints:{','.join(fingerprints)} -->\n"
+                "<!-- codex-pr-review-head-sha:deadbeef -->\n"
                 "## prior\n"
             )
             with (
@@ -392,7 +477,6 @@ class RunCodexPrReviewTests(unittest.TestCase):
                     "scripts.run_codex_pr_review.fetch_pr_diff",
                     return_value="diff --git a/scripts/run_codex_pr_review.py b/scripts/run_codex_pr_review.py",
                 ),
-                patch("scripts.run_codex_pr_review.fetch_pr_labels", return_value=[]),
                 patch("scripts.run_codex_pr_review.load_policy", return_value=run_codex_pr_review._default_policy()),
                 patch(
                     "scripts.run_codex_pr_review.find_existing_review_comment",
@@ -400,7 +484,7 @@ class RunCodexPrReviewTests(unittest.TestCase):
                 ),
                 patch(
                     "scripts.run_codex_pr_review.run_codex_review_with_fallback",
-                    return_value=review_json,
+                    side_effect=[review_json, '{"verdict":"clear","reason":"The regression test covers the reported behavior."}'],
                 ),
                 patch("scripts.run_codex_pr_review.upsert_pr_comment") as comment,
             ):
@@ -408,25 +492,13 @@ class RunCodexPrReviewTests(unittest.TestCase):
 
         comment.assert_called_once()
         body = comment.call_args.args[3]
-        self.assertIn("codex-pr-review-streak:3", body)
-        self.assertIn("Auto-converged", body)
+        self.assertIn("codex-pr-review-streak:0", body)
+        self.assertIn("codex-pr-review-fingerprints:", body)
+        self.assertIn("codex-pr-review-head-sha:abc123", body)
+        self.assertIn("Codex Review Arbitration", body)
+        self.assertIn("clear", body)
 
-    def test_pr_has_ack_label_matches_configured_label(self) -> None:
-        policy = {"version": 1, "pr_review": {"ack_labels": ["review-ack"]}}
-        matched, label = run_codex_pr_review.pr_has_ack_label(
-            {"labels": [{"name": "review-ack"}]},
-            policy,
-        )
-        self.assertTrue(matched)
-        self.assertEqual(label, "review-ack")
-        matched, label = run_codex_pr_review.pr_has_ack_label(
-            {"labels": [{"name": "enhancement"}]},
-            policy,
-        )
-        self.assertFalse(matched)
-        self.assertEqual(label, "")
-
-    def test_main_passes_when_ack_label_present_despite_blocking_findings(self) -> None:
+    def test_main_ignores_legacy_bypass_policy_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             event = {
                 "pull_request": {
@@ -473,10 +545,17 @@ class RunCodexPrReviewTests(unittest.TestCase):
                     return_value="diff --git a/scripts/run_codex_pr_review.py b/scripts/run_codex_pr_review.py",
                 ),
                 patch(
-                    "scripts.run_codex_pr_review.fetch_pr_labels",
-                    return_value=[{"name": "review-ack"}],
+                    "scripts.run_codex_pr_review.load_policy",
+                    return_value={
+                        "version": 1,
+                        "pr_review": {
+                            "ack_labels": ["review-ack"],
+                            "auto_converge_enabled": True,
+                            "auto_converge_after": 1,
+                            "block_on_review_failure": True,
+                        },
+                    },
                 ),
-                patch("scripts.run_codex_pr_review.load_policy", return_value=run_codex_pr_review._default_policy()),
                 patch(
                     "scripts.run_codex_pr_review.find_existing_review_comment",
                     return_value=(None, ""),
@@ -487,12 +566,11 @@ class RunCodexPrReviewTests(unittest.TestCase):
                 ),
                 patch("scripts.run_codex_pr_review.upsert_pr_comment") as comment,
             ):
-                self.assertEqual(run_codex_pr_review.main(), 0)
+                self.assertEqual(run_codex_pr_review.main(), 1)
 
         comment.assert_called_once()
         body = comment.call_args.args[3]
-        self.assertIn("review-ack", body)
-        self.assertIn("will not block merge", body)
+        self.assertNotIn("will not block merge", body)
 
     def test_main_fails_closed_on_unconfigured_backend_without_opt_in(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -507,7 +585,6 @@ class RunCodexPrReviewTests(unittest.TestCase):
                 patch.dict(os.environ, env, clear=True),
                 patch("scripts.run_codex_pr_review.fetch_pr_files", return_value=[{"filename": "scripts/run_codex_pr_review.py"}]),
                 patch("scripts.run_codex_pr_review.fetch_pr_diff", return_value="diff --git a/scripts/run_codex_pr_review.py b/scripts/run_codex_pr_review.py"),
-                patch("scripts.run_codex_pr_review.fetch_pr_labels", return_value=[]),
                 patch("scripts.run_codex_pr_review.load_policy", return_value=run_codex_pr_review._default_policy()),
                 patch("scripts.run_codex_pr_review.find_existing_review_comment", return_value=(None, "")),
                 patch("scripts.run_codex_pr_review.run_codex_review_with_fallback", side_effect=ReviewError(run_codex_pr_review.NO_REVIEW_BACKEND_CONFIGURED)),
@@ -516,7 +593,7 @@ class RunCodexPrReviewTests(unittest.TestCase):
                 self.assertEqual(run_codex_pr_review.main(), 1)
 
         comment.assert_called_once()
-        self.assertIn("Human review required", comment.call_args.args[3])
+        self.assertIn("Merge blocked", comment.call_args.args[3])
 
     def test_main_fails_closed_on_infrastructure_failure_when_policy_requires_it(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -546,7 +623,6 @@ class RunCodexPrReviewTests(unittest.TestCase):
                 patch.dict(os.environ, env, clear=True),
                 patch("scripts.run_codex_pr_review.fetch_pr_files", return_value=[{"filename": "scripts/run_codex_pr_review.py"}]),
                 patch("scripts.run_codex_pr_review.fetch_pr_diff", return_value="diff --git a/scripts/run_codex_pr_review.py b/scripts/run_codex_pr_review.py"),
-                patch("scripts.run_codex_pr_review.fetch_pr_labels", return_value=[]),
                 patch("scripts.run_codex_pr_review.find_existing_review_comment", return_value=(None, "")),
                 patch("scripts.run_codex_pr_review.run_codex_review_with_fallback", side_effect=ReviewError("Codex service job timed out")),
                 patch("scripts.run_codex_pr_review.upsert_pr_comment") as comment,
@@ -554,7 +630,7 @@ class RunCodexPrReviewTests(unittest.TestCase):
                 self.assertEqual(run_codex_pr_review.main(), 1)
 
         comment.assert_called_once()
-        self.assertIn("Human review required", comment.call_args.args[3])
+        self.assertIn("Merge blocked", comment.call_args.args[3])
 
     def test_service_timeout_does_not_fall_back_to_direct_api(self) -> None:
         with (
@@ -652,20 +728,20 @@ class CodexPrReviewWorkflowTest(unittest.TestCase):
         self.assertIn("allow_unconfigured_backend", workflow)
         self.assertIn("api_fallback_enabled", workflow)
         self.assertIn("direct_api_primary_enabled", workflow)
-        self.assertIn("Empty defers to repository variables", workflow)
-        self.assertIn("default: false", workflow)
-        self.assertIn('default: ""', workflow)
-        self.assertIn("CODEX_PR_REVIEW_ALLOW_UNCONFIGURED_BACKEND", workflow)
+        self.assertIn("Optional true/false override for direct API fallback", workflow)
+        self.assertIn("Optional true/false override for API-only PR review", workflow)
+        self.assertIn('default: "false"', workflow)
+        self.assertIn("type: string", workflow)
+        self.assertNotIn("CODEX_PR_REVIEW_ALLOW_UNCONFIGURED_BACKEND", workflow)
         self.assertIn("CODEX_PR_REVIEW_API_FALLBACK_ENABLED", workflow)
         self.assertIn("CODEX_PR_REVIEW_DIRECT_API_PRIMARY_ENABLED", workflow)
-        self.assertIn(
-            "github.event_name == 'workflow_call' && inputs.api_fallback_enabled != '' && inputs.api_fallback_enabled || vars.CODEX_PR_REVIEW_API_FALLBACK_ENABLED || 'true'",
-            workflow,
-        )
-        self.assertIn(
-            "github.event_name == 'workflow_call' && inputs.direct_api_primary_enabled != '' && inputs.direct_api_primary_enabled || vars.CODEX_PR_REVIEW_DIRECT_API_PRIMARY_ENABLED || 'true'",
-            workflow,
-        )
+        self.assertIn("CODEX_PR_REVIEW_REUSABLE_CALL", workflow)
+        self.assertIn("CODEX_PR_REVIEW_API_FALLBACK_INPUT", workflow)
+        self.assertIn("CODEX_PR_REVIEW_DIRECT_API_PRIMARY_INPUT", workflow)
+        self.assertIn("resolve_boolean", workflow)
+        self.assertIn("must be true or false", workflow)
+        self.assertIn("tr '[:upper:]' '[:lower:]'", workflow)
+        self.assertIn('if ! api_fallback_enabled="$(resolve_boolean', workflow)
         self.assertIn("inputs.caller_concurrency_key || github.event.pull_request.number || github.run_id", workflow)
         self.assertNotIn("Validate bridge checkout token", workflow)
         self.assertIn("required: false", workflow)

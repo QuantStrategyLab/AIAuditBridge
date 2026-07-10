@@ -9,6 +9,7 @@ Exits non-zero when blocked, which fails the GitHub Actions check run.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import re
@@ -59,10 +60,15 @@ NO_REVIEW_BACKEND_CONFIGURED = (
 # Risk → block mapping
 BLOCK_SEVERITIES = frozenset({"critical", "high"})
 COMMENT_SEVERITIES = frozenset({"critical", "high", "medium", "low"})
-DEFAULT_ACK_LABELS = ("review-ack",)
-DEFAULT_AUTO_CONVERGE_AFTER = 3
 STREAK_MARKER_PREFIX = "<!-- codex-pr-review-streak:"
 STREAK_MARKER_SUFFIX = " -->"
+FINGERPRINT_MARKER_PREFIX = "<!-- codex-pr-review-fingerprint:"
+FINGERPRINT_MARKER_SUFFIX = " -->"
+FINGERPRINTS_MARKER_PREFIX = "<!-- codex-pr-review-fingerprints:"
+FINGERPRINTS_MARKER_SUFFIX = " -->"
+HEAD_SHA_MARKER_PREFIX = "<!-- codex-pr-review-head-sha:"
+HEAD_SHA_MARKER_SUFFIX = " -->"
+ARBITRATION_REPEAT_THRESHOLD = 2
 
 
 class ReviewError(RuntimeError):
@@ -175,80 +181,8 @@ def _default_policy() -> dict[str, Any]:
         },
         "max_changed_files": 30,
         "max_changed_lines": 2000,
-        "pr_review": {
-            "ack_labels": list(DEFAULT_ACK_LABELS),
-            "auto_converge_after": DEFAULT_AUTO_CONVERGE_AFTER,
-            "block_on_review_failure": True,
-        },
+        "pr_review": {},
     }
-
-
-def ack_labels_from_policy(policy: dict[str, Any]) -> frozenset[str]:
-    """Labels that acknowledge Codex findings and allow merge despite blocking issues."""
-    pr_review = policy.get("pr_review") if isinstance(policy.get("pr_review"), dict) else {}
-    raw = pr_review.get("ack_labels") if isinstance(pr_review, dict) else None
-    if raw is None:
-        return frozenset(DEFAULT_ACK_LABELS)
-    if not isinstance(raw, list):
-        return frozenset()
-    return frozenset(str(item).strip() for item in raw if str(item).strip())
-
-
-def auto_converge_after_from_policy(policy: dict[str, Any]) -> int:
-    """Consecutive blocking review rounds before the check auto-passes.
-
-    Set ``pr_review.auto_converge_after`` to ``0`` to disable.
-    """
-    pr_review = policy.get("pr_review") if isinstance(policy.get("pr_review"), dict) else {}
-    raw = pr_review.get("auto_converge_after") if isinstance(pr_review, dict) else None
-    if raw is None:
-        return DEFAULT_AUTO_CONVERGE_AFTER
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return DEFAULT_AUTO_CONVERGE_AFTER
-    return max(0, value)
-
-
-def block_on_review_failure_from_policy(policy: dict[str, Any]) -> bool:
-    """Whether review backend/infrastructure failures should fail closed."""
-    pr_review = policy.get("pr_review") if isinstance(policy.get("pr_review"), dict) else {}
-    raw = pr_review.get("block_on_review_failure")
-    if raw is None:
-        return True
-    if isinstance(raw, bool):
-        return raw
-    text = str(raw).strip().lower()
-    if text in {"1", "true", "yes", "y", "on"}:
-        return True
-    if text in {"0", "false", "no", "n", "off"}:
-        return False
-    return True
-
-
-def pr_has_ack_label(
-    pr_or_labels: dict[str, Any] | list[Any],
-    policy: dict[str, Any],
-) -> tuple[bool, str]:
-    """Return (matched, label_name) when the PR carries a configured ack label."""
-    wanted = ack_labels_from_policy(policy)
-    if not wanted:
-        return False, ""
-    if isinstance(pr_or_labels, dict):
-        labels = pr_or_labels.get("labels") or []
-    else:
-        labels = pr_or_labels
-    if not isinstance(labels, list):
-        return False, ""
-    for item in labels:
-        name = ""
-        if isinstance(item, dict):
-            name = str(item.get("name") or "").strip()
-        elif isinstance(item, str):
-            name = item.strip()
-        if name in wanted:
-            return True, name
-    return False, ""
 
 
 def _fail_closed(reason: str) -> dict[str, Any]:
@@ -359,18 +293,6 @@ def fetch_pr_files(token: str, repo: str, pr_number: int) -> list[dict[str, Any]
     return files
 
 
-def fetch_pr_labels(token: str, repo: str, pr_number: int) -> list[dict[str, Any]]:
-    """Fetch current PR labels from the API (not the possibly-stale event payload)."""
-    payload = github_request(
-        token,
-        "GET",
-        f"/repos/{repo}/issues/{pr_number}/labels?per_page=100",
-    )
-    if not isinstance(payload, list):
-        return []
-    return [item for item in payload if isinstance(item, dict)]
-
-
 # ---------------------------------------------------------------------------
 # Review prompt
 # ---------------------------------------------------------------------------
@@ -394,7 +316,8 @@ ${BODY}
 
 1. Focus on **security vulnerabilities, logic errors, data corruption, crash bugs, race conditions, and API compatibility breaks**.
 2. Do NOT flag: code style, formatting, naming suggestions, minor refactoring preferences, or documentation issues.
-3. For each finding, classify its severity:
+3. Do not emit a finding that concludes no code change is needed. For OIDC, `job_workflow_ref` is absent for explicit direct callers; flag a bypass only when a non-direct repository can reach the direct-caller path despite the allowlists.
+4. For each finding, classify its severity:
    - **critical**: security vulnerability, data loss, production crash
    - **high**: logic error that produces wrong results, API break, memory/connection leak
    - **medium**: missing error handling, performance degradation, race condition
@@ -588,23 +511,6 @@ def _review_backend_is_unconfigured(exc: ReviewError) -> bool:
     return message == NO_REVIEW_BACKEND_CONFIGURED or "oidc repository is not allowed" in normalized
 
 
-def _allow_unconfigured_backend() -> bool:
-    return parse_bool(env_value("CODEX_PR_REVIEW_ALLOW_UNCONFIGURED_BACKEND"))
-
-
-def _review_infrastructure_failure(exc: ReviewError) -> bool:
-    message = str(exc).lower()
-    return any(
-        signal in message
-        for signal in (
-            "codex exec failed",
-            "codex service job failed",
-            "codex service job timed out",
-            "unexpected codex service status",
-        )
-    )
-
-
 def _api_fallback_enabled() -> bool:
     return parse_bool(env_value("CODEX_PR_REVIEW_API_FALLBACK_ENABLED", "true"))
 
@@ -796,7 +702,12 @@ def _run_openai_review(prompt: str, api_key: str, model: str = "") -> str:
 # ---------------------------------------------------------------------------
 
 
-def parse_review_output(text: str) -> dict[str, Any]:
+def parse_review_output(
+    text: str,
+    *,
+    require_findings: bool = True,
+    required_keys: tuple[str, ...] = (),
+) -> dict[str, Any]:
     """Extract the JSON review result from Codex/API output."""
     stripped = text.strip()
 
@@ -807,22 +718,114 @@ def parse_review_output(text: str) -> dict[str, Any]:
     if fence_match:
         stripped = fence_match.group(1).strip()
 
-    # Try to find JSON object boundaries
-    if not stripped.startswith("{"):
-        start = stripped.find("{")
-        end = stripped.rfind("}")
-        if start >= 0 and end > start:
-            stripped = stripped[start : end + 1]
-
+    candidates: list[dict[str, Any]] = []
     try:
         payload = json.loads(stripped)
+        if isinstance(payload, dict):
+            candidates.append(payload)
     except json.JSONDecodeError:
-        raise ReviewError(f"Failed to parse Codex review output as JSON: {stripped[:500]}")
+        decoder = json.JSONDecoder()
+        for index, char in enumerate(stripped):
+            if char != "{":
+                continue
+            try:
+                payload, _end = decoder.raw_decode(stripped[index:])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict):
+                candidates.append(payload)
 
-    if not isinstance(payload, dict):
-        raise ReviewError("Review output is not a JSON object")
+    for payload in candidates:
+        if require_findings and not isinstance(payload.get("findings"), list):
+            continue
+        if any(key not in payload for key in required_keys):
+            continue
+        return payload
 
-    return payload
+    if require_findings:
+        raise ReviewError(f"Failed to parse Codex review output with a findings array: {stripped[:500]}")
+    if required_keys:
+        raise ReviewError(f"Failed to parse Codex review output with required keys: {stripped[:500]}")
+    raise ReviewError(f"Failed to parse Codex review output as JSON: {stripped[:500]}")
+
+
+def parse_arbitration_output(text: str) -> dict[str, str]:
+    """Parse the independent arbiter's constrained verdict."""
+    payload = parse_review_output(text, require_findings=False, required_keys=("verdict", "reason"))
+    verdict = str(payload.get("verdict") or "").strip().lower()
+    if verdict not in {"clear", "block", "ambiguous"}:
+        raise ReviewError("Arbitration output verdict must be clear, block, or ambiguous")
+    reason = str(payload.get("reason") or "").strip()
+    if not reason:
+        raise ReviewError("Arbitration output reason is required")
+    return {"verdict": verdict, "reason": reason}
+
+
+def blocking_finding_fingerprint(findings: list[dict[str, Any]]) -> str:
+    """Return a stable arbitration-candidate identifier despite wording drift."""
+    normalized: list[dict[str, str]] = []
+    for finding in findings:
+        if not isinstance(finding, dict):
+            continue
+        normalized.append(
+            {
+                "category": str(finding.get("category") or "").strip().lower(),
+                "file": str(finding.get("file") or "").strip(),
+                "severity": str(finding.get("severity") or "").strip().lower(),
+            }
+        )
+    if not normalized:
+        return ""
+    payload = json.dumps(sorted(normalized, key=lambda item: json.dumps(item, sort_keys=True)), sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:20]
+
+
+def blocking_finding_fingerprints(findings: list[dict[str, Any]]) -> tuple[str, ...]:
+    """Return per-finding keys so unrelated findings do not reset arbitration state."""
+    return tuple(
+        sorted(
+            {
+                fingerprint
+                for finding in findings
+                if isinstance(finding, dict)
+                for fingerprint in [blocking_finding_fingerprint([finding])]
+                if fingerprint
+            }
+        )
+    )
+
+
+def build_arbitration_prompt(
+    *,
+    repo: str,
+    pr_title: str,
+    diff: str,
+    findings: list[dict[str, Any]],
+) -> str:
+    """Ask an independent Codex pass to adjudicate repeated primary findings."""
+    diff_limited = _truncate_lines(diff, DEFAULT_MAX_CONTEXT_LINES * 3)
+    findings_json = json.dumps(findings, ensure_ascii=False, indent=2)
+    return f"""You are the independent Codex review arbiter for a production quantitative codebase.
+
+The primary reviewer repeatedly raised the blocking findings below. Decide whether every blocking finding remains valid against the current PR diff. Do not defer to the primary reviewer. Require concrete evidence in the changed code or test contract.
+
+Repository: {repo}
+PR title: {pr_title}
+
+## Primary blocking findings
+{findings_json}
+
+## Current PR diff
+{diff_limited}
+
+Return exactly one JSON object:
+{{
+  "verdict": "clear" | "block" | "ambiguous",
+  "reason": "Concrete evidence for the verdict."
+}}
+
+Use `clear` only when all blocking findings are false positives, obsolete, or demonstrably fixed. Use `block` when any blocking finding remains valid. Use `ambiguous` if evidence is insufficient. Do not discuss style or test coverage.
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -921,62 +924,46 @@ def build_pr_comment(
     decision: dict[str, Any],
     pr_url: str,
     *,
-    ack_label: str = "",
     blocking_streak: int = 0,
-    auto_converged: bool = False,
-    auto_converge_after: int = 0,
+    finding_fingerprint: str = "",
+    finding_fingerprints: tuple[str, ...] = (),
+    reviewed_head_sha: str = "",
+    arbitration: dict[str, str] | None = None,
 ) -> str:
     """Build a markdown comment to post on the PR."""
     lines = [
         "<!-- codex-pr-review -->",
         f"{STREAK_MARKER_PREFIX}{int(blocking_streak)}{STREAK_MARKER_SUFFIX}",
+        f"{FINGERPRINT_MARKER_PREFIX}{finding_fingerprint}{FINGERPRINT_MARKER_SUFFIX}",
+        f"{FINGERPRINTS_MARKER_PREFIX}{','.join(finding_fingerprints)}{FINGERPRINTS_MARKER_SUFFIX}",
+        f"{HEAD_SHA_MARKER_PREFIX}{reviewed_head_sha}{HEAD_SHA_MARKER_SUFFIX}",
         "## 🤖 Codex PR Review",
         "",
         decision["summary"],
         "",
     ]
 
-    if auto_converged:
+    if arbitration:
+        verdict = arbitration.get("verdict", "")
+        reason = arbitration.get("reason", "")
+        emoji = "✅" if verdict == "clear" else "🚫" if verdict == "block" else "⚠️"
         lines.extend(
             [
-                f"> Auto-converged after **{blocking_streak}** consecutive blocking review "
-                f"rounds (threshold `{auto_converge_after}`). Findings are still reported, "
-                "but the review check will not block merge.",
+                "### ⚖️ Codex Review Arbitration",
+                "",
+                f"{emoji} **{verdict or 'error'}**: {reason}",
                 "",
             ]
         )
-    elif ack_label:
-        lines.extend(
-            [
-                f"> Human ack label `{ack_label}` is present. Findings are still reported, "
-                "but the review check will not block merge.",
-                "",
-            ]
-        )
-    elif decision.get("blocked") and auto_converge_after > 0:
-        remaining = max(0, auto_converge_after - blocking_streak)
-        lines.extend(
-            [
-                f"> Blocking streak `{blocking_streak}/{auto_converge_after}`. "
-                f"Auto-converge in **{remaining}** more consecutive blocking round(s) "
-                "if findings keep oscillating without a clean pass.",
-                "",
-            ]
-        )
-
     blocking = decision["blocking_findings"]
     if blocking:
         lines.extend([
             "### 🚫 Blocking Issues",
             "",
             (
-                "These issues were reported as blocking; merge is allowed because of auto-converge:"
-                if auto_converged
-                else (
-                    "These issues were reported as blocking; merge is allowed because of the ack label:"
-                    if ack_label
-                    else "These issues must be fixed before this PR can be merged:"
-                )
+                "These primary findings were cleared by independent Codex arbitration:"
+                if arbitration and arbitration.get("verdict") == "clear"
+                else "These issues must be fixed before this PR can be merged:"
             ),
             "",
         ])
@@ -1046,12 +1033,24 @@ def find_existing_review_comment(
         if not isinstance(comments, list):
             break
         for comment in comments:
-            if isinstance(comment, dict) and marker in str(comment.get("body", "")):
+            if _is_trusted_review_comment(comment) and marker in str(comment.get("body", "")):
                 return comment.get("id"), str(comment.get("body") or "")
         if len(comments) < 100:
             break
         page += 1
     return None, ""
+
+
+def _is_trusted_review_comment(comment: Any) -> bool:
+    """Accept review state only from the GitHub Actions identity that writes it."""
+    if not isinstance(comment, dict):
+        return False
+    user = comment.get("user")
+    if not isinstance(user, dict):
+        return False
+    expected_login = env_value("CODEX_PR_REVIEW_COMMENT_AUTHOR", "github-actions[bot]").strip().casefold()
+    actual_login = str(user.get("login") or "").strip().casefold()
+    return bool(expected_login and actual_login == expected_login)
 
 
 def parse_blocking_streak(body: str) -> int:
@@ -1068,21 +1067,67 @@ def parse_blocking_streak(body: str) -> int:
         return 0
 
 
-def next_blocking_streak(previous_streak: int, *, blocked: bool) -> int:
-    """Advance or reset the consecutive blocking streak."""
-    if not blocked:
-        return 0
-    return previous_streak + 1
+def parse_blocking_fingerprint(body: str) -> str:
+    """Read the primary finding fingerprint from a prior review comment."""
+    match = re.search(
+        rf"{re.escape(FINGERPRINT_MARKER_PREFIX)}([0-9a-f]*){re.escape(FINGERPRINT_MARKER_SUFFIX)}",
+        body or "",
+    )
+    return match.group(1) if match else ""
 
 
-def should_auto_converge(
-    streak: int,
+def parse_blocking_fingerprints(body: str) -> tuple[str, ...]:
+    """Read per-finding keys, including comments written before the new marker."""
+    match = re.search(
+        rf"{re.escape(FINGERPRINTS_MARKER_PREFIX)}([0-9a-f,]*){re.escape(FINGERPRINTS_MARKER_SUFFIX)}",
+        body or "",
+    )
+    if match:
+        return tuple(sorted({item for item in match.group(1).split(",") if re.fullmatch(r"[0-9a-f]{20}", item)}))
+
+    legacy_findings: list[dict[str, str]] = []
+    for severity, category, file_path in re.findall(
+        r"^#### \d+\. .*?\[([A-Z]+)\] (.+?) in `([^`]+)`$",
+        body or "",
+        flags=re.MULTILINE,
+    ):
+        legacy_findings.append(
+            {"severity": severity.lower(), "category": category.lower(), "file": file_path}
+        )
+    return blocking_finding_fingerprints(legacy_findings)
+
+
+def parse_reviewed_head_sha(body: str) -> str:
+    """Read the reviewed pull-request head SHA from a prior trusted comment."""
+    match = re.search(
+        rf"{re.escape(HEAD_SHA_MARKER_PREFIX)}([0-9a-f]{{7,64}}){re.escape(HEAD_SHA_MARKER_SUFFIX)}",
+        body or "",
+    )
+    return match.group(1) if match else ""
+
+
+def next_blocking_streak(
+    previous_streak: int,
     *,
     blocked: bool,
-    threshold: int,
-) -> bool:
-    """True when this round is blocked and streak has reached the threshold."""
-    return bool(blocked and threshold > 0 and streak >= threshold)
+    previous_fingerprint: str = "",
+    current_fingerprint: str = "",
+    previous_head_sha: str = "",
+    current_head_sha: str = "",
+) -> int:
+    """Advance only when the same finding is reviewed on a new PR head."""
+    if not blocked:
+        return 0
+    if previous_fingerprint and current_fingerprint and previous_fingerprint == current_fingerprint:
+        if previous_head_sha and current_head_sha and previous_head_sha != current_head_sha:
+            return previous_streak + 1
+        return max(1, previous_streak)
+    return 1
+
+
+def should_arbitrate(*, blocked: bool, streak: int, repeated: bool, new_head: bool) -> bool:
+    """Arbitrate only after the same finding survives a new author commit."""
+    return bool(blocked and repeated and new_head and streak >= ARBITRATION_REPEAT_THRESHOLD)
 
 
 def upsert_pr_comment(
@@ -1140,6 +1185,8 @@ def main() -> int:
     pr_title = str(pr.get("title", ""))
     pr_body = str(pr.get("body", ""))
     pr_url = str(pr.get("html_url", ""))
+    head = pr.get("head") if isinstance(pr.get("head"), dict) else {}
+    current_head_sha = str(head.get("sha") or "").strip().lower()
 
     print(f"Reviewing PR #{pr_number}: {pr_title}")
 
@@ -1162,24 +1209,15 @@ def main() -> int:
     if policy.get("policy_errors"):
         print(f"::warning::Policy errors: {policy['policy_errors']}")
 
-    # Prefer live labels from the API: pull_request_target event payloads can be
-    # stale after a label is added without a new push.
-    try:
-        live_labels = fetch_pr_labels(token, repo, pr_number)
-    except ReviewError as exc:
-        print(f"::warning::Failed to fetch live PR labels: {exc}")
-        live_labels = pr.get("labels") or []
-    ack_matched, ack_label = pr_has_ack_label(live_labels, policy)
-    if ack_matched:
-        print(f"PR has ack label `{ack_label}`; review findings will not fail the check.")
-    auto_converge_after = auto_converge_after_from_policy(policy)
-    block_on_review_failure = block_on_review_failure_from_policy(policy)
     try:
         _existing_id, previous_comment = find_existing_review_comment(token, repo, pr_number)
     except ReviewError as exc:
         print(f"::warning::Failed to fetch prior review comment: {exc}")
         previous_comment = ""
     previous_streak = parse_blocking_streak(previous_comment)
+    previous_fingerprint = parse_blocking_fingerprint(previous_comment)
+    previous_fingerprints = parse_blocking_fingerprints(previous_comment)
+    previous_head_sha = parse_reviewed_head_sha(previous_comment)
 
     # First pass: classify files. If all files are low-risk, skip review.
     all_low_risk = changed_files_are_low_risk(changed_paths, policy)
@@ -1199,9 +1237,8 @@ def main() -> int:
             build_pr_comment(
                 decision,
                 pr_url,
-                ack_label=ack_label if ack_matched else "",
                 blocking_streak=0,
-                auto_converge_after=auto_converge_after,
+                reviewed_head_sha=current_head_sha,
             ),
         )
         return 0
@@ -1226,39 +1263,14 @@ def main() -> int:
         )
     except ReviewError as exc:
         print(f"::error::Codex review failed: {exc}", file=sys.stderr)
-        if all_low_risk:
-            # Don't block low-risk docs/tests when the review infra is unavailable.
-            warning_body = (
-                "<!-- codex-pr-review -->\n"
-                "## 🤖 Codex PR Review\n\n"
-                "⚠️ **Review skipped**: The Codex review could not be completed.\n\n"
-                f"```\n{exc}\n```\n"
-            )
-            upsert_pr_comment(token, repo, pr_number, warning_body)
-            return 0
-
-        # Caller repositories may not have the central AI backend secrets configured.
-        # In that case, leave an explicit human-review note but do not create
-        # persistent red workflow runs. Other high-risk review infrastructure
-        # failures still fail closed.
         warning_body = (
             "<!-- codex-pr-review -->\n"
             "## 🤖 Codex PR Review\n\n"
-            "⚠️ **Human review required**: The Codex review could not be completed.\n\n"
+            "🚫 **Merge blocked**: The Codex review could not be completed.\n\n"
             f"```\n{exc}\n```\n\n"
-            "Please ensure a human reviewer checks this PR before merging.\n"
+            "The review check fails closed until a valid Codex review is available.\n"
         )
         upsert_pr_comment(token, repo, pr_number, warning_body)
-        if (
-            not block_on_review_failure
-            and _review_backend_is_unconfigured(exc)
-            and _allow_unconfigured_backend()
-        ):
-            print("::warning::Codex review backend is not configured; leaving human-review note without failing the workflow.")
-            return 0
-        if not block_on_review_failure and _review_infrastructure_failure(exc):
-            print("::warning::Codex review infrastructure failure; leaving human-review note without failing the workflow.")
-            return 0
         return 1
 
     print(f"Codex output: {len(output)} chars")
@@ -1278,7 +1290,7 @@ def main() -> int:
             "</details>\n"
         )
         upsert_pr_comment(token, repo, pr_number, raw_body)
-        return 0
+        return 1
 
     findings = review.get("findings", [])
     if not isinstance(findings, list):
@@ -1287,22 +1299,60 @@ def main() -> int:
 
     # Evaluate findings
     decision = evaluate_findings(findings, changed_files, policy)
-    blocking_streak = next_blocking_streak(previous_streak, blocked=bool(decision["blocked"]))
-    auto_converged = should_auto_converge(
-        blocking_streak,
-        blocked=bool(decision["blocked"]),
-        threshold=auto_converge_after,
+    finding_fingerprint = blocking_finding_fingerprint(decision["blocking_findings"])
+    finding_fingerprints = blocking_finding_fingerprints(decision["blocking_findings"])
+    repeated_fingerprints = tuple(sorted(set(finding_fingerprints).intersection(previous_fingerprints)))
+    repeated_finding = bool(
+        decision["blocked"]
+        and repeated_fingerprints
     )
-    bypass = bool(ack_matched or auto_converged)
-
+    new_head = bool(previous_head_sha and current_head_sha and previous_head_sha != current_head_sha)
+    blocking_streak = next_blocking_streak(
+        previous_streak,
+        blocked=bool(decision["blocked"]),
+        previous_fingerprint=repeated_fingerprints[0] if repeated_fingerprints else previous_fingerprint,
+        current_fingerprint=repeated_fingerprints[0] if repeated_fingerprints else finding_fingerprint,
+        previous_head_sha=previous_head_sha,
+        current_head_sha=current_head_sha,
+    )
+    arbitration: dict[str, str] | None = None
+    if should_arbitrate(
+        blocked=bool(decision["blocked"]),
+        streak=blocking_streak,
+        repeated=repeated_finding,
+        new_head=new_head,
+    ):
+        arbitration_prompt = build_arbitration_prompt(
+            repo=repo,
+            pr_title=pr_title,
+            diff=diff,
+            findings=decision["blocking_findings"],
+        )
+        try:
+            arbitration = parse_arbitration_output(
+                run_codex_review_with_fallback(
+                    arbitration_prompt,
+                    DEFAULT_TIMEOUT_MINUTES,
+                    complexity=TASK_COMPLEXITY_HIGH,
+                    changed_file_count=len(changed_paths),
+                    changed_line_count=len(diff.splitlines()),
+                )
+            )
+        except ReviewError as exc:
+            arbitration = {"verdict": "ambiguous", "reason": f"Arbitration failed closed: {exc}"}
+        if arbitration.get("verdict") == "clear":
+            decision["blocked"] = False
+            blocking_streak = 0
+            decision["summary"] = "✅ **Merge allowed**: repeated primary findings were cleared by independent Codex arbitration"
     # Post comment
     comment_body = build_pr_comment(
         decision,
         pr_url,
-        ack_label=ack_label if ack_matched else "",
         blocking_streak=blocking_streak,
-        auto_converged=auto_converged,
-        auto_converge_after=auto_converge_after,
+        finding_fingerprint=finding_fingerprint,
+        finding_fingerprints=finding_fingerprints,
+        reviewed_head_sha=current_head_sha,
+        arbitration=arbitration,
     )
     upsert_pr_comment(token, repo, pr_number, comment_body)
 
@@ -1311,12 +1361,15 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
     decision_payload = {
         **decision,
-        "ack_label": ack_label if ack_matched else "",
-        "ack_bypass": bool(ack_matched and decision["blocked"]),
         "blocking_streak": blocking_streak,
-        "auto_converge_after": auto_converge_after,
-        "auto_converged": auto_converged,
-        "ack_bypass_or_auto": bool(bypass and decision["blocked"]),
+        "finding_fingerprint": finding_fingerprint,
+        "finding_fingerprints": finding_fingerprints,
+        "repeated_fingerprints": repeated_fingerprints,
+        "repeated_finding": repeated_finding,
+        "previous_head_sha": previous_head_sha,
+        "current_head_sha": current_head_sha,
+        "new_head": new_head,
+        "arbitration": arbitration,
     }
     (output_dir / "decision.json").write_text(
         json.dumps(decision_payload, ensure_ascii=False, indent=2) + "\n",
@@ -1327,31 +1380,18 @@ def main() -> int:
     github_output = os.environ.get("GITHUB_OUTPUT")
     if github_output:
         with open(github_output, "a", encoding="utf-8") as f:
-            f.write(f"blocked={'true' if decision['blocked'] and not bypass else 'false'}\n")
+            f.write(f"blocked={'true' if decision['blocked'] else 'false'}\n")
             f.write(f"total_findings={decision['total_findings']}\n")
             f.write(f"blocking_count={len(decision['blocking_findings'])}\n")
-            f.write(f"ack_bypass={'true' if ack_matched and decision['blocked'] else 'false'}\n")
-            f.write(f"auto_converged={'true' if auto_converged else 'false'}\n")
             f.write(f"blocking_streak={blocking_streak}\n")
-
-    if decision["blocked"] and auto_converged:
-        print(
-            f"::warning::Codex found blocking issues for {blocking_streak} consecutive rounds; "
-            f"auto-converging at threshold {auto_converge_after}."
-        )
-        return 0
-
-    if decision["blocked"] and ack_matched:
-        print(
-            f"::warning::Codex found blocking issues, but ack label `{ack_label}` "
-            "allows the review check to pass."
-        )
-        return 0
+            f.write(f"repeated_finding={'true' if repeated_finding else 'false'}\n")
+            f.write(f"new_head={'true' if new_head else 'false'}\n")
+            f.write(f"arbitration_verdict={arbitration.get('verdict', '') if arbitration else ''}\n")
 
     if decision["blocked"]:
         print(
             f"::error::Merge blocked: serious issues found "
-            f"(streak {blocking_streak}/{auto_converge_after or '∞'})"
+            f"(repeated-finding streak {blocking_streak})"
         )
         return 1
 

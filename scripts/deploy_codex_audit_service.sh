@@ -7,11 +7,15 @@ AUDIT_SERVICE_NAME="${CODEX_AUDIT_SERVICE_SYSTEMD_NAME:-codex-audit-service}"
 DEPLOY_DIR="${CODEX_AUDIT_SERVICE_DEPLOY_DIR:-/opt/codex-audit-bridge}"
 AUDIT_PORT="${CODEX_AUDIT_SERVICE_PORT:-8797}"
 AUDIENCE="${CODEX_AUDIT_SERVICE_AUDIENCE:-quant-codex-audit}"
-ALLOWED_REPOSITORIES="${CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES:-QuantStrategyLab/AIAuditBridge}"
-ALLOWED_WORKFLOW_REFS="${CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS:-QuantStrategyLab/AIAuditBridge/.github/workflows/codex_audit.yml@refs/heads/main,QuantStrategyLab/AIAuditBridge/.github/workflows/codex_pr_review.yml@refs/heads/main,QuantStrategyLab/AIAuditBridge/.github/workflows/codex_pr_review.yml@refs/pull/*/merge}"
+ALLOWED_REPOSITORIES="${CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES:-QuantStrategyLab/AIAuditBridge,QuantStrategyLab/QuantRuntimeSettings,QuantStrategyLab/QuantPlatformKit}"
+# Consumer review workflows use pull_request_target, so every OIDC workflow_ref remains pinned to refs/heads/main.
+# The ref allowlist retains PR merge refs because GitHub can preserve the incoming PR ref for reusable calls; _verify_github_oidc requires both allowlists.
+ALLOWED_WORKFLOW_REFS="${CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS:-QuantStrategyLab/AIAuditBridge/.github/workflows/codex_audit.yml@refs/heads/main,QuantStrategyLab/AIAuditBridge/.github/workflows/codex_pr_review.yml@refs/heads/main,QuantStrategyLab/QuantRuntimeSettings/.github/workflows/codex_pr_review.yml@refs/heads/main,QuantStrategyLab/QuantPlatformKit/.github/workflows/codex_pr_review.yml@refs/heads/main}"
 ALLOWED_REFS="${CODEX_AUDIT_SERVICE_ALLOWED_REFS:-refs/heads/main,refs/pull/*/merge}"
 ALLOWED_REPOSITORY_VISIBILITIES="${CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORY_VISIBILITIES:-public}"
-ALLOWED_SOURCE_REPOSITORIES="${CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES:-QuantStrategyLab/AIAuditBridge,QuantStrategyLab/CryptoLivePoolPipelines,QuantStrategyLab/HkEquitySnapshotPipelines,QuantStrategyLab/UsEquitySnapshotPipelines,QuantStrategyLab/ResearchSignalContextPipelines}"
+ALLOWED_JOB_WORKFLOW_REFS="${CODEX_AUDIT_SERVICE_ALLOWED_JOB_WORKFLOW_REFS:-QuantStrategyLab/AIAuditBridge/.github/workflows/codex_pr_review.yml@refs/heads/main}"
+ALLOWED_DIRECT_REPOSITORIES="${CODEX_AUDIT_SERVICE_ALLOWED_DIRECT_REPOSITORIES:-QuantStrategyLab/AIAuditBridge}"
+ALLOWED_SOURCE_REPOSITORIES="${CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES:-QuantStrategyLab/AIAuditBridge,QuantStrategyLab/QuantRuntimeSettings,QuantStrategyLab/QuantPlatformKit,QuantStrategyLab/CryptoLivePoolPipelines,QuantStrategyLab/HkEquitySnapshotPipelines,QuantStrategyLab/UsEquitySnapshotPipelines,QuantStrategyLab/ResearchSignalContextPipelines}"
 JOB_DIR="${CODEX_AUDIT_SERVICE_JOB_DIR:-/var/lib/codex-audit-bridge/jobs}"
 ADMIN_ENV_FILE="${CODEX_AUDIT_SERVICE_ADMIN_ENV_FILE:-/etc/codex-audit-bridge/admin.env}"
 EXECUTION_POLICY_FILE="${CODEX_AUDIT_SERVICE_EXECUTION_POLICY_PATH:-/etc/codex-audit-bridge-policy/execution_policy.json}"
@@ -367,6 +371,8 @@ Environment=CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES=${ALLOWED_REPOSITORIES}
 Environment=CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS=${ALLOWED_WORKFLOW_REFS}
 Environment=CODEX_AUDIT_SERVICE_ALLOWED_REFS=${ALLOWED_REFS}
 Environment=CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORY_VISIBILITIES=${ALLOWED_REPOSITORY_VISIBILITIES}
+Environment=CODEX_AUDIT_SERVICE_ALLOWED_JOB_WORKFLOW_REFS=${ALLOWED_JOB_WORKFLOW_REFS}
+Environment=CODEX_AUDIT_SERVICE_ALLOWED_DIRECT_REPOSITORIES=${ALLOWED_DIRECT_REPOSITORIES}
 Environment=CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES=${ALLOWED_SOURCE_REPOSITORIES}
 Environment=CODEX_AUDIT_SERVICE_JOB_DIR=${JOB_DIR}
 Environment=CODEX_AUDIT_SERVICE_QUOTA_STORE=${JOB_DIR}/quota.json
@@ -399,6 +405,8 @@ Environment="CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES=${ALLOWED_REPOSITORIES}"
 Environment="CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS=${ALLOWED_WORKFLOW_REFS}"
 Environment="CODEX_AUDIT_SERVICE_ALLOWED_REFS=${ALLOWED_REFS}"
 Environment="CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORY_VISIBILITIES=${ALLOWED_REPOSITORY_VISIBILITIES}"
+Environment="CODEX_AUDIT_SERVICE_ALLOWED_JOB_WORKFLOW_REFS=${ALLOWED_JOB_WORKFLOW_REFS}"
+Environment="CODEX_AUDIT_SERVICE_ALLOWED_DIRECT_REPOSITORIES=${ALLOWED_DIRECT_REPOSITORIES}"
 Environment="CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES=${ALLOWED_SOURCE_REPOSITORIES}"
 Environment="CODEX_AUDIT_SERVICE_EXECUTION_POLICY_PATH=${EXECUTION_POLICY_FILE}"
 EOF_DROPIN
