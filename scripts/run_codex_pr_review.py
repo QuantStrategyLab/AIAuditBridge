@@ -513,7 +513,11 @@ def _review_backend_is_unconfigured(exc: ReviewError) -> bool:
 
 def _review_capacity_is_unavailable(exc: ReviewError) -> bool:
     message = str(exc).lower()
-    return "[quota_or_capacity_failure]" in message or "usage limit" in message
+    return (
+        "[quota_or_capacity_failure]" in message
+        or "usage limit" in message
+        or "codex service job failed [unknown_failure]: codex exec failed" in message
+    )
 
 
 def _api_fallback_enabled() -> bool:
