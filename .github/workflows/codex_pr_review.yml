@@ -145,7 +145,7 @@ jobs:
           fi
           CODEX_PR_REVIEW_API_FALLBACK_ENABLED="${api_fallback_enabled}" \
           CODEX_PR_REVIEW_DIRECT_API_PRIMARY_ENABLED="${direct_api_primary_enabled}" \
-            python -I "${script_path}"
+            timeout --signal=TERM --kill-after=60s 25m python -I "${script_path}"
 
       - name: Upload review diagnostics
         if: always()

@@ -761,7 +761,7 @@ class CodexPrReviewWorkflowTest(unittest.TestCase):
         self.assertIn("must be true or false", workflow)
         self.assertIn("tr '[:upper:]' '[:lower:]'", workflow)
         self.assertIn('if ! api_fallback_enabled="$(resolve_boolean', workflow)
-        self.assertIn('python -I "${script_path}"', workflow)
+        self.assertIn('timeout --signal=TERM --kill-after=60s 25m python -I "${script_path}"', workflow)
         self.assertIn("inputs.caller_concurrency_key || github.event.pull_request.number || github.run_id", workflow)
         self.assertNotIn("Validate bridge checkout token", workflow)
         self.assertIn("required: false", workflow)
