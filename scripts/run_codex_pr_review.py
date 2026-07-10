@@ -21,8 +21,6 @@ from pathlib import Path
 from string import Template
 from typing import Any
 
-from service.model_router import route_model
-
 # ---------------------------------------------------------------------------
 # Configuration (aligned with CodexAuditBridge)
 # ---------------------------------------------------------------------------
@@ -30,6 +28,10 @@ from service.model_router import route_model
 API_BASE = "https://api.github.com"
 BRIDGE_ROOT = Path(__file__).resolve().parents[1]
 ROOT = Path(os.environ.get("CODEX_PR_REVIEW_REPO_ROOT") or os.environ.get("GITHUB_WORKSPACE") or Path.cwd()).resolve()
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from service.model_router import route_model
+
 POLICY_PATH = ROOT / ".github" / "codex_auto_merge_policy.json"
 PROMPT_TEMPLATE_PATH = BRIDGE_ROOT / "prompts" / "pr_review.md"
 DEFAULT_SERVICE_AUDIENCE = "quant-codex-audit"
