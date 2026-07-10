@@ -690,7 +690,7 @@ def _job_dedupe_key(payload: dict[str, Any]) -> str:
 
 
 def _classify_codex_exec_failure(text: str) -> str:
-    if any(word in text for word in ("quota", "rate limit", "too many active", "budget")):
+    if any(word in text for word in ("quota", "rate limit", "too many active", "budget", "usage limit")):
         return "quota_or_capacity_failure"
     return "unknown_failure"
 

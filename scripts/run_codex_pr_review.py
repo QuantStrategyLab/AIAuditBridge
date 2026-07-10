@@ -491,7 +491,9 @@ def run_codex_service_review(prompt: str, timeout_minutes: int, complexity: str 
             return output.strip()
         if status == "failed":
             error = str(job_payload.get("error") or "unknown failure")
-            raise ReviewError(f"Codex service job failed: {error[:600]}")
+            failure_category = str(job_payload.get("failure_category") or "").strip()
+            category_suffix = f" [{failure_category}]" if failure_category else ""
+            raise ReviewError(f"Codex service job failed{category_suffix}: {error[:600]}")
         if status not in {"queued", "running"}:
             raise ReviewError(f"Unexpected Codex service status: {status!r}")
 
@@ -507,6 +509,11 @@ def _review_backend_is_unconfigured(exc: ReviewError) -> bool:
     message = str(exc).strip()
     normalized = message.lower()
     return message == NO_REVIEW_BACKEND_CONFIGURED or "oidc repository is not allowed" in normalized
+
+
+def _review_capacity_is_unavailable(exc: ReviewError) -> bool:
+    message = str(exc).lower()
+    return "[quota_or_capacity_failure]" in message or "usage limit" in message
 
 
 def _api_fallback_enabled() -> bool:
@@ -1260,6 +1267,16 @@ def main() -> int:
             changed_line_count=len(diff.splitlines()),
         )
     except ReviewError as exc:
+        if _review_capacity_is_unavailable(exc):
+            print(f"::warning::Codex review unavailable due to quota or capacity: {exc}")
+            warning_body = (
+                "<!-- codex-pr-review -->\n"
+                "## 🤖 Codex PR Review\n\n"
+                "⚠️ **Review unavailable**: Codex review quota or capacity is unavailable. "
+                "No direct paid API fallback was used; required CI checks remain the merge gate.\n"
+            )
+            upsert_pr_comment(token, repo, pr_number, warning_body)
+            return 0
         print(f"::error::Codex review failed: {exc}", file=sys.stderr)
         warning_body = (
             "<!-- codex-pr-review -->\n"

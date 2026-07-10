@@ -358,6 +358,33 @@ class RunCodexPrReviewTests(unittest.TestCase):
         backend.assert_called_once()
         self.assertIn("Merge blocked", comment.call_args.args[3])
 
+    def test_main_allows_required_ci_to_gate_when_review_quota_is_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            event_path = self._write_event(tmpdir, ["src/app.py"])
+            env = {
+                "GH_TOKEN": "token",
+                "GITHUB_REPOSITORY": "org/repo",
+                "GITHUB_EVENT_PATH": event_path,
+                "GITHUB_EVENT_NAME": "pull_request",
+            }
+            with (
+                patch.dict(os.environ, env, clear=True),
+                patch("scripts.run_codex_pr_review.fetch_pr_files", return_value=[{"filename": "src/app.py"}]),
+                patch("scripts.run_codex_pr_review.fetch_pr_diff", return_value="diff --git a/src/app.py b/src/app.py"),
+                patch("scripts.run_codex_pr_review.load_policy", return_value=run_codex_pr_review._default_policy()),
+                patch("scripts.run_codex_pr_review.find_existing_review_comment", return_value=(None, "")),
+                patch(
+                    "scripts.run_codex_pr_review.run_codex_review_with_fallback",
+                    side_effect=ReviewError("Codex service job failed [quota_or_capacity_failure]: usage limits reached"),
+                ),
+                patch("scripts.run_codex_pr_review.upsert_pr_comment") as comment,
+            ):
+                self.assertEqual(run_codex_pr_review.main(), 0)
+
+        comment.assert_called_once()
+        self.assertIn("Review unavailable", comment.call_args.args[3])
+        self.assertNotIn("Merge blocked", comment.call_args.args[3])
+
     def test_main_skips_low_risk_docs_before_calling_review_backend(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             event_path = self._write_event(tmpdir, ["docs/guide.md", "tests/test_x.py"])
