@@ -46,10 +46,12 @@ class RunCodexPrReviewTests(unittest.TestCase):
         reclassified = [dict(findings[0], severity="critical")]
 
         fingerprint = run_codex_pr_review.blocking_finding_fingerprint(findings)
+        fingerprints = run_codex_pr_review.blocking_finding_fingerprints(findings)
         self.assertEqual(fingerprint, run_codex_pr_review.blocking_finding_fingerprint(reordered))
         self.assertEqual(fingerprint, run_codex_pr_review.blocking_finding_fingerprint(reworded))
         self.assertNotEqual(fingerprint, run_codex_pr_review.blocking_finding_fingerprint(other))
         self.assertNotEqual(fingerprint, run_codex_pr_review.blocking_finding_fingerprint(reclassified))
+        self.assertEqual(fingerprints, run_codex_pr_review.blocking_finding_fingerprints(reworded))
         self.assertEqual(
             run_codex_pr_review.next_blocking_streak(
                 1,
@@ -114,6 +116,13 @@ class RunCodexPrReviewTests(unittest.TestCase):
                 run_codex_pr_review.find_existing_review_comment("token", "org/repo", 7),
                 (2, trusted["body"]),
             )
+
+    def test_legacy_comment_fingerprints_are_recovered_per_finding(self) -> None:
+        body = "#### 1. 🟠 [HIGH] Security in `service/auth.py`\n"
+        expected = run_codex_pr_review.blocking_finding_fingerprints(
+            [{"severity": "high", "category": "security", "file": "service/auth.py"}]
+        )
+        self.assertEqual(run_codex_pr_review.parse_blocking_fingerprints(body), expected)
 
     def test_repository_policy_has_no_bypass_fields(self) -> None:
         policy = run_codex_pr_review.load_policy()
@@ -429,10 +438,12 @@ class RunCodexPrReviewTests(unittest.TestCase):
                 }
             )
             fingerprint = run_codex_pr_review.blocking_finding_fingerprint(json.loads(review_json)["findings"])
+            fingerprints = run_codex_pr_review.blocking_finding_fingerprints(json.loads(review_json)["findings"])
             prior_comment = (
                 "<!-- codex-pr-review -->\n"
                 "<!-- codex-pr-review-streak:1 -->\n"
                 f"<!-- codex-pr-review-fingerprint:{fingerprint} -->\n"
+                f"<!-- codex-pr-review-fingerprints:{','.join(fingerprints)} -->\n"
                 "<!-- codex-pr-review-head-sha:deadbeef -->\n"
                 "## prior\n"
             )
@@ -462,6 +473,7 @@ class RunCodexPrReviewTests(unittest.TestCase):
         comment.assert_called_once()
         body = comment.call_args.args[3]
         self.assertIn("codex-pr-review-streak:2", body)
+        self.assertIn("codex-pr-review-fingerprints:", body)
         self.assertIn("codex-pr-review-head-sha:abc123", body)
         self.assertIn("Codex Review Arbitration", body)
         self.assertIn("clear", body)

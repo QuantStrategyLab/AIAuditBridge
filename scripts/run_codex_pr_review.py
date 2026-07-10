@@ -64,6 +64,8 @@ STREAK_MARKER_PREFIX = "<!-- codex-pr-review-streak:"
 STREAK_MARKER_SUFFIX = " -->"
 FINGERPRINT_MARKER_PREFIX = "<!-- codex-pr-review-fingerprint:"
 FINGERPRINT_MARKER_SUFFIX = " -->"
+FINGERPRINTS_MARKER_PREFIX = "<!-- codex-pr-review-fingerprints:"
+FINGERPRINTS_MARKER_SUFFIX = " -->"
 HEAD_SHA_MARKER_PREFIX = "<!-- codex-pr-review-head-sha:"
 HEAD_SHA_MARKER_SUFFIX = " -->"
 ARBITRATION_REPEAT_THRESHOLD = 2
@@ -763,6 +765,21 @@ def blocking_finding_fingerprint(findings: list[dict[str, Any]]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:20]
 
 
+def blocking_finding_fingerprints(findings: list[dict[str, Any]]) -> tuple[str, ...]:
+    """Return per-finding keys so unrelated findings do not reset arbitration state."""
+    return tuple(
+        sorted(
+            {
+                fingerprint
+                for finding in findings
+                if isinstance(finding, dict)
+                for fingerprint in [blocking_finding_fingerprint([finding])]
+                if fingerprint
+            }
+        )
+    )
+
+
 def build_arbitration_prompt(
     *,
     repo: str,
@@ -894,6 +911,7 @@ def build_pr_comment(
     *,
     blocking_streak: int = 0,
     finding_fingerprint: str = "",
+    finding_fingerprints: tuple[str, ...] = (),
     reviewed_head_sha: str = "",
     arbitration: dict[str, str] | None = None,
 ) -> str:
@@ -902,6 +920,7 @@ def build_pr_comment(
         "<!-- codex-pr-review -->",
         f"{STREAK_MARKER_PREFIX}{int(blocking_streak)}{STREAK_MARKER_SUFFIX}",
         f"{FINGERPRINT_MARKER_PREFIX}{finding_fingerprint}{FINGERPRINT_MARKER_SUFFIX}",
+        f"{FINGERPRINTS_MARKER_PREFIX}{','.join(finding_fingerprints)}{FINGERPRINTS_MARKER_SUFFIX}",
         f"{HEAD_SHA_MARKER_PREFIX}{reviewed_head_sha}{HEAD_SHA_MARKER_SUFFIX}",
         "## 🤖 Codex PR Review",
         "",
@@ -1042,6 +1061,27 @@ def parse_blocking_fingerprint(body: str) -> str:
     return match.group(1) if match else ""
 
 
+def parse_blocking_fingerprints(body: str) -> tuple[str, ...]:
+    """Read per-finding keys, including comments written before the new marker."""
+    match = re.search(
+        rf"{re.escape(FINGERPRINTS_MARKER_PREFIX)}([0-9a-f,]*){re.escape(FINGERPRINTS_MARKER_SUFFIX)}",
+        body or "",
+    )
+    if match:
+        return tuple(sorted({item for item in match.group(1).split(",") if re.fullmatch(r"[0-9a-f]{20}", item)}))
+
+    legacy_findings: list[dict[str, str]] = []
+    for severity, category, file_path in re.findall(
+        r"^#### \d+\. .*?\[([A-Z]+)\] (.+?) in `([^`]+)`$",
+        body or "",
+        flags=re.MULTILINE,
+    ):
+        legacy_findings.append(
+            {"severity": severity.lower(), "category": category.lower(), "file": file_path}
+        )
+    return blocking_finding_fingerprints(legacy_findings)
+
+
 def parse_reviewed_head_sha(body: str) -> str:
     """Read the reviewed pull-request head SHA from a prior trusted comment."""
     match = re.search(
@@ -1161,6 +1201,7 @@ def main() -> int:
         previous_comment = ""
     previous_streak = parse_blocking_streak(previous_comment)
     previous_fingerprint = parse_blocking_fingerprint(previous_comment)
+    previous_fingerprints = parse_blocking_fingerprints(previous_comment)
     previous_head_sha = parse_reviewed_head_sha(previous_comment)
 
     # First pass: classify files. If all files are low-risk, skip review.
@@ -1244,17 +1285,18 @@ def main() -> int:
     # Evaluate findings
     decision = evaluate_findings(findings, changed_files, policy)
     finding_fingerprint = blocking_finding_fingerprint(decision["blocking_findings"])
+    finding_fingerprints = blocking_finding_fingerprints(decision["blocking_findings"])
+    repeated_fingerprints = tuple(sorted(set(finding_fingerprints).intersection(previous_fingerprints)))
     repeated_finding = bool(
         decision["blocked"]
-        and finding_fingerprint
-        and finding_fingerprint == previous_fingerprint
+        and repeated_fingerprints
     )
     new_head = bool(previous_head_sha and current_head_sha and previous_head_sha != current_head_sha)
     blocking_streak = next_blocking_streak(
         previous_streak,
         blocked=bool(decision["blocked"]),
-        previous_fingerprint=previous_fingerprint,
-        current_fingerprint=finding_fingerprint,
+        previous_fingerprint=repeated_fingerprints[0] if repeated_fingerprints else previous_fingerprint,
+        current_fingerprint=repeated_fingerprints[0] if repeated_fingerprints else finding_fingerprint,
         previous_head_sha=previous_head_sha,
         current_head_sha=current_head_sha,
     )
@@ -1292,6 +1334,7 @@ def main() -> int:
         pr_url,
         blocking_streak=blocking_streak,
         finding_fingerprint=finding_fingerprint,
+        finding_fingerprints=finding_fingerprints,
         reviewed_head_sha=current_head_sha,
         arbitration=arbitration,
     )
@@ -1304,6 +1347,8 @@ def main() -> int:
         **decision,
         "blocking_streak": blocking_streak,
         "finding_fingerprint": finding_fingerprint,
+        "finding_fingerprints": finding_fingerprints,
+        "repeated_fingerprints": repeated_fingerprints,
         "repeated_finding": repeated_finding,
         "previous_head_sha": previous_head_sha,
         "current_head_sha": current_head_sha,
