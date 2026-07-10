@@ -34,6 +34,10 @@ class RunCodexPrReviewTests(unittest.TestCase):
         self.assertIn("`job_workflow_ref` is absent for explicit direct callers", prompt)
         self.assertIn("Do not emit a finding that concludes no code change is needed", prompt)
 
+    def test_review_script_never_imports_from_the_pr_checkout(self) -> None:
+        source = Path(run_codex_pr_review.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("SOURCE_ROOT = BRIDGE_ROOT.parent / \"source\"", source)
+
     def test_repeated_findings_are_fingerprinted_before_arbitration(self) -> None:
         findings = [
             {
