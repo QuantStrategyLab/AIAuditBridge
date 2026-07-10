@@ -65,3 +65,7 @@ class ReusableWorkflowOidcAuthTests(unittest.TestCase):
         payload["job_workflow_ref"] = ""
         with self.assertRaisesRegex(PermissionError, "cannot be empty"):
             self._verify(payload, env)
+
+        payload["job_workflow_ref"] = 0
+        with self.assertRaisesRegex(PermissionError, "must be a string"):
+            self._verify(payload, env)

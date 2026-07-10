@@ -134,6 +134,7 @@ class RunCodexPrReviewTests(unittest.TestCase):
         self.assertTrue(
             {"ack_labels", "auto_converge_after", "block_on_review_failure"}.isdisjoint(policy["pr_review"])
         )
+        self.assertEqual(run_codex_pr_review._default_policy()["pr_review"], {})
 
     def test_load_policy_uses_trusted_base_ref(self) -> None:
         trusted_policy = {

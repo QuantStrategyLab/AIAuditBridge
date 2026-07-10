@@ -181,6 +181,7 @@ def _default_policy() -> dict[str, Any]:
         },
         "max_changed_files": 30,
         "max_changed_lines": 2000,
+        "pr_review": {},
     }
 
 
