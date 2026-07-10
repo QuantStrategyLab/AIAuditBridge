@@ -1327,6 +1327,7 @@ def main() -> int:
             arbitration = {"verdict": "ambiguous", "reason": f"Arbitration failed closed: {exc}"}
         if arbitration.get("verdict") == "clear":
             decision["blocked"] = False
+            blocking_streak = 0
             decision["summary"] = "✅ **Merge allowed**: repeated primary findings were cleared by independent Codex arbitration"
     # Post comment
     comment_body = build_pr_comment(

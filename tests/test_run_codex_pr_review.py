@@ -472,7 +472,7 @@ class RunCodexPrReviewTests(unittest.TestCase):
 
         comment.assert_called_once()
         body = comment.call_args.args[3]
-        self.assertIn("codex-pr-review-streak:2", body)
+        self.assertIn("codex-pr-review-streak:0", body)
         self.assertIn("codex-pr-review-fingerprints:", body)
         self.assertIn("codex-pr-review-head-sha:abc123", body)
         self.assertIn("Codex Review Arbitration", body)
