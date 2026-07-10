@@ -663,6 +663,7 @@ class CodexPrReviewWorkflowTest(unittest.TestCase):
         self.assertIn("CODEX_PR_REVIEW_DIRECT_API_PRIMARY_INPUT", workflow)
         self.assertIn("resolve_boolean()", workflow)
         self.assertIn("must be true or false", workflow)
+        self.assertIn("tr '[:upper:]' '[:lower:]'", workflow)
         self.assertIn("inputs.caller_concurrency_key || github.event.pull_request.number || github.run_id", workflow)
         self.assertNotIn("Validate bridge checkout token", workflow)
         self.assertIn("required: false", workflow)

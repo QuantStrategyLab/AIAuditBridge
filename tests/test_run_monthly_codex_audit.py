@@ -2412,6 +2412,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertIn("os.open(component, flags_dir, dir_fd=fd)", deploy_script)
         self.assertIn('"max_consecutive_failures": 3', deploy_script)
         self.assertIn("codex_pr_review.yml@refs/pull/*/merge", deploy_script)
+        self.assertIn("Consumer review workflows use pull_request_target", deploy_script)
         self.assertIn("refs/pull/*/merge", deploy_script)
         self.assertIn("QuantStrategyLab/AIAuditBridge", deploy_script)
         self.assertIn("QuantStrategyLab/QuantRuntimeSettings", deploy_script)

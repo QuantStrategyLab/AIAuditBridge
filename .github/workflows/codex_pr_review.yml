@@ -124,8 +124,9 @@ jobs:
             else
               value="${fallback}"
             fi
-            case "${value,,}" in
-              true|false) printf '%s' "${value,,}" ;;
+            value="$(printf '%s' "${value}" | tr '[:upper:]' '[:lower:]')"
+            case "${value}" in
+              true|false) printf '%s' "${value}" ;;
               *) echo "::error::${name} must be true or false" >&2; return 1 ;;
             esac
           }
