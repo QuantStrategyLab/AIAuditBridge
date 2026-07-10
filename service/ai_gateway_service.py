@@ -93,6 +93,12 @@ from service.quota import get_quota_manager
 from service.task_state import TERMINAL_STATES, job_task_state
 from service.health import get_health_monitor
 from service.org_health import read_org_health
+try:
+    from quant_platform_kit.strategy_lifecycle.performance_monitor import try_record_platform_execution
+except ModuleNotFoundError:  # pragma: no cover - optional in CI
+    def try_record_platform_execution(*_args, **_kwargs):
+        return None
+from service.model_router import default_dual_review_model_for_reviewer
 
 # ── constants ───────────────────────────────────────────────────────────
 
@@ -1081,6 +1087,20 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
             job["status"] == "succeeded",
             str(job.get("failure_category") or job.get("error") or ""),
         )
+        _record_platform_execution_telemetry(
+            str(job.get("strategy_profile") or job.get("task") or job.get("source_repository") or job.get("repository") or ""),
+            {
+                "job_id": job_id,
+                "status": job["status"],
+                "task": str(job.get("task") or ""),
+                "source_repository": str(job.get("source_repository") or job.get("repository") or ""),
+                "model": str(payload.get("model") or ""),
+                "reasoning_effort": str(reasoning_effort or ""),
+                "output": str(job.get("output") or ""),
+                "error": str(job.get("error") or ""),
+            },
+            domain=str(job.get("domain") or ""),
+        )
         _audit_log("job_completed", job_id=job_id, status=job["status"],
                    repository=job.get("repository"), task=job.get("task"))
     except Exception as exc:
@@ -1095,6 +1115,17 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
         _write_job(job)
         _record_job_automation_run(job)
         get_health_monitor().record("/v1/ai/execute/jobs/run", time.time() - started, False, type(exc).__name__)
+        _record_platform_execution_telemetry(
+            str(job.get("strategy_profile") or job.get("task") or job.get("source_repository") or job.get("repository") or ""),
+            {
+                "job_id": job_id,
+                "status": "failed",
+                "task": str(job.get("task") or ""),
+                "source_repository": str(job.get("source_repository") or job.get("repository") or ""),
+                "error": str(job.get("error") or str(exc)),
+            },
+            domain=str(job.get("domain") or ""),
+        )
         _audit_log("job_failed", job_id=job_id, error=type(exc).__name__,
                    repository=job.get("repository"))
 
@@ -1896,11 +1927,19 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
 
 
 def _default_model_for_reviewer(reviewer: str) -> str:
-    if reviewer == "claude":
-        return "claude-sonnet-4-6"
-    if reviewer == "gpt":
-        return "gpt-5.4-mini"
-    return "claude-sonnet-4-6"
+    return default_dual_review_model_for_reviewer(reviewer)
+
+
+def _record_platform_execution_telemetry(
+    profile: str,
+    payload: dict[str, Any],
+    *,
+    domain: str,
+) -> None:
+    try:
+        try_record_platform_execution(profile, payload, domain=domain)
+    except Exception as exc:  # pragma: no cover - telemetry best effort
+        logging.getLogger(__name__).warning("platform execution telemetry failed: %s", exc)
 
 
 def _extract_confidence_from_output(output: str) -> float:

@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from service.adapters.llm_adapter import LlmAdapter, LlmResult
 from service.dual_review import VERDICT_FAIL, extract_confidence, extract_verdict
+from service.model_router import default_dual_review_model_for_reviewer
 
 if TYPE_CHECKING:
     from service.dual_review_orchestrator import DualReviewRequest
@@ -94,6 +95,10 @@ def build_secondary_prompt(request: DualReviewRequest) -> str:
     return "\n".join(lines)
 
 
+def _default_model_for_reviewer(reviewer: str) -> str:
+    return default_dual_review_model_for_reviewer(reviewer)
+
+
 def _result_to_review(result: LlmResult) -> dict[str, Any]:
     if not result.success:
         return {
@@ -116,8 +121,8 @@ def run_dual_api_secondary_review(
 ) -> dict[str, Any]:
     """Run parallel GPT + Claude API reviews (plan B)."""
     llm = adapter or LlmAdapter()
-    gpt_model = str(os.environ.get("DUAL_REVIEW_GPT_MODEL", _DEFAULT_GPT_MODEL)).strip()
-    claude_model = str(os.environ.get("DUAL_REVIEW_CLAUDE_MODEL", _DEFAULT_CLAUDE_MODEL)).strip()
+    gpt_model = _default_model_for_reviewer("gpt")
+    claude_model = _default_model_for_reviewer("claude")
     user_prompt = build_secondary_prompt(request)
 
     results = llm.parallel_review(

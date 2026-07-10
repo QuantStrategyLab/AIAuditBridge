@@ -536,6 +536,23 @@ class RunCodexPrReviewTests(unittest.TestCase):
         self.assertEqual(request.call_args_list[0].args[2], "submit-token")
         self.assertEqual(request.call_args_list[1].args[2], "poll-token")
 
+    def test_service_review_includes_router_model(self) -> None:
+        responses = [
+            {"job_id": "job-1"},
+            {"status": "succeeded", "output": "{}"},
+        ]
+        with (
+            patch.dict(os.environ, {"CODEX_AUDIT_SERVICE_URL": "https://service.example", "GITHUB_REPOSITORY": "org/repo"}, clear=True),
+            patch("scripts.run_codex_pr_review.request_github_oidc_token", side_effect=["submit-token", "poll-token"]),
+            patch("scripts.run_codex_pr_review._service_request", side_effect=responses) as request,
+            patch("scripts.run_codex_pr_review.route_model", return_value={"model": "gpt-5.6-sol"}),
+            patch("scripts.run_codex_pr_review.time.sleep"),
+        ):
+            output = run_codex_pr_review.run_codex_service_review("prompt", timeout_minutes=1)
+
+        self.assertEqual(output, "{}")
+        self.assertEqual(request.call_args_list[0].args[3]["model"], "gpt-5.6-sol")
+
 
 class CodexPrReviewWorkflowTest(unittest.TestCase):
     def test_reusable_workflow_runs_bridge_script_against_source_checkout(self) -> None:

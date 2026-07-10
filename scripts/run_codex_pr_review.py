@@ -28,6 +28,11 @@ from typing import Any
 API_BASE = "https://api.github.com"
 BRIDGE_ROOT = Path(__file__).resolve().parents[1]
 ROOT = Path(os.environ.get("CODEX_PR_REVIEW_REPO_ROOT") or os.environ.get("GITHUB_WORKSPACE") or Path.cwd()).resolve()
+SOURCE_ROOT = BRIDGE_ROOT.parent / "source"
+if SOURCE_ROOT.exists() and str(SOURCE_ROOT) not in sys.path:
+    sys.path.insert(0, str(SOURCE_ROOT))
+from service.model_router import route_model  # noqa: E402
+
 POLICY_PATH = ROOT / ".github" / "codex_auto_merge_policy.json"
 PROMPT_TEMPLATE_PATH = BRIDGE_ROOT / "prompts" / "pr_review.md"
 DEFAULT_SERVICE_AUDIENCE = "quant-codex-audit"
@@ -514,6 +519,7 @@ def run_codex_service_review(prompt: str, timeout_minutes: int, complexity: str 
         "task": "pr_review",
         "mode": "review_only",
         "prompt": prompt,
+        "model": route_model("pr_review").get("model", ""),
         "complexity": _normalize_complexity(complexity) or "auto",
         "changed_files": int(changed_file_count),
         "changed_lines": int(changed_line_count),

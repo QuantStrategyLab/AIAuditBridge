@@ -19,6 +19,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from service.model_router import route_model
+
 
 API_BASE = "https://api.github.com"
 ROOT = Path(__file__).resolve().parents[1]
@@ -944,6 +946,7 @@ def request_codex_service(
         "task": task,
         "mode": mode,
         "prompt": prompt,
+        "model": route_model(task).get("model", ""),
         "timeout_seconds": timeout_minutes * 60,
     }
     if issue_number is not None:

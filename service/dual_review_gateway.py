@@ -11,6 +11,7 @@ from service.dual_review_secondary import (
     build_secondary_prompt,
 )
 from service.adapters.llm_adapter import LlmResult
+from service.model_router import default_dual_review_model_for_reviewer
 
 if TYPE_CHECKING:
     from service.dual_review_orchestrator import DualReviewRequest
@@ -44,6 +45,10 @@ def _ai_result_to_llm(result: Any) -> LlmResult:
     )
 
 
+def _default_model_for_reviewer(reviewer: str) -> str:
+    return default_dual_review_model_for_reviewer(reviewer)
+
+
 def run_gateway_dual_api_secondary_review(request: "DualReviewRequest") -> dict[str, Any]:
     """Run GPT + Claude via AiGateway ``/v1/ai/analyze`` (keys stay on VPS)."""
     from client.config import GatewayConfig
@@ -53,8 +58,8 @@ def run_gateway_dual_api_secondary_review(request: "DualReviewRequest") -> dict[
     if not service_url:
         raise RuntimeError("AI gateway URL is not configured")
 
-    gpt_model = str(os.environ.get("DUAL_REVIEW_GPT_MODEL", "gpt-5.4-mini")).strip()
-    claude_model = str(os.environ.get("DUAL_REVIEW_CLAUDE_MODEL", "claude-sonnet-4-6")).strip()
+    gpt_model = _default_model_for_reviewer("gpt")
+    claude_model = _default_model_for_reviewer("claude")
     user_prompt = build_secondary_prompt(request)
 
     config = GatewayConfig(
