@@ -1074,15 +1074,17 @@ class RunCodexPrReviewTests(unittest.TestCase):
                 ),
                 patch("scripts.run_codex_pr_review.upsert_pr_comment") as comment,
             ):
-                self.assertEqual(run_codex_pr_review.main(), 0)
+                self.assertEqual(run_codex_pr_review.main(), 1)
 
         comment.assert_called_once()
+        self.assertIn("Merge blocked", comment.call_args.args[3])
         body = comment.call_args.args[3]
-        self.assertIn("codex-pr-review-streak:0", body)
+        self.assertIn("codex-pr-review-streak:2", body)
         self.assertIn("codex-pr-review-fingerprints:", body)
-        self.assertIn("codex-pr-review-head-sha:abc1234", body)
-        self.assertIn("Codex Review Arbitration", body)
-        self.assertIn("clear", body)
+        self.assertNotIn("Codex Review Arbitration", body)
+        history, valid = run_codex_pr_review.parse_finding_history(body)
+        self.assertTrue(valid)
+        self.assertEqual(history[-1]["status"], "invalid_history")
 
     def test_main_contract_conflict_is_consistent_across_comment_artifact_and_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

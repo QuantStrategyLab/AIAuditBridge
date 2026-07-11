@@ -1662,7 +1662,7 @@ def main() -> int:
             previous_head_sha = str(latest_history.get("head_sha") or "")
         if not previous_fingerprints:
             previous_fingerprints = blocking_finding_fingerprints(
-                latest_history.get("findings") or []
+                unresolved_history_findings(finding_history)
             )
     active_blocking_history = has_active_blocking_history(finding_history)
     legacy_blocking_state = bool(
@@ -1967,12 +1967,13 @@ def main() -> int:
         history_requires_confirmation and previous_findings
     )
     history_arbitration_required = bool(decision["blocked"] and previous_findings)
-    if confirmation_arbitration_required or history_arbitration_required or should_arbitrate(
+    repeated_arbitration_required = should_arbitrate(
         blocked=bool(decision["blocked"]),
         streak=blocking_streak,
         repeated=repeated_finding,
         new_head=new_head,
-    ):
+    ) and not (history_requires_confirmation and not previous_findings)
+    if confirmation_arbitration_required or history_arbitration_required or repeated_arbitration_required:
         arbitration_prompt = build_arbitration_prompt(
             repo=repo,
             pr_title=pr_title,
