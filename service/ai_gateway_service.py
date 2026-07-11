@@ -1181,7 +1181,7 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
             },
             domain=str(job.get("domain") or ""),
         )
-        if result.success:
+        if bool(job.get("dispatch_started")):
             _settle_budget_reservation(job, 0.10)
         else:
             _release_budget_reservation(job)
@@ -1210,7 +1210,10 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
             },
             domain=str(job.get("domain") or ""),
         )
-        _release_budget_reservation(job)
+        if bool(job.get("dispatch_started")):
+            _settle_budget_reservation(job, 0.10)
+        else:
+            _release_budget_reservation(job)
         _audit_log("job_failed", job_id=job_id, error=type(exc).__name__,
                    repository=job.get("repository"))
 
@@ -1469,19 +1472,15 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             if reservation_id:
                 from service.ai_budget_guard import get_ai_budget_guard
 
-                get_ai_budget_guard().release(reservation_id)
+                get_ai_budget_guard().settle(reservation_id, float(qr.get("cost_estimate_usd") or 0.0))
             raise
-        if reservation_id and result.success:
+        if reservation_id:
             from service.ai_budget_guard import get_ai_budget_guard
 
             get_ai_budget_guard().settle(
                 reservation_id,
                 float(qr.get("cost_estimate_usd") or 0.0),
             )
-        elif reservation_id:
-            from service.ai_budget_guard import get_ai_budget_guard
-
-            get_ai_budget_guard().release(reservation_id)
         # A local quota-recording failure must not roll back provider spend.
         try:
             quota.record(source_repo, resolved_model, req.prompt, result.output if result.success else "")
@@ -1594,16 +1593,12 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             if reservation_id:
                 from service.ai_budget_guard import get_ai_budget_guard
 
-                get_ai_budget_guard().release(reservation_id)
+                get_ai_budget_guard().settle(reservation_id, 0.10)
             raise
-        if reservation_id and result.success:
+        if reservation_id:
             from service.ai_budget_guard import get_ai_budget_guard
 
             get_ai_budget_guard().settle(reservation_id, 0.10)
-        elif reservation_id:
-            from service.ai_budget_guard import get_ai_budget_guard
-
-            get_ai_budget_guard().release(reservation_id)
         get_health_monitor().record("/v1/ai/execute", time.time() - started, result.success, result.error if not result.success else "")
         if result.success:
             _json_response(self, HTTPStatus.OK, {"status": "ok", "output": result.output})
@@ -1768,16 +1763,12 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 if codex_reservation_id:
                     from service.ai_budget_guard import get_ai_budget_guard
 
-                    get_ai_budget_guard().release(codex_reservation_id)
+                    get_ai_budget_guard().settle(codex_reservation_id, 0.10)
                 raise
-            if codex_reservation_id and codex_result.success:
+            if codex_reservation_id:
                 from service.ai_budget_guard import get_ai_budget_guard
 
                 get_ai_budget_guard().settle(codex_reservation_id, 0.10)
-            elif codex_reservation_id:
-                from service.ai_budget_guard import get_ai_budget_guard
-
-                get_ai_budget_guard().release(codex_reservation_id)
 
         # Step 3: build per-reviewer results with extracted confidence
         results: list[dict[str, Any]] = []

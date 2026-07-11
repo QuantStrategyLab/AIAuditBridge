@@ -356,9 +356,14 @@ class AIBudgetGuard:
                 freshness="stale", decision="block", reasons=[freshness_reason],
             )
         user_limit = max(0.0, _number(entry.get("user_monthly_budget_usd", entry.get("monthly_budget_usd"))))
+        has_provider_project_limit = entry.get("provider_project_limit_usd") is not None
         provider_limit = _number(entry.get("provider_project_limit_usd"), user_limit)
-        hard_limit = min(user_limit, provider_limit * 0.80)
-        aggregate_hard_limit = max(0.0, provider_limit * 0.80)
+        hard_limit = min(user_limit, provider_limit * 0.80) if has_provider_project_limit else user_limit * 0.80
+        aggregate_hard_limit = max(0.0, provider_limit * 0.80) if has_provider_project_limit else hard_limit
+        reservation_aggregate_scope = (
+            self._aggregate_scope(provider_name, provider_scope, current_period)
+            if has_provider_project_limit else scope
+        )
         with self._lock:
             if self._settled_period != current_period:
                 self._reserved.clear()
@@ -367,12 +372,12 @@ class AIBudgetGuard:
                 self._reservations.clear()
                 self._settled_period = current_period
             self._load_scope_locked(scope)
-            if aggregate_scope != scope:
-                self._load_scope_locked(aggregate_scope)
+            if reservation_aggregate_scope != scope:
+                self._load_scope_locked(reservation_aggregate_scope)
             reserved = self._reserved.get(scope, 0.0)
             settled = self._reconcile_settled_locked(scope, 0.0)
-            aggregate_reserved = self._reserved.get(aggregate_scope, 0.0)
-            aggregate_settled = self._reconcile_settled_locked(aggregate_scope, used)
+            aggregate_reserved = self._reserved.get(reservation_aggregate_scope, 0.0)
+            aggregate_settled = self._reconcile_settled_locked(reservation_aggregate_scope, used)
         repo_remaining = hard_limit - settled - reserved - amount
         aggregate_remaining = aggregate_hard_limit - used - aggregate_settled - aggregate_reserved - amount
         remaining = min(repo_remaining, aggregate_remaining)
@@ -393,7 +398,7 @@ class AIBudgetGuard:
             aggregate_observed=used, aggregate_hard_limit=round(aggregate_hard_limit, 8),
             aggregate_reserved=aggregate_reserved,
             auto_fallback_allowed=human_approved_fallback,
-            reservation_scope=scope, aggregate_scope=self._aggregate_scope(provider_name, provider_scope, current_period),
+            reservation_scope=scope, aggregate_scope=reservation_aggregate_scope,
         )
 
     def _preflight_codex(self, task: str, provider_scope: str, period: str,
@@ -469,9 +474,13 @@ class AIBudgetGuard:
                 self._reservations.clear()
                 self._settled_period = period
             self._load_scope_locked(scope)
-            if any(
-                (parsed := _reset_timestamp(value)) is not None and parsed <= self._clock()
+            parsed_resets = [
+                parsed
                 for value in reset_at
+                if (parsed := _reset_timestamp(value)) is not None
+            ]
+            if len(parsed_resets) == len(reset_at) and parsed_resets and all(
+                parsed <= self._clock() for parsed in parsed_resets
             ):
                 for key in list(self._reserved):
                     if key.startswith("codex/"):
