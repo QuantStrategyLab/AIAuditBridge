@@ -539,7 +539,10 @@ def _api_fallback_enabled() -> bool:
 
 
 def _direct_api_primary_enabled() -> bool:
-    return parse_bool(env_value("CODEX_PR_REVIEW_DIRECT_API_PRIMARY_ENABLED", "false"))
+    # Preserve the legacy API-only primary path when no Codex service URL is
+    # configured; only the secondary fallback after Codex quota failure is off
+    # by default.
+    return parse_bool(env_value("CODEX_PR_REVIEW_DIRECT_API_PRIMARY_ENABLED", "true"))
 
 
 def run_codex_review_with_fallback(

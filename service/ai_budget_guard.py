@@ -103,6 +103,7 @@ class AIBudgetGuard:
             job_dir = os.environ.get("CODEX_AUDIT_SERVICE_JOB_DIR", "").strip()
             ledger_path = str(Path(job_dir) / "ai_budget_ledger.sqlite3") if job_dir else ""
         self._ledger_path = ledger_path
+        self._ledger_error = False
         self._init_ledger()
 
     def _init_ledger(self) -> None:
@@ -130,7 +131,7 @@ class AIBudgetGuard:
                         "UPDATE ai_budget_reservations SET aggregate_scope=scope WHERE aggregate_scope=''"
                     )
         except (OSError, sqlite3.Error):
-            self._ledger_path = ""
+            self._ledger_error = True
 
     def _load_scope_locked(self, scope: str) -> None:
         if not self._ledger_path:
@@ -151,6 +152,7 @@ class AIBudgetGuard:
             if baseline is not None:
                 self._settled_baseline[scope] = float(baseline)
         except (OSError, sqlite3.Error, TypeError, ValueError):
+            self._ledger_error = True
             return
 
     def _save_scope_locked(self, scope: str) -> None:
@@ -171,6 +173,7 @@ class AIBudgetGuard:
                     ),
                 )
         except (OSError, sqlite3.Error):
+            self._ledger_error = True
             return
 
     @staticmethod
@@ -300,6 +303,12 @@ class AIBudgetGuard:
         task = str(task_class or "maintenance").strip().lower()
         provider_name = str(provider or "").strip().lower()
         current_period = self.period()
+        if self._ledger_error:
+            return self._decision(
+                task_class=task, provider_scope=provider_scope, period=current_period,
+                observed={}, reserved=0.0, hard_limit=0.0, remaining=0.0,
+                freshness="unavailable", decision="block", reasons=["shared_budget_ledger_unavailable"],
+            )
         scope = self._scope(provider_name, provider_scope, repo, task, current_period)
         aggregate_scope = self._aggregate_scope(provider_name, provider_scope, task, current_period)
         amount = max(0.0, _number(estimated_cost_usd))
@@ -440,6 +449,8 @@ class AIBudgetGuard:
 
     def reserve(self, decision: dict[str, Any], amount: float | None = None) -> Reservation | None:
         if not isinstance(decision, dict) or decision.get("decision") != "allow":
+            return None
+        if amount is None:
             return None
         scope = str(decision.get("reservation_scope") or decision.get("provider_scope") or "default")
         aggregate_scope = str(decision.get("aggregate_scope") or scope)
