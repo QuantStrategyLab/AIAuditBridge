@@ -707,7 +707,7 @@ class RunCodexPrReviewTests(unittest.TestCase):
         comment.assert_called_once()
         backend.assert_not_called()
 
-    def test_main_does_not_skip_low_risk_changes_with_active_history(self) -> None:
+    def test_main_does_not_skip_low_risk_changes_with_legacy_blocking_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             event_path = self._write_event(tmpdir, ["docs/guide.md"])
             finding = {
@@ -723,9 +723,6 @@ class RunCodexPrReviewTests(unittest.TestCase):
                 "<!-- codex-pr-review-streak:1 -->\n"
                 f"<!-- codex-pr-review-fingerprints:{fingerprint} -->\n"
                 "<!-- codex-pr-review-head-sha:deadbeef -->\n"
-                + run_codex_pr_review.build_finding_history_marker(
-                    [], [finding], "deadbeef"
-                )
             )
             env = {
                 "GH_TOKEN": "token",
@@ -756,6 +753,48 @@ class RunCodexPrReviewTests(unittest.TestCase):
                 self.assertEqual(run_codex_pr_review.main(), 0)
 
         backend.assert_called_once()
+
+    def test_main_keeps_confirmation_required_history_blocked_after_clean_review(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            event_path = self._write_event(tmpdir, ["scripts/run_codex_pr_review.py"])
+            prior_comment = (
+                "<!-- codex-pr-review -->\n"
+                "<!-- codex-pr-review-head-sha:deadbeef -->\n"
+                + run_codex_pr_review.build_invalid_finding_history_marker("deadbeef")
+            )
+            env = {
+                "GH_TOKEN": "token",
+                "GITHUB_REPOSITORY": "org/repo",
+                "GITHUB_EVENT_PATH": event_path,
+            }
+            with (
+                patch.dict(os.environ, env, clear=True),
+                patch(
+                    "scripts.run_codex_pr_review.fetch_pr_files",
+                    return_value=[{"filename": "scripts/run_codex_pr_review.py"}],
+                ),
+                patch("scripts.run_codex_pr_review.fetch_pr_diff", return_value="source diff"),
+                patch(
+                    "scripts.run_codex_pr_review.load_policy",
+                    return_value=run_codex_pr_review._default_policy(),
+                ),
+                patch(
+                    "scripts.run_codex_pr_review.find_existing_review_comment",
+                    return_value=(99, prior_comment),
+                ),
+                patch(
+                    "scripts.run_codex_pr_review.run_codex_review_with_fallback",
+                    return_value='{"summary":"clear","findings":[]}',
+                ),
+                patch("scripts.run_codex_pr_review.upsert_pr_comment") as comment,
+            ):
+                self.assertEqual(run_codex_pr_review.main(), 1)
+
+        body = comment.call_args.args[3]
+        history, valid = run_codex_pr_review.parse_finding_history(body)
+        self.assertTrue(valid)
+        self.assertEqual(history[-1]["status"], "invalid_history")
+        self.assertIn("codex-pr-review-auto-fix-allowed:false", body)
 
 
     def test_main_blocks_unconfigured_backend_even_with_legacy_opt_in(self) -> None:

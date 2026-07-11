@@ -1600,6 +1600,9 @@ def main() -> int:
                 latest_history.get("findings") or []
             )
     active_blocking_history = has_active_blocking_history(finding_history)
+    legacy_blocking_state = bool(
+        not finding_history and (previous_streak > 0 or previous_fingerprints)
+    )
 
     if not history_valid:
         decision = {
@@ -1634,7 +1637,12 @@ def main() -> int:
 
     # First pass: classify files. If all files are low-risk, skip review.
     all_low_risk = changed_files_are_low_risk(changed_paths, policy)
-    if all_low_risk and changed_paths and not active_blocking_history:
+    if (
+        all_low_risk
+        and changed_paths
+        and not active_blocking_history
+        and not legacy_blocking_state
+    ):
         print("All changed files are low-risk (docs/tests). Skipping Codex review.")
         decision = {
             "blocked": False,
@@ -1820,7 +1828,7 @@ def main() -> int:
     history_requires_confirmation = finding_history_requires_confirmation(
         finding_history
     )
-    if history_requires_confirmation and decision["blocked"]:
+    if history_requires_confirmation:
         decision.update(
             {
                 "contract_conflict": True,
@@ -1902,17 +1910,22 @@ def main() -> int:
                 )
         if arbitration.get("verdict") == "clear":
             blocking_streak = 0
-    history_status = (
-        "cleared"
-        if arbitration and arbitration.get("verdict") == "clear"
-        else "blocking" if decision["blocked"] else "clear"
-    )
-    finding_history_marker = build_finding_history_marker(
-        finding_history,
-        decision["blocking_findings"],
-        current_head_sha,
-        status=history_status,
-    )
+    if history_requires_confirmation:
+        finding_history_marker = build_finding_history_marker(
+            finding_history, [], current_head_sha
+        )
+    else:
+        history_status = (
+            "cleared"
+            if arbitration and arbitration.get("verdict") == "clear"
+            else "blocking" if decision["blocked"] else "clear"
+        )
+        finding_history_marker = build_finding_history_marker(
+            finding_history,
+            decision["blocking_findings"],
+            current_head_sha,
+            status=history_status,
+        )
     serialized_history, serialized_history_valid = parse_finding_history(
         finding_history_marker
     )
