@@ -11,3 +11,5 @@ To rotate the QPK reusable workflow without an untrusted or unavailable window:
 5. Remove the old SHA, merge, and deploy again.
 
 Never use a wildcard for `job_workflow_ref`. Strategy drift delegation must use an exact QPK SHA. The existing AIAuditBridge PR-review entry remains on protected `main` only while organization consumers still call `codex_pr_review.yml@main`; migrate that entry to a SHA only together with all consumer workflow pins.
+
+The service also enforces that any allowed strategy `drift-check.yml` caller presents a `job_workflow_ref` for QuantPlatformKit's `reusable-drift-check.yml`. A different allowlisted reusable workflow cannot be substituted.

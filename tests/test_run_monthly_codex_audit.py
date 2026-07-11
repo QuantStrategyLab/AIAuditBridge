@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import tempfile
 import threading
@@ -2454,6 +2455,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertIn("both the current and next exact QPK SHAs", rotation)
         self.assertIn("Never use a wildcard", rotation)
         self.assertIn("PR-review entry remains on protected `main`", rotation)
+        self.assertIn("different allowlisted reusable workflow cannot be substituted", rotation)
         self.assertIn("CODEX_ACCOUNT_USAGE=", deploy_script)
         self.assertIn("OPENAI_USAGE_WINDOW_DAYS=", deploy_script)
         self.assertIn("ANTHROPIC_USAGE_WINDOW_DAYS=", deploy_script)
@@ -2468,6 +2470,26 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertNotIn("^CODEX_AUDIT_SERVICE_TOKEN", deploy_script)
         self.assertNotIn("CODEX_SERVICE_ROUTER", deploy_script)
         self.assertNotIn("codex_service_router", deploy_script)
+
+    def test_vps_deploy_defaults_match_workflow_allowlists(self) -> None:
+        deploy_script = Path("scripts/deploy_codex_audit_service.sh").read_text(encoding="utf-8")
+        workflow = Path(".github/workflows/vps_codex_service_ops.yml").read_text(encoding="utf-8")
+        variable_pairs = {
+            "ALLOWED_REPOSITORIES": "CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES",
+            "ALLOWED_WORKFLOW_REFS": "CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS",
+            "ALLOWED_SOURCE_REPOSITORIES": "CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES",
+        }
+
+        for script_name, workflow_name in variable_pairs.items():
+            script_match = re.search(
+                rf'^{script_name}="\$\{{{workflow_name}:-([^}}]+)\}}"$',
+                deploy_script,
+                re.MULTILINE,
+            )
+            workflow_match = re.search(rf"^\s+{workflow_name}: (.+)$", workflow, re.MULTILINE)
+            self.assertIsNotNone(script_match, script_name)
+            self.assertIsNotNone(workflow_match, workflow_name)
+            self.assertEqual(script_match.group(1), workflow_match.group(1))
 
 
 if __name__ == "__main__":

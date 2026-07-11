@@ -62,6 +62,15 @@ def _require_optional_allowed_claim(payload: dict[str, Any], env_name: str, clai
         raise PermissionError(f"OIDC {label} is not allowed")
 
 
+def _require_trusted_strategy_drift_job(payload: dict[str, Any], job_workflow_ref: str) -> None:
+    workflow_ref = str(payload.get("workflow_ref") or "")
+    if "/.github/workflows/drift-check.yml@" not in workflow_ref:
+        return
+    trusted_prefix = "QuantStrategyLab/QuantPlatformKit/.github/workflows/reusable-drift-check.yml@"
+    if not job_workflow_ref.startswith(trusted_prefix):
+        raise PermissionError("OIDC strategy drift caller must use the trusted QPK reusable workflow")
+
+
 def _load_jwks() -> dict[str, Any]:
     global _JWKS_CACHE, _JWKS_CACHE_EXPIRES_AT
     now = time.time()
@@ -185,6 +194,7 @@ def verify_github_oidc(
             "job_workflow_ref",
             "job workflow ref",
         )
+        _require_trusted_strategy_drift_job(payload, job_workflow_ref)
     else:
         direct_repositories = _allowed_claim_patterns("CODEX_AUDIT_SERVICE_ALLOWED_DIRECT_REPOSITORIES")
         if not direct_repositories:
