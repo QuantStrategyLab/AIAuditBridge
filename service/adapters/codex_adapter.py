@@ -26,6 +26,7 @@ class CodexResult:
     output: str = ""
     error: str = ""
     dispatch_started: bool = False
+    dispatch_uncertain: bool = False
 
 
 def _codex_env() -> dict[str, str]:
@@ -143,13 +144,21 @@ class CodexAdapter:
                     env=_codex_env(),
                 )
             except subprocess.TimeoutExpired as exc:
-                return CodexResult(success=False, error=f"codex exec timed out after {timeout}s: {exc}", dispatch_started=True)
+                return CodexResult(
+                    success=False,
+                    error=f"codex exec timed out after {timeout}s: {exc}",
+                    dispatch_uncertain=True,
+                )
             except FileNotFoundError as exc:
                 return CodexResult(success=False, error=f"codex command not found: {exc}")
 
             if completed.returncode != 0:
                 detail = (completed.stdout[-4000:] + completed.stderr[-4000:]).strip()
-                return CodexResult(success=False, error=f"codex exec failed (rc={completed.returncode})" + (f":\n{detail}" if detail else ""), dispatch_started=True)
+                return CodexResult(
+                    success=False,
+                    error=f"codex exec failed (rc={completed.returncode})" + (f":\n{detail}" if detail else ""),
+                    dispatch_uncertain=True,
+                )
 
             if output_last_message.exists() and output_last_message.read_text(encoding="utf-8").strip():
                 return CodexResult(success=True, output=output_last_message.read_text(encoding="utf-8"), dispatch_started=True)

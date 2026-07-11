@@ -1192,7 +1192,11 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
         )
         job = _read_job(job_id)
         job["dispatch_started"] = bool(getattr(result, "dispatch_started", False))
-        job["dispatch_state"] = "dispatched" if job["dispatch_started"] else "not_dispatched"
+        job["dispatch_state"] = (
+            "dispatched" if job["dispatch_started"]
+            else "pending_uncertain" if bool(getattr(result, "dispatch_uncertain", False))
+            else "not_dispatched"
+        )
         if result.success:
             job["status"] = "succeeded"
             job["output"] = result.output
@@ -1666,6 +1670,10 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             from service.ai_budget_guard import get_ai_budget_guard
 
             get_ai_budget_guard().settle(reservation_id, 0.10)
+        elif reservation_id and bool(getattr(result, "dispatch_uncertain", False)):
+            from service.ai_budget_guard import get_ai_budget_guard
+
+            get_ai_budget_guard().mark_uncertain(reservation_id)
         elif reservation_id:
             from service.ai_budget_guard import get_ai_budget_guard
 
@@ -1879,6 +1887,10 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                     get_quota_manager().mark_recording_failed(review_repo)
                     _audit_log("review_codex_quota_record_failed", error=type(exc).__name__)
                 get_ai_budget_guard().settle(codex_reservation_id, 0.10)
+            elif codex_reservation_id and bool(getattr(codex_result, "dispatch_uncertain", False)):
+                from service.ai_budget_guard import get_ai_budget_guard
+
+                get_ai_budget_guard().mark_uncertain(codex_reservation_id)
             elif codex_reservation_id:
                 from service.ai_budget_guard import get_ai_budget_guard
 
