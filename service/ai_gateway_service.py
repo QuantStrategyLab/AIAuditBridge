@@ -479,14 +479,16 @@ def _recover_orphaned_jobs() -> int:
             job = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             continue
-        if job.get("status") not in ACTIVE_JOB_STATUSES:
+        previous_status = str(job.get("status") or "")
+        if previous_status not in ACTIVE_JOB_STATUSES:
             continue
         job["status"] = "failed"
         job["updated_at"] = _now()
         job["error"] = "codex audit service restarted before job completion"
         job["failure_category"] = "service_restart"
         _write_job(job)
-        _record_job_automation_run(job)
+        if previous_status == "running":
+            _record_job_automation_run(job)
         _audit_log(
             "job_failed",
             job_id=job.get("job_id"),

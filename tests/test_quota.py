@@ -149,6 +149,17 @@ class TestQuotaRecord(unittest.TestCase):
         self.assertEqual(restored.api_key_tokens_input, original.tokens_input)
         self.assertEqual(restored.total_cost_usd, original.total_cost_usd)
 
+    def test_legacy_record_starts_a_fresh_weekly_budget_window(self) -> None:
+        restored = QuotaRecord.from_dict({
+            "repo": "owner/repo",
+            "total_cost_usd": 0.5,
+            "api_key_cost_usd": 0.5,
+            "last_reset_weekly": 0,
+        })
+
+        self.assertEqual(restored.weekly_api_key_cost_usd, 0.0)
+        self.assertGreater(restored.last_reset_weekly, 0)
+
 
 class TestQuotaManager(unittest.TestCase):
     """QuotaManager budget tracking and enforcement."""

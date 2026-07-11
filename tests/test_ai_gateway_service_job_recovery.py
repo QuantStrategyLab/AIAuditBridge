@@ -21,7 +21,7 @@ class AiGatewayJobRecoveryTests(unittest.TestCase):
                 for job in jobs:
                     gateway._write_job(job)
                 with (
-                    patch.object(gateway, "_record_job_automation_run"),
+                    patch.object(gateway, "_record_job_automation_run") as record_automation_run,
                     patch.object(gateway, "_audit_log"),
                 ):
                     recovered = gateway._recover_orphaned_jobs()
@@ -36,6 +36,7 @@ class AiGatewayJobRecoveryTests(unittest.TestCase):
         self.assertEqual(queued["failure_category"], "service_restart")
         self.assertEqual(running["failure_category"], "service_restart")
         self.assertEqual(completed["status"], "succeeded")
+        record_automation_run.assert_called_once_with(running)
 
 
 if __name__ == "__main__":

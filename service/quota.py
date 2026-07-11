@@ -125,6 +125,9 @@ class QuotaRecord:
         aggregate_tokens_are_api_key = aggregate_tokens_present and codex_calls == 0
         aggregate_tokens_are_legacy_unknown = aggregate_tokens_present and not aggregate_tokens_are_api_key
         has_cost_split = any(k in d for k in ("api_key_cost_usd", "codex_cost_usd", "legacy_unknown_cost_usd"))
+        has_weekly_cost_split = any(
+            k in d for k in ("weekly_api_key_cost_usd", "weekly_legacy_unknown_cost_usd")
+        )
         cost_is_legacy_unknown = aggregate_tokens_are_legacy_unknown or (has_legacy_tokens and not has_split_api_tokens)
         legacy_unknown_cost_usd = float(d.get("legacy_unknown_cost_usd", total_cost_usd if cost_is_legacy_unknown and not has_cost_split else 0.0))
         codex_cost_usd = float(d.get("codex_cost_usd", 0.0 if legacy_unknown_cost_usd and not has_cost_split else min(total_cost_usd, DEFAULT_MODEL_COSTS.get("codex-cli", {}).get("flat", 0.05) * codex_calls)))
@@ -154,11 +157,9 @@ class QuotaRecord:
             api_key_cost_usd=api_key_cost_usd,
             codex_cost_usd=codex_cost_usd,
             last_reset_daily=float(d.get("last_reset_daily", time.time())),
-            last_reset_weekly=float(d.get("last_reset_weekly", time.time())),
-            weekly_api_key_cost_usd=float(d.get("weekly_api_key_cost_usd", api_key_cost_usd)),
-            weekly_legacy_unknown_cost_usd=float(
-                d.get("weekly_legacy_unknown_cost_usd", legacy_unknown_cost_usd)
-            ),
+            last_reset_weekly=float(d.get("last_reset_weekly", time.time())) if has_weekly_cost_split else time.time(),
+            weekly_api_key_cost_usd=float(d.get("weekly_api_key_cost_usd", 0.0)),
+            weekly_legacy_unknown_cost_usd=float(d.get("weekly_legacy_unknown_cost_usd", 0.0)),
         )
 
 
