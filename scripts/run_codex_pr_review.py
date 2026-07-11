@@ -1035,15 +1035,21 @@ def build_finding_history_marker(
     history: list[dict[str, Any]],
     findings: list[dict[str, Any]],
     head_sha: str,
+    *,
+    status: str | None = None,
 ) -> str:
     """Serialize a bounded, sanitized blocking-finding history into a bot marker."""
     rounds = list(history[-(FINDING_HISTORY_MAX_ROUNDS - 1):])
     sanitized_findings = [_history_finding(finding) for finding in findings if isinstance(finding, dict)]
-    if sanitized_findings:
+    if sanitized_findings or status:
+        normalized_head_sha = str(head_sha or "").strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{7,64}", normalized_head_sha):
+            return build_invalid_finding_history_marker()
         rounds.append(
             {
-                "head_sha": _sanitize_history_text(head_sha, 64).lower(),
+                "head_sha": normalized_head_sha,
                 "findings": sanitized_findings,
+                "status": status or "blocking",
             }
         )
     payload = {"version": 1, "rounds": rounds[-FINDING_HISTORY_MAX_ROUNDS:]}
@@ -1099,9 +1105,14 @@ def parse_finding_history(body: str) -> tuple[list[dict[str, Any]], bool]:
             return [], False
         head_sha = round_state.get("head_sha")
         findings = round_state.get("findings")
+        status = round_state.get("status", "blocking")
         if not isinstance(head_sha, str) or not re.fullmatch(r"[0-9a-f]{7,64}", head_sha):
             return [], False
         if not isinstance(findings, list):
+            return [], False
+        if status not in {"blocking", "clear", "cleared"}:
+            return [], False
+        if set(round_state) not in ({"head_sha", "findings"}, {"head_sha", "findings", "status"}):
             return [], False
         checked_findings: list[dict[str, str]] = []
         for finding in findings:
@@ -1113,7 +1124,9 @@ def parse_finding_history(body: str) -> tuple[list[dict[str, Any]], bool]:
             ):
                 return [], False
             checked_findings.append(dict(finding))
-        validated.append({"head_sha": head_sha, "findings": checked_findings})
+        validated.append(
+            {"head_sha": head_sha, "findings": checked_findings, "status": status}
+        )
     return validated, True
 
 
@@ -1124,15 +1137,28 @@ def previous_matching_findings(
     if not history:
         return []
     current_keys = set(blocking_finding_fingerprints(current_findings))
-    prior = history[-1].get("findings")
-    if not isinstance(prior, list):
-        return []
-    return [
-        finding
-        for finding in prior
-        if isinstance(finding, dict)
-        and blocking_finding_fingerprint([finding]) in current_keys
-    ]
+    for round_state in reversed(history):
+        prior = round_state.get("findings")
+        if not isinstance(prior, list):
+            continue
+        matches = [
+            finding
+            for finding in prior
+            if isinstance(finding, dict)
+            and blocking_finding_fingerprint([finding]) in current_keys
+        ]
+        if matches:
+            return matches
+    return []
+
+
+def has_active_blocking_history(history: list[dict[str, Any]]) -> bool:
+    if not history:
+        return False
+    latest = history[-1]
+    return latest.get("status", "blocking") == "blocking" and bool(
+        latest.get("findings")
+    )
 
 
 def build_pr_comment(
@@ -1398,6 +1424,61 @@ def write_decision_outputs(decision_payload: dict[str, Any]) -> None:
             f.write(f"next_action={decision_payload.get('next_action', 'none')}\n")
 
 
+def publish_review_decision(
+    token: str,
+    repo: str,
+    pr_number: int,
+    pr_url: str,
+    decision: dict[str, Any],
+    *,
+    exit_code: int,
+    blocking_streak: int = 0,
+    finding_fingerprint: str = "",
+    finding_fingerprints: tuple[str, ...] = (),
+    repeated_fingerprints: tuple[str, ...] = (),
+    repeated_finding: bool = False,
+    previous_head_sha: str = "",
+    current_head_sha: str = "",
+    reviewed_head_sha: str = "",
+    new_head: bool = False,
+    arbitration: dict[str, Any] | None = None,
+    finding_history_marker: str = "",
+    history_valid: bool = True,
+) -> int:
+    """Publish one consistent comment, artifact, and GitHub step-output decision."""
+    upsert_pr_comment(
+        token,
+        repo,
+        pr_number,
+        build_pr_comment(
+            decision,
+            pr_url,
+            blocking_streak=blocking_streak,
+            finding_fingerprint=finding_fingerprint,
+            finding_fingerprints=finding_fingerprints,
+            reviewed_head_sha=reviewed_head_sha or current_head_sha,
+            arbitration=arbitration,
+            finding_history_marker=finding_history_marker,
+        ),
+    )
+    write_decision_outputs(
+        {
+            **decision,
+            "blocking_streak": blocking_streak,
+            "finding_fingerprint": finding_fingerprint,
+            "finding_fingerprints": finding_fingerprints,
+            "repeated_fingerprints": repeated_fingerprints,
+            "repeated_finding": repeated_finding,
+            "previous_head_sha": previous_head_sha,
+            "current_head_sha": current_head_sha,
+            "new_head": new_head,
+            "arbitration": arbitration,
+            "history_valid": history_valid,
+        }
+    )
+    return exit_code
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -1475,6 +1556,7 @@ def main() -> int:
             previous_fingerprints = blocking_finding_fingerprints(
                 latest_history.get("findings") or []
             )
+    active_blocking_history = has_active_blocking_history(finding_history)
 
     if not history_valid:
         decision = {
@@ -1490,29 +1572,20 @@ def main() -> int:
             "auto_fix_allowed": False,
             "next_action": "contract_arbitration",
         }
-        comment_body = build_pr_comment(
-            decision,
+        return publish_review_decision(
+            token,
+            repo,
+            pr_number,
             pr_url,
-            reviewed_head_sha=current_head_sha,
+            decision,
+            exit_code=1,
+            blocking_streak=previous_streak,
+            previous_head_sha=previous_head_sha,
+            current_head_sha=current_head_sha,
+            new_head=bool(previous_head_sha and current_head_sha != previous_head_sha),
             finding_history_marker=build_invalid_finding_history_marker(),
+            history_valid=False,
         )
-        upsert_pr_comment(token, repo, pr_number, comment_body)
-        write_decision_outputs(
-            {
-                **decision,
-                "blocking_streak": previous_streak,
-                "finding_fingerprint": "",
-                "finding_fingerprints": (),
-                "repeated_fingerprints": (),
-                "repeated_finding": False,
-                "previous_head_sha": previous_head_sha,
-                "current_head_sha": current_head_sha,
-                "new_head": bool(previous_head_sha and current_head_sha != previous_head_sha),
-                "arbitration": None,
-                "history_valid": False,
-            }
-        )
-        return 1
 
     # First pass: classify files. If all files are low-risk, skip review.
     all_low_risk = changed_files_are_low_risk(changed_paths, policy)
@@ -1528,21 +1601,18 @@ def main() -> int:
             "auto_fix_allowed": True,
             "next_action": "none",
         }
-        upsert_pr_comment(
+        return publish_review_decision(
             token,
             repo,
             pr_number,
-            build_pr_comment(
-                decision,
-                pr_url,
-                blocking_streak=0,
-                reviewed_head_sha=current_head_sha,
-                finding_history_marker=build_finding_history_marker(
-                    finding_history, [], current_head_sha
-                ),
+            pr_url,
+            decision,
+            exit_code=0,
+            current_head_sha=current_head_sha,
+            finding_history_marker=build_finding_history_marker(
+                finding_history, [], current_head_sha, status="clear"
             ),
         )
-        return 0
 
     # Fetch PR diff
     diff = fetch_pr_diff(token, repo, pr_number)
@@ -1565,7 +1635,7 @@ def main() -> int:
     except ReviewError as exc:
         if _review_capacity_is_unavailable(exc):
             print(f"::warning::Codex review unavailable due to quota or capacity: {exc}")
-            if finding_history:
+            if active_blocking_history:
                 decision = {
                     "blocked": True,
                     "blocking_findings": [],
@@ -1579,30 +1649,51 @@ def main() -> int:
                     "auto_fix_allowed": False,
                     "next_action": "contract_arbitration",
                 }
-                upsert_pr_comment(
+                return publish_review_decision(
                     token,
                     repo,
                     pr_number,
-                    build_pr_comment(
-                        decision,
-                        pr_url,
-                        blocking_streak=previous_streak,
-                        finding_fingerprints=previous_fingerprints,
-                        reviewed_head_sha=previous_head_sha,
-                        finding_history_marker=build_finding_history_marker(
-                            finding_history, [], current_head_sha
-                        ),
+                    pr_url,
+                    decision,
+                    exit_code=1,
+                    blocking_streak=previous_streak,
+                    finding_fingerprints=previous_fingerprints,
+                    previous_head_sha=previous_head_sha,
+                    current_head_sha=current_head_sha,
+                    reviewed_head_sha=previous_head_sha,
+                    new_head=bool(
+                        previous_head_sha and current_head_sha != previous_head_sha
+                    ),
+                    finding_history_marker=build_finding_history_marker(
+                        finding_history, [], current_head_sha
                     ),
                 )
-                return 1
-            warning_body = (
-                "<!-- codex-pr-review -->\n"
-                "## 🤖 Codex PR Review\n\n"
-                "⚠️ **Review unavailable**: Codex review quota or capacity is unavailable. "
-                "No direct paid API fallback was used; required CI checks remain the merge gate.\n"
+            decision = {
+                "blocked": False,
+                "blocking_findings": [],
+                "non_blocking_findings": [],
+                "total_findings": 0,
+                "summary": (
+                    "⚠️ **Review unavailable**: Codex review quota or capacity is unavailable. "
+                    "Required CI checks remain the merge gate."
+                ),
+                "contract_conflict": False,
+                "auto_fix_allowed": False,
+                "next_action": "review_retry",
+            }
+            return publish_review_decision(
+                token,
+                repo,
+                pr_number,
+                pr_url,
+                decision,
+                exit_code=0,
+                previous_head_sha=previous_head_sha,
+                current_head_sha=current_head_sha,
+                finding_history_marker=build_finding_history_marker(
+                    finding_history, [], current_head_sha
+                ),
             )
-            upsert_pr_comment(token, repo, pr_number, warning_body)
-            return 0
         print(f"::error::Codex review failed: {exc}", file=sys.stderr)
         decision = {
             "blocked": True,
@@ -1610,26 +1701,27 @@ def main() -> int:
             "non_blocking_findings": [],
             "total_findings": 0,
             "summary": "🚫 **Merge blocked**: The Codex review could not be completed.",
-            "contract_conflict": bool(finding_history),
+            "contract_conflict": active_blocking_history,
             "auto_fix_allowed": False,
-            "next_action": "contract_arbitration" if finding_history else "review_retry",
+            "next_action": "contract_arbitration" if active_blocking_history else "review_retry",
         }
-        upsert_pr_comment(
+        return publish_review_decision(
             token,
             repo,
             pr_number,
-            build_pr_comment(
-                decision,
-                pr_url,
-                blocking_streak=previous_streak,
-                finding_fingerprints=previous_fingerprints,
-                reviewed_head_sha=previous_head_sha,
-                finding_history_marker=build_finding_history_marker(
-                    finding_history, [], current_head_sha
-                ),
+            pr_url,
+            decision,
+            exit_code=1,
+            blocking_streak=previous_streak,
+            finding_fingerprints=previous_fingerprints,
+            previous_head_sha=previous_head_sha,
+            current_head_sha=current_head_sha,
+            reviewed_head_sha=previous_head_sha,
+            new_head=bool(previous_head_sha and current_head_sha != previous_head_sha),
+            finding_history_marker=build_finding_history_marker(
+                finding_history, [], current_head_sha
             ),
         )
-        return 1
 
     print(f"Codex output: {len(output)} chars")
 
@@ -1644,26 +1736,27 @@ def main() -> int:
             "non_blocking_findings": [],
             "total_findings": 0,
             "summary": "🚫 **Merge blocked**: review output could not be parsed safely.",
-            "contract_conflict": bool(finding_history),
+            "contract_conflict": active_blocking_history,
             "auto_fix_allowed": False,
-            "next_action": "contract_arbitration" if finding_history else "review_retry",
+            "next_action": "contract_arbitration" if active_blocking_history else "review_retry",
         }
-        upsert_pr_comment(
+        return publish_review_decision(
             token,
             repo,
             pr_number,
-            build_pr_comment(
-                decision,
-                pr_url,
-                blocking_streak=previous_streak,
-                finding_fingerprints=previous_fingerprints,
-                reviewed_head_sha=previous_head_sha,
-                finding_history_marker=build_finding_history_marker(
-                    finding_history, [], current_head_sha
-                ),
+            pr_url,
+            decision,
+            exit_code=1,
+            blocking_streak=previous_streak,
+            finding_fingerprints=previous_fingerprints,
+            previous_head_sha=previous_head_sha,
+            current_head_sha=current_head_sha,
+            reviewed_head_sha=previous_head_sha,
+            new_head=bool(previous_head_sha and current_head_sha != previous_head_sha),
+            finding_history_marker=build_finding_history_marker(
+                finding_history, [], current_head_sha
             ),
         )
-        return 1
 
     findings = review.get("findings", [])
     if not isinstance(findings, list):
@@ -1700,7 +1793,7 @@ def main() -> int:
     )
     arbitration: dict[str, Any] | None = None
     history_arbitration_required = bool(
-        decision["blocked"] and previous_findings and new_head
+        decision["blocked"] and previous_findings
     )
     if history_arbitration_required or should_arbitrate(
         blocked=bool(decision["blocked"]),
@@ -1744,8 +1837,16 @@ def main() -> int:
                 )
         if arbitration.get("verdict") == "clear":
             blocking_streak = 0
+    history_status = (
+        "cleared"
+        if arbitration and arbitration.get("verdict") == "clear"
+        else "blocking" if decision["blocked"] else "clear"
+    )
     finding_history_marker = build_finding_history_marker(
-        finding_history, decision["blocking_findings"], current_head_sha
+        finding_history,
+        decision["blocking_findings"],
+        current_head_sha,
+        status=history_status,
     )
     _serialized_history, serialized_history_valid = parse_finding_history(
         finding_history_marker
@@ -1754,44 +1855,32 @@ def main() -> int:
         decision = apply_arbitration_failure(
             decision, ReviewError("blocking finding history exceeds its safe bound")
         )
-    # Post comment
-    comment_body = build_pr_comment(
-        decision,
-        pr_url,
-        blocking_streak=blocking_streak,
-        finding_fingerprint=finding_fingerprint,
-        finding_fingerprints=finding_fingerprints,
-        reviewed_head_sha=current_head_sha,
-        arbitration=arbitration,
-        finding_history_marker=finding_history_marker,
-    )
-    upsert_pr_comment(token, repo, pr_number, comment_body)
-
-    # Write decision for downstream use
-    decision_payload = {
-        **decision,
-        "blocking_streak": blocking_streak,
-        "finding_fingerprint": finding_fingerprint,
-        "finding_fingerprints": finding_fingerprints,
-        "repeated_fingerprints": repeated_fingerprints,
-        "repeated_finding": repeated_finding,
-        "previous_head_sha": previous_head_sha,
-        "current_head_sha": current_head_sha,
-        "new_head": new_head,
-        "arbitration": arbitration,
-        "history_valid": serialized_history_valid,
-    }
-    write_decision_outputs(decision_payload)
-
     if decision["blocked"]:
         print(
             f"::error::Merge blocked: serious issues found "
             f"(repeated-finding streak {blocking_streak})"
         )
-        return 1
-
-    print("Review passed: no blocking issues")
-    return 0
+    else:
+        print("Review passed: no blocking issues")
+    return publish_review_decision(
+        token,
+        repo,
+        pr_number,
+        pr_url,
+        decision,
+        exit_code=1 if decision["blocked"] else 0,
+        blocking_streak=blocking_streak,
+        finding_fingerprint=finding_fingerprint,
+        finding_fingerprints=finding_fingerprints,
+        repeated_fingerprints=repeated_fingerprints,
+        repeated_finding=repeated_finding,
+        previous_head_sha=previous_head_sha,
+        current_head_sha=current_head_sha,
+        new_head=new_head,
+        arbitration=arbitration,
+        finding_history_marker=finding_history_marker,
+        history_valid=serialized_history_valid,
+    )
 
 
 if __name__ == "__main__":

@@ -212,6 +212,29 @@ class RunCodexPrReviewTests(unittest.TestCase):
         self.assertEqual(len(history), run_codex_pr_review.FINDING_HISTORY_MAX_ROUNDS)
         self.assertEqual(run_codex_pr_review.parse_finding_history("legacy comment"), ([], True))
 
+    def test_cleared_history_retains_semantics_without_remaining_active(self) -> None:
+        head_sha = "7eed3550854ee498edc378f3658e6a8f536299cc"
+        finding = {
+            "severity": "high",
+            "category": "contract",
+            "file": "service/review.py",
+            "description": "Missing panel must fail fast.",
+            "suggestion": "Raise ReviewError.",
+        }
+        marker = run_codex_pr_review.build_finding_history_marker(
+            [], [finding], head_sha, status="cleared"
+        )
+        history, valid = run_codex_pr_review.parse_finding_history(marker)
+
+        self.assertTrue(valid)
+        self.assertEqual(history[0]["head_sha"], head_sha)
+        self.assertEqual(history[0]["status"], "cleared")
+        self.assertFalse(run_codex_pr_review.has_active_blocking_history(history))
+        self.assertEqual(
+            run_codex_pr_review.previous_matching_findings(history, [finding]),
+            history[0]["findings"],
+        )
+
     def test_malformed_or_oversized_history_fails_closed(self) -> None:
         malformed = "<!-- codex-pr-review-history:v1:not-base64! -->"
         oversized = (
@@ -802,8 +825,8 @@ class RunCodexPrReviewTests(unittest.TestCase):
                 "<!-- codex-pr-review-streak:1 -->\n"
                 f"<!-- codex-pr-review-fingerprint:{fingerprint} -->\n"
                 f"<!-- codex-pr-review-fingerprints:{fingerprint} -->\n"
-                "<!-- codex-pr-review-head-sha:deadbeef -->\n"
-                + run_codex_pr_review.build_finding_history_marker([], [prior], "deadbeef")
+                "<!-- codex-pr-review-head-sha:abc1234 -->\n"
+                + run_codex_pr_review.build_finding_history_marker([], [prior], "abc1234")
             )
             env = {
                 "GH_TOKEN": "token",
@@ -899,7 +922,15 @@ class RunCodexPrReviewTests(unittest.TestCase):
             finally:
                 os.chdir(previous_cwd)
 
+            decision = json.loads(
+                (Path(tmpdir) / "data/output/codex_pr_review/decision.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+
         backend.assert_not_called()
+        self.assertFalse(decision["history_valid"])
+        self.assertFalse(decision["auto_fix_allowed"])
         self.assertIn("automatic remediation is disabled", comment.call_args.args[3])
 
     def test_main_ignores_legacy_bypass_policy_fields(self) -> None:
