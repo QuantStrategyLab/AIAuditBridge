@@ -516,6 +516,7 @@ def _review_capacity_is_unavailable(exc: ReviewError) -> bool:
     return (
         "[quota_or_capacity_failure]" in message
         or "usage limit" in message
+        or "daily budget exceeded" in message
         or "codex service job failed [unknown_failure]: codex exec failed" in message
     )
 
