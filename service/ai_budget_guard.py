@@ -81,6 +81,7 @@ class Reservation:
     created_at: float
     baseline_usage: float | None = None
     period: str = ""
+    aggregate_scope: str = ""
 
 
 class AIBudgetGuard:
@@ -115,7 +116,7 @@ class AIBudgetGuard:
                     "CREATE TABLE IF NOT EXISTS ai_budget_ledger (scope TEXT NOT NULL, period TEXT NOT NULL, reserved REAL NOT NULL, settled REAL NOT NULL, baseline REAL, updated_at REAL NOT NULL, PRIMARY KEY(scope, period))"
                 )
                 db.execute(
-                    "CREATE TABLE IF NOT EXISTS ai_budget_reservations (reservation_id TEXT PRIMARY KEY, scope TEXT NOT NULL, period TEXT NOT NULL, amount REAL NOT NULL, task_class TEXT NOT NULL, created_at REAL NOT NULL, baseline_usage REAL)"
+                    "CREATE TABLE IF NOT EXISTS ai_budget_reservations (reservation_id TEXT PRIMARY KEY, scope TEXT NOT NULL, aggregate_scope TEXT NOT NULL, period TEXT NOT NULL, amount REAL NOT NULL, task_class TEXT NOT NULL, created_at REAL NOT NULL, baseline_usage REAL)"
                 )
         except (OSError, sqlite3.Error):
             self._ledger_path = ""
@@ -180,9 +181,11 @@ class AIBudgetGuard:
         return _period(self._clock() if now is None else now, self._timezone)
 
     def _scope(self, provider: str, provider_scope: str, repo: str, task_class: str, period: str) -> str:
-        # Hard-limit reservations aggregate the billing/rate-limit principal;
-        # repo remains an independent budget/config dimension in _budget_entry.
-        return "/".join((provider or "unknown", provider_scope or "default", task_class or "maintenance", period))
+        return "/".join((provider or "unknown", provider_scope or "default", repo or "unknown", task_class or "maintenance", period))
+
+    @staticmethod
+    def _aggregate_scope(provider: str, provider_scope: str, task_class: str, period: str) -> str:
+        return "/".join((provider or "unknown", provider_scope or "default", "_aggregate", task_class or "maintenance", period))
 
     def _budget_entry(self, provider: str, provider_scope: str, repo: str, task_class: str) -> dict[str, Any] | None:
         budgets = self._config.get("monthly_budgets")
@@ -251,12 +254,13 @@ class AIBudgetGuard:
     def _decision(self, *, task_class: str, provider_scope: str, period: str, observed: Any,
                   reserved: float, hard_limit: Any, remaining: Any, freshness: str,
                   decision: str, reasons: list[str], reset_at: Any = None,
-                  auto_fallback_allowed: bool = False, reservation_scope: str = "") -> dict[str, Any]:
+                  auto_fallback_allowed: bool = False, reservation_scope: str = "", aggregate_scope: str = "") -> dict[str, Any]:
         return {
             "schema": DECISION_SCHEMA,
             "task_class": task_class,
             "provider_scope": provider_scope,
             "reservation_scope": reservation_scope or provider_scope,
+            "aggregate_scope": aggregate_scope,
             "period": period,
             "observed_usage": observed,
             "reserved_usage": round(reserved, 8),
@@ -286,9 +290,10 @@ class AIBudgetGuard:
         provider_name = str(provider or "").strip().lower()
         current_period = self.period()
         scope = self._scope(provider_name, provider_scope, repo, task, current_period)
+        aggregate_scope = self._aggregate_scope(provider_name, provider_scope, task, current_period)
         amount = max(0.0, _number(estimated_cost_usd))
         if provider_name in {"codex", "codex-cli", "codex_account"}:
-            return self._preflight_codex(task, provider_scope, current_period, codex_snapshot, scope)
+            return self._preflight_codex(task, provider_scope, current_period, codex_snapshot, scope, aggregate_scope)
 
         entry = self._budget_entry(provider_name, provider_scope, repo, task)
         if entry is None:
@@ -309,6 +314,8 @@ class AIBudgetGuard:
         hard_limit = min(user_limit, provider_limit * 0.80)
         with self._lock:
             self._load_scope_locked(scope)
+            if aggregate_scope != scope:
+                self._load_scope_locked(aggregate_scope)
             if self._settled_period != current_period:
                 self._settled.clear()
                 self._settled_baseline.clear()
@@ -328,11 +335,12 @@ class AIBudgetGuard:
             task_class=task, provider_scope=provider_scope, period=current_period,
             observed=used, reserved=reserved, hard_limit=round(hard_limit, 8),
             remaining=round(remaining, 8), freshness="fresh", decision="allow", reasons=[],
-            auto_fallback_allowed=human_approved_fallback, reservation_scope=scope,
+            auto_fallback_allowed=human_approved_fallback,
+            reservation_scope=scope, aggregate_scope=self._aggregate_scope(provider_name, provider_scope, task, current_period),
         )
 
     def _preflight_codex(self, task: str, provider_scope: str, period: str,
-                         snapshot: dict[str, Any] | None, scope: str) -> dict[str, Any]:
+                         snapshot: dict[str, Any] | None, scope: str, aggregate_scope: str) -> dict[str, Any]:
         if not isinstance(snapshot, dict):
             return self._decision(
                 task_class=task, provider_scope=provider_scope, period=period,
@@ -378,6 +386,18 @@ class AIBudgetGuard:
             if any(_number(value, 0.0) and _number(value, 0.0) <= self._clock() for value in reset_at):
                 self._settled.pop(scope, None)
                 self._settled_baseline.pop(scope, None)
+                for reservation_id, reservation in list(self._reservations.items()):
+                    if reservation.scope.startswith("codex/"):
+                        self._reservations.pop(reservation_id, None)
+                        self._reserved[reservation.scope] = 0.0
+                        self._reserved[reservation.aggregate_scope] = 0.0
+                if self._ledger_path:
+                    try:
+                        with sqlite3.connect(self._ledger_path, timeout=30) as db:
+                            db.execute("DELETE FROM ai_budget_reservations WHERE scope LIKE 'codex/%'")
+                            db.execute("DELETE FROM ai_budget_ledger WHERE scope LIKE 'codex/%'")
+                    except (OSError, sqlite3.Error):
+                        pass
                 self._save_scope_locked(scope)
             settled = self._settled.get(scope, 0.0)
             reserved = self._reserved.get(scope, 0.0)
@@ -398,12 +418,14 @@ class AIBudgetGuard:
             ],
             reset_at=reset_at,
             reservation_scope=scope,
+            aggregate_scope=aggregate_scope,
         )
 
     def reserve(self, decision: dict[str, Any], amount: float | None = None) -> Reservation | None:
         if not isinstance(decision, dict) or decision.get("decision") != "allow":
             return None
         scope = str(decision.get("reservation_scope") or decision.get("provider_scope") or "default")
+        aggregate_scope = str(decision.get("aggregate_scope") or scope)
         # Provider scope in a decision is intentionally the stable ledger key;
         # callers may pass an explicit amount for API reservations.
         requested = max(0.0, _number(amount, _number(decision.get("remaining_after_reservation"))))
@@ -417,6 +439,7 @@ class AIBudgetGuard:
             self._clock(),
             baseline_usage if baseline_usage >= 0 else None,
             self.period(),
+            aggregate_scope,
         )
         with self._lock:
             if self._ledger_path:
@@ -427,16 +450,25 @@ class AIBudgetGuard:
                             "SELECT reserved,settled,baseline FROM ai_budget_ledger WHERE scope=? AND period=?",
                             (scope, self._settled_period),
                         ).fetchone()
+                        aggregate_row = db.execute(
+                            "SELECT reserved,settled,baseline FROM ai_budget_ledger WHERE scope=? AND period=?",
+                            (aggregate_scope, self._settled_period),
+                        ).fetchone()
                         stored_reserved = max(0.0, float(row[0])) if row else 0.0
                         stored_settled = max(0.0, float(row[1])) if row else 0.0
                         stored_baseline = float(row[2]) if row and row[2] is not None else None
+                        aggregate_reserved = max(0.0, float(aggregate_row[0])) if aggregate_row else 0.0
+                        aggregate_settled = max(0.0, float(aggregate_row[1])) if aggregate_row else 0.0
                         observed_value = decision.get("observed_usage")
                         observed = float(observed_value) if isinstance(observed_value, (int, float)) and not isinstance(observed_value, bool) else 0.0
                         if stored_baseline is not None and observed >= stored_baseline + stored_settled:
                             stored_settled = 0.0
                             stored_baseline = None
                         hard_limit = _number(decision.get("hard_limit"), float("inf"))
-                        if hard_limit != float("inf") and observed + stored_settled + stored_reserved + requested > hard_limit + 1e-12:
+                        if hard_limit != float("inf") and (
+                            observed + stored_settled + stored_reserved + requested > hard_limit + 1e-12
+                            or observed + aggregate_settled + aggregate_reserved + requested > hard_limit + 1e-12
+                        ):
                             return None
                         new_reserved = stored_reserved + requested
                         db.execute(
@@ -444,13 +476,22 @@ class AIBudgetGuard:
                             "ON CONFLICT(scope,period) DO UPDATE SET reserved=excluded.reserved,settled=excluded.settled,baseline=excluded.baseline,updated_at=excluded.updated_at",
                             (scope, self._settled_period, new_reserved, stored_settled, stored_baseline, self._clock()),
                         )
+                        if aggregate_scope != scope:
+                            db.execute(
+                                "INSERT INTO ai_budget_ledger(scope,period,reserved,settled,baseline,updated_at) VALUES(?,?,?,?,?,?) "
+                                "ON CONFLICT(scope,period) DO UPDATE SET reserved=excluded.reserved,settled=excluded.settled,baseline=excluded.baseline,updated_at=excluded.updated_at",
+                                (aggregate_scope, self._settled_period, aggregate_reserved + requested, aggregate_settled, None, self._clock()),
+                            )
                         db.execute(
-                            "INSERT INTO ai_budget_reservations(reservation_id,scope,period,amount,task_class,created_at,baseline_usage) VALUES(?,?,?,?,?,?,?)",
-                            (reservation.reservation_id, reservation.scope, reservation.period, reservation.amount, reservation.task_class, reservation.created_at, reservation.baseline_usage),
+                            "INSERT INTO ai_budget_reservations(reservation_id,scope,aggregate_scope,period,amount,task_class,created_at,baseline_usage) VALUES(?,?,?,?,?,?,?,?)",
+                            (reservation.reservation_id, reservation.scope, reservation.aggregate_scope, reservation.period, reservation.amount, reservation.task_class, reservation.created_at, reservation.baseline_usage),
                         )
                         db.commit()
                     self._reserved[scope] = new_reserved
                     self._settled[scope] = stored_settled
+                    if aggregate_scope != scope:
+                        self._reserved[aggregate_scope] = aggregate_reserved + requested
+                        self._settled[aggregate_scope] = aggregate_settled
                     if stored_baseline is not None:
                         self._settled_baseline[scope] = stored_baseline
                     self._reservations[reservation.reservation_id] = reservation
@@ -466,11 +507,20 @@ class AIBudgetGuard:
             else:
                 observed = 0.0
                 settled = self._settled.get(scope, 0.0)
-            if hard_limit != float("inf") and observed + settled + self._reserved.get(scope, 0.0) + requested > hard_limit + 1e-12:
+            aggregate_settled = self._settled.get(aggregate_scope, 0.0)
+            aggregate_reserved = self._reserved.get(aggregate_scope, 0.0)
+            if hard_limit != float("inf") and (
+                observed + settled + self._reserved.get(scope, 0.0) + requested > hard_limit + 1e-12
+                or observed + aggregate_settled + aggregate_reserved + requested > hard_limit + 1e-12
+            ):
                 return None
             self._reservations[reservation.reservation_id] = reservation
             self._reserved[scope] = self._reserved.get(scope, 0.0) + requested
+            if aggregate_scope != scope:
+                self._reserved[aggregate_scope] = aggregate_reserved + requested
             self._save_scope_locked(scope)
+            if aggregate_scope != scope:
+                self._save_scope_locked(aggregate_scope)
         return reservation
 
     def release(self, reservation: Reservation | str) -> bool:
@@ -481,17 +531,22 @@ class AIBudgetGuard:
                     with sqlite3.connect(self._ledger_path, timeout=30) as db:
                         db.execute("BEGIN IMMEDIATE")
                         row = db.execute(
-                            "SELECT scope,period,amount FROM ai_budget_reservations WHERE reservation_id=?",
+                            "SELECT scope,aggregate_scope,period,amount FROM ai_budget_reservations WHERE reservation_id=?",
                             (rid,),
                         ).fetchone()
                         if row is None:
                             db.rollback()
                             return False
-                        scope, period, amount = row
+                        scope, aggregate_scope, period, amount = row
                         db.execute(
                             "UPDATE ai_budget_ledger SET reserved=MAX(0,reserved-?),updated_at=? WHERE scope=? AND period=?",
                             (float(amount), self._clock(), scope, period),
                         )
+                        if aggregate_scope != scope:
+                            db.execute(
+                                "UPDATE ai_budget_ledger SET reserved=MAX(0,reserved-?),updated_at=? WHERE scope=? AND period=?",
+                                (float(amount), self._clock(), aggregate_scope, period),
+                            )
                         db.execute("DELETE FROM ai_budget_reservations WHERE reservation_id=?", (rid,))
                     self._reservations.pop(rid, None)
                     self._load_scope_locked(scope)
@@ -502,7 +557,11 @@ class AIBudgetGuard:
             if item is None:
                 return False
             self._reserved[item.scope] = max(0.0, self._reserved.get(item.scope, 0.0) - item.amount)
+            if item.aggregate_scope != item.scope:
+                self._reserved[item.aggregate_scope] = max(0.0, self._reserved.get(item.aggregate_scope, 0.0) - item.amount)
             self._save_scope_locked(item.scope)
+            if item.aggregate_scope != item.scope:
+                self._save_scope_locked(item.aggregate_scope)
             return True
 
     def settle(self, reservation: Reservation | str, actual_cost: float) -> bool:
@@ -514,13 +573,13 @@ class AIBudgetGuard:
                     with sqlite3.connect(self._ledger_path, timeout=30) as db:
                         db.execute("BEGIN IMMEDIATE")
                         row = db.execute(
-                            "SELECT scope,period,amount,baseline_usage FROM ai_budget_reservations WHERE reservation_id=?",
+                            "SELECT scope,aggregate_scope,period,amount,baseline_usage FROM ai_budget_reservations WHERE reservation_id=?",
                             (rid,),
                         ).fetchone()
                         if row is None:
                             db.rollback()
                             return False
-                        scope, period, reserved_amount, baseline_usage = row
+                        scope, aggregate_scope, period, reserved_amount, baseline_usage = row
                         ledger = db.execute(
                             "SELECT period,settled,baseline FROM ai_budget_ledger WHERE scope=? AND period=?",
                             (scope, period),
@@ -535,6 +594,11 @@ class AIBudgetGuard:
                             "ON CONFLICT(scope,period) DO UPDATE SET reserved=MAX(0,ai_budget_ledger.reserved-?),settled=ai_budget_ledger.settled+?,baseline=COALESCE(ai_budget_ledger.baseline,excluded.baseline),updated_at=excluded.updated_at",
                             (scope, period, max(0.0, float(reserved_amount)), settled + amount, baseline, self._clock(), float(reserved_amount), amount),
                         )
+                        if aggregate_scope != scope:
+                            db.execute(
+                                "UPDATE ai_budget_ledger SET reserved=MAX(0,reserved-?),settled=settled+?,updated_at=? WHERE scope=? AND period=?",
+                                (float(reserved_amount), amount, self._clock(), aggregate_scope, period),
+                            )
                         db.execute("DELETE FROM ai_budget_reservations WHERE reservation_id=?", (rid,))
                     self._reservations.pop(rid, None)
                     self._load_scope_locked(scope)
@@ -545,13 +609,19 @@ class AIBudgetGuard:
             if item is None:
                 return False
             self._reserved[item.scope] = max(0.0, self._reserved.get(item.scope, 0.0) - item.amount)
+            if item.aggregate_scope != item.scope:
+                self._reserved[item.aggregate_scope] = max(0.0, self._reserved.get(item.aggregate_scope, 0.0) - item.amount)
             amount = max(0.0, _number(actual_cost))
             if amount:
                 self._settled.setdefault(item.scope, 0.0)
                 if item.baseline_usage is not None:
                     self._settled_baseline.setdefault(item.scope, item.baseline_usage)
                 self._settled[item.scope] += amount
+                if item.aggregate_scope != item.scope:
+                    self._settled[item.aggregate_scope] = self._settled.get(item.aggregate_scope, 0.0) + amount
             self._save_scope_locked(item.scope)
+            if item.aggregate_scope != item.scope:
+                self._save_scope_locked(item.aggregate_scope)
             return True
 
 
