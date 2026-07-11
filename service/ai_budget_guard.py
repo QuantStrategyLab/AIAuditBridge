@@ -80,6 +80,7 @@ class Reservation:
     task_class: str
     created_at: float
     baseline_usage: float | None = None
+    period: str = ""
 
 
 class AIBudgetGuard:
@@ -111,10 +112,10 @@ class AIBudgetGuard:
             path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             with sqlite3.connect(path, timeout=30) as db:
                 db.execute(
-                    "CREATE TABLE IF NOT EXISTS ai_budget_ledger (scope TEXT PRIMARY KEY, period TEXT NOT NULL, reserved REAL NOT NULL, settled REAL NOT NULL, baseline REAL, updated_at REAL NOT NULL)"
+                    "CREATE TABLE IF NOT EXISTS ai_budget_ledger (scope TEXT NOT NULL, period TEXT NOT NULL, reserved REAL NOT NULL, settled REAL NOT NULL, baseline REAL, updated_at REAL NOT NULL, PRIMARY KEY(scope, period))"
                 )
                 db.execute(
-                    "CREATE TABLE IF NOT EXISTS ai_budget_reservations (reservation_id TEXT PRIMARY KEY, scope TEXT NOT NULL, amount REAL NOT NULL, task_class TEXT NOT NULL, created_at REAL NOT NULL, baseline_usage REAL)"
+                    "CREATE TABLE IF NOT EXISTS ai_budget_reservations (reservation_id TEXT PRIMARY KEY, scope TEXT NOT NULL, period TEXT NOT NULL, amount REAL NOT NULL, task_class TEXT NOT NULL, created_at REAL NOT NULL, baseline_usage REAL)"
                 )
         except (OSError, sqlite3.Error):
             self._ledger_path = ""
@@ -147,7 +148,7 @@ class AIBudgetGuard:
             with sqlite3.connect(self._ledger_path, timeout=30) as db:
                 db.execute(
                     "INSERT INTO ai_budget_ledger(scope,period,reserved,settled,baseline,updated_at) VALUES(?,?,?,?,?,?) "
-                    "ON CONFLICT(scope) DO UPDATE SET period=excluded.period,reserved=excluded.reserved,settled=excluded.settled,baseline=excluded.baseline,updated_at=excluded.updated_at",
+                    "ON CONFLICT(scope,period) DO UPDATE SET reserved=excluded.reserved,settled=excluded.settled,baseline=excluded.baseline,updated_at=excluded.updated_at",
                     (
                         scope,
                         self._settled_period,
@@ -178,10 +179,8 @@ class AIBudgetGuard:
     def period(self, now: float | None = None) -> str:
         return _period(self._clock() if now is None else now, self._timezone)
 
-    def _scope(self, provider: str, provider_scope: str, repo: str, task_class: str) -> str:
-        # Reservations are shared by the billing/rate-limit principal across
-        # repositories; repo remains a separate reporting/config dimension.
-        return "/".join((provider or "unknown", provider_scope or "default", task_class or "maintenance"))
+    def _scope(self, provider: str, provider_scope: str, repo: str, task_class: str, period: str) -> str:
+        return "/".join((provider or "unknown", provider_scope or "default", repo or "unknown", task_class or "maintenance", period))
 
     def _budget_entry(self, provider: str, provider_scope: str, repo: str, task_class: str) -> dict[str, Any] | None:
         budgets = self._config.get("monthly_budgets")
@@ -284,7 +283,7 @@ class AIBudgetGuard:
         task = str(task_class or "maintenance").strip().lower()
         provider_name = str(provider or "").strip().lower()
         current_period = self.period()
-        scope = self._scope(provider_name, provider_scope, repo, task)
+        scope = self._scope(provider_name, provider_scope, repo, task, current_period)
         amount = max(0.0, _number(estimated_cost_usd))
         if provider_name in {"codex", "codex-cli", "codex_account"}:
             return self._preflight_codex(task, provider_scope, current_period, codex_snapshot, scope)
@@ -415,6 +414,7 @@ class AIBudgetGuard:
             str(decision.get("task_class") or "maintenance"),
             self._clock(),
             baseline_usage if baseline_usage >= 0 else None,
+            self.period(),
         )
         with self._lock:
             if self._ledger_path:
@@ -439,12 +439,12 @@ class AIBudgetGuard:
                         new_reserved = stored_reserved + requested
                         db.execute(
                             "INSERT INTO ai_budget_ledger(scope,period,reserved,settled,baseline,updated_at) VALUES(?,?,?,?,?,?) "
-                            "ON CONFLICT(scope) DO UPDATE SET period=excluded.period,reserved=excluded.reserved,settled=excluded.settled,baseline=excluded.baseline,updated_at=excluded.updated_at",
+                            "ON CONFLICT(scope,period) DO UPDATE SET reserved=excluded.reserved,settled=excluded.settled,baseline=excluded.baseline,updated_at=excluded.updated_at",
                             (scope, self._settled_period, new_reserved, stored_settled, stored_baseline, self._clock()),
                         )
                         db.execute(
-                            "INSERT INTO ai_budget_reservations(reservation_id,scope,amount,task_class,created_at,baseline_usage) VALUES(?,?,?,?,?,?)",
-                            (reservation.reservation_id, reservation.scope, reservation.amount, reservation.task_class, reservation.created_at, reservation.baseline_usage),
+                            "INSERT INTO ai_budget_reservations(reservation_id,scope,period,amount,task_class,created_at,baseline_usage) VALUES(?,?,?,?,?,?,?)",
+                            (reservation.reservation_id, reservation.scope, reservation.period, reservation.amount, reservation.task_class, reservation.created_at, reservation.baseline_usage),
                         )
                         db.commit()
                     self._reserved[scope] = new_reserved
@@ -479,16 +479,16 @@ class AIBudgetGuard:
                     with sqlite3.connect(self._ledger_path, timeout=30) as db:
                         db.execute("BEGIN IMMEDIATE")
                         row = db.execute(
-                            "SELECT scope,amount FROM ai_budget_reservations WHERE reservation_id=?",
+                            "SELECT scope,period,amount FROM ai_budget_reservations WHERE reservation_id=?",
                             (rid,),
                         ).fetchone()
                         if row is None:
                             db.rollback()
                             return False
-                        scope, amount = row
+                        scope, period, amount = row
                         db.execute(
-                            "UPDATE ai_budget_ledger SET reserved=MAX(0,reserved-?),updated_at=? WHERE scope=?",
-                            (float(amount), self._clock(), scope),
+                            "UPDATE ai_budget_ledger SET reserved=MAX(0,reserved-?),updated_at=? WHERE scope=? AND period=?",
+                            (float(amount), self._clock(), scope, period),
                         )
                         db.execute("DELETE FROM ai_budget_reservations WHERE reservation_id=?", (rid,))
                     self._reservations.pop(rid, None)
@@ -512,25 +512,25 @@ class AIBudgetGuard:
                     with sqlite3.connect(self._ledger_path, timeout=30) as db:
                         db.execute("BEGIN IMMEDIATE")
                         row = db.execute(
-                            "SELECT scope,amount,baseline_usage FROM ai_budget_reservations WHERE reservation_id=?",
+                            "SELECT scope,period,amount,baseline_usage FROM ai_budget_reservations WHERE reservation_id=?",
                             (rid,),
                         ).fetchone()
                         if row is None:
                             db.rollback()
                             return False
-                        scope, reserved_amount, baseline_usage = row
+                        scope, period, reserved_amount, baseline_usage = row
                         ledger = db.execute(
-                            "SELECT period,settled,baseline FROM ai_budget_ledger WHERE scope=?",
-                            (scope,),
+                            "SELECT period,settled,baseline FROM ai_budget_ledger WHERE scope=? AND period=?",
+                            (scope, period),
                         ).fetchone()
-                        period = ledger[0] if ledger else self._settled_period
+                        period = ledger[0] if ledger else period
                         settled = float(ledger[1]) if ledger else 0.0
                         baseline = ledger[2] if ledger else None
                         if baseline is None:
                             baseline = baseline_usage
                         db.execute(
                             "INSERT INTO ai_budget_ledger(scope,period,reserved,settled,baseline,updated_at) VALUES(?,?,?,?,?,?) "
-                            "ON CONFLICT(scope) DO UPDATE SET reserved=MAX(0,ai_budget_ledger.reserved-?),settled=ai_budget_ledger.settled+?,baseline=COALESCE(ai_budget_ledger.baseline,excluded.baseline),updated_at=excluded.updated_at",
+                            "ON CONFLICT(scope,period) DO UPDATE SET reserved=MAX(0,ai_budget_ledger.reserved-?),settled=ai_budget_ledger.settled+?,baseline=COALESCE(ai_budget_ledger.baseline,excluded.baseline),updated_at=excluded.updated_at",
                             (scope, period, max(0.0, float(reserved_amount)), settled + amount, baseline, self._clock(), float(reserved_amount), amount),
                         )
                         db.execute("DELETE FROM ai_budget_reservations WHERE reservation_id=?", (rid,))

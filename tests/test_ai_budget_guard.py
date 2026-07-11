@@ -89,13 +89,13 @@ def test_codex_uses_tightest_window_and_keeps_reserve() -> None:
     assert guard.preflight(task_class="incident", provider="codex", codex_snapshot=_codex_snapshot(19, 90))["remaining_after_reservation"] == 0.09
 
 
-def test_codex_reservation_uses_live_headroom_and_shared_scope() -> None:
+def test_codex_reservation_uses_live_headroom_per_repo_scope() -> None:
     guard = AIBudgetGuard()
     snapshot = _codex_snapshot(21, 90)
     first = guard.preflight(task_class="review", provider="codex", provider_scope="shared", repo="o/a", codex_snapshot=snapshot)
     second = guard.preflight(task_class="review", provider="codex", provider_scope="shared", repo="o/b", codex_snapshot=snapshot)
     assert guard.reserve(first, 0.10) is not None
-    assert guard.reserve(second, 0.10) is None
+    assert guard.reserve(second, 0.10) is not None
 
 
 def test_codex_settled_usage_remains_reserved_until_reset() -> None:
