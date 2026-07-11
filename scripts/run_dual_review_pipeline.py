@@ -147,6 +147,8 @@ def run_pipeline(
 
 
 def _exit_code(result: dict[str, Any]) -> int:
+    # Exit 3 is a distinct degraded state; workflow callers must handle it
+    # explicitly rather than treating it as review success or a hard crash.
     if result.get("degraded") and result.get("error") == "reviewers_unavailable":
         return 3
     if not result.get("ok"):

@@ -5,9 +5,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import urllib.error
 from typing import TYPE_CHECKING, Any
 
-from service.adapters.llm_adapter import LlmAdapter, LlmResult
+from service.adapters.llm_adapter import LlmAdapter, LlmAdapterError, LlmResult
 from service.dual_review import VERDICT_INVALID, VERDICT_UNAVAILABLE, extract_confidence, extract_verdict
 from service.model_router import default_dual_review_model_for_reviewer
 
@@ -159,7 +160,7 @@ def dual_api_secondary_reviewer(request: DualReviewRequest) -> dict[str, Any]:
 
     try:
         return run_dual_api_secondary_review(request)
-    except Exception as exc:
+    except (LlmAdapterError, urllib.error.URLError, OSError) as exc:
         return {
             "mode": "dual_api",
             "gpt": {"verdict": VERDICT_UNAVAILABLE, "confidence": 0.0, "error": str(exc)},

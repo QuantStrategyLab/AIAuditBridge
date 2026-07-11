@@ -12,6 +12,11 @@ from typing import Any
 
 from service.briefing_consumer import BriefingAction, BriefingConsumptionResult
 
+_REPOSITORY_RE = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*/"
+    r"[A-Za-z0-9][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*"
+)
+
 
 def _telegram_token() -> str:
     for key in (
@@ -103,7 +108,7 @@ def create_github_issue(*, title: str, body: str, labels: tuple[str, ...] = ("br
         or os.environ.get("GITHUB_REPOSITORY")
         or "QuantStrategyLab/QuantStrategyLab"
     ).strip()
-    if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo) is None:
+    if _REPOSITORY_RE.fullmatch(repo) is None:
         return None
     if not shutil_which("gh"):
         return None

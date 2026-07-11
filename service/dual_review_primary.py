@@ -108,7 +108,7 @@ def run_codex_primary_review(
             "quota",
             "http 429",
             "status 429",
-            "service job failed",
+            "service job failed [unknown_failure]: codex exec failed",
             "not configured on the service host",
             "request timed out",
         )
