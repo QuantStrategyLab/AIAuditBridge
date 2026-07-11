@@ -5,9 +5,10 @@ from __future__ import annotations
 import json
 import os
 import unittest
+from datetime import UTC, datetime
 from unittest.mock import patch
 
-from service.openai_admin_usage import read_openai_admin_usage
+from service.openai_admin_usage import _usage_window, read_openai_admin_usage
 
 
 class _FakeResponse:
@@ -25,6 +26,13 @@ class _FakeResponse:
 
 
 class TestOpenAIAdminUsage(unittest.TestCase):
+    def test_default_window_uses_configured_billing_timezone(self) -> None:
+        end_time = int(datetime(2026, 7, 31, 18, tzinfo=UTC).timestamp())
+        start_time, days = _usage_window(end_time, "Asia/Shanghai")
+
+        self.assertEqual(start_time, end_time - 2 * 3600)
+        self.assertEqual(days, 1)
+
     def test_disabled_without_admin_key(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             self.assertIsNone(read_openai_admin_usage(now=1783139561, timeout_seconds=1))

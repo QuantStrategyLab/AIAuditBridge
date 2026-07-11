@@ -1809,7 +1809,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 from service.ai_budget_guard import get_ai_budget_guard
 
                 for reservation_id, _estimated_cost, _index in review_reservations:
-                    get_ai_budget_guard().mark_uncertain(reservation_id)
+                    get_ai_budget_guard().release(reservation_id)
             if codex_reservation_id:
                 from service.ai_budget_guard import get_ai_budget_guard
 

@@ -31,12 +31,18 @@ def _int_env(name: str, default: int, *, minimum: int = 1, maximum: int | None =
     return value
 
 
-def _usage_window(end_time: int) -> tuple[int, int]:
+def _usage_window(end_time: int, billing_timezone: str = "UTC") -> tuple[int, int]:
     configured = os.environ.get("CODEX_AUDIT_SERVICE_ANTHROPIC_USAGE_WINDOW_DAYS", "").strip()
     if configured:
         days = _int_env("CODEX_AUDIT_SERVICE_ANTHROPIC_USAGE_WINDOW_DAYS", 1, minimum=1, maximum=31)
         return end_time - days * 86400, days
-    current = datetime.fromtimestamp(end_time, UTC)
+    try:
+        from zoneinfo import ZoneInfo
+
+        zone = ZoneInfo(billing_timezone)
+    except Exception:  # noqa: BLE001 - invalid configuration must use the guard's UTC fallback.
+        zone = UTC
+    current = datetime.fromtimestamp(end_time, zone)
     start = current.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     return int(start.timestamp()), (current.date() - start.date()).days + 1
 
@@ -141,13 +147,17 @@ def _sum_costs(payloads: list[dict[str, Any]]) -> dict[str, Any]:
     return {"total_cost": round(by_currency.get(currency, 0.0), 4), "currency": currency, "result_count": result_count}
 
 
-def read_anthropic_admin_usage(now: int | None = None, timeout_seconds: float | None = None) -> dict[str, Any] | None:
+def read_anthropic_admin_usage(
+    now: int | None = None,
+    timeout_seconds: float | None = None,
+    billing_timezone: str = "UTC",
+) -> dict[str, Any] | None:
     """Return a sanitized Anthropic org usage/cost snapshot, or None when unavailable."""
     admin_key = _admin_key()
     if not admin_key:
         return None
     end_time = int(now if now is not None else time.time())
-    start_time, days = _usage_window(end_time)
+    start_time, days = _usage_window(end_time, billing_timezone)
     timeout = timeout_seconds if timeout_seconds is not None else float(
         _int_env("CODEX_AUDIT_SERVICE_ANTHROPIC_ADMIN_TIMEOUT_SECONDS", 8, minimum=1, maximum=60)
     )

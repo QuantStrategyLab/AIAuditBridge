@@ -623,7 +623,12 @@ class QuotaManager:
             if now - self._openai_account_attempt_ts < failure_ttl:
                 return None
             self._openai_account_attempt_ts = now
-            snapshot = read_openai_admin_usage(timeout_seconds=timeout_seconds)
+            from service.ai_budget_guard import get_ai_budget_guard
+
+            snapshot = read_openai_admin_usage(
+                timeout_seconds=timeout_seconds,
+                billing_timezone=get_ai_budget_guard().billing_timezone,
+            )
             if snapshot:
                 self._openai_account_cache = snapshot
                 self._openai_account_cache_ts = now
@@ -642,7 +647,12 @@ class QuotaManager:
             if now - self._anthropic_account_attempt_ts < failure_ttl:
                 return None
             self._anthropic_account_attempt_ts = now
-            snapshot = read_anthropic_admin_usage(timeout_seconds=timeout_seconds)
+            from service.ai_budget_guard import get_ai_budget_guard
+
+            snapshot = read_anthropic_admin_usage(
+                timeout_seconds=timeout_seconds,
+                billing_timezone=get_ai_budget_guard().billing_timezone,
+            )
             if snapshot:
                 self._anthropic_account_cache = snapshot
                 self._anthropic_account_cache_ts = now

@@ -302,6 +302,15 @@ class TestQuotaManager(unittest.TestCase):
             status = self.manager.status()
         self.assertEqual(status["summary"]["openai_account"], snapshot)
 
+    def test_openai_snapshot_uses_budget_guard_billing_timezone(self) -> None:
+        guard = type("Guard", (), {"billing_timezone": "Asia/Shanghai"})()
+        with (
+            patch("service.quota.read_openai_admin_usage", return_value=None) as read_snapshot,
+            patch("service.ai_budget_guard.get_ai_budget_guard", return_value=guard),
+        ):
+            self.manager._openai_account_snapshot(timeout_seconds=1)
+        read_snapshot.assert_called_once_with(timeout_seconds=1, billing_timezone="Asia/Shanghai")
+
     def test_status_summary_can_include_live_anthropic_account_snapshot(self) -> None:
         snapshot = {"source": "anthropic_admin_api", "status": "available", "costs": {"total_cost": 1.23}}
         with patch("service.quota.read_anthropic_admin_usage", return_value=snapshot):
@@ -321,7 +330,7 @@ class TestQuotaManager(unittest.TestCase):
         self.assertEqual(read_snapshot.call_count, 1)
 
     def test_account_snapshot_reads_use_shared_status_timeout(self) -> None:
-        def slow_snapshot(timeout_seconds: float | None = None) -> dict[str, object]:
+        def slow_snapshot(timeout_seconds: float | None = None, billing_timezone: str = "UTC") -> dict[str, object]:
             time.sleep(timeout_seconds or 0.25)
             return {"source": "slow", "status": "available"}
 
@@ -344,7 +353,7 @@ class TestQuotaManager(unittest.TestCase):
     def test_openai_account_snapshot_refresh_is_single_flight(self) -> None:
         snapshot = {"source": "openai_admin_api", "status": "available"}
 
-        def slow_snapshot(timeout_seconds: float | None = None) -> dict[str, object]:
+        def slow_snapshot(timeout_seconds: float | None = None, billing_timezone: str = "UTC") -> dict[str, object]:
             time.sleep(0.05)
             return snapshot
 
