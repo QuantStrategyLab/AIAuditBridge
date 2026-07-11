@@ -503,7 +503,7 @@ def _recover_orphaned_jobs() -> int:
         job["failure_category"] = "service_restart"
         _write_job(job)
         _record_job_automation_run(job)
-        _settle_budget_reservation(job, 0.10 if bool(job.get("dispatch_started")) else 0.0)
+        _release_budget_reservation(job)
         _audit_log(
             "job_failed",
             job_id=job.get("job_id"),
@@ -527,7 +527,7 @@ def _mark_stale_job_failed(job: dict[str, Any]) -> dict[str, Any]:
     job["failure_category"] = "stale_job_timeout"
     _write_job(job)
     _record_job_automation_run(job)
-    _settle_budget_reservation(job, 0.10 if bool(job.get("dispatch_started")) else 0.0)
+    _release_budget_reservation(job)
     return job
 
 
@@ -1187,10 +1187,7 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
             },
             domain=str(job.get("domain") or ""),
         )
-        if bool(job.get("dispatch_started")):
-            _settle_budget_reservation(job, 0.10)
-        else:
-            _release_budget_reservation(job)
+        _settle_budget_reservation(job, 0.10)
         _audit_log("job_completed", job_id=job_id, status=job["status"],
                    repository=job.get("repository"), task=job.get("task"))
     except Exception as exc:

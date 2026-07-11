@@ -276,6 +276,9 @@ class QuotaManager:
             for repo, item in records.items()
             if isinstance(repo, str) and isinstance(item, dict)
         }
+        persisted_failures = raw.get("record_failures") if isinstance(raw, dict) else None
+        if isinstance(persisted_failures, list):
+            self._record_failures.update(str(repo) for repo in persisted_failures if isinstance(repo, str))
 
     def _save_records_locked(self) -> None:
         path = self._store_path()
@@ -283,7 +286,10 @@ class QuotaManager:
             return
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         payload = json.dumps(
-            {"records": {repo: record.to_dict() for repo, record in self._records.items()}},
+            {
+                "records": {repo: record.to_dict() for repo, record in self._records.items()},
+                "record_failures": sorted(self._record_failures),
+            },
             ensure_ascii=False,
             sort_keys=True,
         ).encode("utf-8")

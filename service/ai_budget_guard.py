@@ -349,7 +349,9 @@ class AIBudgetGuard:
                 observed=0.0, reserved=0.0, hard_limit=0.0, remaining=0.0,
                 freshness="unknown", decision="defer", reasons=["monthly_budget_not_configured"],
             )
-        used, fresh, freshness_reason = self._usage(usage_snapshot)
+        has_provider_project_limit = entry.get("provider_project_limit_usd") is not None
+        usage_required = has_provider_project_limit or not repo
+        used, fresh, freshness_reason = self._usage(usage_snapshot) if usage_required else (0.0, True, "")
         if not fresh:
             return self._decision(
                 task_class=task, provider_scope=provider_scope, period=current_period,
