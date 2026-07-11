@@ -96,6 +96,41 @@ class DashboardSnapshotTests(unittest.TestCase):
         self.assertIn("strategies_not_array", payload["errors"])
         self.assertEqual(payload["strategies"], [])
 
+    def test_invalid_computed_at_is_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            health = Path(tmp) / "health.json"
+            health.write_text(json.dumps({
+                "computed_at": "not-a-timestamp",
+                "strategies": [{
+                    "strategy_profile": "must_not_publish",
+                    "domain": "crypto",
+                    "status": "healthy",
+                }],
+            }), encoding="utf-8")
+
+            payload = build_payload(health_file=health)
+
+        self.assertEqual(payload["data_status"], "unavailable")
+        self.assertIn("computed_at_invalid", payload["errors"])
+        self.assertEqual(payload["strategies"], [])
+
+    def test_non_finite_freshness_age_is_normalized(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            health = Path(tmp) / "health.json"
+            health.write_text(json.dumps({
+                "strategies": [{
+                    "strategy_profile": "safe",
+                    "domain": "crypto",
+                    "status": "healthy",
+                    "freshness": {"status": "fresh", "age_seconds": float("inf")},
+                }],
+            }), encoding="utf-8")
+
+            payload = build_payload(health_file=health)
+
+        self.assertEqual(payload["data_status"], "ready")
+        self.assertIsNone(payload["strategies"][0]["freshness"]["age_seconds"])
+
     def test_mixed_strategy_rows_are_fail_closed_without_partial_data(self):
         with tempfile.TemporaryDirectory() as tmp:
             health = Path(tmp) / "health.json"

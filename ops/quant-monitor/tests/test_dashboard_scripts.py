@@ -71,7 +71,7 @@ class DashboardScriptTests(unittest.TestCase):
             fake_curl.chmod(0o755)
             argv_path = root / "curl.argv"
             config_path = root / "curl.config"
-            token = "-".join(("dedicated", "sync", "value"))
+            token = " ".join(("dedicated", "sync", "value"))
             result = subprocess.run(
                 ["bash", str(ROOT / "scripts/publish_strategy_health.sh")],
                 env=os.environ | {
@@ -93,6 +93,7 @@ class DashboardScriptTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn(token, curl_argv)
         self.assertIn(token, curl_config)
+        self.assertIn(f'header = "Authorization: Bearer {token}"', curl_config)
 
 
 if __name__ == "__main__":

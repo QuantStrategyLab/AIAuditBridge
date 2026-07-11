@@ -164,9 +164,13 @@ def _clean_freshness(value: Any) -> dict[str, str | int | None]:
     if isinstance(age, bool):
         age = None
     try:
-        age = round(float(age)) if age is not None else None
-    except (TypeError, ValueError):
+        age = float(age) if age is not None else None
+    except (TypeError, ValueError, OverflowError):
         age = None
+    if age is not None and not math.isfinite(age):
+        age = None
+    if age is not None:
+        age = round(age)
     if age is not None and not 0 <= age <= 315_360_000:
         age = None
     return {"status": status, "age_seconds": age}
@@ -276,13 +280,14 @@ def build_payload(
             "source_revision": _clean_text(raw.get("source_revision"), 120),
         })
 
-    if not payload_shape_valid:
-        strategies = []
-    counts = {status: sum(1 for item in strategies if item["status"] == status) for status in STATUS_ORDER}
     raw_computed_at = (health or {}).get("computed_at")
     computed_at = _clean_timestamp(raw_computed_at)
     if raw_computed_at not in (None, "") and computed_at is None:
         errors.append("computed_at_invalid")
+        payload_shape_valid = False
+    if not payload_shape_valid:
+        strategies = []
+    counts = {status: sum(1 for item in strategies if item["status"] == status) for status in STATUS_ORDER}
     return {
         "schema_version": "strategy_health_dashboard.v1",
         "generated_at": _now(),
