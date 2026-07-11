@@ -51,6 +51,7 @@ AIAuditBridge 是 QuantStrategyLab 的 AI 审计控制面，负责：
 - `codex_pr_review.yml`
   - 处理 PR review。
   - 支持 Codex service + 直接 API fallback。
+  - 通过中央 Contract Oscillation Guard 保存受限的 blocking finding 历史并仲裁契约冲突。
   - 上传诊断 artifact。
 
 - `codex_review_gate.yml`
@@ -199,6 +200,20 @@ AIAuditBridge 是 QuantStrategyLab 的 AI 审计控制面，负责：
 - branch protection；
 - merge queue / required checks；
 - 失败后的 retrigger 逻辑。
+
+#### 3.3.1 Contract Oscillation Guard
+
+Contract Oscillation Guard 是 `AIAuditBridge` 的中央 PR review gate 语义，不是要求每个消费者仓库新增一套 branch rule。消费者仍使用原有 required check、branch protection 和 merge queue；guard 不提供 label、admin 或人工确认绕过。
+
+trusted review comment 只保存最近固定轮数、固定字节上限且脱敏后的 blocking finding 摘要，包括 head SHA、file、category、severity、description 和 suggestion。历史只能由已验证的 review bot comment 恢复；legacy comment 没有 history marker 时保持兼容，畸形或超限 history 则 fail closed。
+
+当同一 file/category/severity 的前后 finding 可能要求相反行为时，独立仲裁必须同时读取上一轮 finding、当前 finding 和累计 PR diff，并优先以公共接口、schema、tests、docs 等 source-of-truth 判断：
+
+- source-of-truth 足以证明当前 finding 为 false positive 时，仲裁可 `clear`；
+- 当前 finding 有明确契约依据时保持 `block`；
+- 证据不足、结果 ambiguous 或仲裁失败时继续 blocked。
+
+一旦确认或无法排除 contract conflict，结构化结果固定为 `contract_conflict=true`、`auto_fix_allowed=false`、`next_action=contract_arbitration`，禁止自动 remediation 继续反向修改代码。系统只要求一次人工契约确认；确认应落到公共接口、schema、tests 或 docs 的明确变更后，再由普通 review/check 链路重新验证，而不是绕过 gate。
 
 ### P1：强烈建议补的缺口
 

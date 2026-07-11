@@ -64,6 +64,16 @@ FINGERPRINTS_MARKER_PREFIX = "<!-- codex-pr-review-fingerprints:"
 FINGERPRINTS_MARKER_SUFFIX = " -->"
 HEAD_SHA_MARKER_PREFIX = "<!-- codex-pr-review-head-sha:"
 HEAD_SHA_MARKER_SUFFIX = " -->"
+FINDING_HISTORY_MARKER_PREFIX = "<!-- codex-pr-review-history:v1:"
+FINDING_HISTORY_MARKER_SUFFIX = " -->"
+CONTRACT_CONFLICT_MARKER_PREFIX = "<!-- codex-pr-review-contract-conflict:"
+AUTO_FIX_ALLOWED_MARKER_PREFIX = "<!-- codex-pr-review-auto-fix-allowed:"
+NEXT_ACTION_MARKER_PREFIX = "<!-- codex-pr-review-next-action:"
+DECISION_MARKER_SUFFIX = " -->"
+FINDING_HISTORY_MAX_ROUNDS = 4
+FINDING_HISTORY_MAX_BYTES = 8192
+FINDING_HISTORY_MAX_ENCODED_BYTES = ((FINDING_HISTORY_MAX_BYTES + 2) // 3) * 4
+FINDING_HISTORY_TEXT_LIMIT = 500
 ARBITRATION_REPEAT_THRESHOLD = 2
 
 
@@ -759,7 +769,9 @@ def parse_review_output(
     raise ReviewError(f"Failed to parse Codex review output as JSON: {stripped[:500]}")
 
 
-def parse_arbitration_output(text: str) -> dict[str, str]:
+def parse_arbitration_output(
+    text: str, *, require_contract_conflict: bool = False
+) -> dict[str, Any]:
     """Parse the independent arbiter's constrained verdict."""
     payload = parse_review_output(text, require_findings=False, required_keys=("verdict", "reason"))
     verdict = str(payload.get("verdict") or "").strip().lower()
@@ -768,7 +780,18 @@ def parse_arbitration_output(text: str) -> dict[str, str]:
     reason = str(payload.get("reason") or "").strip()
     if not reason:
         raise ReviewError("Arbitration output reason is required")
-    return {"verdict": verdict, "reason": reason}
+    contract_conflict = payload.get("contract_conflict", False)
+    if require_contract_conflict and "contract_conflict" not in payload:
+        raise ReviewError("Arbitration output contract_conflict is required")
+    if not isinstance(contract_conflict, bool):
+        raise ReviewError("Arbitration output contract_conflict must be a boolean")
+    result: dict[str, Any] = {
+        "verdict": verdict,
+        "reason": reason,
+    }
+    if "contract_conflict" in payload:
+        result["contract_conflict"] = contract_conflict
+    return result
 
 
 def blocking_finding_fingerprint(findings: list[dict[str, Any]]) -> str:
@@ -811,18 +834,31 @@ def build_arbitration_prompt(
     pr_title: str,
     diff: str,
     findings: list[dict[str, Any]],
+    previous_findings: list[dict[str, Any]] | None = None,
+    previous_head_sha: str = "",
 ) -> str:
-    """Ask an independent Codex pass to adjudicate repeated primary findings."""
+    """Ask an independent Codex pass to adjudicate repeated or conflicting findings."""
     diff_limited = _truncate_lines(diff, DEFAULT_MAX_CONTEXT_LINES * 3)
     findings_json = json.dumps(findings, ensure_ascii=False, indent=2)
+    previous_findings_json = json.dumps(previous_findings or [], ensure_ascii=False, indent=2)
     return f"""You are the independent Codex review arbiter for a production quantitative codebase.
 
-The primary reviewer repeatedly raised the blocking findings below. Decide whether every blocking finding remains valid against the current PR diff. Do not defer to the primary reviewer. Require concrete evidence in the changed code or test contract.
+The primary reviewer raised the current blocking findings below. Compare them with the prior blocking findings when present, then decide whether every current finding remains valid against the cumulative PR diff. Do not defer to either review round.
+
+A contract conflict means that following the current suggestion would reverse or contradict the behavior required by a prior finding for the same file/category/severity. Wording drift that preserves the same required behavior is not a conflict. Unrelated findings are not conflicts.
+
+Treat public interfaces, schemas, tests, and documentation in the base/current source as contract evidence. Use `clear` only when that source of truth proves every current finding false, obsolete, or fixed. Use `block` when a current finding is proven valid. Use `ambiguous` when the source of truth is insufficient. Never clear solely because two reviewers disagree.
 
 Repository: {repo}
 PR title: {pr_title}
 
-## Primary blocking findings
+## Prior reviewed head
+{previous_head_sha or "not available"}
+
+## Prior blocking findings
+{previous_findings_json}
+
+## Current blocking findings
 {findings_json}
 
 ## Current PR diff
@@ -831,11 +867,53 @@ PR title: {pr_title}
 Return exactly one JSON object:
 {{
   "verdict": "clear" | "block" | "ambiguous",
+  "contract_conflict": true | false,
   "reason": "Concrete evidence for the verdict."
 }}
 
-Use `clear` only when all blocking findings are false positives, obsolete, or demonstrably fixed. Use `block` when any blocking finding remains valid. Use `ambiguous` if evidence is insufficient. Do not discuss style or test coverage.
+Do not discuss style or generic test coverage.
 """
+
+
+def apply_arbitration_result(
+    decision: dict[str, Any], arbitration: dict[str, Any]
+) -> dict[str, Any]:
+    """Apply an arbiter verdict without allowing contract-conflict remediation churn."""
+    result = dict(decision)
+    contract_conflict = bool(arbitration.get("contract_conflict"))
+    if arbitration.get("verdict") == "clear":
+        result["blocked"] = False
+        result["summary"] = (
+            "✅ **Merge allowed**: blocking findings were cleared by independent Codex arbitration"
+        )
+    result["contract_conflict"] = contract_conflict
+    result["auto_fix_allowed"] = not contract_conflict
+    result["next_action"] = (
+        "contract_arbitration"
+        if contract_conflict
+        else "auto_remediation" if result.get("blocked") else "none"
+    )
+    return result
+
+
+def apply_arbitration_failure(
+    decision: dict[str, Any], error: ReviewError
+) -> dict[str, Any]:
+    """Fail closed when history-aware arbitration cannot establish the contract."""
+    result = dict(decision)
+    result.update(
+        {
+            "blocked": True,
+            "contract_conflict": True,
+            "auto_fix_allowed": False,
+            "next_action": "contract_arbitration",
+            "summary": (
+                "🚫 **Merge blocked**: contract arbitration failed closed; "
+                "automatic remediation is disabled"
+            ),
+        }
+    )
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -930,6 +1008,133 @@ def evaluate_findings(
 # ---------------------------------------------------------------------------
 
 
+def _sanitize_history_text(value: Any, limit: int = FINDING_HISTORY_TEXT_LIMIT) -> str:
+    text = re.sub(r"[\x00-\x1f\x7f]+", " ", str(value or "")).strip()
+    text = re.sub(
+        r"(?i)\b(token|secret|password|api[ _-]?key|authorization|cookie)\b\s*[:=]\s*\S+",
+        r"\1=[REDACTED]",
+        text,
+    )
+    text = re.sub(r"(?i)\bbearer\s+\S+", "Bearer [REDACTED]", text)
+    text = re.sub(r"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,})\b", "[REDACTED]", text)
+    text = re.sub(r"\b[A-Za-z0-9_+/=-]{40,}\b", "[REDACTED]", text)
+    return text[:limit]
+
+
+def _history_finding(finding: dict[str, Any]) -> dict[str, str]:
+    return {
+        "severity": _sanitize_history_text(finding.get("severity"), 20).lower(),
+        "category": _sanitize_history_text(finding.get("category"), 80).lower(),
+        "file": _sanitize_history_text(finding.get("file"), 300),
+        "description": _sanitize_history_text(finding.get("description")),
+        "suggestion": _sanitize_history_text(finding.get("suggestion")),
+    }
+
+
+def build_finding_history_marker(
+    history: list[dict[str, Any]],
+    findings: list[dict[str, Any]],
+    head_sha: str,
+) -> str:
+    """Serialize a bounded, sanitized blocking-finding history into a bot marker."""
+    rounds = list(history[-(FINDING_HISTORY_MAX_ROUNDS - 1):])
+    sanitized_findings = [_history_finding(finding) for finding in findings if isinstance(finding, dict)]
+    if sanitized_findings:
+        rounds.append(
+            {
+                "head_sha": _sanitize_history_text(head_sha, 64).lower(),
+                "findings": sanitized_findings,
+            }
+        )
+    payload = {"version": 1, "rounds": rounds[-FINDING_HISTORY_MAX_ROUNDS:]}
+    raw = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+    if len(raw) > FINDING_HISTORY_MAX_BYTES:
+        raw = b'{"version":1,"invalid":true}'
+    encoded = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+    return f"{FINDING_HISTORY_MARKER_PREFIX}{encoded}{FINDING_HISTORY_MARKER_SUFFIX}"
+
+
+def build_invalid_finding_history_marker() -> str:
+    raw = b'{"version":1,"invalid":true}'
+    encoded = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+    return f"{FINDING_HISTORY_MARKER_PREFIX}{encoded}{FINDING_HISTORY_MARKER_SUFFIX}"
+
+
+def parse_finding_history(body: str) -> tuple[list[dict[str, Any]], bool]:
+    """Recover trusted history; legacy absence is valid, malformed state fails closed."""
+    if FINDING_HISTORY_MARKER_PREFIX not in (body or ""):
+        return [], True
+    match = re.search(
+        rf"{re.escape(FINDING_HISTORY_MARKER_PREFIX)}([A-Za-z0-9_-]+){re.escape(FINDING_HISTORY_MARKER_SUFFIX)}",
+        body or "",
+    )
+    if not match:
+        return [], False
+    encoded = match.group(1)
+    if len(encoded) > FINDING_HISTORY_MAX_ENCODED_BYTES:
+        return [], False
+    try:
+        padding = "=" * (-len(encoded) % 4)
+        raw = base64.b64decode(encoded + padding, altchars=b"-_", validate=True)
+        if len(raw) > FINDING_HISTORY_MAX_BYTES:
+            return [], False
+        payload = json.loads(raw)
+    except (ValueError, json.JSONDecodeError):
+        return [], False
+    if not isinstance(payload, dict) or payload.get("version") != 1:
+        return [], False
+    rounds = payload.get("rounds")
+    if not isinstance(rounds, list) or len(rounds) > FINDING_HISTORY_MAX_ROUNDS:
+        return [], False
+    validated: list[dict[str, Any]] = []
+    field_limits = {
+        "severity": 20,
+        "category": 80,
+        "file": 300,
+        "description": FINDING_HISTORY_TEXT_LIMIT,
+        "suggestion": FINDING_HISTORY_TEXT_LIMIT,
+    }
+    for round_state in rounds:
+        if not isinstance(round_state, dict):
+            return [], False
+        head_sha = round_state.get("head_sha")
+        findings = round_state.get("findings")
+        if not isinstance(head_sha, str) or not re.fullmatch(r"[0-9a-f]{7,64}", head_sha):
+            return [], False
+        if not isinstance(findings, list):
+            return [], False
+        checked_findings: list[dict[str, str]] = []
+        for finding in findings:
+            if not isinstance(finding, dict) or set(finding) != set(field_limits):
+                return [], False
+            if any(
+                not isinstance(finding[field], str) or len(finding[field]) > limit
+                for field, limit in field_limits.items()
+            ):
+                return [], False
+            checked_findings.append(dict(finding))
+        validated.append({"head_sha": head_sha, "findings": checked_findings})
+    return validated, True
+
+
+def previous_matching_findings(
+    history: list[dict[str, Any]], current_findings: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Return only previous-round findings sharing a coarse arbitration key."""
+    if not history:
+        return []
+    current_keys = set(blocking_finding_fingerprints(current_findings))
+    prior = history[-1].get("findings")
+    if not isinstance(prior, list):
+        return []
+    return [
+        finding
+        for finding in prior
+        if isinstance(finding, dict)
+        and blocking_finding_fingerprint([finding]) in current_keys
+    ]
+
+
 def build_pr_comment(
     decision: dict[str, Any],
     pr_url: str,
@@ -938,7 +1143,8 @@ def build_pr_comment(
     finding_fingerprint: str = "",
     finding_fingerprints: tuple[str, ...] = (),
     reviewed_head_sha: str = "",
-    arbitration: dict[str, str] | None = None,
+    arbitration: dict[str, Any] | None = None,
+    finding_history_marker: str = "",
 ) -> str:
     """Build a markdown comment to post on the PR."""
     lines = [
@@ -947,6 +1153,10 @@ def build_pr_comment(
         f"{FINGERPRINT_MARKER_PREFIX}{finding_fingerprint}{FINGERPRINT_MARKER_SUFFIX}",
         f"{FINGERPRINTS_MARKER_PREFIX}{','.join(finding_fingerprints)}{FINGERPRINTS_MARKER_SUFFIX}",
         f"{HEAD_SHA_MARKER_PREFIX}{reviewed_head_sha}{HEAD_SHA_MARKER_SUFFIX}",
+        finding_history_marker,
+        f"{CONTRACT_CONFLICT_MARKER_PREFIX}{str(bool(decision.get('contract_conflict'))).lower()}{DECISION_MARKER_SUFFIX}",
+        f"{AUTO_FIX_ALLOWED_MARKER_PREFIX}{str(bool(decision.get('auto_fix_allowed', True))).lower()}{DECISION_MARKER_SUFFIX}",
+        f"{NEXT_ACTION_MARKER_PREFIX}{decision.get('next_action', 'none')}{DECISION_MARKER_SUFFIX}",
         "## 🤖 Codex PR Review",
         "",
         decision["summary"],
@@ -1163,6 +1373,31 @@ def upsert_pr_comment(
         print("Posted new review comment")
 
 
+def write_decision_outputs(decision_payload: dict[str, Any]) -> None:
+    """Persist the decision and publish the same contract fields to GitHub Actions."""
+    output_dir = Path("data/output/codex_pr_review")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "decision.json").write_text(
+        json.dumps(decision_payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    github_output = os.environ.get("GITHUB_OUTPUT")
+    if github_output:
+        arbitration = decision_payload.get("arbitration")
+        with open(github_output, "a", encoding="utf-8") as f:
+            f.write(f"blocked={'true' if decision_payload['blocked'] else 'false'}\n")
+            f.write(f"total_findings={decision_payload['total_findings']}\n")
+            f.write(f"blocking_count={len(decision_payload['blocking_findings'])}\n")
+            f.write(f"blocking_streak={decision_payload.get('blocking_streak', 0)}\n")
+            f.write(f"repeated_finding={'true' if decision_payload.get('repeated_finding') else 'false'}\n")
+            f.write(f"new_head={'true' if decision_payload.get('new_head') else 'false'}\n")
+            f.write(f"arbitration_verdict={arbitration.get('verdict', '') if arbitration else ''}\n")
+            f.write(f"contract_conflict={'true' if decision_payload.get('contract_conflict') else 'false'}\n")
+            f.write(f"auto_fix_allowed={'true' if decision_payload.get('auto_fix_allowed') else 'false'}\n")
+            f.write(f"next_action={decision_payload.get('next_action', 'none')}\n")
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -1219,15 +1454,65 @@ def main() -> int:
     if policy.get("policy_errors"):
         print(f"::warning::Policy errors: {policy['policy_errors']}")
 
+    history_source_valid = True
     try:
         _existing_id, previous_comment = find_existing_review_comment(token, repo, pr_number)
     except ReviewError as exc:
         print(f"::warning::Failed to fetch prior review comment: {exc}")
         previous_comment = ""
+        history_source_valid = False
     previous_streak = parse_blocking_streak(previous_comment)
     previous_fingerprint = parse_blocking_fingerprint(previous_comment)
     previous_fingerprints = parse_blocking_fingerprints(previous_comment)
     previous_head_sha = parse_reviewed_head_sha(previous_comment)
+    finding_history, history_valid = parse_finding_history(previous_comment)
+    history_valid = history_source_valid and history_valid
+    if history_valid and finding_history:
+        latest_history = finding_history[-1]
+        if not previous_head_sha:
+            previous_head_sha = str(latest_history.get("head_sha") or "")
+        if not previous_fingerprints:
+            previous_fingerprints = blocking_finding_fingerprints(
+                latest_history.get("findings") or []
+            )
+
+    if not history_valid:
+        decision = {
+            "blocked": True,
+            "blocking_findings": [],
+            "non_blocking_findings": [],
+            "total_findings": 0,
+            "summary": (
+                "🚫 **Merge blocked**: trusted review history is malformed or oversized; "
+                "automatic remediation is disabled pending contract arbitration"
+            ),
+            "contract_conflict": True,
+            "auto_fix_allowed": False,
+            "next_action": "contract_arbitration",
+        }
+        comment_body = build_pr_comment(
+            decision,
+            pr_url,
+            reviewed_head_sha=current_head_sha,
+            finding_history_marker=build_invalid_finding_history_marker(),
+        )
+        upsert_pr_comment(token, repo, pr_number, comment_body)
+        write_decision_outputs(
+            {
+                **decision,
+                "blocking_streak": previous_streak,
+                "finding_fingerprint": "",
+                "finding_fingerprints": (),
+                "repeated_fingerprints": (),
+                "repeated_finding": False,
+                "previous_head_sha": previous_head_sha,
+                "current_head_sha": current_head_sha,
+                "new_head": bool(previous_head_sha and current_head_sha != previous_head_sha),
+                "arbitration": None,
+                "history_valid": False,
+            }
+        )
+        return 1
 
     # First pass: classify files. If all files are low-risk, skip review.
     all_low_risk = changed_files_are_low_risk(changed_paths, policy)
@@ -1239,6 +1524,9 @@ def main() -> int:
             "non_blocking_findings": [],
             "total_findings": 0,
             "summary": "✅ **Merge allowed**: All changes are in docs/tests — Codex review skipped.",
+            "contract_conflict": False,
+            "auto_fix_allowed": True,
+            "next_action": "none",
         }
         upsert_pr_comment(
             token,
@@ -1249,6 +1537,9 @@ def main() -> int:
                 pr_url,
                 blocking_streak=0,
                 reviewed_head_sha=current_head_sha,
+                finding_history_marker=build_finding_history_marker(
+                    finding_history, [], current_head_sha
+                ),
             ),
         )
         return 0
@@ -1274,6 +1565,36 @@ def main() -> int:
     except ReviewError as exc:
         if _review_capacity_is_unavailable(exc):
             print(f"::warning::Codex review unavailable due to quota or capacity: {exc}")
+            if finding_history:
+                decision = {
+                    "blocked": True,
+                    "blocking_findings": [],
+                    "non_blocking_findings": [],
+                    "total_findings": 0,
+                    "summary": (
+                        "🚫 **Merge blocked**: review capacity is unavailable while "
+                        "blocking contract history is active"
+                    ),
+                    "contract_conflict": True,
+                    "auto_fix_allowed": False,
+                    "next_action": "contract_arbitration",
+                }
+                upsert_pr_comment(
+                    token,
+                    repo,
+                    pr_number,
+                    build_pr_comment(
+                        decision,
+                        pr_url,
+                        blocking_streak=previous_streak,
+                        finding_fingerprints=previous_fingerprints,
+                        reviewed_head_sha=previous_head_sha,
+                        finding_history_marker=build_finding_history_marker(
+                            finding_history, [], current_head_sha
+                        ),
+                    ),
+                )
+                return 1
             warning_body = (
                 "<!-- codex-pr-review -->\n"
                 "## 🤖 Codex PR Review\n\n"
@@ -1283,14 +1604,31 @@ def main() -> int:
             upsert_pr_comment(token, repo, pr_number, warning_body)
             return 0
         print(f"::error::Codex review failed: {exc}", file=sys.stderr)
-        warning_body = (
-            "<!-- codex-pr-review -->\n"
-            "## 🤖 Codex PR Review\n\n"
-            "🚫 **Merge blocked**: The Codex review could not be completed.\n\n"
-            f"```\n{exc}\n```\n\n"
-            "The review check fails closed until a valid Codex review is available.\n"
+        decision = {
+            "blocked": True,
+            "blocking_findings": [],
+            "non_blocking_findings": [],
+            "total_findings": 0,
+            "summary": "🚫 **Merge blocked**: The Codex review could not be completed.",
+            "contract_conflict": bool(finding_history),
+            "auto_fix_allowed": False,
+            "next_action": "contract_arbitration" if finding_history else "review_retry",
+        }
+        upsert_pr_comment(
+            token,
+            repo,
+            pr_number,
+            build_pr_comment(
+                decision,
+                pr_url,
+                blocking_streak=previous_streak,
+                finding_fingerprints=previous_fingerprints,
+                reviewed_head_sha=previous_head_sha,
+                finding_history_marker=build_finding_history_marker(
+                    finding_history, [], current_head_sha
+                ),
+            ),
         )
-        upsert_pr_comment(token, repo, pr_number, warning_body)
         return 1
 
     print(f"Codex output: {len(output)} chars")
@@ -1300,16 +1638,31 @@ def main() -> int:
         review = parse_review_output(output)
     except ReviewError as exc:
         print(f"::warning::Failed to parse review output: {exc}")
-        # Post raw output as comment
-        raw_body = (
-            "<!-- codex-pr-review -->\n"
-            "## 🤖 Codex PR Review\n\n"
-            "⚠️ **Review completed** but output could not be parsed for automated blocking.\n\n"
-            "<details><summary>Raw review output</summary>\n\n"
-            f"{output[:8000]}\n\n"
-            "</details>\n"
+        decision = {
+            "blocked": True,
+            "blocking_findings": [],
+            "non_blocking_findings": [],
+            "total_findings": 0,
+            "summary": "🚫 **Merge blocked**: review output could not be parsed safely.",
+            "contract_conflict": bool(finding_history),
+            "auto_fix_allowed": False,
+            "next_action": "contract_arbitration" if finding_history else "review_retry",
+        }
+        upsert_pr_comment(
+            token,
+            repo,
+            pr_number,
+            build_pr_comment(
+                decision,
+                pr_url,
+                blocking_streak=previous_streak,
+                finding_fingerprints=previous_fingerprints,
+                reviewed_head_sha=previous_head_sha,
+                finding_history_marker=build_finding_history_marker(
+                    finding_history, [], current_head_sha
+                ),
+            ),
         )
-        upsert_pr_comment(token, repo, pr_number, raw_body)
         return 1
 
     findings = review.get("findings", [])
@@ -1319,6 +1672,13 @@ def main() -> int:
 
     # Evaluate findings
     decision = evaluate_findings(findings, changed_files, policy)
+    decision.update(
+        {
+            "contract_conflict": False,
+            "auto_fix_allowed": True,
+            "next_action": "auto_remediation" if decision["blocked"] else "none",
+        }
+    )
     finding_fingerprint = blocking_finding_fingerprint(decision["blocking_findings"])
     finding_fingerprints = blocking_finding_fingerprints(decision["blocking_findings"])
     repeated_fingerprints = tuple(sorted(set(finding_fingerprints).intersection(previous_fingerprints)))
@@ -1335,8 +1695,14 @@ def main() -> int:
         previous_head_sha=previous_head_sha,
         current_head_sha=current_head_sha,
     )
-    arbitration: dict[str, str] | None = None
-    if should_arbitrate(
+    previous_findings = previous_matching_findings(
+        finding_history, decision["blocking_findings"]
+    )
+    arbitration: dict[str, Any] | None = None
+    history_arbitration_required = bool(
+        decision["blocked"] and previous_findings and new_head
+    )
+    if history_arbitration_required or should_arbitrate(
         blocked=bool(decision["blocked"]),
         streak=blocking_streak,
         repeated=repeated_finding,
@@ -1347,6 +1713,8 @@ def main() -> int:
             pr_title=pr_title,
             diff=diff,
             findings=decision["blocking_findings"],
+            previous_findings=previous_findings,
+            previous_head_sha=previous_head_sha,
         )
         try:
             arbitration = parse_arbitration_output(
@@ -1356,14 +1724,36 @@ def main() -> int:
                     complexity=TASK_COMPLEXITY_HIGH,
                     changed_file_count=len(changed_paths),
                     changed_line_count=len(diff.splitlines()),
-                )
+                ),
+                require_contract_conflict=bool(previous_findings),
             )
         except ReviewError as exc:
-            arbitration = {"verdict": "ambiguous", "reason": f"Arbitration failed closed: {exc}"}
+            arbitration = {
+                "verdict": "ambiguous",
+                "reason": f"Arbitration failed closed: {exc}",
+                "contract_conflict": bool(previous_findings),
+            }
+            if previous_findings:
+                decision = apply_arbitration_failure(decision, exc)
+        else:
+            decision = apply_arbitration_result(decision, arbitration)
+            if previous_findings and arbitration.get("verdict") == "ambiguous":
+                arbitration["contract_conflict"] = True
+                decision = apply_arbitration_failure(
+                    decision, ReviewError("contract evidence is ambiguous")
+                )
         if arbitration.get("verdict") == "clear":
-            decision["blocked"] = False
             blocking_streak = 0
-            decision["summary"] = "✅ **Merge allowed**: repeated primary findings were cleared by independent Codex arbitration"
+    finding_history_marker = build_finding_history_marker(
+        finding_history, decision["blocking_findings"], current_head_sha
+    )
+    _serialized_history, serialized_history_valid = parse_finding_history(
+        finding_history_marker
+    )
+    if not serialized_history_valid:
+        decision = apply_arbitration_failure(
+            decision, ReviewError("blocking finding history exceeds its safe bound")
+        )
     # Post comment
     comment_body = build_pr_comment(
         decision,
@@ -1373,12 +1763,11 @@ def main() -> int:
         finding_fingerprints=finding_fingerprints,
         reviewed_head_sha=current_head_sha,
         arbitration=arbitration,
+        finding_history_marker=finding_history_marker,
     )
     upsert_pr_comment(token, repo, pr_number, comment_body)
 
     # Write decision for downstream use
-    output_dir = Path("data/output/codex_pr_review")
-    output_dir.mkdir(parents=True, exist_ok=True)
     decision_payload = {
         **decision,
         "blocking_streak": blocking_streak,
@@ -1390,23 +1779,9 @@ def main() -> int:
         "current_head_sha": current_head_sha,
         "new_head": new_head,
         "arbitration": arbitration,
+        "history_valid": serialized_history_valid,
     }
-    (output_dir / "decision.json").write_text(
-        json.dumps(decision_payload, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-
-    # Output for GitHub Actions
-    github_output = os.environ.get("GITHUB_OUTPUT")
-    if github_output:
-        with open(github_output, "a", encoding="utf-8") as f:
-            f.write(f"blocked={'true' if decision['blocked'] else 'false'}\n")
-            f.write(f"total_findings={decision['total_findings']}\n")
-            f.write(f"blocking_count={len(decision['blocking_findings'])}\n")
-            f.write(f"blocking_streak={blocking_streak}\n")
-            f.write(f"repeated_finding={'true' if repeated_finding else 'false'}\n")
-            f.write(f"new_head={'true' if new_head else 'false'}\n")
-            f.write(f"arbitration_verdict={arbitration.get('verdict', '') if arbitration else ''}\n")
+    write_decision_outputs(decision_payload)
 
     if decision["blocked"]:
         print(
