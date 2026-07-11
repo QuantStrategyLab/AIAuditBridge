@@ -1437,7 +1437,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         )
         if not qr["allowed"]:
             _json_response(self, HTTPStatus.TOO_MANY_REQUESTS, {
-                "status": "deferred_budget",
+                "status": "error", "deferred_budget": True,
                 "error": qr["reason"],
                 "recommended_model": qr.get("recommended_model", ""),
                 "remaining_usd": qr.get("remaining_usd", 0),
@@ -1518,7 +1518,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         )
         if not qr["allowed"]:
             _json_response(self, HTTPStatus.TOO_MANY_REQUESTS, {
-                "status": "deferred_budget", "error": qr["reason"],
+                "status": "error", "deferred_budget": True, "error": qr["reason"],
                 "remaining_usd": qr.get("remaining_usd", 0),
                 "budget_decision": qr.get("budget_decision", {}),
             })
@@ -1557,7 +1557,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         )
         if not qr["allowed"]:
             _json_response(self, HTTPStatus.TOO_MANY_REQUESTS, {
-                "status": "deferred_budget", "error": qr["reason"],
+                "status": "error", "deferred_budget": True, "error": qr["reason"],
                 "remaining_usd": qr.get("remaining_usd", 0),
                 "budget_decision": qr.get("budget_decision", {}),
             })
@@ -1642,7 +1642,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             )
             if not codex_quota.get("allowed"):
                 _json_response(self, HTTPStatus.TOO_MANY_REQUESTS, {
-                    "status": "deferred_budget",
+                    "status": "error", "deferred_budget": True,
                     "error": codex_quota.get("reason", "AI budget gate denied Codex review"),
                     "budget_decision": codex_quota.get("budget_decision", {}),
                 })
@@ -1668,7 +1668,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
 
                     get_ai_budget_guard().release(codex_reservation_id)
                 _json_response(self, HTTPStatus.TOO_MANY_REQUESTS, {
-                    "status": "deferred_budget",
+                    "status": "error", "deferred_budget": True,
                     "error": review_quota.get("reason", "AI budget gate denied review"),
                     "reviewer": reviewer_name,
                     "budget_decision": review_quota.get("budget_decision", {}),

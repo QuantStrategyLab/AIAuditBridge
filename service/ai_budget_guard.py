@@ -209,8 +209,10 @@ class AIBudgetGuard:
         return "/".join((provider or "unknown", provider_scope or "default", repo or "unknown", task_class or "maintenance", period))
 
     @staticmethod
-    def _aggregate_scope(provider: str, provider_scope: str, task_class: str, period: str) -> str:
-        return "/".join((provider or "unknown", provider_scope or "default", "_aggregate", task_class or "maintenance", period))
+    def _aggregate_scope(provider: str, provider_scope: str, period: str) -> str:
+        # Aggregate reservations share one provider/project cap across all
+        # task classes; task-specific thresholds stay in the decision only.
+        return "/".join((provider or "unknown", provider_scope or "default", "_aggregate", period))
 
     def _budget_entry(self, provider: str, provider_scope: str, repo: str, task_class: str) -> dict[str, Any] | None:
         budgets = self._config.get("monthly_budgets")
@@ -334,7 +336,7 @@ class AIBudgetGuard:
                 freshness="unavailable", decision="block", reasons=["shared_budget_ledger_unavailable"],
             )
         scope = self._scope(provider_name, provider_scope, repo, task, current_period)
-        aggregate_scope = self._aggregate_scope(provider_name, provider_scope, task, current_period)
+        aggregate_scope = self._aggregate_scope(provider_name, provider_scope, current_period)
         amount = max(0.0, _number(estimated_cost_usd))
         if provider_name in {"codex", "codex-cli", "codex_account"}:
             return self._preflight_codex(task, provider_scope, current_period, codex_snapshot, scope, aggregate_scope)
@@ -391,7 +393,7 @@ class AIBudgetGuard:
             aggregate_observed=used, aggregate_hard_limit=round(aggregate_hard_limit, 8),
             aggregate_reserved=aggregate_reserved,
             auto_fallback_allowed=human_approved_fallback,
-            reservation_scope=scope, aggregate_scope=self._aggregate_scope(provider_name, provider_scope, task, current_period),
+            reservation_scope=scope, aggregate_scope=self._aggregate_scope(provider_name, provider_scope, current_period),
         )
 
     def _preflight_codex(self, task: str, provider_scope: str, period: str,
