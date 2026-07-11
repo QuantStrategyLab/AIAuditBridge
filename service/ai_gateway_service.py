@@ -486,6 +486,8 @@ def _cleanup_expired_jobs() -> None:
                     _settle_budget_reservation(payload, 0.10)
                 else:
                     _release_budget_reservation(payload)
+                if payload.get("_budget_cleanup_pending") or payload.get("_budget_reservation_id"):
+                    continue
             try:
                 path.unlink()
             except FileNotFoundError:

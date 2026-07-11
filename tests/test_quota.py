@@ -162,6 +162,12 @@ class TestQuotaRecord(unittest.TestCase):
 
 
 class TestQuotaManager(unittest.TestCase):
+    def test_recording_failure_requires_explicit_recovery(self) -> None:
+        manager = QuotaManager()
+        manager.mark_recording_failed("repo/recovery")
+        self.assertFalse(manager.check("repo/recovery", "gpt-5.4-mini")["allowed"])
+        manager.recover_recording_failure("repo/recovery")
+        self.assertTrue(manager.check("repo/recovery", "gpt-5.4-mini")["allowed"])
     """QuotaManager budget tracking and enforcement."""
 
     def setUp(self) -> None:
