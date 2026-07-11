@@ -1914,7 +1914,9 @@ def main() -> int:
         else []
     )
     arbitration: dict[str, Any] | None = None
-    confirmation_arbitration_required = history_requires_confirmation
+    confirmation_arbitration_required = bool(
+        history_requires_confirmation and previous_findings
+    )
     history_arbitration_required = bool(decision["blocked"] and previous_findings)
     if confirmation_arbitration_required or history_arbitration_required or should_arbitrate(
         blocked=bool(decision["blocked"]),

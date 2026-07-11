@@ -849,7 +849,7 @@ class RunCodexPrReviewTests(unittest.TestCase):
         self.assertTrue(valid)
         self.assertEqual(history[-1]["status"], "cleared")
 
-    def test_main_clears_confirmation_history_only_after_independent_arbitration(self) -> None:
+    def test_main_does_not_arbitrate_confirmation_history_without_prior_findings(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             event_path = self._write_event(tmpdir, ["scripts/run_codex_pr_review.py"])
             prior_comment = (
@@ -879,21 +879,19 @@ class RunCodexPrReviewTests(unittest.TestCase):
                 ),
                 patch(
                     "scripts.run_codex_pr_review.run_codex_review_with_fallback",
-                    side_effect=[
-                        '{"summary":"clear","findings":[]}',
-                        '{"verdict":"clear","reason":"tests define the contract",'
-                        '"contract_conflict":false}',
-                    ],
-                ),
+                    return_value='{"summary":"clear","findings":[]}',
+                ) as backend,
                 patch("scripts.run_codex_pr_review.upsert_pr_comment") as comment,
             ):
-                self.assertEqual(run_codex_pr_review.main(), 0)
+                self.assertEqual(run_codex_pr_review.main(), 1)
 
+        backend.assert_called_once()
         body = comment.call_args.args[3]
         history, valid = run_codex_pr_review.parse_finding_history(body)
         self.assertTrue(valid)
-        self.assertEqual(history[-1]["status"], "cleared")
-        self.assertIn("Codex Review Arbitration", body)
+        self.assertEqual(history[-1]["status"], "invalid_history")
+        self.assertNotIn("Codex Review Arbitration", body)
+        self.assertIn("codex-pr-review-auto-fix-allowed:false", body)
 
 
     def test_main_blocks_unconfigured_backend_even_with_legacy_opt_in(self) -> None:
