@@ -419,8 +419,9 @@ def decide_automation_execution(
     if ai_budget_decision is not None:
         budget_result = str(ai_budget_decision.get("decision") or "block").strip().lower()
         if budget_result != "allow":
-            action = EXECUTION_DEFER
-            defer = True
+            if action != EXECUTION_HUMAN_REVIEW:
+                action = EXECUTION_DEFER
+                defer = True
             budget_deferred = True
             effective_mode = MODE_REVIEW_ONLY
             reasons.append(

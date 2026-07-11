@@ -572,6 +572,9 @@ class AIBudgetGuard:
                         observed = float(observed_value) if isinstance(observed_value, (int, float)) and not isinstance(observed_value, bool) else 0.0
                         aggregate_observed_value = decision.get("aggregate_observed_usage")
                         aggregate_observed = float(aggregate_observed_value) if isinstance(aggregate_observed_value, (int, float)) and not isinstance(aggregate_observed_value, bool) else observed
+                        if aggregate_baseline is not None and aggregate_observed >= aggregate_baseline + aggregate_settled:
+                            aggregate_settled = 0.0
+                            aggregate_baseline = None
                         if stored_baseline is not None and observed >= stored_baseline + stored_settled:
                             stored_settled = 0.0
                             stored_baseline = None

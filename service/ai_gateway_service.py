@@ -1653,6 +1653,21 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 return
             codex_reservation_id = str(codex_quota.get("budget_reservation_id") or "")
         review_reservations: list[tuple[str, float]] = []
+        if _budget_gate_enabled():
+            estimated_total = sum(
+                float(get_quota_manager().check(review_repo, reviewer_model, req.prompt).get("cost_estimate_usd") or 0.0)
+                for _reviewer_name, reviewer_model in reviewer_tuples
+            )
+            if get_quota_manager().remaining_daily(review_repo) < estimated_total:
+                if codex_reservation_id:
+                    from service.ai_budget_guard import get_ai_budget_guard
+
+                    get_ai_budget_guard().release(codex_reservation_id)
+                _json_response(self, HTTPStatus.TOO_MANY_REQUESTS, {
+                    "status": "error", "deferred_budget": True,
+                    "error": "deferred_budget: combined reviewer daily budget is insufficient",
+                })
+                return
         for reviewer_name, reviewer_model in reviewer_tuples:
             review_quota = get_quota_manager().check(
                 review_repo,
