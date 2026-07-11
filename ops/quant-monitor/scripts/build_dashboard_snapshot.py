@@ -11,7 +11,9 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import re
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -71,10 +73,11 @@ def _review_index(review_dir: Path) -> tuple[dict[str, dict[str, Any]], set[str]
             continue
         profile = _clean_id(payload.get("profile") or payload.get("strategy_profile"))
         if profile:
-            if profile in index:
-                duplicates.add(profile)
+            profile_key = profile.casefold()
+            if profile_key in index:
+                duplicates.add(profile_key)
                 continue
-            index[profile] = {
+            index[profile_key] = {
                 "requested_stage": _clean_text(payload.get("requested_stage"), 80),
                 "validation": _clean_summary(payload.get("validation")),
                 "risk": _clean_summary(payload.get("risk")),
@@ -211,7 +214,9 @@ def build_payload(
         for raw in raw_strategies
         if isinstance(raw, dict)
     }
-    active_duplicate_reviews = duplicate_reviews & active_profiles
+    active_duplicate_reviews = duplicate_reviews & {
+        profile.casefold() for profile in active_profiles if profile
+    }
     if active_duplicate_reviews:
         errors.append("review_artifact_ambiguous")
         payload_shape_valid = False
@@ -243,7 +248,7 @@ def build_payload(
             errors.append("strategy_status_invalid")
             payload_shape_valid = False
             continue
-        review = reviews.get(profile, {})
+        review = reviews.get(profile.casefold(), {})
         requested_stage = review.get("requested_stage")
         decision = _decision(status, requested_stage)
         strategies.append({
@@ -324,10 +329,28 @@ def main() -> int:
         force_unavailable=args.force_unavailable,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
-        encoding="utf-8",
-    )
+    content = json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+    temp_name: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=args.output.parent,
+            prefix=f".{args.output.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temp_file:
+            temp_name = temp_file.name
+            temp_file.write(content)
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
+        Path(temp_name).replace(args.output)
+    finally:
+        if temp_name:
+            try:
+                Path(temp_name).unlink()
+            except FileNotFoundError:
+                pass
     print(json.dumps({"output": args.output.name, "data_status": payload["data_status"], "strategies": len(payload["strategies"])}, ensure_ascii=False))
     return 0
 

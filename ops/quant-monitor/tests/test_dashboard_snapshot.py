@@ -150,6 +150,27 @@ class DashboardSnapshotTests(unittest.TestCase):
         self.assertIn("review_artifact_ambiguous", payload["errors"])
         self.assertEqual(payload["strategies"], [])
 
+    def test_case_only_duplicate_review_artifacts_are_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            health = root / "health.json"
+            health.write_text(json.dumps({"strategies": [
+                {"strategy_profile": "Alpha", "domain": "crypto", "status": "healthy"},
+            ]}), encoding="utf-8")
+            reviews = root / "reviews"
+            reviews.mkdir()
+            for name, profile in (("upper.json", "Alpha"), ("lower.json", "alpha")):
+                (reviews / name).write_text(
+                    json.dumps({"profile": profile, "requested_stage": "live_candidate"}),
+                    encoding="utf-8",
+                )
+
+            payload = build_payload(health_file=health, review_dir=reviews)
+
+        self.assertEqual(payload["data_status"], "unavailable")
+        self.assertIn("review_artifact_ambiguous", payload["errors"])
+        self.assertEqual(payload["strategies"], [])
+
     def test_force_unavailable_ignores_existing_input(self):
         with tempfile.TemporaryDirectory() as tmp:
             health = Path(tmp) / "health.json"

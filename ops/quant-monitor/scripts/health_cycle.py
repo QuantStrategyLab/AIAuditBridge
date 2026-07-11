@@ -87,6 +87,10 @@ def main() -> int:
         json.dumps(normalized_payload, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+    collector_payload_invalid = (
+        normalized_payload.get("data_status") != "ready"
+        or bool(normalized_payload.get("errors"))
+    )
     if json_path.is_file():
         try:
             payload = json.loads(json_path.read_text(encoding="utf-8"))
