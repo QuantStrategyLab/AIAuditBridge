@@ -111,6 +111,7 @@ def task_public_summary(task: Any) -> dict[str, Any]:
     trigger = payload.get("trigger") if isinstance(payload.get("trigger"), dict) else {}
     proposed_action = payload.get("proposed_action") if isinstance(payload.get("proposed_action"), dict) else {}
     gate_decision = payload.get("gate_decision") if isinstance(payload.get("gate_decision"), dict) else {}
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
     return {
         "trigger": {
             "source": trigger.get("source", ""),
@@ -128,6 +129,7 @@ def task_public_summary(task: Any) -> dict[str, Any]:
             "allowed": gate_decision.get("allowed", False),
             "human_review_required": gate_decision.get("human_review_required", True),
         },
+        "finding_type": metadata.get("finding_type", "metric_degradation"),
         "status": payload.get("status", ""),
     }
 

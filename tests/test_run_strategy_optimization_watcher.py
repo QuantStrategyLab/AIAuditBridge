@@ -9,17 +9,23 @@ from unittest.mock import patch
 from scripts.run_strategy_optimization_watcher import list_open_issue_urls, parse_bool, resolve_input_path, run_watcher
 
 
+def _performance_payload(*, repo: str = "QuantStrategyLab/TestStrategies", profile: str = "live", sharpe: float = 0.5) -> dict[str, object]:
+    return {
+        "repo": repo,
+        "profile": profile,
+        "schema_version": "strategy_performance.v2",
+        "metrics_kind": "performance",
+        "current_metrics": {"sharpe": sharpe, "cagr": 0.1, "calmar": 0.7, "win_rate": 0.52, "max_dd": 0.12},
+        "baseline_metrics": {"sharpe": 1.0, "cagr": 0.2, "calmar": 1.0, "win_rate": 0.58, "max_dd": 0.08},
+    }
+
+
 class RunStrategyOptimizationWatcherTest(unittest.TestCase):
     def test_dry_run_does_not_create_issue(self) -> None:
         calls: list[tuple[str, str, str]] = []
 
         result = run_watcher(
-            {
-                "repo": "QuantStrategyLab/TestStrategies",
-                "profile": "live",
-                "current_metrics": {"sharpe": 0.5},
-                "baseline_metrics": {"sharpe": 1.0},
-            },
+            _performance_payload(),
             dry_run=True,
             create_issue=lambda repo, title, body: calls.append((repo, title, body)) or "https://example.test/1",
             comment_issue=lambda repo, url, body: "https://example.test/comment",
@@ -36,11 +42,9 @@ class RunStrategyOptimizationWatcherTest(unittest.TestCase):
         calls: list[tuple[str, str, str]] = []
 
         result = run_watcher(
-            {
-                "repo": "QuantStrategyLab/IssueRepo",
-                "profile": "live",
-                "current_metrics": {"max_dd": 0.2},
-                "baseline_metrics": {"max_dd": 0.1},
+            _performance_payload(repo="QuantStrategyLab/IssueRepo", sharpe=1.0) | {
+                "current_metrics": {"sharpe": 1.0, "cagr": 0.2, "calmar": 1.0, "win_rate": 0.58, "max_dd": 0.2},
+                "baseline_metrics": {"sharpe": 1.0, "cagr": 0.2, "calmar": 1.0, "win_rate": 0.58, "max_dd": 0.1},
             },
             source_repo="QuantStrategyLab/IssueRepo",
             dry_run=False,
@@ -55,12 +59,7 @@ class RunStrategyOptimizationWatcherTest(unittest.TestCase):
 
     def test_non_dry_run_skips_existing_open_issue(self) -> None:
         calls: list[tuple[str, str, str]] = []
-        payload = {
-            "repo": "QuantStrategyLab/TestStrategies",
-            "profile": "live",
-            "current_metrics": {"sharpe": 0.5},
-            "baseline_metrics": {"sharpe": 1.0},
-        }
+        payload = _performance_payload()
         dry_result = run_watcher(payload, dry_run=True)
         issue_key = dry_result["issues"][0]["watcher_issue_key"]
 
@@ -114,32 +113,20 @@ class RunStrategyOptimizationWatcherTest(unittest.TestCase):
     def test_run_watcher_requires_source_repo_for_non_dry_run(self) -> None:
         with self.assertRaises(ValueError):
             run_watcher(
-                {
-                    "repo": "QuantStrategyLab/TestStrategies",
-                    "current_metrics": {"sharpe": 0.5},
-                    "baseline_metrics": {"sharpe": 1.0},
-                },
+                _performance_payload(),
                 dry_run=False,
             )
 
     def test_run_watcher_rejects_mismatched_source_repo_payload(self) -> None:
         with self.assertRaises(ValueError):
             run_watcher(
-                {
-                    "repo": "QuantStrategyLab/Other",
-                    "current_metrics": {"sharpe": 0.5},
-                    "baseline_metrics": {"sharpe": 1.0},
-                },
+                _performance_payload(repo="QuantStrategyLab/Other"),
                 source_repo="QuantStrategyLab/TestStrategies",
             )
 
     def test_run_watcher_uses_validated_source_repo_in_task_summary(self) -> None:
         result = run_watcher(
-            {
-                "profile": "live",
-                "current_metrics": {"sharpe": 0.5},
-                "baseline_metrics": {"sharpe": 1.0},
-            },
+            _performance_payload(repo="", profile="live"),
             source_repo="QuantStrategyLab/TestStrategies",
             dry_run=True,
         )
@@ -152,8 +139,8 @@ class RunStrategyOptimizationWatcherTest(unittest.TestCase):
         payload = {
             "repo": "QuantStrategyLab/TestStrategies",
             "snapshots": [
-                {"profile": "a", "current_metrics": {"sharpe": 0.5}, "baseline_metrics": {"sharpe": 1.0}},
-                {"profile": "b", "current_metrics": {"sharpe": 0.4}, "baseline_metrics": {"sharpe": 1.0}},
+                _performance_payload(profile="a"),
+                _performance_payload(profile="b", sharpe=0.4),
             ],
         }
 
@@ -175,8 +162,8 @@ class RunStrategyOptimizationWatcherTest(unittest.TestCase):
         payload = {
             "repo": "QuantStrategyLab/TestStrategies",
             "snapshots": [
-                {"profile": "same", "current_metrics": {"sharpe": 0.5}, "baseline_metrics": {"sharpe": 1.0}},
-                {"profile": "same", "current_metrics": {"sharpe": 0.5}, "baseline_metrics": {"sharpe": 1.0}},
+                _performance_payload(profile="same"),
+                _performance_payload(profile="same"),
             ],
         }
 
@@ -199,8 +186,8 @@ class RunStrategyOptimizationWatcherTest(unittest.TestCase):
         payload = {
             "repo": "QuantStrategyLab/TestStrategies",
             "snapshots": [
-                {"profile": "a", "current_metrics": {"sharpe": 0.5}, "baseline_metrics": {"sharpe": 1.0}},
-                {"profile": "b", "current_metrics": {"sharpe": 0.4}, "baseline_metrics": {"sharpe": 1.0}},
+                _performance_payload(profile="a"),
+                _performance_payload(profile="b", sharpe=0.4),
             ],
         }
 
@@ -230,6 +217,24 @@ class RunStrategyOptimizationWatcherTest(unittest.TestCase):
         self.assertTrue(parse_bool(None, default=True))
         with self.assertRaises(ValueError):
             parse_bool("flase")
+
+    def test_run_watcher_opens_data_quality_finding_for_operational_payload(self) -> None:
+        result = run_watcher(
+            {
+                "repo": "QuantStrategyLab/TestStrategies",
+                "profile": "live",
+                "schema_version": "strategy_operational_metrics.v1",
+                "metrics_kind": "operational_quality",
+                "current_metrics": {"pool_size": 10},
+                "baseline_metrics": {"pool_size": 9},
+            },
+            dry_run=True,
+        )
+
+        self.assertEqual(result["findings"], 1)
+        self.assertEqual(result["issues"][0]["task"]["trigger"]["kind"], "strategy_metrics_contract_invalid")
+        self.assertEqual(result["issues"][0]["task"]["proposed_action"]["target"], "QuantStrategyLab/TestStrategies")
+        self.assertEqual(result["issues"][0]["task"]["finding_type"], "data_quality")
 
 
 if __name__ == "__main__":
