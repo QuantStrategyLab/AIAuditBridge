@@ -398,6 +398,15 @@ class QuotaManager:
         """
         tokens_input = estimate_tokens(prompt)
         cost = estimate_cost(model, tokens_input, estimated_output_tokens)
+        if budget_guard and not codex_account and self.remaining_daily(repo) < cost:
+            return {
+                "allowed": False,
+                "reason": f"deferred_budget: daily budget has ${self.remaining_daily(repo):.4f} remaining, ${cost:.4f} needed",
+                "remaining_usd": self.remaining_daily(repo),
+                "cost_estimate_usd": cost,
+                "decision": "defer",
+                "deferred_budget": True,
+            }
         if budget_guard and not codex_account:
             from service.ai_budget_guard import get_ai_budget_guard
 

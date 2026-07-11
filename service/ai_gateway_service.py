@@ -1587,7 +1587,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         _audit_log("review_started", reviewers=req.reviewers, verifier=req.verifier,
                    changed_paths_count=len(changed_paths))
         review_repo = str(payload.get("source_repository") or "unknown")
-        review_reservations: list[str] = []
+        review_reservations: list[tuple[str, float]] = []
         for reviewer_name, reviewer_model in reviewer_tuples:
             review_quota = get_quota_manager().check(
                 review_repo,
@@ -1597,6 +1597,11 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 budget_guard=_budget_gate_enabled(),
             )
             if not review_quota.get("allowed"):
+                if review_reservations:
+                    from service.ai_budget_guard import get_ai_budget_guard
+
+                    for reservation_id, _cost in review_reservations:
+                        get_ai_budget_guard().release(reservation_id)
                 _json_response(self, HTTPStatus.TOO_MANY_REQUESTS, {
                     "status": "deferred_budget",
                     "error": review_quota.get("reason", "AI budget gate denied review"),
@@ -1605,13 +1610,23 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 })
                 return
             if review_quota.get("budget_reservation_id"):
-                review_reservations.append(str(review_quota["budget_reservation_id"]))
-        llm_results = llm.parallel_review(
-            reviewers=reviewer_tuples,
-            system="You are a careful quantitative strategy reviewer. Return JSON with verdict, confidence (0.0-1.0), and summary.",
-            user=req.prompt,
-            timeout=req.timeout_seconds,
-        )
+                review_reservations.append(
+                    (str(review_quota["budget_reservation_id"]), float(review_quota.get("cost_estimate_usd") or 0.0))
+                )
+        try:
+            llm_results = llm.parallel_review(
+                reviewers=reviewer_tuples,
+                system="You are a careful quantitative strategy reviewer. Return JSON with verdict, confidence (0.0-1.0), and summary.",
+                user=req.prompt,
+                timeout=req.timeout_seconds,
+            )
+        except Exception:
+            if review_reservations:
+                from service.ai_budget_guard import get_ai_budget_guard
+
+                for reservation_id, _cost in review_reservations:
+                    get_ai_budget_guard().release(reservation_id)
+            raise
 
         # Step 2: optional Codex verification
         codex_result = None
@@ -1625,6 +1640,11 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 task_class="review",
             )
             if not codex_quota.get("allowed"):
+                if review_reservations:
+                    from service.ai_budget_guard import get_ai_budget_guard
+
+                    for reservation_id, _cost in review_reservations:
+                        get_ai_budget_guard().release(reservation_id)
                 _json_response(self, HTTPStatus.TOO_MANY_REQUESTS, {
                     "status": "deferred_budget",
                     "error": codex_quota.get("reason", "AI budget gate denied Codex review"),
@@ -1632,26 +1652,30 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 })
                 return
             get_quota_manager().record_execute(quota_repo)
-            codex_result = codex.execute(
-                prompt=req.prompt,
-                sandbox=_validate_sandbox("read-only"),
-                reasoning_effort=_resolve_codex_reasoning_effort(payload, TASK_REVIEW),
-                timeout=req.timeout_seconds,
-            )
             codex_reservation_id = str(codex_quota.get("budget_reservation_id") or "")
+            try:
+                codex_result = codex.execute(
+                    prompt=req.prompt,
+                    sandbox=_validate_sandbox("read-only"),
+                    reasoning_effort=_resolve_codex_reasoning_effort(payload, TASK_REVIEW),
+                    timeout=req.timeout_seconds,
+                )
+            except Exception:
+                if codex_reservation_id:
+                    from service.ai_budget_guard import get_ai_budget_guard
+
+                    get_ai_budget_guard().release(codex_reservation_id)
+                raise
             if codex_reservation_id:
                 from service.ai_budget_guard import get_ai_budget_guard
 
-                get_ai_budget_guard().settle(
-                    codex_reservation_id,
-                    0.10 if codex_result.success else 0.0,
-                )
+                get_ai_budget_guard().settle(codex_reservation_id, 0.10 if codex_result.success else 0.0)
 
         if review_reservations:
             from service.ai_budget_guard import get_ai_budget_guard
 
-            for reservation_id in review_reservations:
-                get_ai_budget_guard().settle(reservation_id, 0.0)
+            for reservation_id, estimated_cost in review_reservations:
+                get_ai_budget_guard().settle(reservation_id, estimated_cost)
 
         # Step 3: build per-reviewer results with extracted confidence
         results: list[dict[str, Any]] = []
