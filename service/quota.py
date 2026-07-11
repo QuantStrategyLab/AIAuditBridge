@@ -387,6 +387,8 @@ class QuotaManager:
         estimated_output_tokens: int = 0,
         *,
         codex_account: bool = False,
+        task_class: str = "review",
+        budget_guard: bool = False,
     ) -> dict[str, Any]:
         """Check whether the selected provider is allowed to run.
 
@@ -396,25 +398,67 @@ class QuotaManager:
         """
         tokens_input = estimate_tokens(prompt)
         cost = estimate_cost(model, tokens_input, estimated_output_tokens)
+        if budget_guard and not codex_account:
+            from service.ai_budget_guard import get_ai_budget_guard
+
+            provider = "anthropic" if model.lower().startswith("claude") else "openai"
+            snapshot = (
+                self._anthropic_account_snapshot()
+                if provider == "anthropic"
+                else self._openai_account_snapshot()
+            )
+            budget_decision = get_ai_budget_guard().preflight(
+                task_class=task_class,
+                provider=provider,
+                provider_scope=repo,
+                repo=repo,
+                estimated_cost_usd=cost,
+                usage_snapshot=snapshot,
+            )
+            if budget_decision.get("decision") != "allow":
+                return {
+                    "allowed": False,
+                    "reason": "; ".join(budget_decision.get("reason_codes") or ["AI budget gate denied API execution"]),
+                    "budget_decision": budget_decision,
+                    "remaining_usd": 0.0,
+                }
         if codex_account:
             if model != "codex-cli":
                 raise ValueError("codex_account quota checks require model=codex-cli")
+            from service.ai_budget_guard import get_ai_budget_guard
+
+            budget_decision = get_ai_budget_guard().preflight(
+                task_class=task_class,
+                provider="codex",
+                provider_scope=repo,
+                repo=repo,
+                codex_snapshot=self._codex_account_snapshot(),
+            )
+            if budget_decision.get("decision") != "allow":
+                return {
+                    "allowed": False,
+                    "reason": "; ".join(budget_decision.get("reason_codes") or ["AI budget gate denied Codex execution"]),
+                    "quota_scope": "codex_account",
+                    "budget_decision": budget_decision,
+                    "remaining_usd": 0.0,
+                }
             return {
                 "allowed": True,
                 "cost_estimate_usd": cost,
                 "remaining_usd": self.remaining_daily(repo),
                 "quota_scope": "codex_account",
+                "budget_decision": budget_decision,
             }
         remaining = self.remaining_daily(repo)
 
         if remaining < cost:
-            recommended = recommend_model(remaining)
             return {
                 "allowed": False,
-                "reason": f"Daily budget exceeded: ${remaining:.4f} remaining, ${cost:.4f} needed",
-                "recommended_model": recommended,
+                "reason": f"deferred_budget: daily budget has ${remaining:.4f} remaining, ${cost:.4f} needed",
                 "remaining_usd": remaining,
                 "cost_estimate_usd": cost,
+                "decision": "defer",
+                "deferred_budget": True,
             }
         return {
             "allowed": True,

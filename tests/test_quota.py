@@ -195,6 +195,14 @@ class TestQuotaManager(unittest.TestCase):
         self.manager._records["test/repo"] = QuotaRecord(
             repo="test/repo", total_cost_usd=0.05, api_key_cost_usd=0.05
         )
+        self.manager._codex_account_cache = {
+            "updated_at": time.time(),
+            "rate_limits": {
+                "primary": {"remaining_percent": 80},
+                "secondary": {"remaining_percent": 80},
+            },
+        }
+        self.manager._codex_account_cache_ts = time.time()
 
         untrusted_result = self.manager.check("test/repo", "codex-cli", "review this pull request")
         trusted_result = self.manager.check(

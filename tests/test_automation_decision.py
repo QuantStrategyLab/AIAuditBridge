@@ -157,6 +157,24 @@ class TestAutomationDecision(unittest.TestCase):
         self.assertEqual(result["effective_provider"], "openai")
         self.assertEqual(result["effective_model"], "gpt-5.4-mini")
 
+    def test_budget_defer_never_selects_paid_fallback(self) -> None:
+        result = decide_automation_execution(
+            repo="org/repo",
+            requested_provider="codex",
+            requested_model="codex-cli",
+            quota_status="ok",
+            control_action=CONTROL_CONTINUE,
+            ai_budget_decision={
+                "schema": "ai_budget_decision.v1",
+                "decision": "defer",
+                "reason_codes": ["codex_rate_limit_below_task_threshold"],
+            },
+        )
+        self.assertEqual(result["action"], EXECUTION_DEFER)
+        self.assertTrue(result["deferred_budget"])
+        self.assertNotEqual(result["effective_provider"], "openai")
+        self.assertTrue(any("deferred_budget" in reason for reason in result["reasons"]))
+
     def test_low_quota_overrides_requested_expensive_model(self) -> None:
         result = decide_automation_execution(
             repo="QuantStrategyLab/AIAuditBridge",

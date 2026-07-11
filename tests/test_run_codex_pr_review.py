@@ -534,6 +534,7 @@ class RunCodexPrReviewTests(unittest.TestCase):
                 {
                     "OPENAI_API_KEY": "test-key",
                     "CODEX_PR_REVIEW_API_FALLBACK_ENABLED": "true",
+                    "CODEX_PR_REVIEW_DIRECT_API_PRIMARY_ENABLED": "true",
                 },
                 clear=True,
             ),
@@ -1387,7 +1388,14 @@ class RunCodexPrReviewTests(unittest.TestCase):
 
     def test_service_exec_failure_falls_back_to_direct_api(self) -> None:
         with (
-            patch.dict(os.environ, {"CODEX_AUDIT_SERVICE_URL": "https://service.example"}, clear=True),
+            patch.dict(
+                os.environ,
+                {
+                    "CODEX_AUDIT_SERVICE_URL": "https://service.example",
+                    "CODEX_PR_REVIEW_API_FALLBACK_ENABLED": "true",
+                },
+                clear=True,
+            ),
             patch(
                 "scripts.run_codex_pr_review.run_codex_service_review",
                 side_effect=ReviewError("Codex service job failed: codex exec failed (rc=1): boom"),

@@ -333,6 +333,7 @@ def decide_automation_execution(
     recent_runs: list[dict[str, Any]] | None = None,
     failure_history_complete: bool = True,
     policy: dict[str, Any] | None = None,
+    ai_budget_decision: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Produce a safe execution decision from health, quota, failures, and repo policy."""
     repo_policy = repo_execution_policy(repo, policy)
@@ -357,6 +358,7 @@ def decide_automation_execution(
     action = EXECUTION_RUN
     human_review_required = False
     defer = False
+    budget_deferred = False
 
     service = _normalize_status(service_health)
     quota = _normalize_quota_status(quota_status)
@@ -412,6 +414,19 @@ def decide_automation_execution(
         human_review_required = True
         reasons.append("health unhealthy; forcing human review")
 
+    # Budget is a central preflight gate.  A missing/failed decision is not an
+    # invitation to select another paid provider; it is deferred_budget.
+    if ai_budget_decision is not None:
+        budget_result = str(ai_budget_decision.get("decision") or "block").strip().lower()
+        if budget_result != "allow":
+            action = EXECUTION_DEFER
+            defer = True
+            budget_deferred = True
+            effective_mode = MODE_REVIEW_ONLY
+            reasons.append(
+                "ai budget decision is " + (budget_result or "unavailable") + "; execution deferred_budget"
+            )
+
     if quota in {"low", "constrained"}:
         if action in {EXECUTION_HUMAN_REVIEW, EXECUTION_DEFER}:
             reasons.append(f"quota status is {quota}; execution already blocked")
@@ -422,7 +437,7 @@ def decide_automation_execution(
             reasons.append(f"quota status is {quota}; deferring automation")
         elif quota_low_behavior == "defer":
             reasons.append(f"quota status is {quota}; automation already review_only")
-        else:
+        elif not budget_deferred:
             effective_model = low_cost_model or recommend_model(0.0)
             effective_provider = low_cost_provider or "auto"
             reasons.append(f"quota status is {quota}; recommending low-cost model")
@@ -463,5 +478,7 @@ def decide_automation_execution(
             and not human_review_required
         ),
         "defer": defer,
+        "deferred_budget": budget_deferred,
+        "ai_budget_decision": ai_budget_decision,
         "reasons": reasons or ["execution allowed"],
     }

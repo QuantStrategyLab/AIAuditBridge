@@ -527,16 +527,19 @@ def _review_capacity_is_unavailable(exc: ReviewError) -> bool:
         "[quota_or_capacity_failure]" in message
         or "usage limit" in message
         or "daily budget exceeded" in message
+        or "deferred_budget" in message
         or "codex service job failed [unknown_failure]: codex exec failed" in message
     )
 
 
 def _api_fallback_enabled() -> bool:
-    return parse_bool(env_value("CODEX_PR_REVIEW_API_FALLBACK_ENABLED", "true"))
+    # Codex quota exhaustion must become deferred_budget; never consume a
+    # paid API key unless a human explicitly enables the exception.
+    return parse_bool(env_value("CODEX_PR_REVIEW_API_FALLBACK_ENABLED", "false"))
 
 
 def _direct_api_primary_enabled() -> bool:
-    return parse_bool(env_value("CODEX_PR_REVIEW_DIRECT_API_PRIMARY_ENABLED", "true"))
+    return parse_bool(env_value("CODEX_PR_REVIEW_DIRECT_API_PRIMARY_ENABLED", "false"))
 
 
 def run_codex_review_with_fallback(

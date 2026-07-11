@@ -424,3 +424,20 @@ trusted review comment 只保存最近固定轮数、固定字节上限且脱敏
 2. 再补一份“自治边界表”，把自动 / 人工 / 禁止 三类动作列清楚。
 3. 然后补指标持久化和 dashboard 视图。
 4. 最后再决定是否扩大 auto-merge 覆盖面。
+
+## 7. AI Budget Guard v1（中央执行前门）
+
+所有 `research`、`optimization`、`review` 和 `auto_fix` 入口在启动前必须生成
+`ai_budget_decision.v1` 并取得 `decision=allow`。这是 AIAuditBridge 的中央执行门，
+不是各仓库自行复制的 branch rule；确定性监控、kill-switch、暂停和回滚不依赖 AI 额度。
+
+- API-key 预算按 provider、key/project scope、repo、task class 和明确的 billing period
+  （默认 `UTC` 日历月）记账。未配置月度预算时可用上限为 `0`；内部 hard limit 取用户月度预算
+  与 provider/project limit 的 `80%` 两者较小值。
+- usage/cost 快照缺失、过期或无法解析时 fail closed。每次启动先做原子 reservation，完成、失败、
+  取消和超时都必须 settle/release；并发 reservation 不能共同突破 hard limit。
+- Codex 同时读取 primary/secondary rate-limit window，使用更紧张的剩余比例；research、
+  maintenance/review/auto-fix、incident 的门槛分别是 `30%/20%/10%`，并永久保留最后 `10%`。
+  快照不可用时不启动 research 或 auto-fix。
+- Codex 或 API 额度不足的状态是 `deferred_budget`，禁止自动切换 OpenAI/Anthropic、换 key 或
+  推荐付费低成本模型；只有人工显式批准才允许一次性 fallback。reset 后可安全恢复延后队列。

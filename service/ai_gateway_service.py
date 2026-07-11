@@ -111,6 +111,15 @@ WRITE_AUTH_METHODS = frozenset({"github_oidc", "none"})
 TRUSTED_AUTOMATION_PROOF_PATH_ENV = "CODEX_AUDIT_SERVICE_TRUSTED_AUTOMATION_PROOF_PATH"
 DASHBOARD_REPOSITORIES_ENV = "CODEX_AUDIT_SERVICE_DASHBOARD_REPOSITORIES"
 
+
+def _budget_gate_enabled() -> bool:
+    """Keep the explicit unauthenticated local test mode backward compatible."""
+    return not (
+        os.environ.get("CODEX_AUDIT_SERVICE_AUTH", "").strip().lower() == "none"
+        and os.environ.get("CODEX_AUDIT_SERVICE_ALLOW_NO_AUTH_FOR_LOCAL_TESTS", "").strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
+
 # sandbox allowlist — restrict what callers can request
 ALLOWED_SANDBOXES: frozenset[str] = frozenset(
     os.environ.get("CODEX_AUDIT_SERVICE_ALLOWED_SANDBOXES", "read-only").replace(" ", "").split(",")
@@ -1402,13 +1411,17 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         # Quota check
         quota = get_quota_manager()
         resolved_model = _resolve_analyze_model(req.model)
-        qr = quota.check(source_repo, resolved_model, req.prompt)
+        qr = quota.check(
+            source_repo, resolved_model, req.prompt, task_class="research",
+            budget_guard=_budget_gate_enabled(),
+        )
         if not qr["allowed"]:
             _json_response(self, HTTPStatus.TOO_MANY_REQUESTS, {
-                "status": "error",
+                "status": "deferred_budget",
                 "error": qr["reason"],
                 "recommended_model": qr.get("recommended_model", ""),
                 "remaining_usd": qr.get("remaining_usd", 0),
+                "budget_decision": qr.get("budget_decision", {}),
             })
             return
 
@@ -1453,11 +1466,15 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
 
         # Quota check
         quota = get_quota_manager()
-        qr = quota.check(quota_repo, "codex-cli", req.prompt, codex_account=True)
+        qr = quota.check(
+            quota_repo, "codex-cli", req.prompt, codex_account=True,
+            task_class="auto_fix" if str(payload.get("task") or "").lower() in {"auto_fix", "autofix"} else "maintenance",
+        )
         if not qr["allowed"]:
             _json_response(self, HTTPStatus.TOO_MANY_REQUESTS, {
-                "status": "error", "error": qr["reason"],
+                "status": "deferred_budget", "error": qr["reason"],
                 "remaining_usd": qr.get("remaining_usd", 0),
+                "budget_decision": qr.get("budget_decision", {}),
             })
             return
         quota.record_execute(quota_repo)
@@ -1477,11 +1494,15 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             _validate_source_repo_org(claims, source_repo)
         quota_repo = source_repo or str(claims.get("repository") or "unknown")
         quota = get_quota_manager()
-        qr = quota.check(quota_repo, "codex-cli", req.prompt, codex_account=True)
+        qr = quota.check(
+            quota_repo, "codex-cli", req.prompt, codex_account=True,
+            task_class="auto_fix" if str(payload.get("task") or "").lower() in {"auto_fix", "autofix"} else "maintenance",
+        )
         if not qr["allowed"]:
             _json_response(self, HTTPStatus.TOO_MANY_REQUESTS, {
-                "status": "error", "error": qr["reason"],
+                "status": "deferred_budget", "error": qr["reason"],
                 "remaining_usd": qr.get("remaining_usd", 0),
+                "budget_decision": qr.get("budget_decision", {}),
             })
             return
         quota.record_execute(quota_repo)
@@ -1528,6 +1549,23 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         ]
         _audit_log("review_started", reviewers=req.reviewers, verifier=req.verifier,
                    changed_paths_count=len(changed_paths))
+        review_repo = str(payload.get("source_repository") or "unknown")
+        for reviewer_name, reviewer_model in reviewer_tuples:
+            review_quota = get_quota_manager().check(
+                review_repo,
+                reviewer_model,
+                req.prompt,
+                task_class="review",
+                budget_guard=_budget_gate_enabled(),
+            )
+            if not review_quota.get("allowed"):
+                _json_response(self, HTTPStatus.TOO_MANY_REQUESTS, {
+                    "status": "deferred_budget",
+                    "error": review_quota.get("reason", "AI budget gate denied review"),
+                    "reviewer": reviewer_name,
+                    "budget_decision": review_quota.get("budget_decision", {}),
+                })
+                return
         llm_results = llm.parallel_review(
             reviewers=reviewer_tuples,
             system="You are a careful quantitative strategy reviewer. Return JSON with verdict, confidence (0.0-1.0), and summary.",
@@ -1538,6 +1576,22 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         # Step 2: optional Codex verification
         codex_result = None
         if req.verifier == "codex":
+            quota_repo = str(payload.get("source_repository") or "unknown")
+            codex_quota = get_quota_manager().check(
+                quota_repo,
+                "codex-cli",
+                req.prompt,
+                codex_account=True,
+                task_class="review",
+            )
+            if not codex_quota.get("allowed"):
+                _json_response(self, HTTPStatus.TOO_MANY_REQUESTS, {
+                    "status": "deferred_budget",
+                    "error": codex_quota.get("reason", "AI budget gate denied Codex review"),
+                    "budget_decision": codex_quota.get("budget_decision", {}),
+                })
+                return
+            get_quota_manager().record_execute(quota_repo)
             codex_result = codex.execute(
                 prompt=req.prompt,
                 sandbox=_validate_sandbox("read-only"),
