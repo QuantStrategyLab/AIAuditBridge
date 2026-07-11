@@ -44,7 +44,12 @@ def _require_allowed_claim(payload: dict[str, Any], env_name: str, claim_name: s
     patterns = _allowed_claim_patterns(env_name)
     if not patterns:
         raise PermissionError(f"{env_name} is required")
-    value = str(payload.get(claim_name) or "")
+    raw_value = payload.get(claim_name)
+    if raw_value is None or raw_value == "":
+        raise PermissionError(f"OIDC {label} is missing")
+    if not isinstance(raw_value, str):
+        raise PermissionError(f"OIDC {label} must be a string")
+    value = raw_value.strip()
     if not value:
         raise PermissionError(f"OIDC {label} is missing")
     if not _claim_matches(value, patterns):
@@ -60,6 +65,29 @@ def _require_optional_allowed_claim(payload: dict[str, Any], env_name: str, clai
         raise PermissionError(f"OIDC {label} is missing")
     if not _claim_matches(value, patterns):
         raise PermissionError(f"OIDC {label} is not allowed")
+
+
+def _require_trusted_strategy_drift_job(payload: dict[str, Any], job_workflow_ref: str) -> None:
+    # workflow_ref is a required, allowlisted string before this defense-in-depth check runs.
+    raw_workflow_ref = payload.get("workflow_ref")
+    if not isinstance(raw_workflow_ref, str):
+        raise PermissionError("OIDC workflow_ref must be a string")
+    workflow_ref = raw_workflow_ref.strip()
+    allowed_workflow_refs = _allowed_claim_patterns("CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS")
+    drift_workflow_pattern = re.compile(
+        r"QuantStrategyLab/[A-Za-z0-9_.-]+/\.github/workflows/drift-check\.yml@refs/heads/main"
+    )
+    trusted_drift_refs = {value for value in allowed_workflow_refs if drift_workflow_pattern.fullmatch(value)}
+    if workflow_ref not in trusted_drift_refs:
+        return
+    trusted_prefix = "QuantStrategyLab/QuantPlatformKit/.github/workflows/reusable-drift-check.yml@"
+    trusted_job_pattern = re.compile(re.escape(trusted_prefix) + r"[0-9a-f]{40}")
+    if not trusted_job_pattern.fullmatch(job_workflow_ref):
+        raise PermissionError("OIDC strategy drift caller must use an exact QPK reusable workflow SHA")
+    allowed_job_refs = _allowed_claim_patterns("CODEX_AUDIT_SERVICE_ALLOWED_JOB_WORKFLOW_REFS")
+    trusted_qpk_refs = {value for value in allowed_job_refs if trusted_job_pattern.fullmatch(value)}
+    if job_workflow_ref not in trusted_qpk_refs:
+        raise PermissionError("OIDC strategy drift caller must use the trusted QPK reusable workflow")
 
 
 def _load_jwks() -> dict[str, Any]:
@@ -191,6 +219,7 @@ def verify_github_oidc(
             raise PermissionError("CODEX_AUDIT_SERVICE_ALLOWED_DIRECT_REPOSITORIES is required")
         if not _claim_matches(str(payload.get("repository") or ""), direct_repositories):
             raise PermissionError("OIDC job workflow ref is required for this repository")
+    _require_trusted_strategy_drift_job(payload, job_workflow_ref)
     _require_optional_allowed_claim(
         payload, "CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORY_VISIBILITIES", "repository_visibility", "repository visibility"
     )

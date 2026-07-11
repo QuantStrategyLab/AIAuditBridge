@@ -2390,7 +2390,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertIn("CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES", workflow)
         self.assertIn("CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS", workflow)
         self.assertIn("CODEX_AUDIT_SERVICE_ALLOWED_REFS", workflow)
-        self.assertIn("CODEX_AUDIT_SERVICE_ALLOWED_JOB_WORKFLOW_REFS", workflow)
+        self.assertIn("CODEX_AUDIT_SERVICE_ALLOWED_JOB_WORKFLOW_REFS:", workflow)
         self.assertIn("CODEX_AUDIT_SERVICE_ALLOWED_DIRECT_REPOSITORIES", workflow)
         self.assertIn("CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES", workflow)
         self.assertIn("CODEX_AUDIT_SERVICE_CODEX_ACCOUNT_USAGE", workflow)
@@ -2402,11 +2402,13 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertIn("QuantStrategyLab/QuantRuntimeSettings", workflow)
         self.assertIn("QuantStrategyLab/QuantPlatformKit", workflow)
         self.assertIn("QuantStrategyLab/CryptoLivePoolPipelines", workflow)
+        self.assertIn("QuantStrategyLab/CryptoStrategies/.github/workflows/drift-check.yml@refs/heads/main", workflow)
         self.assertNotIn("QuantStrategyLab/CodexAuditBridge", workflow)
         self.assertIn("actions/checkout@v6.0.3", workflow)
 
     def test_vps_deploy_adds_nginx_audit_route_without_router_service(self) -> None:
         deploy_script = Path("scripts/deploy_codex_audit_service.sh").read_text(encoding="utf-8")
+        workflow = Path(".github/workflows/vps_codex_service_ops.yml").read_text(encoding="utf-8")
 
         self.assertIn("location = /v1/codex-audit", deploy_script)
         self.assertIn("location ^~ /v1/codex-audit/", deploy_script)
@@ -2419,13 +2421,21 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertIn("dir_fd=fd", deploy_script)
         self.assertIn("os.open(component, flags_dir, dir_fd=fd)", deploy_script)
         self.assertIn('"max_consecutive_failures": 3', deploy_script)
-        self.assertIn("Consumer review workflows use pull_request_target", deploy_script)
+        self.assertIn("workflow_ref with the dispatch branch", deploy_script)
         self.assertIn('ALLOWED_REFS="${CODEX_AUDIT_SERVICE_ALLOWED_REFS:-refs/heads/main,refs/pull/*/merge}"', deploy_script)
         self.assertNotIn("codex_pr_review.yml@refs/pull/*/merge", deploy_script)
         self.assertIn("QuantStrategyLab/AIAuditBridge", deploy_script)
         self.assertIn("QuantStrategyLab/QuantRuntimeSettings", deploy_script)
         self.assertIn("QuantStrategyLab/QuantPlatformKit", deploy_script)
         self.assertIn("QuantStrategyLab/CryptoLivePoolPipelines", deploy_script)
+        self.assertIn("QuantStrategyLab/CryptoStrategies/.github/workflows/drift-check.yml@refs/heads/main", deploy_script)
+        qpk_job_ref = "QuantStrategyLab/QuantPlatformKit/.github/workflows/reusable-drift-check.yml@644cd9002ae92f2aaca6f7efb4afa4986fae05ea"
+        self.assertIn(qpk_job_ref, deploy_script)
+        self.assertIn(qpk_job_ref, workflow)
+        self.assertIn("Single source of truth for delegated drift code", deploy_script)
+        self.assertIn("QuantStrategyLab/CnEquityStrategies", deploy_script)
+        self.assertIn("QuantStrategyLab/UsEquityStrategies", deploy_script)
+        self.assertIn("QuantStrategyLab/CryptoStrategies", deploy_script)
         self.assertNotIn("QuantStrategyLab/CodexAuditBridge", deploy_script)
         self.assertIn("proxy_pass http://127.0.0.1:{port}", deploy_script)
         self.assertIn('"# CodexAuditBridge route start" not in block', deploy_script)
@@ -2439,6 +2449,12 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertIn('sed -E "s/^[\\"', deploy_script)
         self.assertIn('s/[\\"\']$//"', deploy_script)
         self.assertIn("CODEX_AUDIT_SERVICE_(ALLOWED_|AUDIENCE=", deploy_script)
+        rotation = Path("docs/drift_oidc_rotation.md").read_text(encoding="utf-8")
+        self.assertIn("protected `main`", rotation)
+        self.assertIn("both the current and next exact QPK SHAs", rotation)
+        self.assertIn("Never use a wildcard", rotation)
+        self.assertIn("PR-review entry remains on protected `main`", rotation)
+        self.assertIn("different allowlisted reusable workflow cannot be substituted", rotation)
         self.assertIn("CODEX_ACCOUNT_USAGE=", deploy_script)
         self.assertIn("OPENAI_USAGE_WINDOW_DAYS=", deploy_script)
         self.assertIn("ANTHROPIC_USAGE_WINDOW_DAYS=", deploy_script)
@@ -2453,6 +2469,36 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertNotIn("^CODEX_AUDIT_SERVICE_TOKEN", deploy_script)
         self.assertNotIn("CODEX_SERVICE_ROUTER", deploy_script)
         self.assertNotIn("codex_service_router", deploy_script)
+
+    def test_vps_deploy_defaults_match_workflow_allowlists(self) -> None:
+        deploy_script = Path("scripts/deploy_codex_audit_service.sh").read_text(encoding="utf-8")
+        workflow = Path(".github/workflows/vps_codex_service_ops.yml").read_text(encoding="utf-8")
+        variable_pairs = {
+            "ALLOWED_REPOSITORIES": "CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES",
+            "ALLOWED_WORKFLOW_REFS": "CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS",
+            "ALLOWED_JOB_WORKFLOW_REFS": "CODEX_AUDIT_SERVICE_ALLOWED_JOB_WORKFLOW_REFS",
+            "ALLOWED_SOURCE_REPOSITORIES": "CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES",
+        }
+
+        for script_name, workflow_name in variable_pairs.items():
+            script_line = next(
+                (line for line in deploy_script.splitlines() if line.startswith(f'{script_name}="')),
+                None,
+            )
+            workflow_line = next(
+                (line.strip() for line in workflow.splitlines() if line.strip().startswith(f"{workflow_name}: ")),
+                None,
+            )
+            self.assertIsNotNone(script_line, script_name)
+            self.assertIsNotNone(workflow_line, workflow_name)
+            assert script_line is not None
+            assert workflow_line is not None
+            script_prefix = f'{script_name}="${{{workflow_name}:-'
+            self.assertTrue(script_line.startswith(script_prefix), script_name)
+            self.assertTrue(script_line.endswith('}"'), script_name)
+            script_value = script_line[len(script_prefix) : -2]
+            workflow_value = workflow_line.removeprefix(f"{workflow_name}: ")
+            self.assertEqual(script_value, workflow_value)
 
 
 if __name__ == "__main__":
