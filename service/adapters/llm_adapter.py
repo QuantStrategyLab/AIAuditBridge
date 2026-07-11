@@ -344,7 +344,6 @@ class LlmAdapter:
                             output="",
                             success=False,
                             error=str(exc),
-                            dispatch_uncertain=True,
                         )
                     )
         return [result for result in results if result is not None]

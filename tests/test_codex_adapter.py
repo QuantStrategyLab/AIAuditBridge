@@ -19,7 +19,7 @@ class CodexAdapterDispatchTests(unittest.TestCase):
         self.assertTrue(result.dispatch_uncertain)
 
     def test_nonzero_exit_is_pending_uncertain_not_confirmed_dispatch(self) -> None:
-        completed = Mock(returncode=1, stdout="bootstrap failed", stderr="")
+        completed = Mock(returncode=1, stdout="upstream request interrupted", stderr="")
         with (
             patch("service.adapters.codex_adapter.shutil.which", return_value="/usr/bin/codex"),
             patch("service.adapters.codex_adapter.subprocess.run", return_value=completed),
@@ -28,6 +28,17 @@ class CodexAdapterDispatchTests(unittest.TestCase):
 
         self.assertFalse(result.dispatch_started)
         self.assertTrue(result.dispatch_uncertain)
+
+    def test_known_local_nonzero_exit_is_not_dispatched(self) -> None:
+        completed = Mock(returncode=2, stdout="", stderr="unknown option --bad-flag")
+        with (
+            patch("service.adapters.codex_adapter.shutil.which", return_value="/usr/bin/codex"),
+            patch("service.adapters.codex_adapter.subprocess.run", return_value=completed),
+        ):
+            result = CodexAdapter().execute(prompt="review")
+
+        self.assertFalse(result.dispatch_started)
+        self.assertFalse(result.dispatch_uncertain)
 
     def test_prelaunch_command_failure_is_not_dispatched(self) -> None:
         with patch(
