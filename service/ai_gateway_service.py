@@ -44,7 +44,7 @@ from service.contracts import (
     parse_execute_request,
     parse_review_request,
 )
-from service.adapters.llm_adapter import LlmAdapter, resolve_model
+from service.adapters.llm_adapter import DEFAULT_MAX_TOKENS, LlmAdapter, resolve_model
 from service.adapters.codex_adapter import CodexAdapter
 from service.autonomy import (
     ACTION_AUTO_PR,
@@ -1448,6 +1448,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         resolved_model = _resolve_analyze_model(req.model)
         qr = quota.check(
             source_repo, resolved_model, req.prompt, task_class="research",
+            estimated_output_tokens=req.max_tokens,
             budget_guard=_budget_gate_enabled(),
         )
         if not qr["allowed"]:
@@ -1684,9 +1685,18 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         review_reservations: list[tuple[str, float, str]] = []
         if _budget_gate_enabled():
             estimated_total = sum(
-                float(get_quota_manager().check(review_repo, reviewer_model, req.prompt).get("cost_estimate_usd") or 0.0)
+                float(
+                    get_quota_manager().check(
+                        review_repo,
+                        reviewer_model,
+                        req.prompt,
+                        estimated_output_tokens=DEFAULT_MAX_TOKENS,
+                    ).get("cost_estimate_usd") or 0.0
+                )
                 for _reviewer_name, reviewer_model in reviewer_tuples
             )
+            if codex_quota is not None:
+                estimated_total += float(codex_quota.get("cost_estimate_usd") or 0.0)
             if get_quota_manager().remaining_daily(review_repo) < estimated_total:
                 if codex_reservation_id:
                     from service.ai_budget_guard import get_ai_budget_guard
@@ -1702,6 +1712,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 review_repo,
                 reviewer_model,
                 req.prompt,
+                estimated_output_tokens=DEFAULT_MAX_TOKENS,
                 task_class="review",
                 budget_guard=_budget_gate_enabled(),
             )
@@ -1787,6 +1798,13 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             get_ai_budget_guard().release(codex_reservation_id)
             codex_reservation_id = ""
             codex_quota = None
+        if quota_record_failed:
+            _json_response(self, HTTPStatus.SERVICE_UNAVAILABLE, {
+                "status": "error",
+                "deferred_budget": True,
+                "error": "quota_ledger_unavailable",
+            })
+            return
         # Step 2: optional Codex verification
         codex_result = None
         if req.verifier == "codex" and codex_quota is not None:
