@@ -1564,7 +1564,7 @@ def publish_review_decision(
             blocking_streak=blocking_streak,
             finding_fingerprint=finding_fingerprint,
             finding_fingerprints=finding_fingerprints,
-            reviewed_head_sha=reviewed_head_sha or current_head_sha,
+            reviewed_head_sha=reviewed_head_sha,
             arbitration=arbitration,
             finding_history_marker=finding_history_marker,
         ),
@@ -1683,6 +1683,19 @@ def main() -> int:
             "auto_fix_allowed": False,
             "next_action": "contract_arbitration",
         }
+        if not history_source_valid:
+            write_decision_outputs(
+                {
+                    **decision,
+                    "blocking_streak": previous_streak,
+                    "previous_head_sha": previous_head_sha,
+                    "current_head_sha": current_head_sha,
+                    "new_head": False,
+                    "history_valid": False,
+                    "history_source_valid": False,
+                }
+            )
+            return 1
         return publish_review_decision(
             token,
             repo,
@@ -1693,6 +1706,7 @@ def main() -> int:
             blocking_streak=previous_streak,
             previous_head_sha=previous_head_sha,
             current_head_sha=current_head_sha,
+            reviewed_head_sha=current_head_sha,
             new_head=bool(previous_head_sha and current_head_sha != previous_head_sha),
             finding_history_marker=build_invalid_finding_history_marker(
                 current_head_sha
@@ -1727,6 +1741,7 @@ def main() -> int:
             decision,
             exit_code=0,
             current_head_sha=current_head_sha,
+            reviewed_head_sha=current_head_sha,
             finding_history_marker=build_finding_history_marker(
                 finding_history, [], current_head_sha, status="clear"
             ),
@@ -2074,6 +2089,7 @@ def main() -> int:
         new_head=new_head,
         arbitration=arbitration,
         finding_history_marker=finding_history_marker,
+        reviewed_head_sha=current_head_sha,
         history_valid=serialized_history_valid,
     )
 
