@@ -445,7 +445,7 @@ class QuotaManager:
                     "budget_decision": {**budget_decision, "decision": "defer", "reason_codes": ["reservation_conflict"]},
                     "remaining_usd": 0.0,
                 }
-        if codex_account:
+        if codex_account and budget_guard:
             if model != "codex-cli":
                 raise ValueError("codex_account quota checks require model=codex-cli")
             from service.ai_budget_guard import get_ai_budget_guard
@@ -483,6 +483,13 @@ class QuotaManager:
                 "quota_scope": "codex_account",
                 "budget_decision": budget_decision,
                 "budget_reservation_id": reservation.reservation_id,
+            }
+        if codex_account:
+            return {
+                "allowed": True,
+                "cost_estimate_usd": cost,
+                "remaining_usd": self.remaining_daily(repo),
+                "quota_scope": "codex_account",
             }
         remaining = self.remaining_daily(repo)
 

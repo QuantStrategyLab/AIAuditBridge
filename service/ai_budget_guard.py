@@ -180,7 +180,9 @@ class AIBudgetGuard:
         return _period(self._clock() if now is None else now, self._timezone)
 
     def _scope(self, provider: str, provider_scope: str, repo: str, task_class: str, period: str) -> str:
-        return "/".join((provider or "unknown", provider_scope or "default", repo or "unknown", task_class or "maintenance", period))
+        # Hard-limit reservations aggregate the billing/rate-limit principal;
+        # repo remains an independent budget/config dimension in _budget_entry.
+        return "/".join((provider or "unknown", provider_scope or "default", task_class or "maintenance", period))
 
     def _budget_entry(self, provider: str, provider_scope: str, repo: str, task_class: str) -> dict[str, Any] | None:
         budgets = self._config.get("monthly_budgets")

@@ -1506,6 +1506,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         quota = get_quota_manager()
         qr = quota.check(
             quota_repo, "codex-cli", req.prompt, codex_account=True,
+            budget_guard=_budget_gate_enabled(),
             task_class="auto_fix" if str(payload.get("task") or "").lower() in {"auto_fix", "autofix"} else "maintenance",
         )
         if not qr["allowed"]:
@@ -1544,6 +1545,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         quota = get_quota_manager()
         qr = quota.check(
             quota_repo, "codex-cli", req.prompt, codex_account=True,
+            budget_guard=_budget_gate_enabled(),
             task_class="auto_fix" if str(payload.get("task") or "").lower() in {"auto_fix", "autofix"} else "maintenance",
         )
         if not qr["allowed"]:
@@ -1627,6 +1629,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 "codex-cli",
                 req.prompt,
                 codex_account=True,
+                budget_guard=_budget_gate_enabled(),
                 task_class="review",
             )
             if not codex_quota.get("allowed"):
