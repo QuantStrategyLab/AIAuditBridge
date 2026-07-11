@@ -1119,6 +1119,7 @@ def _find_active_job_by_dedupe_key(dedupe_key: str) -> dict[str, Any] | None:
 
 def _run_job(job_id: str, payload: dict[str, Any]) -> None:
     started = time.time()
+    dispatch_started = False
     try:
         job = _read_job(job_id)
         job["status"] = "running"
@@ -1128,6 +1129,7 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
         adapter = CodexAdapter()
         sandbox = _validate_sandbox(str(payload.get("sandbox") or ""))
         reasoning_effort = _resolve_codex_reasoning_effort(payload, str(payload.get("task") or TASK_EXECUTE))
+        dispatch_started = True
         result = adapter.execute(
             prompt=str(payload["prompt"]),
             sandbox=sandbox,
@@ -1167,7 +1169,7 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
             },
             domain=str(job.get("domain") or ""),
         )
-        _settle_budget_reservation(job, 0.10 if job.get("status") == "succeeded" else 0.0)
+        _settle_budget_reservation(job, 0.10)
         _audit_log("job_completed", job_id=job_id, status=job["status"],
                    repository=job.get("repository"), task=job.get("task"))
     except Exception as exc:
@@ -1193,7 +1195,7 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
             },
             domain=str(job.get("domain") or ""),
         )
-        _settle_budget_reservation(job, 0.0)
+        _settle_budget_reservation(job, 0.10 if dispatch_started else 0.0)
         _audit_log("job_failed", job_id=job_id, error=type(exc).__name__,
                    repository=job.get("repository"))
 
@@ -1554,7 +1556,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             if reservation_id:
                 from service.ai_budget_guard import get_ai_budget_guard
 
-                get_ai_budget_guard().release(reservation_id)
+                get_ai_budget_guard().settle(reservation_id, 0.10)
             raise
         if reservation_id:
             from service.ai_budget_guard import get_ai_budget_guard
@@ -1594,6 +1596,24 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         _audit_log("review_started", reviewers=req.reviewers, verifier=req.verifier,
                    changed_paths_count=len(changed_paths))
         review_repo = str(payload.get("source_repository") or "unknown")
+        codex_quota: dict[str, Any] | None = None
+        codex_reservation_id = ""
+        if req.verifier == "codex":
+            codex_quota = get_quota_manager().check(
+                review_repo,
+                "codex-cli",
+                req.prompt,
+                codex_account=True,
+                task_class="review",
+            )
+            if not codex_quota.get("allowed"):
+                _json_response(self, HTTPStatus.TOO_MANY_REQUESTS, {
+                    "status": "deferred_budget",
+                    "error": codex_quota.get("reason", "AI budget gate denied Codex review"),
+                    "budget_decision": codex_quota.get("budget_decision", {}),
+                })
+                return
+            codex_reservation_id = str(codex_quota.get("budget_reservation_id") or "")
         review_reservations: list[tuple[str, float]] = []
         for reviewer_name, reviewer_model in reviewer_tuples:
             review_quota = get_quota_manager().check(
@@ -1609,6 +1629,10 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
 
                     for reservation_id, _cost in review_reservations:
                         get_ai_budget_guard().release(reservation_id)
+                if codex_reservation_id:
+                    from service.ai_budget_guard import get_ai_budget_guard
+
+                    get_ai_budget_guard().release(codex_reservation_id)
                 _json_response(self, HTTPStatus.TOO_MANY_REQUESTS, {
                     "status": "deferred_budget",
                     "error": review_quota.get("reason", "AI budget gate denied review"),
@@ -1633,6 +1657,10 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
 
                 for reservation_id, _cost in review_reservations:
                     get_ai_budget_guard().release(reservation_id)
+            if codex_reservation_id:
+                from service.ai_budget_guard import get_ai_budget_guard
+
+                get_ai_budget_guard().release(codex_reservation_id)
             raise
         if review_reservations:
             from service.ai_budget_guard import get_ai_budget_guard
@@ -1643,29 +1671,8 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
 
         # Step 2: optional Codex verification
         codex_result = None
-        if req.verifier == "codex":
-            quota_repo = str(payload.get("source_repository") or "unknown")
-            codex_quota = get_quota_manager().check(
-                quota_repo,
-                "codex-cli",
-                req.prompt,
-                codex_account=True,
-                task_class="review",
-            )
-            if not codex_quota.get("allowed"):
-                if review_reservations:
-                    from service.ai_budget_guard import get_ai_budget_guard
-
-                    for reservation_id, _cost in review_reservations:
-                        get_ai_budget_guard().release(reservation_id)
-                _json_response(self, HTTPStatus.TOO_MANY_REQUESTS, {
-                    "status": "deferred_budget",
-                    "error": codex_quota.get("reason", "AI budget gate denied Codex review"),
-                    "budget_decision": codex_quota.get("budget_decision", {}),
-                })
-                return
-            get_quota_manager().record_execute(quota_repo)
-            codex_reservation_id = str(codex_quota.get("budget_reservation_id") or "")
+        if req.verifier == "codex" and codex_quota is not None:
+            get_quota_manager().record_execute(review_repo)
             try:
                 codex_result = codex.execute(
                     prompt=req.prompt,
@@ -1677,12 +1684,12 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 if codex_reservation_id:
                     from service.ai_budget_guard import get_ai_budget_guard
 
-                    get_ai_budget_guard().release(codex_reservation_id)
+                    get_ai_budget_guard().settle(codex_reservation_id, 0.10)
                 raise
             if codex_reservation_id:
                 from service.ai_budget_guard import get_ai_budget_guard
 
-                get_ai_budget_guard().settle(codex_reservation_id, 0.10 if codex_result.success else 0.0)
+                get_ai_budget_guard().settle(codex_reservation_id, 0.10)
 
         # Step 3: build per-reviewer results with extracted confidence
         results: list[dict[str, Any]] = []

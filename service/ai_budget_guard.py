@@ -78,6 +78,7 @@ class Reservation:
     amount: float
     task_class: str
     created_at: float
+    baseline_usage: float | None = None
 
 
 class AIBudgetGuard:
@@ -89,6 +90,7 @@ class AIBudgetGuard:
         self._reservations: dict[str, Reservation] = {}
         self._reserved: dict[str, float] = {}
         self._settled: dict[str, float] = {}
+        self._settled_baseline: dict[str, float] = {}
         self._config = config if isinstance(config, dict) else self._load_config()
         self._timezone = str(self._config.get("billing_timezone") or DEFAULT_BILLING_TIMEZONE)
         self._max_age = max(1, int(_number(self._config.get("usage_max_age_seconds"), DEFAULT_MAX_USAGE_AGE_SECONDS)))
@@ -228,13 +230,17 @@ class AIBudgetGuard:
         with self._lock:
             if self._settled_period != current_period:
                 self._settled.clear()
+                self._settled_baseline.clear()
                 self._settled_period = current_period
             reserved = self._reserved.get(scope, 0.0)
             settled = self._settled.get(scope, 0.0)
             # Once the provider snapshot includes the locally settled amount,
             # drop the local delta to avoid double counting.
-            if used >= settled:
+            baseline = self._settled_baseline.get(scope)
+            if baseline is not None and used >= baseline + settled:
                 settled = 0.0
+                self._settled.pop(scope, None)
+                self._settled_baseline.pop(scope, None)
         remaining = hard_limit - used - settled - reserved - amount
         if remaining < 0:
             reason = "monthly_hard_limit_reached" if remaining <= 0 else "monthly_budget_insufficient"
@@ -324,12 +330,22 @@ class AIBudgetGuard:
         # Provider scope in a decision is intentionally the stable ledger key;
         # callers may pass an explicit amount for API reservations.
         requested = max(0.0, _number(amount, _number(decision.get("remaining_after_reservation"))))
-        reservation = Reservation(uuid.uuid4().hex, scope, requested, str(decision.get("task_class") or "maintenance"), self._clock())
+        observed_value = decision.get("observed_usage")
+        baseline_usage = _number(observed_value, -1.0)
+        reservation = Reservation(
+            uuid.uuid4().hex,
+            scope,
+            requested,
+            str(decision.get("task_class") or "maintenance"),
+            self._clock(),
+            baseline_usage if baseline_usage >= 0 else None,
+        )
         with self._lock:
             hard_limit = _number(decision.get("hard_limit"), float("inf"))
             observed = _number(decision.get("observed_usage"), 0.0)
             settled = self._settled.get(scope, 0.0)
-            if observed >= settled:
+            baseline = self._settled_baseline.get(scope)
+            if baseline is not None and observed >= baseline + settled:
                 settled = 0.0
             if hard_limit != float("inf") and observed + settled + self._reserved.get(scope, 0.0) + requested > hard_limit + 1e-12:
                 return None
@@ -353,7 +369,12 @@ class AIBudgetGuard:
             if item is None:
                 return False
             self._reserved[item.scope] = max(0.0, self._reserved.get(item.scope, 0.0) - item.amount)
-            self._settled[item.scope] = self._settled.get(item.scope, 0.0) + max(0.0, _number(actual_cost))
+            amount = max(0.0, _number(actual_cost))
+            if amount:
+                self._settled.setdefault(item.scope, 0.0)
+                if item.baseline_usage is not None:
+                    self._settled_baseline.setdefault(item.scope, item.baseline_usage)
+                self._settled[item.scope] += amount
             return True
 
 
