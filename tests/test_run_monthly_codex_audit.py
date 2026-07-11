@@ -2390,7 +2390,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertIn("CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES", workflow)
         self.assertIn("CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS", workflow)
         self.assertIn("CODEX_AUDIT_SERVICE_ALLOWED_REFS", workflow)
-        self.assertNotIn("CODEX_AUDIT_SERVICE_ALLOWED_JOB_WORKFLOW_REFS:", workflow)
+        self.assertIn("CODEX_AUDIT_SERVICE_ALLOWED_JOB_WORKFLOW_REFS:", workflow)
         self.assertIn("CODEX_AUDIT_SERVICE_ALLOWED_DIRECT_REPOSITORIES", workflow)
         self.assertIn("CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES", workflow)
         self.assertIn("CODEX_AUDIT_SERVICE_CODEX_ACCOUNT_USAGE", workflow)
@@ -2408,6 +2408,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
 
     def test_vps_deploy_adds_nginx_audit_route_without_router_service(self) -> None:
         deploy_script = Path("scripts/deploy_codex_audit_service.sh").read_text(encoding="utf-8")
+        workflow = Path(".github/workflows/vps_codex_service_ops.yml").read_text(encoding="utf-8")
 
         self.assertIn("location = /v1/codex-audit", deploy_script)
         self.assertIn("location ^~ /v1/codex-audit/", deploy_script)
@@ -2428,7 +2429,9 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertIn("QuantStrategyLab/QuantPlatformKit", deploy_script)
         self.assertIn("QuantStrategyLab/CryptoLivePoolPipelines", deploy_script)
         self.assertIn("QuantStrategyLab/CryptoStrategies/.github/workflows/drift-check.yml@refs/heads/main", deploy_script)
-        self.assertIn("QuantStrategyLab/QuantPlatformKit/.github/workflows/reusable-drift-check.yml@644cd9002ae92f2aaca6f7efb4afa4986fae05ea", deploy_script)
+        qpk_job_ref = "QuantStrategyLab/QuantPlatformKit/.github/workflows/reusable-drift-check.yml@644cd9002ae92f2aaca6f7efb4afa4986fae05ea"
+        self.assertIn(qpk_job_ref, deploy_script)
+        self.assertIn(qpk_job_ref, workflow)
         self.assertIn("Single source of truth for delegated drift code", deploy_script)
         self.assertIn("QuantStrategyLab/CnEquityStrategies", deploy_script)
         self.assertIn("QuantStrategyLab/UsEquityStrategies", deploy_script)
@@ -2449,7 +2452,8 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         rotation = Path("docs/drift_oidc_rotation.md").read_text(encoding="utf-8")
         self.assertIn("protected `main`", rotation)
         self.assertIn("both the current and next exact QPK SHAs", rotation)
-        self.assertIn("Never use a wildcard or mutable branch", rotation)
+        self.assertIn("Never use a wildcard", rotation)
+        self.assertIn("PR-review entry remains on protected `main`", rotation)
         self.assertIn("CODEX_ACCOUNT_USAGE=", deploy_script)
         self.assertIn("OPENAI_USAGE_WINDOW_DAYS=", deploy_script)
         self.assertIn("ANTHROPIC_USAGE_WINDOW_DAYS=", deploy_script)
