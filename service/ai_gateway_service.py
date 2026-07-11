@@ -539,6 +539,8 @@ def _settle_budget_reservation(payload: dict[str, Any], actual_cost: float = 0.0
 
     if not get_ai_budget_guard().settle(reservation_id, actual_cost):
         _audit_log("budget_reservation_settle_failed", reservation_id=reservation_id)
+        payload["_budget_cleanup_pending"] = True
+        _write_job(payload)
         return
     payload.pop("_budget_reservation_id", None)
     _write_job(payload)
@@ -552,6 +554,8 @@ def _release_budget_reservation(payload: dict[str, Any]) -> None:
 
     if not get_ai_budget_guard().release(reservation_id):
         _audit_log("budget_reservation_release_failed", reservation_id=reservation_id)
+        payload["_budget_cleanup_pending"] = True
+        _write_job(payload)
         return
     payload.pop("_budget_reservation_id", None)
     _write_job(payload)

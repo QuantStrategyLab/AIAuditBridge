@@ -424,7 +424,6 @@ class QuotaManager:
                         "decision": "block",
                         "deferred_budget": True,
                     }
-                self._record_failures.discard(repo)
         tokens_input = estimate_tokens(prompt)
         resolved_model = model
         provider = ""

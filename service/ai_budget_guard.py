@@ -485,8 +485,9 @@ class AIBudgetGuard:
                 if (parsed := _reset_timestamp(value)) is not None
             ]
             reset_event = min(parsed_resets) if len(parsed_resets) == len(reset_at) and parsed_resets else None
-            if reset_event is not None and reset_event <= self._clock() and reset_event > self._codex_reset_events.get(scope, 0.0):
-                self._codex_reset_events[scope] = reset_event
+            reset_key = aggregate_scope
+            if reset_event is not None and reset_event <= self._clock() and reset_event > self._codex_reset_events.get(reset_key, 0.0):
+                self._codex_reset_events[reset_key] = reset_event
                 for key in list(self._reserved):
                     if key.startswith("codex/"):
                         self._reserved.pop(key, None)
