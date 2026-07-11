@@ -31,6 +31,16 @@ def _int_env(name: str, default: int, *, minimum: int = 1, maximum: int | None =
     return value
 
 
+def _usage_window(end_time: int) -> tuple[int, int]:
+    configured = os.environ.get("CODEX_AUDIT_SERVICE_ANTHROPIC_USAGE_WINDOW_DAYS", "").strip()
+    if configured:
+        days = _int_env("CODEX_AUDIT_SERVICE_ANTHROPIC_USAGE_WINDOW_DAYS", 1, minimum=1, maximum=31)
+        return end_time - days * 86400, days
+    current = datetime.fromtimestamp(end_time, UTC)
+    start = current.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    return int(start.timestamp()), (current.date() - start.date()).days + 1
+
+
 def _iso_utc(timestamp: int) -> str:
     return datetime.fromtimestamp(timestamp, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -136,9 +146,8 @@ def read_anthropic_admin_usage(now: int | None = None, timeout_seconds: float | 
     admin_key = _admin_key()
     if not admin_key:
         return None
-    days = _int_env("CODEX_AUDIT_SERVICE_ANTHROPIC_USAGE_WINDOW_DAYS", 7, minimum=1, maximum=31)
     end_time = int(now if now is not None else time.time())
-    start_time = end_time - days * 86400
+    start_time, days = _usage_window(end_time)
     timeout = timeout_seconds if timeout_seconds is not None else float(
         _int_env("CODEX_AUDIT_SERVICE_ANTHROPIC_ADMIN_TIMEOUT_SECONDS", 8, minimum=1, maximum=60)
     )

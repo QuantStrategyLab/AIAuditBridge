@@ -503,7 +503,7 @@ def _recover_orphaned_jobs() -> int:
         job["failure_category"] = "service_restart"
         _write_job(job)
         _record_job_automation_run(job)
-        _settle_budget_reservation(job, 0.0)
+        _settle_budget_reservation(job, 0.10 if bool(job.get("dispatch_started")) else 0.0)
         _audit_log(
             "job_failed",
             job_id=job.get("job_id"),
@@ -527,7 +527,7 @@ def _mark_stale_job_failed(job: dict[str, Any]) -> dict[str, Any]:
     job["failure_category"] = "stale_job_timeout"
     _write_job(job)
     _record_job_automation_run(job)
-    _settle_budget_reservation(job, 0.0)
+    _settle_budget_reservation(job, 0.10 if bool(job.get("dispatch_started")) else 0.0)
     return job
 
 
@@ -1130,6 +1130,9 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
         sandbox = _validate_sandbox(str(payload.get("sandbox") or ""))
         reasoning_effort = _resolve_codex_reasoning_effort(payload, str(payload.get("task") or TASK_EXECUTE))
         dispatch_started = True
+        job["dispatch_started"] = True
+        job["updated_at"] = _now()
+        _write_job(job)
         result = adapter.execute(
             prompt=str(payload["prompt"]),
             sandbox=sandbox,
@@ -1241,6 +1244,7 @@ def _submit_job(claims: dict[str, Any], payload: dict[str, Any]) -> dict[str, ob
         "timeout_seconds": int(payload.get("timeout_seconds", 2700)),
         "dedupe_key": dedupe_key,
         "_budget_reservation_id": str(payload.get("_budget_reservation_id") or ""),
+        "dispatch_started": False,
     }
     _write_job(job)
     _record_job_automation_run(job)
@@ -1444,23 +1448,23 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         started = time.time()
         adapter = LlmAdapter()
         reservation_id = str(qr.get("budget_reservation_id") or "")
+        dispatch_started = False
         try:
+            dispatch_started = True
             result = adapter.complete(
                 model=resolved_model, system=req.system, user=req.prompt,
                 max_tokens=req.max_tokens, timeout=req.timeout_seconds,
             )
-            # Record quota while the reservation is still held; if this fails,
-            # the cleanup below keeps the ledger conservative.
-            quota.record(source_repo, resolved_model, req.prompt, result.output if result.success else "")
         except Exception:
             if reservation_id:
                 from service.ai_budget_guard import get_ai_budget_guard
 
-                get_ai_budget_guard().release(reservation_id)
+                guard = get_ai_budget_guard()
+                if dispatch_started:
+                    guard.settle(reservation_id, float(qr.get("cost_estimate_usd") or 0.0))
+                else:
+                    guard.release(reservation_id)
             raise
-        latency = time.time() - started
-
-        # Record quota and health
         if reservation_id:
             from service.ai_budget_guard import get_ai_budget_guard
 
@@ -1468,6 +1472,11 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 reservation_id,
                 float(qr.get("cost_estimate_usd") or 0.0),
             )
+        # A local quota-recording failure must not roll back provider spend.
+        quota.record(source_repo, resolved_model, req.prompt, result.output if result.success else "")
+        latency = time.time() - started
+
+        # Record quota and health
         get_health_monitor().record("/v1/ai/analyze", latency, result.success, result.error if not result.success else "")
 
         _audit_log("analyze_completed", model=result.model, provider=result.provider,
@@ -1553,9 +1562,11 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         quota.record_execute(quota_repo)
         adapter = CodexAdapter()
         reservation_id = str(qr.get("budget_reservation_id") or "")
+        dispatch_started = False
         try:
             sandbox = _validate_sandbox(str(payload.get("sandbox") or ""))
             reasoning_effort = _resolve_codex_reasoning_effort(payload, str(payload.get("task") or TASK_EXECUTE))
+            dispatch_started = True
             result = adapter.execute(
                 prompt=req.prompt,
                 sandbox=sandbox,
@@ -1567,7 +1578,11 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             if reservation_id:
                 from service.ai_budget_guard import get_ai_budget_guard
 
-                get_ai_budget_guard().release(reservation_id)
+                guard = get_ai_budget_guard()
+                if dispatch_started:
+                    guard.settle(reservation_id, 0.10)
+                else:
+                    guard.release(reservation_id)
             raise
         if reservation_id:
             from service.ai_budget_guard import get_ai_budget_guard
@@ -1678,20 +1693,41 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
 
                 get_ai_budget_guard().release(codex_reservation_id)
             raise
+        # Keep the legacy per-repo quota ledger aligned with the provider
+        # reservation ledger for every reviewer invocation.
+        for review_result in llm_results:
+            try:
+                get_quota_manager().record(
+                    review_repo,
+                    str(review_result.model or ""),
+                    req.prompt,
+                    review_result.output if review_result.success else "",
+                )
+            except Exception as exc:  # noqa: BLE001 - provider spend is already reserved/settled.
+                _audit_log("review_quota_record_failed", error=type(exc).__name__)
         if review_reservations:
             from service.ai_budget_guard import get_ai_budget_guard
 
             for reservation_id, estimated_cost in review_reservations:
                 get_ai_budget_guard().settle(reservation_id, estimated_cost)
             review_reservations = []
+        for reviewer_result in llm_results:
+            get_quota_manager().record(
+                review_repo,
+                reviewer_result.model,
+                req.prompt,
+                reviewer_result.output if reviewer_result.success else "",
+            )
 
         # Step 2: optional Codex verification
         codex_result = None
         if req.verifier == "codex" and codex_quota is not None:
             get_quota_manager().record_execute(review_repo)
+            codex_dispatch_started = False
             try:
                 codex_sandbox = _validate_sandbox("read-only")
                 codex_reasoning_effort = _resolve_codex_reasoning_effort(payload, TASK_REVIEW)
+                codex_dispatch_started = True
                 codex_result = codex.execute(
                     prompt=req.prompt,
                     sandbox=codex_sandbox,
@@ -1702,7 +1738,11 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 if codex_reservation_id:
                     from service.ai_budget_guard import get_ai_budget_guard
 
-                    get_ai_budget_guard().release(codex_reservation_id)
+                    guard = get_ai_budget_guard()
+                    if codex_dispatch_started:
+                        guard.settle(codex_reservation_id, 0.10)
+                    else:
+                        guard.release(codex_reservation_id)
                 raise
             if codex_reservation_id:
                 from service.ai_budget_guard import get_ai_budget_guard

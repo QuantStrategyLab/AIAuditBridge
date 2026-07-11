@@ -397,7 +397,13 @@ class QuotaManager:
         only that internal signal may bypass the API-key budget.
         """
         tokens_input = estimate_tokens(prompt)
-        cost = estimate_cost(model, tokens_input, estimated_output_tokens)
+        resolved_model = model
+        provider = ""
+        if budget_guard and not codex_account:
+            from service.adapters.llm_adapter import resolve_model
+
+            provider, resolved_model = resolve_model(model)
+        cost = estimate_cost(resolved_model, tokens_input, estimated_output_tokens)
         if budget_guard and not codex_account and self.remaining_daily(repo) < cost:
             return {
                 "allowed": False,
@@ -411,7 +417,6 @@ class QuotaManager:
             from service.ai_budget_guard import get_ai_budget_guard
 
             budget_guard_instance = get_ai_budget_guard()
-            provider = "anthropic" if model.lower().startswith("claude") else "openai"
             snapshot = (
                 self._anthropic_account_snapshot()
                 if provider == "anthropic"

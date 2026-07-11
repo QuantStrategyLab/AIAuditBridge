@@ -61,6 +61,16 @@ def _timestamp(snapshot: dict[str, Any]) -> float | None:
     return None
 
 
+def _reset_timestamp(value: Any) -> float | None:
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return None
+    parsed = _number(value, -1.0)
+    return parsed if parsed >= 0 else None
+
+
 def _period(now: float, timezone_name: str) -> str:
     # Billing periods are calendar months.  Invalid timezone configuration is
     # not allowed to change the period silently; UTC is the safe fallback.
@@ -435,7 +445,10 @@ class AIBudgetGuard:
         tightest = min(ratios)
         with self._lock:
             self._load_scope_locked(scope)
-            if any(_number(value, 0.0) and _number(value, 0.0) <= self._clock() for value in reset_at):
+            if any(
+                (parsed := _reset_timestamp(value)) is not None and parsed <= self._clock()
+                for value in reset_at
+            ):
                 for key in list(self._reserved):
                     if key.startswith("codex/"):
                         self._reserved.pop(key, None)
