@@ -1192,8 +1192,15 @@ def has_active_blocking_history(history: list[dict[str, Any]]) -> bool:
         return False
     latest = history[-1]
     status = latest.get("status", "blocking")
-    return status in {"overflow", "invalid_history"} or (
+    return finding_history_requires_confirmation(history) or (
         status == "blocking" and bool(latest.get("findings"))
+    )
+
+
+def finding_history_requires_confirmation(history: list[dict[str, Any]]) -> bool:
+    return bool(
+        history
+        and history[-1].get("status") in {"overflow", "invalid_history"}
     )
 
 
@@ -1627,7 +1634,7 @@ def main() -> int:
 
     # First pass: classify files. If all files are low-risk, skip review.
     all_low_risk = changed_files_are_low_risk(changed_paths, policy)
-    if all_low_risk and changed_paths:
+    if all_low_risk and changed_paths and not active_blocking_history:
         print("All changed files are low-risk (docs/tests). Skipping Codex review.")
         decision = {
             "blocked": False,
@@ -1810,9 +1817,8 @@ def main() -> int:
             "next_action": "auto_remediation" if decision["blocked"] else "none",
         }
     )
-    history_requires_confirmation = bool(
+    history_requires_confirmation = finding_history_requires_confirmation(
         finding_history
-        and finding_history[-1].get("status") in {"overflow", "invalid_history"}
     )
     if history_requires_confirmation and decision["blocked"]:
         decision.update(
@@ -1907,10 +1913,13 @@ def main() -> int:
         current_head_sha,
         status=history_status,
     )
-    _serialized_history, serialized_history_valid = parse_finding_history(
+    serialized_history, serialized_history_valid = parse_finding_history(
         finding_history_marker
     )
-    if not serialized_history_valid:
+    serialized_history_requires_confirmation = finding_history_requires_confirmation(
+        serialized_history
+    )
+    if not serialized_history_valid or serialized_history_requires_confirmation:
         decision = apply_arbitration_failure(
             decision, ReviewError("blocking finding history exceeds its safe bound")
         )

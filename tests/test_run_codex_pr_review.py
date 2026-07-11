@@ -260,6 +260,9 @@ class RunCodexPrReviewTests(unittest.TestCase):
         self.assertTrue(valid)
         self.assertEqual(history[0]["status"], "overflow")
         self.assertTrue(run_codex_pr_review.has_active_blocking_history(history))
+        self.assertTrue(
+            run_codex_pr_review.finding_history_requires_confirmation(history)
+        )
         recovered_marker = run_codex_pr_review.build_finding_history_marker(
             history, [], "feedface", status="clear"
         )
@@ -703,6 +706,56 @@ class RunCodexPrReviewTests(unittest.TestCase):
 
         comment.assert_called_once()
         backend.assert_not_called()
+
+    def test_main_does_not_skip_low_risk_changes_with_active_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            event_path = self._write_event(tmpdir, ["docs/guide.md"])
+            finding = {
+                "severity": "high",
+                "category": "logic",
+                "file": "scripts/run_codex_pr_review.py",
+                "description": "Prior source defect.",
+                "suggestion": "Fix the source defect.",
+            }
+            fingerprint = run_codex_pr_review.blocking_finding_fingerprint([finding])
+            prior_comment = (
+                "<!-- codex-pr-review -->\n"
+                "<!-- codex-pr-review-streak:1 -->\n"
+                f"<!-- codex-pr-review-fingerprints:{fingerprint} -->\n"
+                "<!-- codex-pr-review-head-sha:deadbeef -->\n"
+                + run_codex_pr_review.build_finding_history_marker(
+                    [], [finding], "deadbeef"
+                )
+            )
+            env = {
+                "GH_TOKEN": "token",
+                "GITHUB_REPOSITORY": "org/repo",
+                "GITHUB_EVENT_PATH": event_path,
+            }
+            with (
+                patch.dict(os.environ, env, clear=True),
+                patch(
+                    "scripts.run_codex_pr_review.fetch_pr_files",
+                    return_value=[{"filename": "docs/guide.md"}],
+                ),
+                patch("scripts.run_codex_pr_review.fetch_pr_diff", return_value="docs diff"),
+                patch(
+                    "scripts.run_codex_pr_review.load_policy",
+                    return_value=run_codex_pr_review._default_policy(),
+                ),
+                patch(
+                    "scripts.run_codex_pr_review.find_existing_review_comment",
+                    return_value=(99, prior_comment),
+                ),
+                patch(
+                    "scripts.run_codex_pr_review.run_codex_review_with_fallback",
+                    return_value='{"summary":"clear","findings":[]}',
+                ) as backend,
+                patch("scripts.run_codex_pr_review.upsert_pr_comment"),
+            ):
+                self.assertEqual(run_codex_pr_review.main(), 0)
+
+        backend.assert_called_once()
 
 
     def test_main_blocks_unconfigured_backend_even_with_legacy_opt_in(self) -> None:
