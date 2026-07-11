@@ -471,6 +471,32 @@ def _cleanup_expired_jobs() -> None:
                 pass
 
 
+def _recover_orphaned_jobs() -> int:
+    """Fail persisted active jobs whose worker threads were lost on restart."""
+    recovered = 0
+    for path in _job_dir().glob("*.json"):
+        try:
+            job = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if job.get("status") not in ACTIVE_JOB_STATUSES:
+            continue
+        job["status"] = "failed"
+        job["updated_at"] = _now()
+        job["error"] = "codex audit service restarted before job completion"
+        job["failure_category"] = "service_restart"
+        _write_job(job)
+        _record_job_automation_run(job)
+        _audit_log(
+            "job_failed",
+            job_id=job.get("job_id"),
+            error="service_restart",
+            repository=job.get("repository"),
+        )
+        recovered += 1
+    return recovered
+
+
 def _mark_stale_job_failed(job: dict[str, Any]) -> dict[str, Any]:
     if job.get("status") not in {"queued", "running"}:
         return job
@@ -2016,6 +2042,7 @@ def main() -> int:
 
     # Startup security checks
     _validate_static_token_on_startup()
+    recovered_jobs = _recover_orphaned_jobs()
     if _is_production() and os.environ.get("CODEX_AUDIT_SERVICE_FAKE_OUTPUT") is not None:
         print("[ai-gateway] WARNING: CODEX_AUDIT_SERVICE_FAKE_OUTPUT is set in production!", file=sys.stderr)
 
@@ -2024,6 +2051,8 @@ def main() -> int:
     server = ThreadingHTTPServer((host, port), AiGatewayRequestHandler)
 
     print(f"[ai-gateway] listening on http://{host}:{port}", file=sys.stderr)
+    if recovered_jobs:
+        print(f"[ai-gateway] failed {recovered_jobs} orphaned jobs after restart", file=sys.stderr)
     print("[ai-gateway] security:", file=sys.stderr)
     print(f"  auth_mode: {os.environ.get('CODEX_AUDIT_SERVICE_AUTH', 'github-oidc')}", file=sys.stderr)
     print(f"  production: {_is_production()}", file=sys.stderr)
