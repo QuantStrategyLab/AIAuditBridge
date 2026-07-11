@@ -417,10 +417,15 @@ class QuotaManager:
                 if provider == "anthropic"
                 else self._openai_account_snapshot()
             )
+            provider_scope = (
+                os.environ.get("CODEX_AUDIT_SERVICE_ANTHROPIC_WORKSPACE_SCOPE", "")
+                if provider == "anthropic"
+                else os.environ.get("CODEX_AUDIT_SERVICE_OPENAI_PROJECT_SCOPE", "")
+            ).strip() or "default"
             budget_decision = budget_guard_instance.preflight(
                 task_class=task_class,
                 provider=provider,
-                provider_scope=repo,
+                provider_scope=provider_scope,
                 repo=repo,
                 estimated_cost_usd=cost,
                 usage_snapshot=snapshot,
@@ -446,10 +451,11 @@ class QuotaManager:
             from service.ai_budget_guard import get_ai_budget_guard
 
             budget_guard_instance = get_ai_budget_guard()
+            provider_scope = os.environ.get("CODEX_AUDIT_SERVICE_CODEX_ACCOUNT_SCOPE", "").strip() or "codex-account"
             budget_decision = budget_guard_instance.preflight(
                 task_class=task_class,
                 provider="codex",
-                provider_scope=repo,
+                provider_scope=provider_scope,
                 repo=repo,
                 codex_snapshot=self._codex_account_snapshot(),
             )

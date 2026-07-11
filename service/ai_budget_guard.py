@@ -112,7 +112,9 @@ class AIBudgetGuard:
         return _period(self._clock() if now is None else now, self._timezone)
 
     def _scope(self, provider: str, provider_scope: str, repo: str, task_class: str) -> str:
-        return "/".join((provider or "unknown", provider_scope or "default", repo or "unknown", task_class or "maintenance"))
+        # Reservations are shared by the billing/rate-limit principal across
+        # repositories; repo remains a separate reporting/config dimension.
+        return "/".join((provider or "unknown", provider_scope or "default", task_class or "maintenance"))
 
     def _budget_entry(self, provider: str, provider_scope: str, repo: str, task_class: str) -> dict[str, Any] | None:
         budgets = self._config.get("monthly_budgets")
@@ -290,12 +292,15 @@ class AIBudgetGuard:
             ratios.append(max(0.0, min(1.0, _number(remaining) / 100.0)))
             reset_at.append(window.get("resets_at"))
         tightest = min(ratios)
+        with self._lock:
+            if any(_number(value, 0.0) and _number(value, 0.0) <= self._clock() for value in reset_at):
+                self._settled.pop(scope, None)
         threshold = CODEX_THRESHOLDS.get(task, CODEX_THRESHOLDS["maintenance"])
         allowed = tightest >= threshold and tightest - CODEX_RESERVE_RATIO >= 0
         return self._decision(
             task_class=task, provider_scope=provider_scope, period=period,
             observed={"primary_remaining_ratio": ratios[0], "secondary_remaining_ratio": ratios[1]},
-            reserved=0.0, hard_limit=threshold,
+            reserved=0.0, hard_limit=round(max(0.0, tightest - CODEX_RESERVE_RATIO), 8),
             remaining=round(tightest - CODEX_RESERVE_RATIO, 8), freshness="fresh",
             decision="allow" if allowed else "defer",
             reasons=[] if allowed else ["codex_rate_limit_below_task_threshold"],
@@ -339,8 +344,7 @@ class AIBudgetGuard:
             if item is None:
                 return False
             self._reserved[item.scope] = max(0.0, self._reserved.get(item.scope, 0.0) - item.amount)
-            if not item.scope.startswith("codex/"):
-                self._settled[item.scope] = self._settled.get(item.scope, 0.0) + max(0.0, _number(actual_cost))
+            self._settled[item.scope] = self._settled.get(item.scope, 0.0) + max(0.0, _number(actual_cost))
             return True
 
 

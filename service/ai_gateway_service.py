@@ -1541,14 +1541,21 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         adapter = CodexAdapter()
         sandbox = _validate_sandbox(str(payload.get("sandbox") or ""))
         reasoning_effort = _resolve_codex_reasoning_effort(payload, str(payload.get("task") or TASK_EXECUTE))
-        result = adapter.execute(
-            prompt=req.prompt,
-            sandbox=sandbox,
-            model=req.model or None,
-            reasoning_effort=reasoning_effort,
-            timeout=req.timeout_seconds,
-        )
         reservation_id = str(qr.get("budget_reservation_id") or "")
+        try:
+            result = adapter.execute(
+                prompt=req.prompt,
+                sandbox=sandbox,
+                model=req.model or None,
+                reasoning_effort=reasoning_effort,
+                timeout=req.timeout_seconds,
+            )
+        except Exception:
+            if reservation_id:
+                from service.ai_budget_guard import get_ai_budget_guard
+
+                get_ai_budget_guard().release(reservation_id)
+            raise
         if reservation_id:
             from service.ai_budget_guard import get_ai_budget_guard
 
