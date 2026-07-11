@@ -275,7 +275,14 @@ class LlmAdapter:
                 output = _openai_completion(resolved_model, system, user, max_tokens=max_tokens, timeout=timeout)
             return LlmResult(provider=provider, model=resolved_model, output=output, latency_seconds=time.time() - started)
         except LlmAdapterError as exc:
-            return LlmResult(provider=provider, model=resolved_model, success=False, error=str(exc), latency_seconds=time.time() - started)
+            return LlmResult(
+                provider=provider,
+                model=resolved_model,
+                output="",
+                success=False,
+                error=str(exc),
+                latency_seconds=time.time() - started,
+            )
 
     def parallel_review(
         self,
@@ -303,5 +310,7 @@ class LlmAdapter:
                     results.append(f.result())
                 except Exception as exc:
                     label, model = futures[f]
-                    results.append(LlmResult(provider=label, model=model, success=False, error=str(exc)))
+                    results.append(
+                        LlmResult(provider=label, model=model, output="", success=False, error=str(exc))
+                    )
         return results
