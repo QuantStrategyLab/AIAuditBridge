@@ -106,5 +106,13 @@ class ReusableWorkflowOidcAuthTests(unittest.TestCase):
         suffixed_job_ref = f"{qpk_job_ref}_evil"
         payload["job_workflow_ref"] = suffixed_job_ref
         env["CODEX_AUDIT_SERVICE_ALLOWED_JOB_WORKFLOW_REFS"] = f"{qpk_job_ref},{suffixed_job_ref}"
-        with self.assertRaisesRegex(PermissionError, "strategy drift caller must use"):
+        with self.assertRaisesRegex(PermissionError, "exact QPK reusable workflow SHA"):
+            self._verify(payload, env)
+
+        different_job_ref = (
+            "QuantStrategyLab/QuantPlatformKit/.github/workflows/reusable-drift-check.yml@" + "a" * 40
+        )
+        payload["job_workflow_ref"] = qpk_job_ref
+        env["CODEX_AUDIT_SERVICE_ALLOWED_JOB_WORKFLOW_REFS"] = different_job_ref
+        with self.assertRaisesRegex(PermissionError, "job workflow ref is not allowed"):
             self._verify(payload, env)

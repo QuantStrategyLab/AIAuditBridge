@@ -64,13 +64,19 @@ def _require_optional_allowed_claim(payload: dict[str, Any], env_name: str, clai
 
 def _require_trusted_strategy_drift_job(payload: dict[str, Any], job_workflow_ref: str) -> None:
     workflow_ref = str(payload.get("workflow_ref") or "")
-    if "/.github/workflows/drift-check.yml@" not in workflow_ref:
+    allowed_workflow_refs = _allowed_claim_patterns("CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS")
+    drift_workflow_pattern = re.compile(
+        r"QuantStrategyLab/[A-Za-z0-9_.-]+/\.github/workflows/drift-check\.yml@refs/heads/main"
+    )
+    trusted_drift_refs = {value for value in allowed_workflow_refs if drift_workflow_pattern.fullmatch(value)}
+    if workflow_ref not in trusted_drift_refs:
         return
     trusted_prefix = "QuantStrategyLab/QuantPlatformKit/.github/workflows/reusable-drift-check.yml@"
+    trusted_job_pattern = re.compile(re.escape(trusted_prefix) + r"[0-9a-f]{40}")
+    if not trusted_job_pattern.fullmatch(job_workflow_ref):
+        raise PermissionError("OIDC strategy drift caller must use an exact QPK reusable workflow SHA")
     allowed_job_refs = _allowed_claim_patterns("CODEX_AUDIT_SERVICE_ALLOWED_JOB_WORKFLOW_REFS")
-    trusted_qpk_refs = {
-        value for value in allowed_job_refs if re.fullmatch(re.escape(trusted_prefix) + r"[0-9a-f]{40}", value)
-    }
+    trusted_qpk_refs = {value for value in allowed_job_refs if trusted_job_pattern.fullmatch(value)}
     if job_workflow_ref not in trusted_qpk_refs:
         raise PermissionError("OIDC strategy drift caller must use the trusted QPK reusable workflow")
 
