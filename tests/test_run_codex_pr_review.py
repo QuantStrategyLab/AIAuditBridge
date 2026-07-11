@@ -256,7 +256,37 @@ class RunCodexPrReviewTests(unittest.TestCase):
             } for index in range(20)],
             "deadbeef",
         )
-        self.assertEqual(run_codex_pr_review.parse_finding_history(generated), ([], False))
+        history, valid = run_codex_pr_review.parse_finding_history(generated)
+        self.assertTrue(valid)
+        self.assertEqual(history[0]["status"], "overflow")
+        self.assertTrue(run_codex_pr_review.has_active_blocking_history(history))
+        recovered_marker = run_codex_pr_review.build_finding_history_marker(
+            history, [], "feedface", status="clear"
+        )
+        recovered, valid = run_codex_pr_review.parse_finding_history(recovered_marker)
+        self.assertTrue(valid)
+        self.assertFalse(run_codex_pr_review.has_active_blocking_history(recovered))
+
+    def test_matching_history_round_retains_its_own_head_sha(self) -> None:
+        finding = {
+            "severity": "high",
+            "category": "contract",
+            "file": "service/review.py",
+            "description": "Return a structured result.",
+            "suggestion": "Return ReviewResult.",
+        }
+        first_marker = run_codex_pr_review.build_finding_history_marker(
+            [], [finding], "deadbeef"
+        )
+        history, _valid = run_codex_pr_review.parse_finding_history(first_marker)
+        second_marker = run_codex_pr_review.build_finding_history_marker(
+            history, [], "feedface", status="clear"
+        )
+        history, _valid = run_codex_pr_review.parse_finding_history(second_marker)
+
+        matched = run_codex_pr_review.previous_matching_round(history, [finding])
+        self.assertIsNotNone(matched)
+        self.assertEqual(matched["head_sha"], "deadbeef")
 
     def test_history_aware_arbitration_distinguishes_conflict_from_repetition(self) -> None:
         prior = [{

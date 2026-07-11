@@ -1041,8 +1041,8 @@ def build_finding_history_marker(
     """Serialize a bounded, sanitized blocking-finding history into a bot marker."""
     rounds = list(history[-(FINDING_HISTORY_MAX_ROUNDS - 1):])
     sanitized_findings = [_history_finding(finding) for finding in findings if isinstance(finding, dict)]
+    normalized_head_sha = str(head_sha or "").strip().lower()
     if sanitized_findings or status:
-        normalized_head_sha = str(head_sha or "").strip().lower()
         if not re.fullmatch(r"[0-9a-f]{7,64}", normalized_head_sha):
             return build_invalid_finding_history_marker()
         rounds.append(
@@ -1055,7 +1055,20 @@ def build_finding_history_marker(
     payload = {"version": 1, "rounds": rounds[-FINDING_HISTORY_MAX_ROUNDS:]}
     raw = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
     if len(raw) > FINDING_HISTORY_MAX_BYTES:
-        raw = b'{"version":1,"invalid":true}'
+        overflow_head_sha = normalized_head_sha or str(rounds[-1].get("head_sha") or "")
+        if not re.fullmatch(r"[0-9a-f]{7,64}", overflow_head_sha):
+            return build_invalid_finding_history_marker()
+        overflow_payload = {
+            "version": 1,
+            "rounds": [
+                {
+                    "head_sha": overflow_head_sha,
+                    "findings": [],
+                    "status": "overflow",
+                }
+            ],
+        }
+        raw = json.dumps(overflow_payload, separators=(",", ":")).encode("utf-8")
     encoded = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
     return f"{FINDING_HISTORY_MARKER_PREFIX}{encoded}{FINDING_HISTORY_MARKER_SUFFIX}"
 
@@ -1110,7 +1123,7 @@ def parse_finding_history(body: str) -> tuple[list[dict[str, Any]], bool]:
             return [], False
         if not isinstance(findings, list):
             return [], False
-        if status not in {"blocking", "clear", "cleared"}:
+        if status not in {"blocking", "clear", "cleared", "overflow"}:
             return [], False
         if set(round_state) not in ({"head_sha", "findings"}, {"head_sha", "findings", "status"}):
             return [], False
@@ -1134,8 +1147,16 @@ def previous_matching_findings(
     history: list[dict[str, Any]], current_findings: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
     """Return only previous-round findings sharing a coarse arbitration key."""
+    matched_round = previous_matching_round(history, current_findings)
+    return list(matched_round.get("findings") or []) if matched_round else []
+
+
+def previous_matching_round(
+    history: list[dict[str, Any]], current_findings: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    """Return the exact prior round containing findings matching current keys."""
     if not history:
-        return []
+        return None
     current_keys = set(blocking_finding_fingerprints(current_findings))
     for round_state in reversed(history):
         prior = round_state.get("findings")
@@ -1148,16 +1169,17 @@ def previous_matching_findings(
             and blocking_finding_fingerprint([finding]) in current_keys
         ]
         if matches:
-            return matches
-    return []
+            return {**round_state, "findings": matches}
+    return None
 
 
 def has_active_blocking_history(history: list[dict[str, Any]]) -> bool:
     if not history:
         return False
     latest = history[-1]
-    return latest.get("status", "blocking") == "blocking" and bool(
-        latest.get("findings")
+    status = latest.get("status", "blocking")
+    return status == "overflow" or (
+        status == "blocking" and bool(latest.get("findings"))
     )
 
 
@@ -1772,6 +1794,17 @@ def main() -> int:
             "next_action": "auto_remediation" if decision["blocked"] else "none",
         }
     )
+    history_overflow = bool(
+        finding_history and finding_history[-1].get("status") == "overflow"
+    )
+    if history_overflow and decision["blocked"]:
+        decision.update(
+            {
+                "contract_conflict": True,
+                "auto_fix_allowed": False,
+                "next_action": "contract_arbitration",
+            }
+        )
     finding_fingerprint = blocking_finding_fingerprint(decision["blocking_findings"])
     finding_fingerprints = blocking_finding_fingerprints(decision["blocking_findings"])
     repeated_fingerprints = tuple(sorted(set(finding_fingerprints).intersection(previous_fingerprints)))
@@ -1788,8 +1821,13 @@ def main() -> int:
         previous_head_sha=previous_head_sha,
         current_head_sha=current_head_sha,
     )
-    previous_findings = previous_matching_findings(
+    matched_history_round = previous_matching_round(
         finding_history, decision["blocking_findings"]
+    )
+    previous_findings = (
+        list(matched_history_round.get("findings") or [])
+        if matched_history_round
+        else []
     )
     arbitration: dict[str, Any] | None = None
     history_arbitration_required = bool(
@@ -1807,7 +1845,11 @@ def main() -> int:
             diff=diff,
             findings=decision["blocking_findings"],
             previous_findings=previous_findings,
-            previous_head_sha=previous_head_sha,
+            previous_head_sha=(
+                str(matched_history_round.get("head_sha") or "")
+                if matched_history_round
+                else previous_head_sha
+            ),
         )
         try:
             arbitration = parse_arbitration_output(
