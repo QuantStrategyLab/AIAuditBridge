@@ -1128,6 +1128,7 @@ def _find_active_job_by_dedupe_key(dedupe_key: str) -> dict[str, Any] | None:
 
 def _run_job(job_id: str, payload: dict[str, Any]) -> None:
     started = time.time()
+    dispatch_started = False
     try:
         job = _read_job(job_id)
         job["status"] = "running"
@@ -1137,6 +1138,10 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
         adapter = CodexAdapter()
         sandbox = _validate_sandbox(str(payload.get("sandbox") or ""))
         reasoning_effort = _resolve_codex_reasoning_effort(payload, str(payload.get("task") or TASK_EXECUTE))
+        job["dispatch_started"] = True
+        job["updated_at"] = _now()
+        _write_job(job)
+        dispatch_started = True
         result = adapter.execute(
             prompt=str(payload["prompt"]),
             sandbox=sandbox,
@@ -1202,7 +1207,10 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
             },
             domain=str(job.get("domain") or ""),
         )
-        _release_budget_reservation(job)
+        if dispatch_started:
+            _settle_budget_reservation(job, 0.10)
+        else:
+            _release_budget_reservation(job)
         _audit_log("job_failed", job_id=job_id, error=type(exc).__name__,
                    repository=job.get("repository"))
 
@@ -1476,10 +1484,6 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         except Exception as exc:  # noqa: BLE001 - provider response is already settled.
             quota.mark_recording_failed(source_repo)
             _audit_log("analyze_quota_record_failed", error=type(exc).__name__)
-            _json_response(self, HTTPStatus.SERVICE_UNAVAILABLE, {
-                "status": "error", "error": "quota_ledger_unavailable",
-            })
-            return
         latency = time.time() - started
 
         # Record quota and health
@@ -1733,11 +1737,11 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             for reservation_id, estimated_cost in review_reservations:
                 get_ai_budget_guard().settle(reservation_id, estimated_cost)
             review_reservations = []
-        if quota_record_failed:
-            _json_response(self, HTTPStatus.SERVICE_UNAVAILABLE, {
-                "status": "error", "error": "quota_ledger_unavailable",
-            })
-            return
+        if quota_record_failed and codex_reservation_id:
+            from service.ai_budget_guard import get_ai_budget_guard
+
+            get_ai_budget_guard().release(codex_reservation_id)
+            codex_reservation_id = ""
         # Step 2: optional Codex verification
         codex_result = None
         if req.verifier == "codex" and codex_quota is not None:
