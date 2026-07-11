@@ -15,6 +15,7 @@ VERDICT_PASS = "pass"
 VERDICT_FAIL = "fail"
 VERDICT_DISAGREEMENT = "disagreement"
 VERDICT_UNAVAILABLE = "unavailable"
+VERDICT_INVALID = "invalid"
 
 DEFAULT_ESCALATION_THRESHOLD = 0.8
 
@@ -99,15 +100,20 @@ def compare_three_reviews(
     claude_verdict = _extract_verdict(claude_review)
 
     verdicts = (primary_verdict, gpt_verdict, claude_verdict)
-    if all(verdict == VERDICT_UNAVAILABLE for verdict in verdicts):
+    if any(verdict is None for verdict in verdicts):
+        verdict = VERDICT_DISAGREEMENT
+        reason = "missing or unrecognized review verdict in primary/gpt/claude"
+    elif all(verdict == VERDICT_UNAVAILABLE for verdict in verdicts):
         verdict = VERDICT_UNAVAILABLE
         reason = "codex, gpt, and claude unavailable"
     elif VERDICT_UNAVAILABLE in verdicts:
-        verdict = VERDICT_DISAGREEMENT
-        reason = "one or more reviewers unavailable"
-    elif primary_verdict is None or gpt_verdict is None or claude_verdict is None:
-        verdict = VERDICT_DISAGREEMENT
-        reason = "missing or unrecognized review verdict in primary/gpt/claude"
+        available = [item for item in verdicts if item != VERDICT_UNAVAILABLE]
+        if len(available) >= 2 and len(set(available)) == 1:
+            verdict = available[0]
+            reason = "available reviewer quorum agrees; one reviewer unavailable"
+        else:
+            verdict = VERDICT_DISAGREEMENT
+            reason = "insufficient or conflicting available reviewer quorum"
     elif primary_verdict == gpt_verdict == claude_verdict:
         verdict = primary_verdict
         reason = "codex, gpt, and claude unanimous"
@@ -139,15 +145,15 @@ def compare_reviews(primary: dict[str, Any], secondary: dict[str, Any]) -> dict[
     primary_confidence = _extract_confidence(primary)
     secondary_confidence = _extract_confidence(secondary)
 
-    if primary_verdict == secondary_verdict == VERDICT_UNAVAILABLE:
+    if primary_verdict is None or secondary_verdict is None:
+        verdict = VERDICT_DISAGREEMENT
+        reason = "missing or unrecognized review verdict"
+    elif primary_verdict == secondary_verdict == VERDICT_UNAVAILABLE:
         verdict = VERDICT_UNAVAILABLE
         reason = "primary and secondary reviewers unavailable"
     elif VERDICT_UNAVAILABLE in {primary_verdict, secondary_verdict}:
         verdict = VERDICT_DISAGREEMENT
-        reason = "one or more reviewers unavailable"
-    elif primary_verdict is None or secondary_verdict is None:
-        verdict = VERDICT_DISAGREEMENT
-        reason = "missing or unrecognized review verdict"
+        reason = "two-reviewer quorum unavailable"
     elif primary_verdict == secondary_verdict:
         verdict = primary_verdict
         reason = "reviews agree"

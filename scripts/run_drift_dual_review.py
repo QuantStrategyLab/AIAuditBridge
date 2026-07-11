@@ -99,6 +99,12 @@ def main(argv: list[str] | None = None) -> int:
             body = {"ok": False, "error": proc.stdout or proc.stderr}
         body["exit_code"] = proc.returncode
         results.append(body)
+        if body.get("degraded"):
+            print(
+                f"::warning::Dual review unavailable for {item['strategy_profile']}; "
+                "critical drift alert remains active",
+                file=sys.stderr,
+            )
         worst = max(worst, proc.returncode)
 
     summary = {"ok": True, "domain": domain, "count": len(results), "results": results}

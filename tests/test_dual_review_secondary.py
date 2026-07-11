@@ -25,6 +25,11 @@ class DualReviewSecondaryTests(unittest.TestCase):
         self.assertEqual(review["verdict"], "approve")
         self.assertEqual(review["confidence"], 0.87)
 
+    def test_empty_provider_response_is_invalid_not_unavailable(self) -> None:
+        review = parse_llm_review_output("", provider="openai", model="gpt")
+        self.assertEqual(review["verdict"], "invalid")
+        self.assertEqual(review["parse_error"], "empty_output")
+
     def test_build_secondary_prompt_excludes_primary_verdict(self) -> None:
         request = DualReviewRequest(
             trigger=DualReviewTrigger.PROMOTION,

@@ -100,10 +100,27 @@ class TestCompareThreeReviews(unittest.TestCase):
         self.assertEqual(result["verdict"], VERDICT_UNAVAILABLE)
         self.assertFalse(result["agreement"])
 
-    def test_partial_unavailable_requires_arbitration(self) -> None:
+    def test_two_available_reviewers_form_quorum(self) -> None:
         result = compare_three_reviews(
             {"verdict": "approve", "confidence": 0.9},
             {"verdict": "unavailable", "confidence": 0.0, "error": "provider unavailable"},
+            {"verdict": "approve", "confidence": 0.9},
+        )
+        self.assertEqual(result["verdict"], VERDICT_PASS)
+        self.assertIn("available reviewer quorum", result["reason"])
+
+    def test_one_available_reviewer_is_not_a_quorum(self) -> None:
+        result = compare_three_reviews(
+            {"verdict": "approve", "confidence": 0.9},
+            {"verdict": "unavailable", "confidence": 0.0, "error": "provider unavailable"},
+            {"verdict": "unavailable", "confidence": 0.0, "error": "provider unavailable"},
+        )
+        self.assertEqual(result["verdict"], VERDICT_DISAGREEMENT)
+
+    def test_parse_error_is_not_dropped_from_quorum(self) -> None:
+        result = compare_three_reviews(
+            {"verdict": "approve", "confidence": 0.9},
+            {"verdict": "invalid", "confidence": 0.0, "parse_error": "empty_output"},
             {"verdict": "approve", "confidence": 0.9},
         )
         self.assertEqual(result["verdict"], VERDICT_DISAGREEMENT)

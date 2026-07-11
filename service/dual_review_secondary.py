@@ -8,7 +8,7 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from service.adapters.llm_adapter import LlmAdapter, LlmResult
-from service.dual_review import VERDICT_UNAVAILABLE, extract_confidence, extract_verdict
+from service.dual_review import VERDICT_INVALID, VERDICT_UNAVAILABLE, extract_confidence, extract_verdict
 from service.model_router import default_dual_review_model_for_reviewer
 
 if TYPE_CHECKING:
@@ -39,7 +39,7 @@ def parse_llm_review_output(output: str, *, provider: str, model: str) -> dict[s
         "raw_output": output,
     }
     if not output.strip():
-        parsed.update({"verdict": VERDICT_UNAVAILABLE, "confidence": 0.0, "parse_error": "empty_output"})
+        parsed.update({"verdict": VERDICT_INVALID, "confidence": 0.0, "parse_error": "empty_output"})
         return parsed
 
     try:
@@ -64,7 +64,7 @@ def parse_llm_review_output(output: str, *, provider: str, model: str) -> dict[s
     except (json.JSONDecodeError, TypeError, ValueError) as exc:
         parsed.update(
             {
-                "verdict": VERDICT_UNAVAILABLE,
+                "verdict": VERDICT_INVALID,
                 "confidence": 0.0,
                 "parse_error": str(exc),
             }

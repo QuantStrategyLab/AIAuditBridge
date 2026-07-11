@@ -137,7 +137,9 @@ def run_pipeline(
     result = outcome.to_dict()
     if outcome.outcome == VERDICT_UNAVAILABLE:
         result["skipped"] = ["reviewers_unavailable"]
-    elif dispatch:
+        result["degraded"] = True
+        result["warning"] = "all configured reviewers are unavailable"
+    if dispatch:
         result["dispatch"] = dispatch_dual_review_result(outcome, dry_run=dry_run)
     result["ok"] = True
     return result
