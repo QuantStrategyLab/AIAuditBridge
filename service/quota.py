@@ -138,6 +138,18 @@ class QuotaRecord:
         legacy_tokens_output = int(d.get("legacy_tokens_output", tokens_output if aggregate_tokens_are_legacy_unknown else 0))
         legacy_api_activity = api_key_cost_usd > 0 or aggregate_tokens_are_api_key
         api_calls_incomplete = bool(d.get("api_calls_incomplete", False) or (not has_api_calls and legacy_api_activity))
+        now = time.time()
+        last_reset_weekly = float(d.get("last_reset_weekly", now))
+        if has_weekly_cost_split:
+            weekly_api_key_cost_usd = float(d.get("weekly_api_key_cost_usd", 0.0))
+            weekly_legacy_unknown_cost_usd = float(d.get("weekly_legacy_unknown_cost_usd", 0.0))
+        elif now - last_reset_weekly <= 604800:
+            weekly_api_key_cost_usd = api_key_cost_usd
+            weekly_legacy_unknown_cost_usd = legacy_unknown_cost_usd
+        else:
+            last_reset_weekly = now
+            weekly_api_key_cost_usd = 0.0
+            weekly_legacy_unknown_cost_usd = 0.0
         return cls(
             repo=str(d.get("repo", "")),
             tokens_input=tokens_input,
@@ -157,9 +169,9 @@ class QuotaRecord:
             api_key_cost_usd=api_key_cost_usd,
             codex_cost_usd=codex_cost_usd,
             last_reset_daily=float(d.get("last_reset_daily", time.time())),
-            last_reset_weekly=float(d.get("last_reset_weekly", time.time())) if has_weekly_cost_split else time.time(),
-            weekly_api_key_cost_usd=float(d.get("weekly_api_key_cost_usd", 0.0)),
-            weekly_legacy_unknown_cost_usd=float(d.get("weekly_legacy_unknown_cost_usd", 0.0)),
+            last_reset_weekly=last_reset_weekly,
+            weekly_api_key_cost_usd=weekly_api_key_cost_usd,
+            weekly_legacy_unknown_cost_usd=weekly_legacy_unknown_cost_usd,
         )
 
 

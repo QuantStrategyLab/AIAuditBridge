@@ -408,6 +408,22 @@ class TestQuotaManager(unittest.TestCase):
         self.assertAlmostEqual(record.codex_cost_usd, 5.0)
         self.assertEqual(self.manager.remaining_daily(record.repo), DEFAULT_DAILY_BUDGET_USD)
 
+    def test_legacy_record_preserves_active_weekly_api_usage(self) -> None:
+        now = time.time()
+        record = QuotaRecord.from_dict({
+            "repo": "old/api",
+            "tokens_input": 1000,
+            "tokens_output": 500,
+            "total_cost_usd": 0.75,
+            "last_reset_weekly": now - 60,
+        })
+
+        self.assertAlmostEqual(record.weekly_api_key_cost_usd, 0.75)
+        self.assertAlmostEqual(record.weekly_legacy_unknown_cost_usd, 0.0)
+        self.manager._repo_budgets[record.repo] = {"daily": 5.0, "weekly": 1.0}
+        self.manager._records[record.repo] = record
+        self.assertAlmostEqual(self.manager.remaining_weekly(record.repo), 0.25)
+
     def test_explicit_legacy_tokens_are_preserved_as_legacy_unknown(self) -> None:
         record = QuotaRecord.from_dict({
             "repo": "old/legacy-explicit",
