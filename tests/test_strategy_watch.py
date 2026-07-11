@@ -122,6 +122,19 @@ class StrategyWatchTest(unittest.TestCase):
         self.assertEqual(len(findings), 1)
         self.assertEqual(findings[0].finding_type, "metric_degradation")
 
+    def test_single_performance_discriminator_remains_compatible(self) -> None:
+        base = {
+            "repo": "QuantStrategyLab/TestStrategies",
+            "profile": "live",
+            "current_metrics": {"sharpe": 0.5, "cagr": 0.1, "calmar": 0.7, "win_rate": 0.52, "max_dd": 0.12},
+            "baseline_metrics": {"sharpe": 1.0, "cagr": 0.2, "calmar": 1.0, "win_rate": 0.58, "max_dd": 0.08},
+        }
+
+        for discriminator in ({"schema_version": "strategy_performance.v2"}, {"metrics_kind": "performance"}):
+            findings = evaluate_strategy_watch({**base, **discriminator})
+            self.assertEqual(len(findings), 1)
+            self.assertEqual(findings[0].finding_type, "metric_degradation")
+
     def test_invalid_numeric_value_becomes_data_quality_finding(self) -> None:
         findings = evaluate_strategy_watch(
             {

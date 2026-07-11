@@ -152,6 +152,11 @@ def _validate_snapshot_contract(snapshot: StrategyWatchSnapshot) -> list[dict[st
             )
         return [_data_quality_signal("missing versioned performance metrics; no comparable legacy metrics found")]
 
+    if schema_version == PERFORMANCE_SCHEMA_VERSION and not metrics_kind:
+        metrics_kind = METRICS_KIND_PERFORMANCE
+    elif metrics_kind == METRICS_KIND_PERFORMANCE and not schema_version:
+        schema_version = PERFORMANCE_SCHEMA_VERSION
+
     if not schema_version:
         issues.append(_data_quality_signal("missing schema_version; expected strategy_performance.v2 payload"))
     if not metrics_kind:
