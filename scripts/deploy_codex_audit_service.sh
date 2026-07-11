@@ -8,12 +8,13 @@ DEPLOY_DIR="${CODEX_AUDIT_SERVICE_DEPLOY_DIR:-/opt/codex-audit-bridge}"
 AUDIT_PORT="${CODEX_AUDIT_SERVICE_PORT:-8797}"
 AUDIENCE="${CODEX_AUDIT_SERVICE_AUDIENCE:-quant-codex-audit}"
 ALLOWED_REPOSITORIES="${CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES:-QuantStrategyLab/AIAuditBridge,QuantStrategyLab/QuantRuntimeSettings,QuantStrategyLab/QuantPlatformKit,QuantStrategyLab/CnEquityStrategies,QuantStrategyLab/UsEquityStrategies,QuantStrategyLab/CryptoStrategies}"
-# Consumer review workflows use pull_request_target, so every OIDC workflow_ref remains pinned to refs/heads/main.
+# Direct review and strategy workflow identities are pinned to protected main because GitHub emits workflow_ref with the dispatch branch.
+# Delegated reusable code is constrained separately by the exact job_workflow_ref SHA below.
 # The ref allowlist retains PR merge refs because GitHub can preserve the incoming PR ref for reusable calls; _verify_github_oidc requires both allowlists.
 ALLOWED_WORKFLOW_REFS="${CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS:-QuantStrategyLab/AIAuditBridge/.github/workflows/codex_audit.yml@refs/heads/main,QuantStrategyLab/AIAuditBridge/.github/workflows/codex_pr_review.yml@refs/heads/main,QuantStrategyLab/QuantRuntimeSettings/.github/workflows/codex_pr_review.yml@refs/heads/main,QuantStrategyLab/QuantPlatformKit/.github/workflows/codex_pr_review.yml@refs/heads/main,QuantStrategyLab/CnEquityStrategies/.github/workflows/drift-check.yml@refs/heads/main,QuantStrategyLab/UsEquityStrategies/.github/workflows/drift-check.yml@refs/heads/main,QuantStrategyLab/CryptoStrategies/.github/workflows/drift-check.yml@refs/heads/main}"
 ALLOWED_REFS="${CODEX_AUDIT_SERVICE_ALLOWED_REFS:-refs/heads/main,refs/pull/*/merge}"
 ALLOWED_REPOSITORY_VISIBILITIES="${CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORY_VISIBILITIES:-public}"
-# Strategy callers use this exact QPK commit in `uses:`; rotate this SHA with downstream workflow pins.
+# Single source of truth for delegated drift code. Rotate with the two-SHA procedure in docs/drift_oidc_rotation.md.
 ALLOWED_JOB_WORKFLOW_REFS="${CODEX_AUDIT_SERVICE_ALLOWED_JOB_WORKFLOW_REFS:-QuantStrategyLab/AIAuditBridge/.github/workflows/codex_pr_review.yml@refs/heads/main,QuantStrategyLab/QuantPlatformKit/.github/workflows/reusable-drift-check.yml@644cd9002ae92f2aaca6f7efb4afa4986fae05ea}"
 ALLOWED_DIRECT_REPOSITORIES="${CODEX_AUDIT_SERVICE_ALLOWED_DIRECT_REPOSITORIES:-QuantStrategyLab/AIAuditBridge}"
 ALLOWED_SOURCE_REPOSITORIES="${CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES:-QuantStrategyLab/AIAuditBridge,QuantStrategyLab/QuantRuntimeSettings,QuantStrategyLab/QuantPlatformKit,QuantStrategyLab/CryptoLivePoolPipelines,QuantStrategyLab/HkEquitySnapshotPipelines,QuantStrategyLab/UsEquitySnapshotPipelines,QuantStrategyLab/ResearchSignalContextPipelines,QuantStrategyLab/CnEquityStrategies,QuantStrategyLab/UsEquityStrategies,QuantStrategyLab/CryptoStrategies}"
