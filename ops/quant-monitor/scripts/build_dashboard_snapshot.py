@@ -245,6 +245,8 @@ def build_payload(
             "source_revision": _clean_text(raw.get("source_revision"), 120),
         })
 
+    if not payload_shape_valid:
+        strategies = []
     counts = {status: sum(1 for item in strategies if item["status"] == status) for status in STATUS_ORDER}
     raw_computed_at = (health or {}).get("computed_at")
     computed_at = _clean_timestamp(raw_computed_at)

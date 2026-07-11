@@ -21,7 +21,21 @@ run_lifecycle_dashboard() {
   local help
   help="$(quant-lifecycle dashboard --help 2>&1 || true)"
   if grep -q -- "--output-dir" <<<"$help"; then
-    quant-lifecycle dashboard --output-dir "$HEALTH_DIR" --format json
+    local modern_dir="$HEALTH_DIR/.modern-dashboard-output"
+    rm -rf "$modern_dir"
+    mkdir -p "$modern_dir"
+    if ! quant-lifecycle dashboard --output-dir "$modern_dir" --format json; then
+      rm -rf "$modern_dir"
+      return 1
+    fi
+    local modern_file="$modern_dir/strategy_health_dashboard.json"
+    if [[ ! -f "$modern_file" ]]; then
+      echo "[dashboard] lifecycle CLI did not produce strategy_health_dashboard.json" >&2
+      rm -rf "$modern_dir"
+      return 1
+    fi
+    cp "$modern_file" "$HEALTH_FILE"
+    rm -rf "$modern_dir"
     return
   fi
 

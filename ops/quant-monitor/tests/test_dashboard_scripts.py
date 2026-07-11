@@ -39,7 +39,7 @@ class DashboardScriptTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             payload = json.loads((root / "data/health/strategy_health_dashboard.v1.json").read_text(encoding="utf-8"))
             self.assertEqual(payload["schema_version"], "strategy_health_dashboard.v1")
-            self.assertFalse((root / "data/dashboard/.legacy-dashboard-output").exists())
+            self.assertFalse((root / "data/health/dashboard/.legacy-dashboard-output").exists())
 
     def test_publish_is_disabled_by_default(self):
         with tempfile.TemporaryDirectory() as tmp:

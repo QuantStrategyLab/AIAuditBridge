@@ -96,6 +96,20 @@ class DashboardSnapshotTests(unittest.TestCase):
         self.assertIn("strategies_not_array", payload["errors"])
         self.assertEqual(payload["strategies"], [])
 
+    def test_mixed_strategy_rows_are_fail_closed_without_partial_data(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            health = Path(tmp) / "health.json"
+            health.write_text(json.dumps({"strategies": [
+                {"strategy_profile": "valid", "domain": "crypto", "status": "healthy"},
+                {"strategy_profile": "invalid", "domain": "unknown", "status": "healthy"},
+            ]}), encoding="utf-8")
+
+            payload = build_payload(health_file=health)
+
+        self.assertEqual(payload["data_status"], "unavailable")
+        self.assertEqual(payload["strategies"], [])
+        self.assertEqual(payload["summary"]["strategy_count"], 0)
+
     def test_redacts_untrusted_review_fields_and_keeps_missing_scores_null(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
