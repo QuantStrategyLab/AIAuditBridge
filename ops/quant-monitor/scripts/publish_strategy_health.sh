@@ -27,11 +27,12 @@ if payload.get("schema_version") != "strategy_health_dashboard.v1":
     raise SystemExit("[publish] unsupported dashboard schema")
 PY
 
-curl --fail --silent --show-error --max-time 20 \
-  -X POST \
-  -H "Authorization: Bearer ${STRATEGY_HEALTH_SYNC_TOKEN}" \
-  -H "Content-Type: application/json" \
-  --data-binary "@${INPUT}" \
-  "${STRATEGY_HEALTH_SYNC_URL}" >/dev/null
+curl --fail --silent --show-error --max-time 20 --config - >/dev/null <<CURL_CONFIG
+url = "${STRATEGY_HEALTH_SYNC_URL}"
+request = POST
+header = Authorization: Bearer ${STRATEGY_HEALTH_SYNC_TOKEN}
+header = Content-Type: application/json
+data-binary = @${INPUT}
+CURL_CONFIG
 
 echo "[publish] strategy health snapshot sent"

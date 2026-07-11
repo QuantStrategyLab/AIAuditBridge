@@ -54,6 +54,46 @@ class DashboardScriptTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn("disabled", result.stderr)
 
+    def test_publish_keeps_sync_token_out_of_curl_argv(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data = root / "snapshot.json"
+            data.write_text(json.dumps({"schema_version": "strategy_health_dashboard.v1"}), encoding="utf-8")
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            fake_curl = fake_bin / "curl"
+            fake_curl.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf '%s' \"$*\" > \"$CURL_ARGV\"\n"
+                "cat > \"$CURL_CONFIG\"\n",
+                encoding="utf-8",
+            )
+            fake_curl.chmod(0o755)
+            argv_path = root / "curl.argv"
+            config_path = root / "curl.config"
+            token = "-".join(("dedicated", "sync", "value"))
+            result = subprocess.run(
+                ["bash", str(ROOT / "scripts/publish_strategy_health.sh")],
+                env=os.environ | {
+                    "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                    "QUANT_MONITOR_ROOT": str(root),
+                    "STRATEGY_HEALTH_INPUT": str(data),
+                    "STRATEGY_HEALTH_PUBLISH": "1",
+                    "STRATEGY_HEALTH_SYNC_URL": "https://example.invalid/sync",
+                    "STRATEGY_HEALTH_SYNC_TOKEN": token,
+                    "CURL_ARGV": str(argv_path),
+                    "CURL_CONFIG": str(config_path),
+                },
+                capture_output=True,
+                text=True,
+            )
+            curl_argv = argv_path.read_text(encoding="utf-8")
+            curl_config = config_path.read_text(encoding="utf-8")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn(token, curl_argv)
+        self.assertIn(token, curl_config)
+
 
 if __name__ == "__main__":
     unittest.main()

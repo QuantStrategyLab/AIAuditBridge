@@ -189,28 +189,33 @@ def build_payload(
         errors.append("data_status_invalid")
         upstream_status = "unavailable"
 
-    raw_strategies = (health or {}).get("strategies", [])
-    if upstream_status == "unavailable":
+    raw_strategies = (health or {}).get("strategies")
+    payload_shape_valid = isinstance(raw_strategies, list) and len(raw_strategies) <= MAX_STRATEGIES
+    if not payload_shape_valid:
+        errors.append("strategies_not_array" if not isinstance(raw_strategies, list) else "strategies_too_many")
         raw_strategies = []
-    if not isinstance(raw_strategies, list):
-        errors.append("strategies_not_array")
+    if upstream_status == "unavailable":
         raw_strategies = []
 
     for raw in raw_strategies[:MAX_STRATEGIES]:
         if not isinstance(raw, dict):
             errors.append("strategy_entry_not_object")
+            payload_shape_valid = False
             continue
         profile = _clean_id(raw.get("strategy_profile") or raw.get("profile"))
         domain = str(raw.get("domain") or "").strip().lower()
         status = str(raw.get("status") or "").strip().lower()
         if not profile:
             errors.append("strategy_profile_invalid")
+            payload_shape_valid = False
             continue
         if domain not in ALLOWED_DOMAINS:
             errors.append("strategy_domain_invalid")
+            payload_shape_valid = False
             continue
         if status not in STATUS_ORDER:
             errors.append("strategy_status_invalid")
+            payload_shape_valid = False
             continue
         review = reviews.get(profile, {})
         requested_stage = review.get("requested_stage")
@@ -249,7 +254,11 @@ def build_payload(
         "schema_version": "strategy_health_dashboard.v1",
         "generated_at": _now(),
         "computed_at": computed_at,
-        "data_status": upstream_status or ("ready" if health is not None else "unavailable"),
+        "data_status": (
+            "unavailable"
+            if not payload_shape_valid or upstream_status == "unavailable" or health is None
+            else upstream_status or "ready"
+        ),
         "errors": list(dict.fromkeys(error_code for error_code in errors if error_code)),
         "summary": {
             "strategy_count": len(strategies),
