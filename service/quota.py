@@ -333,6 +333,10 @@ class QuotaManager:
         """Fail closed for a repo after its quota record cannot be persisted."""
         with self._lock:
             self._record_failures.add(repo or "unknown")
+            try:
+                self._save_records_locked()
+            except Exception:  # noqa: BLE001 - preserve in-memory fail-closed state.
+                pass
 
     def recover_recording_failure(self, repo: str) -> None:
         """Explicit recovery after quota state reconciliation."""

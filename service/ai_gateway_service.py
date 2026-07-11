@@ -480,6 +480,12 @@ def _cleanup_expired_jobs() -> None:
         except Exception:
             expires_at = 0
         if expires_at and expires_at < now:
+            reservation_id = str(payload.get("_budget_reservation_id") or "")
+            if reservation_id:
+                if bool(payload.get("dispatch_started")):
+                    _settle_budget_reservation(payload, 0.10)
+                else:
+                    _release_budget_reservation(payload)
             try:
                 path.unlink()
             except FileNotFoundError:
@@ -1489,7 +1495,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             if reservation_id:
                 from service.ai_budget_guard import get_ai_budget_guard
 
-                get_ai_budget_guard().release(reservation_id)
+                get_ai_budget_guard().settle(reservation_id, float(qr.get("cost_estimate_usd") or 0.0))
             raise
         if reservation_id and bool(getattr(result, "dispatch_started", False)):
             from service.ai_budget_guard import get_ai_budget_guard
