@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -79,19 +80,39 @@ def main() -> int:
     from build_dashboard_snapshot import build_payload
 
     normalized_path = out_dir / "strategy_health_dashboard.v1.json"
+    review_dir = Path(os.environ.get("QUANT_REVIEW_DIR") or root / "data" / "strategy-reviews")
     normalized_payload = build_payload(
         health_file=json_path,
-        review_dir=root / "data" / "strategy-reviews",
+        review_dir=review_dir,
     )
-    normalized_path.write_text(
-        json.dumps(normalized_payload, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    normalized_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_name: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=normalized_path.parent,
+            prefix=f".{normalized_path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temp_file:
+            temp_name = temp_file.name
+            json.dump(normalized_payload, temp_file, ensure_ascii=False, indent=2)
+            temp_file.write("\n")
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
+        Path(temp_name).replace(normalized_path)
+    finally:
+        if temp_name:
+            try:
+                Path(temp_name).unlink()
+            except FileNotFoundError:
+                pass
     collector_payload_invalid = (
         normalized_payload.get("data_status") != "ready"
         or bool(normalized_payload.get("errors"))
     )
-    if json_path.is_file():
+    if not collector_payload_invalid and json_path.is_file():
         try:
             payload = json.loads(json_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -99,7 +120,7 @@ def main() -> int:
             collector_payload_invalid = True
         if isinstance(payload.get("strategies"), list):
             strategies = [row for row in payload["strategies"] if isinstance(row, dict)]
-    else:
+    elif not json_path.is_file():
         collector_payload_invalid = True
 
     telegram_lines: list[str] = []
