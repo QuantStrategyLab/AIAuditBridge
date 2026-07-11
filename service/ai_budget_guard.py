@@ -710,9 +710,14 @@ class AIBudgetGuard:
                             (scope, period, max(0.0, float(reserved_amount)), settled + amount, baseline, self._clock(), float(reserved_amount), amount),
                         )
                         if aggregate_scope != scope:
+                            aggregate_row = db.execute(
+                                "SELECT settled,baseline FROM ai_budget_ledger WHERE scope=? AND period=?",
+                                (aggregate_scope, period),
+                            ).fetchone()
+                            aggregate_baseline = aggregate_row[1] if aggregate_row and aggregate_row[1] is not None else baseline_usage
                             db.execute(
-                                "UPDATE ai_budget_ledger SET reserved=MAX(0,reserved-?),settled=settled+?,updated_at=? WHERE scope=? AND period=?",
-                                (float(reserved_amount), amount, self._clock(), aggregate_scope, period),
+                                "UPDATE ai_budget_ledger SET reserved=MAX(0,reserved-?),settled=settled+?,baseline=COALESCE(baseline,?),updated_at=? WHERE scope=? AND period=?",
+                                (float(reserved_amount), amount, aggregate_baseline, self._clock(), aggregate_scope, period),
                             )
                         db.execute("DELETE FROM ai_budget_reservations WHERE reservation_id=?", (rid,))
                     self._reservations.pop(rid, None)
@@ -737,6 +742,8 @@ class AIBudgetGuard:
                     self._settled_baseline.setdefault(item.scope, item.baseline_usage)
                 self._settled[item.scope] += amount
                 if item.aggregate_scope != item.scope:
+                    if item.baseline_usage is not None:
+                        self._settled_baseline.setdefault(item.aggregate_scope, item.baseline_usage)
                     self._settled[item.aggregate_scope] = self._settled.get(item.aggregate_scope, 0.0) + amount
             self._save_scope_locked(item.scope)
             if item.aggregate_scope != item.scope:
