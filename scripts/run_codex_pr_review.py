@@ -1044,7 +1044,7 @@ def build_finding_history_marker(
     normalized_head_sha = str(head_sha or "").strip().lower()
     if sanitized_findings or status:
         if not re.fullmatch(r"[0-9a-f]{7,64}", normalized_head_sha):
-            return build_invalid_finding_history_marker()
+            return build_invalid_finding_history_marker(normalized_head_sha)
         rounds.append(
             {
                 "head_sha": normalized_head_sha,
@@ -1057,7 +1057,7 @@ def build_finding_history_marker(
     if len(raw) > FINDING_HISTORY_MAX_BYTES:
         overflow_head_sha = normalized_head_sha or str(rounds[-1].get("head_sha") or "")
         if not re.fullmatch(r"[0-9a-f]{7,64}", overflow_head_sha):
-            return build_invalid_finding_history_marker()
+            return build_invalid_finding_history_marker(overflow_head_sha)
         overflow_payload = {
             "version": 1,
             "rounds": [
@@ -1073,8 +1073,22 @@ def build_finding_history_marker(
     return f"{FINDING_HISTORY_MARKER_PREFIX}{encoded}{FINDING_HISTORY_MARKER_SUFFIX}"
 
 
-def build_invalid_finding_history_marker() -> str:
-    raw = b'{"version":1,"invalid":true}'
+def build_invalid_finding_history_marker(head_sha: str = "") -> str:
+    normalized_head_sha = str(head_sha or "").strip().lower()
+    if re.fullmatch(r"[0-9a-f]{7,64}", normalized_head_sha):
+        payload = {
+            "version": 1,
+            "rounds": [
+                {
+                    "head_sha": normalized_head_sha,
+                    "findings": [],
+                    "status": "invalid_history",
+                }
+            ],
+        }
+        raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    else:
+        raw = b'{"version":1,"invalid":true}'
     encoded = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
     return f"{FINDING_HISTORY_MARKER_PREFIX}{encoded}{FINDING_HISTORY_MARKER_SUFFIX}"
 
@@ -1123,7 +1137,7 @@ def parse_finding_history(body: str) -> tuple[list[dict[str, Any]], bool]:
             return [], False
         if not isinstance(findings, list):
             return [], False
-        if status not in {"blocking", "clear", "cleared", "overflow"}:
+        if status not in {"blocking", "clear", "cleared", "overflow", "invalid_history"}:
             return [], False
         if set(round_state) not in ({"head_sha", "findings"}, {"head_sha", "findings", "status"}):
             return [], False
@@ -1178,7 +1192,7 @@ def has_active_blocking_history(history: list[dict[str, Any]]) -> bool:
         return False
     latest = history[-1]
     status = latest.get("status", "blocking")
-    return status == "overflow" or (
+    return status in {"overflow", "invalid_history"} or (
         status == "blocking" and bool(latest.get("findings"))
     )
 
@@ -1605,7 +1619,9 @@ def main() -> int:
             previous_head_sha=previous_head_sha,
             current_head_sha=current_head_sha,
             new_head=bool(previous_head_sha and current_head_sha != previous_head_sha),
-            finding_history_marker=build_invalid_finding_history_marker(),
+            finding_history_marker=build_invalid_finding_history_marker(
+                current_head_sha
+            ),
             history_valid=False,
         )
 
@@ -1794,10 +1810,11 @@ def main() -> int:
             "next_action": "auto_remediation" if decision["blocked"] else "none",
         }
     )
-    history_overflow = bool(
-        finding_history and finding_history[-1].get("status") == "overflow"
+    history_requires_confirmation = bool(
+        finding_history
+        and finding_history[-1].get("status") in {"overflow", "invalid_history"}
     )
-    if history_overflow and decision["blocked"]:
+    if history_requires_confirmation and decision["blocked"]:
         decision.update(
             {
                 "contract_conflict": True,

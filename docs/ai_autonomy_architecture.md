@@ -215,6 +215,8 @@ trusted review comment 只保存最近固定轮数、固定字节上限且脱敏
 
 一旦确认或无法排除 contract conflict，结构化结果固定为 `contract_conflict=true`、`auto_fix_allowed=false`、`next_action=contract_arbitration`，禁止自动 remediation 继续反向修改代码。系统只要求一次人工契约确认；确认应落到公共接口、schema、tests 或 docs 的明确变更后，再由普通 review/check 链路重新验证，而不是绕过 gate。
 
+`verdict=clear` 表示 source-of-truth 已证明当前 finding 为 false positive，因此 required review check 可以通过；即使历史上检测到 `contract_conflict=true`，仍保持 `auto_fix_allowed=false`，防止执行线程继续改代码。这是对错误 finding 的独立仲裁结论，不是绕过 branch protection。`block`、`ambiguous` 或仲裁失败才必须继续 blocked。
+
 ### P1：强烈建议补的缺口
 
 #### 3.4 缺少统一的任务状态机

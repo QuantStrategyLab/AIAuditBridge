@@ -267,6 +267,20 @@ class RunCodexPrReviewTests(unittest.TestCase):
         self.assertTrue(valid)
         self.assertFalse(run_codex_pr_review.has_active_blocking_history(recovered))
 
+    def test_invalid_history_sentinel_is_fail_closed_but_recoverable(self) -> None:
+        marker = run_codex_pr_review.build_invalid_finding_history_marker("deadbeef")
+        history, valid = run_codex_pr_review.parse_finding_history(marker)
+
+        self.assertTrue(valid)
+        self.assertEqual(history[0]["status"], "invalid_history")
+        self.assertTrue(run_codex_pr_review.has_active_blocking_history(history))
+        recovered_marker = run_codex_pr_review.build_finding_history_marker(
+            history, [], "feedface", status="clear"
+        )
+        recovered, valid = run_codex_pr_review.parse_finding_history(recovered_marker)
+        self.assertTrue(valid)
+        self.assertFalse(run_codex_pr_review.has_active_blocking_history(recovered))
+
     def test_matching_history_round_retains_its_own_head_sha(self) -> None:
         finding = {
             "severity": "high",
