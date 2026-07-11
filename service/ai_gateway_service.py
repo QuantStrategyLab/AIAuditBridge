@@ -1443,21 +1443,35 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
 
         started = time.time()
         adapter = LlmAdapter()
-        result = adapter.complete(
-            model=resolved_model, system=req.system, user=req.prompt,
-            max_tokens=req.max_tokens, timeout=req.timeout_seconds,
-        )
+        reservation_id = str(qr.get("budget_reservation_id") or "")
+        dispatched = False
+        try:
+            dispatched = True
+            result = adapter.complete(
+                model=resolved_model, system=req.system, user=req.prompt,
+                max_tokens=req.max_tokens, timeout=req.timeout_seconds,
+            )
+            # Record quota while the reservation is still held; if this fails,
+            # the cleanup below keeps the ledger conservative.
+            quota.record(source_repo, resolved_model, req.prompt, result.output if result.success else "")
+        except Exception:
+            if reservation_id:
+                from service.ai_budget_guard import get_ai_budget_guard
+
+                if dispatched:
+                    get_ai_budget_guard().settle(reservation_id, float(qr.get("cost_estimate_usd") or 0.0))
+                else:
+                    get_ai_budget_guard().release(reservation_id)
+            raise
         latency = time.time() - started
 
         # Record quota and health
-        quota.record(source_repo, resolved_model, req.prompt, result.output if result.success else "")
-        reservation_id = str(qr.get("budget_reservation_id") or "")
         if reservation_id:
             from service.ai_budget_guard import get_ai_budget_guard
 
             get_ai_budget_guard().settle(
                 reservation_id,
-                float(qr.get("cost_estimate_usd") or 0.0) if result.success else 0.0,
+                float(qr.get("cost_estimate_usd") or 0.0),
             )
         get_health_monitor().record("/v1/ai/analyze", latency, result.success, result.error if not result.success else "")
 
@@ -1541,10 +1555,12 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             return
         quota.record_execute(quota_repo)
         adapter = CodexAdapter()
-        sandbox = _validate_sandbox(str(payload.get("sandbox") or ""))
-        reasoning_effort = _resolve_codex_reasoning_effort(payload, str(payload.get("task") or TASK_EXECUTE))
         reservation_id = str(qr.get("budget_reservation_id") or "")
+        dispatched = False
         try:
+            sandbox = _validate_sandbox(str(payload.get("sandbox") or ""))
+            reasoning_effort = _resolve_codex_reasoning_effort(payload, str(payload.get("task") or TASK_EXECUTE))
+            dispatched = True
             result = adapter.execute(
                 prompt=req.prompt,
                 sandbox=sandbox,
@@ -1556,12 +1572,15 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             if reservation_id:
                 from service.ai_budget_guard import get_ai_budget_guard
 
-                get_ai_budget_guard().settle(reservation_id, 0.10)
+                if dispatched:
+                    get_ai_budget_guard().settle(reservation_id, 0.10)
+                else:
+                    get_ai_budget_guard().release(reservation_id)
             raise
         if reservation_id:
             from service.ai_budget_guard import get_ai_budget_guard
 
-            get_ai_budget_guard().settle(reservation_id, 0.10 if result.success else 0.0)
+            get_ai_budget_guard().settle(reservation_id, 0.10)
         get_health_monitor().record("/v1/ai/execute", time.time() - started, result.success, result.error if not result.success else "")
         if result.success:
             _json_response(self, HTTPStatus.OK, {"status": "ok", "output": result.output})
@@ -1673,18 +1692,25 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         codex_result = None
         if req.verifier == "codex" and codex_quota is not None:
             get_quota_manager().record_execute(review_repo)
+            codex_dispatched = False
             try:
+                codex_sandbox = _validate_sandbox("read-only")
+                codex_reasoning_effort = _resolve_codex_reasoning_effort(payload, TASK_REVIEW)
+                codex_dispatched = True
                 codex_result = codex.execute(
                     prompt=req.prompt,
-                    sandbox=_validate_sandbox("read-only"),
-                    reasoning_effort=_resolve_codex_reasoning_effort(payload, TASK_REVIEW),
+                    sandbox=codex_sandbox,
+                    reasoning_effort=codex_reasoning_effort,
                     timeout=req.timeout_seconds,
                 )
             except Exception:
                 if codex_reservation_id:
                     from service.ai_budget_guard import get_ai_budget_guard
 
-                    get_ai_budget_guard().settle(codex_reservation_id, 0.10)
+                    if codex_dispatched:
+                        get_ai_budget_guard().settle(codex_reservation_id, 0.10)
+                    else:
+                        get_ai_budget_guard().release(codex_reservation_id)
                 raise
             if codex_reservation_id:
                 from service.ai_budget_guard import get_ai_budget_guard
