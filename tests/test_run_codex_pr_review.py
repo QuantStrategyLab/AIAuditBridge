@@ -802,11 +802,55 @@ class RunCodexPrReviewTests(unittest.TestCase):
                     "scripts.run_codex_pr_review.run_codex_review_with_fallback",
                     return_value='{"summary":"clear","findings":[]}',
                 ) as backend,
-                patch("scripts.run_codex_pr_review.upsert_pr_comment"),
+                patch("scripts.run_codex_pr_review.upsert_pr_comment") as comment,
             ):
-                self.assertEqual(run_codex_pr_review.main(), 0)
+                self.assertEqual(run_codex_pr_review.main(), 1)
 
         backend.assert_called_once()
+        body = comment.call_args.args[3]
+        self.assertIn("Merge blocked", body)
+        history, valid = run_codex_pr_review.parse_finding_history(body)
+        self.assertTrue(valid)
+        self.assertEqual(history[-1]["status"], "invalid_history")
+
+    def test_main_keeps_legacy_blocker_closed_when_review_backend_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            event_path = self._write_event(tmpdir, ["scripts/run_codex_pr_review.py"])
+            prior_comment = (
+                "<!-- codex-pr-review -->\n"
+                "<!-- codex-pr-review-streak:1 -->\n"
+                "<!-- codex-pr-review-fingerprint:legacy -->\n"
+                "<!-- codex-pr-review-head-sha:deadbeef -->\n"
+            )
+            env = {
+                "GH_TOKEN": "token",
+                "GITHUB_REPOSITORY": "org/repo",
+                "GITHUB_EVENT_PATH": event_path,
+            }
+            with (
+                patch.dict(os.environ, env, clear=True),
+                patch(
+                    "scripts.run_codex_pr_review.fetch_pr_files",
+                    return_value=[{"filename": "scripts/run_codex_pr_review.py"}],
+                ),
+                patch("scripts.run_codex_pr_review.fetch_pr_diff", return_value="source diff"),
+                patch(
+                    "scripts.run_codex_pr_review.load_policy",
+                    return_value=run_codex_pr_review._default_policy(),
+                ),
+                patch(
+                    "scripts.run_codex_pr_review.find_existing_review_comment",
+                    return_value=(99, prior_comment),
+                ),
+                patch(
+                    "scripts.run_codex_pr_review.run_codex_review_with_fallback",
+                    side_effect=ReviewError("Codex service job timed out"),
+                ),
+                patch("scripts.run_codex_pr_review.upsert_pr_comment") as comment,
+            ):
+                self.assertEqual(run_codex_pr_review.main(), 1)
+
+        self.assertIn("Merge blocked", comment.call_args.args[3])
 
     def test_main_clears_active_history_only_after_independent_arbitration(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

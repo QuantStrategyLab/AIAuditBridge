@@ -1768,7 +1768,7 @@ def main() -> int:
     except ReviewError as exc:
         if _review_capacity_is_unavailable(exc):
             print(f"::warning::Codex review unavailable due to quota or capacity: {exc}")
-            if active_blocking_history:
+            if active_blocking_history or legacy_blocking_state:
                 decision = {
                     "blocked": True,
                     "blocking_findings": [],
@@ -1907,13 +1907,14 @@ def main() -> int:
     )
     history_requires_confirmation = finding_history_requires_confirmation(
         finding_history
-    )
+    ) or legacy_blocking_state
     active_history_clearance_required = bool(
         active_blocking_history and not decision["blocked"]
     )
     if history_requires_confirmation:
         decision.update(
             {
+                "blocked": True,
                 "contract_conflict": True,
                 "auto_fix_allowed": False,
                 "next_action": "contract_arbitration",
@@ -2037,7 +2038,10 @@ def main() -> int:
     arbitration_cleared = bool(arbitration and arbitration.get("verdict") == "clear")
     if (history_requires_confirmation or active_history_clearance_required) and not arbitration_cleared:
         finding_history_marker = build_finding_history_marker(
-            finding_history, [], current_head_sha
+            finding_history,
+            [],
+            current_head_sha,
+            status="invalid_history" if legacy_blocking_state and not finding_history else None,
         )
     else:
         history_status = (

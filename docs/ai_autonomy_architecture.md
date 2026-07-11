@@ -205,7 +205,7 @@ AIAuditBridge 是 QuantStrategyLab 的 AI 审计控制面，负责：
 
 Contract Oscillation Guard 是 `AIAuditBridge` 的中央 PR review gate 语义，不是要求每个消费者仓库新增一套 branch rule。消费者仍使用原有 required check、branch protection 和 merge queue；guard 不提供 label、admin 或人工确认绕过。
 
-trusted review comment 只保存最近固定轮数、固定字节上限且脱敏后的 blocking finding 摘要，包括 head SHA、file、category、severity、description 和 suggestion。历史只能由已验证的 review bot comment 恢复；legacy comment 没有 history marker 时保持兼容，畸形或超限 history 则 fail closed。
+trusted review comment 只保存最近固定轮数、固定字节上限且脱敏后的 blocking finding 摘要，包括 head SHA、file、category、severity、description 和 suggestion。历史只能由已验证的 review bot comment 恢复；legacy comment 没有 history marker 时保持兼容，但既有 blocker 会被迁移为 `invalid_history` 并继续 fail closed，不能因一次 clean review 自动清除。畸形或超限 history 同样 fail closed。
 
 若 `overflow` / `invalid_history` 状态中没有可供仲裁的 trusted prior finding，系统不得用空上下文自动 `clear`。此时需要人工确认 source-of-truth 后修复或删除损坏的 trusted bot state，再重新运行普通 required review check；这只恢复可审计状态，不直接放行 merge，也不绕过 branch protection。
 
