@@ -418,6 +418,7 @@ class QuotaManager:
         tokens_input = estimate_tokens(prompt)
         resolved_model = model
         provider = ""
+        reservation = None
         if budget_guard and not codex_account:
             from service.adapters.llm_adapter import resolve_model
 
@@ -530,7 +531,7 @@ class QuotaManager:
             "allowed": True,
             "cost_estimate_usd": cost,
             "remaining_usd": remaining - cost,
-            "budget_reservation_id": reservation.reservation_id if budget_guard else "",
+            "budget_reservation_id": reservation.reservation_id if reservation is not None else "",
         }
 
     def record(self, repo: str, model: str, prompt: str, output: str = "") -> None:

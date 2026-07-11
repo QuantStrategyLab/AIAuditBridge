@@ -105,6 +105,7 @@ class AIBudgetGuard:
         self._reserved: dict[str, float] = {}
         self._settled: dict[str, float] = {}
         self._settled_baseline: dict[str, float] = {}
+        self._codex_reset_events: dict[str, float] = {}
         self._config = config if isinstance(config, dict) else self._load_config()
         self._timezone = str(self._config.get("billing_timezone") or DEFAULT_BILLING_TIMEZONE)
         self._max_age = max(1, int(_number(self._config.get("usage_max_age_seconds"), DEFAULT_MAX_USAGE_AGE_SECONDS)))
@@ -379,7 +380,8 @@ class AIBudgetGuard:
             aggregate_reserved = self._reserved.get(reservation_aggregate_scope, 0.0)
             aggregate_settled = settled if reservation_aggregate_scope == scope else self._reconcile_settled_locked(reservation_aggregate_scope, used)
         repo_remaining = hard_limit - settled - reserved - amount
-        aggregate_remaining = aggregate_hard_limit - used - aggregate_settled - aggregate_reserved - amount
+        aggregate_accounted = used + aggregate_settled
+        aggregate_remaining = aggregate_hard_limit - aggregate_accounted - aggregate_reserved - amount
         remaining = min(repo_remaining, aggregate_remaining)
         if remaining < 0:
             reason = "monthly_hard_limit_reached" if remaining <= 0 else "monthly_budget_insufficient"
@@ -479,9 +481,9 @@ class AIBudgetGuard:
                 for value in reset_at
                 if (parsed := _reset_timestamp(value)) is not None
             ]
-            if len(parsed_resets) == len(reset_at) and parsed_resets and all(
-                parsed <= self._clock() for parsed in parsed_resets
-            ):
+            reset_event = min(parsed_resets) if len(parsed_resets) == len(reset_at) and parsed_resets else None
+            if reset_event is not None and reset_event <= self._clock() and reset_event > self._codex_reset_events.get(scope, 0.0):
+                self._codex_reset_events[scope] = reset_event
                 for key in list(self._reserved):
                     if key.startswith("codex/"):
                         self._reserved.pop(key, None)
@@ -611,15 +613,9 @@ class AIBudgetGuard:
                             (reservation.reservation_id, reservation.scope, reservation.aggregate_scope, reservation.period, reservation.amount, reservation.task_class, reservation.created_at, reservation.baseline_usage),
                         )
                         db.commit()
-                    self._reserved[scope] = new_reserved
-                    self._settled[scope] = stored_settled
+                    self._load_scope_locked(scope)
                     if aggregate_scope != scope:
-                        self._reserved[aggregate_scope] = aggregate_reserved + requested
-                        self._settled[aggregate_scope] = aggregate_settled
-                    if stored_baseline is not None:
-                        self._settled_baseline[scope] = stored_baseline
-                    if aggregate_scope != scope and aggregate_baseline is not None:
-                        self._settled_baseline[aggregate_scope] = aggregate_baseline
+                        self._load_scope_locked(aggregate_scope)
                     self._reservations[reservation.reservation_id] = reservation
                     return reservation
                 except (OSError, sqlite3.Error, TypeError, ValueError):
