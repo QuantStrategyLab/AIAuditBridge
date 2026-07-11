@@ -363,6 +363,7 @@ class QuotaManager:
             return {
                 "allowed": True,
                 "cost_estimate_usd": cost,
+                "remaining_usd": self.remaining_daily(repo),
                 "quota_scope": "codex_account",
             }
         remaining = self.remaining_daily(repo)

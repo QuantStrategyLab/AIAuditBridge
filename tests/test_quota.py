@@ -189,6 +189,7 @@ class TestQuotaManager(unittest.TestCase):
 
         self.assertTrue(result["allowed"])
         self.assertEqual(result["quota_scope"], "codex_account")
+        self.assertEqual(result["remaining_usd"], 0.0)
 
     def test_runtime_status_reflects_daily_budget_pressure(self) -> None:
         self.assertEqual(self.manager.runtime_status("test/repo")["status"], "ok")
