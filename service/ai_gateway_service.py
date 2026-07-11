@@ -1473,7 +1473,10 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 float(qr.get("cost_estimate_usd") or 0.0),
             )
         # A local quota-recording failure must not roll back provider spend.
-        quota.record(source_repo, resolved_model, req.prompt, result.output if result.success else "")
+        try:
+            quota.record(source_repo, resolved_model, req.prompt, result.output if result.success else "")
+        except Exception as exc:  # noqa: BLE001 - provider response is already settled.
+            _audit_log("analyze_quota_record_failed", error=type(exc).__name__)
         latency = time.time() - started
 
         # Record quota and health
@@ -1711,14 +1714,6 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             for reservation_id, estimated_cost in review_reservations:
                 get_ai_budget_guard().settle(reservation_id, estimated_cost)
             review_reservations = []
-        for reviewer_result in llm_results:
-            get_quota_manager().record(
-                review_repo,
-                reviewer_result.model,
-                req.prompt,
-                reviewer_result.output if reviewer_result.success else "",
-            )
-
         # Step 2: optional Codex verification
         codex_result = None
         if req.verifier == "codex" and codex_quota is not None:

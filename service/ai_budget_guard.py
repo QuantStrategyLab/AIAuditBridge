@@ -287,6 +287,8 @@ class AIBudgetGuard:
     def _decision(self, *, task_class: str, provider_scope: str, period: str, observed: Any,
                   reserved: float, hard_limit: Any, remaining: Any, freshness: str,
                   decision: str, reasons: list[str], reset_at: Any = None,
+                  aggregate_observed: Any = None, aggregate_hard_limit: Any = None,
+                  aggregate_reserved: float = 0.0,
                   auto_fallback_allowed: bool = False, reservation_scope: str = "", aggregate_scope: str = "") -> dict[str, Any]:
         return {
             "schema": DECISION_SCHEMA,
@@ -296,8 +298,11 @@ class AIBudgetGuard:
             "aggregate_scope": aggregate_scope,
             "period": period,
             "observed_usage": observed,
+            "aggregate_observed_usage": aggregate_observed if aggregate_observed is not None else observed,
             "reserved_usage": round(reserved, 8),
             "hard_limit": hard_limit,
+            "aggregate_hard_limit": aggregate_hard_limit if aggregate_hard_limit is not None else hard_limit,
+            "aggregate_reserved_usage": round(aggregate_reserved, 8),
             "remaining_after_reservation": remaining,
             "usage_freshness": freshness,
             "decision": decision,
@@ -351,6 +356,7 @@ class AIBudgetGuard:
         user_limit = max(0.0, _number(entry.get("user_monthly_budget_usd", entry.get("monthly_budget_usd"))))
         provider_limit = _number(entry.get("provider_project_limit_usd"), user_limit)
         hard_limit = min(user_limit, provider_limit * 0.80)
+        aggregate_hard_limit = max(0.0, provider_limit * 0.80)
         with self._lock:
             self._load_scope_locked(scope)
             if aggregate_scope != scope:
@@ -360,20 +366,28 @@ class AIBudgetGuard:
                 self._settled_baseline.clear()
                 self._settled_period = current_period
             reserved = self._reserved.get(scope, 0.0)
-            settled = self._reconcile_settled_locked(scope, used)
-        remaining = hard_limit - used - settled - reserved - amount
+            settled = self._reconcile_settled_locked(scope, 0.0)
+            aggregate_reserved = self._reserved.get(aggregate_scope, 0.0)
+            aggregate_settled = self._reconcile_settled_locked(aggregate_scope, used)
+        repo_remaining = hard_limit - settled - reserved - amount
+        aggregate_remaining = aggregate_hard_limit - used - aggregate_settled - aggregate_reserved - amount
+        remaining = min(repo_remaining, aggregate_remaining)
         if remaining < 0:
             reason = "monthly_hard_limit_reached" if remaining <= 0 else "monthly_budget_insufficient"
             return self._decision(
                 task_class=task, provider_scope=provider_scope, period=current_period,
-                observed=used, reserved=reserved, hard_limit=round(hard_limit, 8),
+                observed=0.0, reserved=reserved, hard_limit=round(hard_limit, 8),
                 remaining=round(max(0.0, remaining), 8), freshness="fresh", decision="defer",
                 reasons=[item for item in (reason, "api_fallback_requires_human_approval" if not human_approved_fallback else "") if item],
+                aggregate_observed=used, aggregate_hard_limit=round(aggregate_hard_limit, 8),
+                aggregate_reserved=aggregate_reserved,
             )
         return self._decision(
             task_class=task, provider_scope=provider_scope, period=current_period,
-            observed=used, reserved=reserved, hard_limit=round(hard_limit, 8),
+            observed=0.0, reserved=reserved, hard_limit=round(hard_limit, 8),
             remaining=round(remaining, 8), freshness="fresh", decision="allow", reasons=[],
+            aggregate_observed=used, aggregate_hard_limit=round(aggregate_hard_limit, 8),
+            aggregate_reserved=aggregate_reserved,
             auto_fallback_allowed=human_approved_fallback,
             reservation_scope=scope, aggregate_scope=self._aggregate_scope(provider_name, provider_scope, task, current_period),
         )
@@ -503,7 +517,8 @@ class AIBudgetGuard:
         # callers may pass an explicit amount for API reservations.
         requested = max(0.0, _number(amount, _number(decision.get("remaining_after_reservation"))))
         observed_value = decision.get("observed_usage")
-        baseline_usage = _number(observed_value, -1.0)
+        aggregate_observed_value = decision.get("aggregate_observed_usage")
+        baseline_usage = _number(aggregate_observed_value, _number(observed_value, -1.0))
         reservation = Reservation(
             uuid.uuid4().hex,
             scope,
@@ -534,13 +549,16 @@ class AIBudgetGuard:
                         aggregate_settled = max(0.0, float(aggregate_row[1])) if aggregate_row else 0.0
                         observed_value = decision.get("observed_usage")
                         observed = float(observed_value) if isinstance(observed_value, (int, float)) and not isinstance(observed_value, bool) else 0.0
+                        aggregate_observed_value = decision.get("aggregate_observed_usage")
+                        aggregate_observed = float(aggregate_observed_value) if isinstance(aggregate_observed_value, (int, float)) and not isinstance(aggregate_observed_value, bool) else observed
                         if stored_baseline is not None and observed >= stored_baseline + stored_settled:
                             stored_settled = 0.0
                             stored_baseline = None
                         hard_limit = _number(decision.get("hard_limit"), float("inf"))
+                        aggregate_hard_limit = _number(decision.get("aggregate_hard_limit"), hard_limit)
                         if hard_limit != float("inf") and (
                             observed + stored_settled + stored_reserved + requested > hard_limit + 1e-12
-                            or observed + aggregate_settled + aggregate_reserved + requested > hard_limit + 1e-12
+                            or aggregate_observed + aggregate_settled + aggregate_reserved + requested > aggregate_hard_limit + 1e-12
                         ):
                             return None
                         new_reserved = stored_reserved + requested
@@ -573,6 +591,7 @@ class AIBudgetGuard:
                     return None
             self._load_scope_locked(scope)
             hard_limit = _number(decision.get("hard_limit"), float("inf"))
+            aggregate_hard_limit = _number(decision.get("aggregate_hard_limit"), hard_limit)
             observed_value = decision.get("observed_usage")
             if isinstance(observed_value, (int, float)) and not isinstance(observed_value, bool):
                 observed = float(observed_value)
@@ -580,11 +599,12 @@ class AIBudgetGuard:
             else:
                 observed = 0.0
                 settled = self._settled.get(scope, 0.0)
-            aggregate_settled = self._settled.get(aggregate_scope, 0.0)
+            aggregate_observed = _number(decision.get("aggregate_observed_usage"), observed)
+            aggregate_settled = self._reconcile_settled_locked(aggregate_scope, aggregate_observed)
             aggregate_reserved = self._reserved.get(aggregate_scope, 0.0)
             if hard_limit != float("inf") and (
                 observed + settled + self._reserved.get(scope, 0.0) + requested > hard_limit + 1e-12
-                or observed + aggregate_settled + aggregate_reserved + requested > hard_limit + 1e-12
+                or aggregate_observed + aggregate_settled + aggregate_reserved + requested > aggregate_hard_limit + 1e-12
             ):
                 return None
             self._reservations[reservation.reservation_id] = reservation
