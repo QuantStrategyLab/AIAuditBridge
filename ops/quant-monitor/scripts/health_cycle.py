@@ -146,7 +146,9 @@ def main() -> int:
         "strategy_count": len(strategies),
         "telegram_alerts": notify_lines,
         "issues_created": len([r for r in issue_results if r.get("issue_url")]),
-        "ok": not notify_lines and not collector_payload_invalid,
+        "ok": not notify_lines,
+        "collector_payload_valid": not collector_payload_invalid,
+        "snapshot_data_status": normalized_payload.get("data_status"),
     }
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     (out_dir / f"cycle_{ts}.json").write_text(

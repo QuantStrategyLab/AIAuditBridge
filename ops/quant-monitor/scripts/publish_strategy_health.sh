@@ -27,7 +27,7 @@ if payload.get("schema_version") != "strategy_health_dashboard.v1":
     raise SystemExit("[publish] unsupported dashboard schema")
 PY
 
-python3 - <<'PY' | curl --fail --silent --show-error --max-time 20 --config - >/dev/null
+STRATEGY_HEALTH_INPUT="$INPUT" python3 - <<'PY' | curl --fail --silent --show-error --max-time 20 --config - >/dev/null
 import json
 import os
 

@@ -57,7 +57,8 @@ class DashboardScriptTests(unittest.TestCase):
     def test_publish_keeps_sync_token_out_of_curl_argv(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            data = root / "snapshot.json"
+            data = root / "data" / "health" / "strategy_health_dashboard.v1.json"
+            data.parent.mkdir(parents=True)
             data.write_text(json.dumps({"schema_version": "strategy_health_dashboard.v1"}), encoding="utf-8")
             fake_bin = root / "bin"
             fake_bin.mkdir()
@@ -77,7 +78,6 @@ class DashboardScriptTests(unittest.TestCase):
                 env=os.environ | {
                     "PATH": f"{fake_bin}:{os.environ['PATH']}",
                     "QUANT_MONITOR_ROOT": str(root),
-                    "STRATEGY_HEALTH_INPUT": str(data),
                     "STRATEGY_HEALTH_PUBLISH": "1",
                     "STRATEGY_HEALTH_SYNC_URL": "https://example.invalid/sync",
                     "STRATEGY_HEALTH_SYNC_TOKEN": token,
