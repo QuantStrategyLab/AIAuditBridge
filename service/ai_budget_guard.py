@@ -91,6 +91,7 @@ class AIBudgetGuard:
         self._config = config if isinstance(config, dict) else self._load_config()
         self._timezone = str(self._config.get("billing_timezone") or DEFAULT_BILLING_TIMEZONE)
         self._max_age = max(1, int(_number(self._config.get("usage_max_age_seconds"), DEFAULT_MAX_USAGE_AGE_SECONDS)))
+        self._settled_period = self.period()
 
     @staticmethod
     def _load_config() -> dict[str, Any]:
@@ -129,7 +130,8 @@ class AIBudgetGuard:
             if isinstance(value, (int, float)):
                 return {"user_monthly_budget_usd": float(value)}
             if isinstance(value, dict):
-                return value
+                if any(field in value for field in ("user_monthly_budget_usd", "monthly_budget_usd", "provider_project_limit_usd")):
+                    return value
         provider_node = budgets.get(provider)
         if isinstance(provider_node, dict):
             scope_node = provider_node.get(provider_scope) or provider_node.get("default")
@@ -221,8 +223,12 @@ class AIBudgetGuard:
         provider_limit = _number(entry.get("provider_project_limit_usd"), user_limit)
         hard_limit = min(user_limit, provider_limit * 0.80)
         with self._lock:
+            if self._settled_period != current_period:
+                self._settled.clear()
+                self._settled_period = current_period
             reserved = self._reserved.get(scope, 0.0)
-        remaining = hard_limit - used - reserved - amount
+            settled = self._settled.get(scope, 0.0)
+        remaining = hard_limit - used - settled - reserved - amount
         if remaining < 0:
             reason = "monthly_hard_limit_reached" if remaining <= 0 else "monthly_budget_insufficient"
             return self._decision(
@@ -304,7 +310,7 @@ class AIBudgetGuard:
         with self._lock:
             hard_limit = _number(decision.get("hard_limit"), float("inf"))
             observed = _number(decision.get("observed_usage"), 0.0)
-            if hard_limit != float("inf") and observed + self._reserved.get(scope, 0.0) + requested > hard_limit + 1e-12:
+            if hard_limit != float("inf") and observed + self._settled.get(scope, 0.0) + self._reserved.get(scope, 0.0) + requested > hard_limit + 1e-12:
                 return None
             self._reservations[reservation.reservation_id] = reservation
             self._reserved[scope] = self._reserved.get(scope, 0.0) + requested

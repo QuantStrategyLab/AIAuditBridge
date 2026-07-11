@@ -401,13 +401,14 @@ class QuotaManager:
         if budget_guard and not codex_account:
             from service.ai_budget_guard import get_ai_budget_guard
 
+            budget_guard_instance = get_ai_budget_guard()
             provider = "anthropic" if model.lower().startswith("claude") else "openai"
             snapshot = (
                 self._anthropic_account_snapshot()
                 if provider == "anthropic"
                 else self._openai_account_snapshot()
             )
-            budget_decision = get_ai_budget_guard().preflight(
+            budget_decision = budget_guard_instance.preflight(
                 task_class=task_class,
                 provider=provider,
                 provider_scope=repo,
@@ -422,12 +423,21 @@ class QuotaManager:
                     "budget_decision": budget_decision,
                     "remaining_usd": 0.0,
                 }
+            reservation = budget_guard_instance.reserve(budget_decision, cost)
+            if reservation is None:
+                return {
+                    "allowed": False,
+                    "reason": "deferred_budget: atomic reservation unavailable",
+                    "budget_decision": {**budget_decision, "decision": "defer", "reason_codes": ["reservation_conflict"]},
+                    "remaining_usd": 0.0,
+                }
         if codex_account:
             if model != "codex-cli":
                 raise ValueError("codex_account quota checks require model=codex-cli")
             from service.ai_budget_guard import get_ai_budget_guard
 
-            budget_decision = get_ai_budget_guard().preflight(
+            budget_guard_instance = get_ai_budget_guard()
+            budget_decision = budget_guard_instance.preflight(
                 task_class=task_class,
                 provider="codex",
                 provider_scope=repo,
@@ -442,12 +452,22 @@ class QuotaManager:
                     "budget_decision": budget_decision,
                     "remaining_usd": 0.0,
                 }
+            reservation = budget_guard_instance.reserve(budget_decision, 0.10)
+            if reservation is None:
+                return {
+                    "allowed": False,
+                    "reason": "deferred_budget: atomic Codex reservation unavailable",
+                    "quota_scope": "codex_account",
+                    "budget_decision": {**budget_decision, "decision": "defer", "reason_codes": ["reservation_conflict"]},
+                    "remaining_usd": 0.0,
+                }
             return {
                 "allowed": True,
                 "cost_estimate_usd": cost,
                 "remaining_usd": self.remaining_daily(repo),
                 "quota_scope": "codex_account",
                 "budget_decision": budget_decision,
+                "budget_reservation_id": reservation.reservation_id,
             }
         remaining = self.remaining_daily(repo)
 
@@ -464,6 +484,7 @@ class QuotaManager:
             "allowed": True,
             "cost_estimate_usd": cost,
             "remaining_usd": remaining - cost,
+            "budget_reservation_id": reservation.reservation_id if budget_guard else "",
         }
 
     def record(self, repo: str, model: str, prompt: str, output: str = "") -> None:

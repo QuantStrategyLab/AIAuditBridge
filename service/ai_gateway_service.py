@@ -503,6 +503,7 @@ def _recover_orphaned_jobs() -> int:
         job["failure_category"] = "service_restart"
         _write_job(job)
         _record_job_automation_run(job)
+        _settle_budget_reservation(job, 0.0)
         _audit_log(
             "job_failed",
             job_id=job.get("job_id"),
@@ -526,7 +527,17 @@ def _mark_stale_job_failed(job: dict[str, Any]) -> dict[str, Any]:
     job["failure_category"] = "stale_job_timeout"
     _write_job(job)
     _record_job_automation_run(job)
+    _settle_budget_reservation(job, 0.0)
     return job
+
+
+def _settle_budget_reservation(payload: dict[str, Any], actual_cost: float = 0.0) -> None:
+    reservation_id = str(payload.get("_budget_reservation_id") or "")
+    if not reservation_id:
+        return
+    from service.ai_budget_guard import get_ai_budget_guard
+
+    get_ai_budget_guard().settle(reservation_id, actual_cost)
 
 
 def _assert_job_access(job: dict[str, Any], claims: dict[str, Any]) -> None:
@@ -1156,6 +1167,7 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
             },
             domain=str(job.get("domain") or ""),
         )
+        _settle_budget_reservation(job, 0.10 if job.get("status") == "succeeded" else 0.0)
         _audit_log("job_completed", job_id=job_id, status=job["status"],
                    repository=job.get("repository"), task=job.get("task"))
     except Exception as exc:
@@ -1181,6 +1193,7 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
             },
             domain=str(job.get("domain") or ""),
         )
+        _settle_budget_reservation(job, 0.0)
         _audit_log("job_failed", job_id=job_id, error=type(exc).__name__,
                    repository=job.get("repository"))
 
@@ -1225,6 +1238,7 @@ def _submit_job(claims: dict[str, Any], payload: dict[str, Any]) -> dict[str, ob
         "mode": str(payload.get("mode") or MODE_REVIEW_ONLY),
         "timeout_seconds": int(payload.get("timeout_seconds", 2700)),
         "dedupe_key": dedupe_key,
+        "_budget_reservation_id": str(payload.get("_budget_reservation_id") or ""),
     }
     _write_job(job)
     _record_job_automation_run(job)
@@ -1435,6 +1449,14 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
 
         # Record quota and health
         quota.record(source_repo, resolved_model, req.prompt, result.output if result.success else "")
+        reservation_id = str(qr.get("budget_reservation_id") or "")
+        if reservation_id:
+            from service.ai_budget_guard import get_ai_budget_guard
+
+            get_ai_budget_guard().settle(
+                reservation_id,
+                float(qr.get("cost_estimate_usd") or 0.0) if result.success else 0.0,
+            )
         get_health_monitor().record("/v1/ai/analyze", latency, result.success, result.error if not result.success else "")
 
         _audit_log("analyze_completed", model=result.model, provider=result.provider,
@@ -1480,7 +1502,17 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         quota.record_execute(quota_repo)
 
         payload.setdefault("task", TASK_EXECUTE)
-        job = _submit_job(claims, payload)
+        reservation_id = str(qr.get("budget_reservation_id") or "")
+        if reservation_id:
+            payload["_budget_reservation_id"] = reservation_id
+        try:
+            job = _submit_job(claims, payload)
+        except Exception:
+            if reservation_id:
+                from service.ai_budget_guard import get_ai_budget_guard
+
+                get_ai_budget_guard().settle(reservation_id, 0.0)
+            raise
         get_health_monitor().record("/v1/ai/execute/jobs", time.time() - started, True)
         _json_response(self, HTTPStatus.ACCEPTED, job)
 
@@ -1516,6 +1548,11 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             reasoning_effort=reasoning_effort,
             timeout=req.timeout_seconds,
         )
+        reservation_id = str(qr.get("budget_reservation_id") or "")
+        if reservation_id:
+            from service.ai_budget_guard import get_ai_budget_guard
+
+            get_ai_budget_guard().settle(reservation_id, 0.10 if result.success else 0.0)
         get_health_monitor().record("/v1/ai/execute", time.time() - started, result.success, result.error if not result.success else "")
         if result.success:
             _json_response(self, HTTPStatus.OK, {"status": "ok", "output": result.output})
@@ -1550,6 +1587,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         _audit_log("review_started", reviewers=req.reviewers, verifier=req.verifier,
                    changed_paths_count=len(changed_paths))
         review_repo = str(payload.get("source_repository") or "unknown")
+        review_reservations: list[str] = []
         for reviewer_name, reviewer_model in reviewer_tuples:
             review_quota = get_quota_manager().check(
                 review_repo,
@@ -1566,6 +1604,8 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                     "budget_decision": review_quota.get("budget_decision", {}),
                 })
                 return
+            if review_quota.get("budget_reservation_id"):
+                review_reservations.append(str(review_quota["budget_reservation_id"]))
         llm_results = llm.parallel_review(
             reviewers=reviewer_tuples,
             system="You are a careful quantitative strategy reviewer. Return JSON with verdict, confidence (0.0-1.0), and summary.",
@@ -1598,6 +1638,20 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 reasoning_effort=_resolve_codex_reasoning_effort(payload, TASK_REVIEW),
                 timeout=req.timeout_seconds,
             )
+            codex_reservation_id = str(codex_quota.get("budget_reservation_id") or "")
+            if codex_reservation_id:
+                from service.ai_budget_guard import get_ai_budget_guard
+
+                get_ai_budget_guard().settle(
+                    codex_reservation_id,
+                    0.10 if codex_result.success else 0.0,
+                )
+
+        if review_reservations:
+            from service.ai_budget_guard import get_ai_budget_guard
+
+            for reservation_id in review_reservations:
+                get_ai_budget_guard().settle(reservation_id, 0.0)
 
         # Step 3: build per-reviewer results with extracted confidence
         results: list[dict[str, Any]] = []
