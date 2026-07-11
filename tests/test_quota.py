@@ -179,17 +179,24 @@ class TestQuotaManager(unittest.TestCase):
         remaining = self.manager.remaining_daily("test/repo")
         self.assertEqual(remaining, DEFAULT_DAILY_BUDGET_USD)
 
-    def test_codex_check_ignores_api_budget(self) -> None:
+    def test_only_trusted_codex_account_checks_ignore_api_budget(self) -> None:
         self.manager._repo_budgets["test/repo"] = {"daily": 0.05, "weekly": 1.0}
         self.manager._records["test/repo"] = QuotaRecord(
             repo="test/repo", total_cost_usd=0.05, api_key_cost_usd=0.05
         )
 
-        result = self.manager.check("test/repo", "codex-cli", "review this pull request")
+        untrusted_result = self.manager.check("test/repo", "codex-cli", "review this pull request")
+        trusted_result = self.manager.check(
+            "test/repo",
+            "codex-cli",
+            "review this pull request",
+            codex_account=True,
+        )
 
-        self.assertTrue(result["allowed"])
-        self.assertEqual(result["quota_scope"], "codex_account")
-        self.assertEqual(result["remaining_usd"], 0.0)
+        self.assertFalse(untrusted_result["allowed"])
+        self.assertTrue(trusted_result["allowed"])
+        self.assertEqual(trusted_result["quota_scope"], "codex_account")
+        self.assertEqual(trusted_result["remaining_usd"], 0.0)
 
     def test_runtime_status_reflects_daily_budget_pressure(self) -> None:
         self.assertEqual(self.manager.runtime_status("test/repo")["status"], "ok")
@@ -451,6 +458,23 @@ class TestQuotaManager(unittest.TestCase):
     def test_get_weekly_budget_respects_repo_overrides(self) -> None:
         self.manager._repo_budgets["premium/repo"] = {"weekly": 250.0}
         self.assertEqual(self.manager.get_weekly_budget("premium/repo"), 250.0)
+
+    def test_weekly_budget_resets_stale_record(self) -> None:
+        self.manager._repo_budgets["test/repo"] = {"daily": 5.0, "weekly": 1.0}
+        self.manager._records["test/repo"] = QuotaRecord(
+            repo="test/repo",
+            total_cost_usd=0.5,
+            api_key_cost_usd=0.5,
+            last_reset_weekly=0,
+            weekly_api_key_cost_usd=0.5,
+        )
+
+        self.assertEqual(self.manager.remaining_weekly("test/repo"), 1.0)
+
+    def test_api_record_reduces_weekly_budget(self) -> None:
+        self.manager.record("test/repo", "claude-sonnet-4-6", "A" * 4000, "B" * 1000)
+
+        self.assertLess(self.manager.remaining_weekly("test/repo"), DEFAULT_DAILY_BUDGET_USD * 5)
 
     def test_records_persist_to_store(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

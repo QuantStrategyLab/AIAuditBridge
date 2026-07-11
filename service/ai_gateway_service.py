@@ -1419,7 +1419,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
 
         # Quota check
         quota = get_quota_manager()
-        qr = quota.check(quota_repo, "codex-cli", req.prompt)
+        qr = quota.check(quota_repo, "codex-cli", req.prompt, codex_account=True)
         if not qr["allowed"]:
             _json_response(self, HTTPStatus.TOO_MANY_REQUESTS, {
                 "status": "error", "error": qr["reason"],
@@ -1443,7 +1443,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             _validate_source_repo_org(claims, source_repo)
         quota_repo = source_repo or str(claims.get("repository") or "unknown")
         quota = get_quota_manager()
-        qr = quota.check(quota_repo, "codex-cli", req.prompt)
+        qr = quota.check(quota_repo, "codex-cli", req.prompt, codex_account=True)
         if not qr["allowed"]:
             _json_response(self, HTTPStatus.TOO_MANY_REQUESTS, {
                 "status": "error", "error": qr["reason"],
