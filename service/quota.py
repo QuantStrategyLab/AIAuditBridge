@@ -1,8 +1,8 @@
-"""Quota management — per-repo API budgets and model cost tracking.
+"""Quota management — per-repo API-key budgets and provider cost tracking.
 
-Prevents a single repo or workflow from exhausting the shared API budget.
-Tracks token consumption, enforces daily limits, and supports model
-tier escalation (try cheap model first, upgrade only when needed).
+Prevents a single repo or workflow from exhausting the shared API-key budget.
+Tracks API-key consumption, keeps separate nominal Codex CLI usage for the
+dashboard, enforces API-key daily limits, and supports model tier escalation.
 
 Configuration via environment::
 
@@ -50,7 +50,7 @@ DEFAULT_MODEL_COSTS: dict[str, dict[str, float]] = {
     "claude-fable-5": {"input": 0.003, "output": 0.015},
     "gpt-5.4-mini": {"input": 0.00015, "output": 0.0006},
     "gpt-5.4": {"input": 0.0025, "output": 0.01},
-    "codex-cli": {"flat": 0.05},  # flat per-execution cost
+    "codex-cli": {"flat": 0.05},  # dashboard-only nominal per-execution estimate
 }
 
 # Model tier for escalation: cheaper → more capable
@@ -299,20 +299,30 @@ class QuotaManager:
     def get_weekly_budget(self, repo: str) -> float:
         return self._repo_budgets.get(repo, {}).get("weekly", self._weekly_budget)
 
+    @staticmethod
+    def _api_budget_cost(record: QuotaRecord) -> float:
+        """Return spend governed by the internal API-key USD budget.
+
+        Codex CLI uses the authenticated Codex account, not an API key. Its
+        nominal dashboard estimate must therefore never consume this budget.
+        Legacy unclassified cost remains budgeted conservatively.
+        """
+        return record.api_key_cost_usd + record.legacy_unknown_cost_usd
+
     def remaining_daily(self, repo: str) -> float:
         with self._lock:
             record = self._records.get(repo)
             if not record:
                 return self.get_daily_budget(repo)
             record = self._reset_if_needed(record)
-            return max(0, self.get_daily_budget(repo) - record.total_cost_usd)
+            return max(0, self.get_daily_budget(repo) - self._api_budget_cost(record))
 
     def remaining_weekly(self, repo: str) -> float:
         with self._lock:
             record = self._records.get(repo)
             if not record:
                 return self.get_weekly_budget(repo)
-            return max(0, self.get_weekly_budget(repo) - record.total_cost_usd)
+            return max(0, self.get_weekly_budget(repo) - self._api_budget_cost(record))
 
     def runtime_status(self, repo: str = "") -> dict[str, Any]:
         """Classify quota pressure for autonomy runtime guards.
@@ -341,9 +351,20 @@ class QuotaManager:
         }
 
     def check(self, repo: str, model: str, prompt: str = "", estimated_output_tokens: int = 0) -> dict[str, Any]:
-        """Check if the repo has enough quota remaining. Returns approval dict."""
+        """Check whether the selected provider is allowed to run.
+
+        Internal USD budgets apply only to API-key providers. Codex CLI is
+        governed by the authenticated Codex account's own rate limits, so its
+        nominal dashboard estimate cannot reject a request here.
+        """
         tokens_input = estimate_tokens(prompt)
         cost = estimate_cost(model, tokens_input, estimated_output_tokens)
+        if model == "codex-cli":
+            return {
+                "allowed": True,
+                "cost_estimate_usd": cost,
+                "quota_scope": "codex_account",
+            }
         remaining = self.remaining_daily(repo)
 
         if remaining < cost:
@@ -387,7 +408,7 @@ class QuotaManager:
             self._save_records_locked()
 
     def record_execute(self, repo: str) -> None:
-        """Record a codex exec call (flat cost)."""
+        """Record a Codex exec call with a nominal dashboard estimate only."""
         cost = DEFAULT_MODEL_COSTS.get("codex-cli", {}).get("flat", 0.05)
         with self._lock:
             if repo not in self._records:
