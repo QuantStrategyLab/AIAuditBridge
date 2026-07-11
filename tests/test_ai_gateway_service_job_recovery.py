@@ -3,7 +3,7 @@ from __future__ import annotations
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 import service.ai_gateway_service as gateway
 
@@ -36,7 +36,8 @@ class AiGatewayJobRecoveryTests(unittest.TestCase):
         self.assertEqual(queued["failure_category"], "service_restart")
         self.assertEqual(running["failure_category"], "service_restart")
         self.assertEqual(completed["status"], "succeeded")
-        record_automation_run.assert_called_once_with(running)
+        record_automation_run.assert_has_calls([call(queued), call(running)], any_order=True)
+        self.assertEqual(record_automation_run.call_count, 2)
 
 
 if __name__ == "__main__":
