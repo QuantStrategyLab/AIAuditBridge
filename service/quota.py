@@ -414,16 +414,13 @@ class QuotaManager:
         """
         with self._lock:
             if repo in self._record_failures:
-                try:
-                    self._save_records_locked()
-                except Exception:  # noqa: BLE001 - remain fail closed until storage recovers.
-                    return {
-                        "allowed": False,
-                        "reason": "quota_ledger_unavailable",
-                        "remaining_usd": 0.0,
-                        "decision": "block",
-                        "deferred_budget": True,
-                    }
+                return {
+                    "allowed": False,
+                    "reason": "quota_ledger_unavailable",
+                    "remaining_usd": 0.0,
+                    "decision": "block",
+                    "deferred_budget": True,
+                }
         tokens_input = estimate_tokens(prompt)
         resolved_model = model
         provider = ""

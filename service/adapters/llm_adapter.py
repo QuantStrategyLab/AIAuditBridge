@@ -55,6 +55,7 @@ class LlmResult:
     success: bool = True
     error: str = ""
     latency_seconds: float = 0.0
+    dispatch_started: bool = False
 
 
 class LlmAdapterError(RuntimeError):
@@ -273,7 +274,13 @@ class LlmAdapter:
                 output = _anthropic_completion(resolved_model, system, user, max_tokens=max_tokens, timeout=timeout)
             else:
                 output = _openai_completion(resolved_model, system, user, max_tokens=max_tokens, timeout=timeout)
-            return LlmResult(provider=provider, model=resolved_model, output=output, latency_seconds=time.time() - started)
+            return LlmResult(
+                provider=provider,
+                model=resolved_model,
+                output=output,
+                latency_seconds=time.time() - started,
+                dispatch_started=True,
+            )
         except LlmAdapterError as exc:
             return LlmResult(
                 provider=provider,
@@ -282,6 +289,7 @@ class LlmAdapter:
                 success=False,
                 error=str(exc),
                 latency_seconds=time.time() - started,
+                dispatch_started="API_KEY is not configured" not in str(exc),
             )
 
     def parallel_review(

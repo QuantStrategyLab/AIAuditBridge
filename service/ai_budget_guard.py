@@ -115,7 +115,10 @@ class AIBudgetGuard:
             job_dir = os.environ.get("CODEX_AUDIT_SERVICE_JOB_DIR", "").strip()
             ledger_path = str(Path(job_dir) / "ai_budget_ledger.sqlite3") if job_dir else ""
         self._ledger_path = ledger_path
-        self._ledger_error = False
+        allow_in_memory = bool(self._config.get("allow_in_memory_ledger")) or os.environ.get(
+            "CODEX_AUDIT_SERVICE_ALLOW_IN_MEMORY_LEDGER", ""
+        ).strip().lower() in {"1", "true", "yes"}
+        self._ledger_error = not self._ledger_path and not allow_in_memory
         self._init_ledger()
 
     def _init_ledger(self) -> None:

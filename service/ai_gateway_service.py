@@ -1483,7 +1483,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
 
                 get_ai_budget_guard().release(reservation_id)
             raise
-        if reservation_id:
+        if reservation_id and bool(getattr(result, "dispatch_started", False)):
             from service.ai_budget_guard import get_ai_budget_guard
 
             get_ai_budget_guard().settle(
@@ -1495,11 +1495,12 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
 
             get_ai_budget_guard().release(reservation_id)
         # A local quota-recording failure must not roll back provider spend.
-        try:
-            quota.record(source_repo, resolved_model, req.prompt, result.output if result.success else "")
-        except Exception as exc:  # noqa: BLE001 - provider response is already settled.
-            quota.mark_recording_failed(source_repo)
-            _audit_log("analyze_quota_record_failed", error=type(exc).__name__)
+        if result.success or bool(getattr(result, "dispatch_started", False)):
+            try:
+                quota.record(source_repo, resolved_model, req.prompt, result.output if result.success else "")
+            except Exception as exc:  # noqa: BLE001 - provider response is already settled.
+                quota.mark_recording_failed(source_repo)
+                _audit_log("analyze_quota_record_failed", error=type(exc).__name__)
         latency = time.time() - started
 
         # Record quota and health
@@ -1774,7 +1775,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         # reservation ledger for every reviewer invocation.
         quota_record_failed = False
         for review_result in llm_results:
-            if not review_result.success:
+            if not review_result.success and not bool(getattr(review_result, "dispatch_started", False)):
                 continue
             try:
                 get_quota_manager().record(
@@ -1798,7 +1799,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 )
                 if matched_result is not None:
                     remaining_results.remove(matched_result)
-                if matched_result is not None:
+                if matched_result is not None and bool(getattr(matched_result, "dispatch_started", False)):
                     get_ai_budget_guard().settle(reservation_id, estimated_cost)
                 else:
                     get_ai_budget_guard().release(reservation_id)
