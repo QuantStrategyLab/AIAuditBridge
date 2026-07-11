@@ -86,7 +86,7 @@ def _review_index(review_dir: Path) -> tuple[dict[str, dict[str, Any]], set[str]
 
 def _clean_id(value: Any) -> str | None:
     text = str(value or "").strip()
-    return text.lower() if text and len(text) <= 120 and all(char.isalnum() or char in "._=-" for char in text) else None
+    return text if text and len(text) <= 120 and all(char.isalnum() or char in "._=-" for char in text) else None
 
 
 def _clean_text(value: Any, max_length: int, default: str | None = None) -> str | None:
@@ -187,8 +187,9 @@ def build_payload(
     *,
     health_file: Path,
     review_dir: Path | None = None,
+    force_unavailable: bool = False,
 ) -> dict[str, Any]:
-    health, error = _load_json(health_file)
+    health, error = (None, "health_file_missing") if force_unavailable else _load_json(health_file)
     reviews, duplicate_reviews = _review_index(review_dir) if review_dir else ({}, set())
     strategies: list[dict[str, Any]] = []
     errors: list[str] = [error] if error else []
@@ -215,6 +216,7 @@ def build_payload(
         errors.append("review_artifact_ambiguous")
         payload_shape_valid = False
 
+    seen_profiles: set[str] = set()
     for raw in raw_strategies[:MAX_STRATEGIES]:
         if not isinstance(raw, dict):
             errors.append("strategy_entry_not_object")
@@ -227,6 +229,12 @@ def build_payload(
             errors.append("strategy_profile_invalid")
             payload_shape_valid = False
             continue
+        profile_key = profile.casefold()
+        if profile_key in seen_profiles:
+            errors.append("strategy_profile_collision")
+            payload_shape_valid = False
+            continue
+        seen_profiles.add(profile_key)
         if domain not in ALLOWED_DOMAINS:
             errors.append("strategy_domain_invalid")
             payload_shape_valid = False
@@ -307,9 +315,14 @@ def main() -> int:
     parser.add_argument("--health-file", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--review-dir", type=Path, default=None)
+    parser.add_argument("--force-unavailable", action="store_true")
     args = parser.parse_args()
 
-    payload = build_payload(health_file=args.health_file, review_dir=args.review_dir)
+    payload = build_payload(
+        health_file=args.health_file,
+        review_dir=args.review_dir,
+        force_unavailable=args.force_unavailable,
+    )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n",

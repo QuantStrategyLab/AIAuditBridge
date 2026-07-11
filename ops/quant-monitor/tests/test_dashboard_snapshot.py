@@ -150,6 +150,18 @@ class DashboardSnapshotTests(unittest.TestCase):
         self.assertIn("review_artifact_ambiguous", payload["errors"])
         self.assertEqual(payload["strategies"], [])
 
+    def test_force_unavailable_ignores_existing_input(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            health = Path(tmp) / "health.json"
+            health.write_text(json.dumps({"strategies": [{
+                "strategy_profile": "injected", "domain": "crypto", "status": "healthy",
+            }]}), encoding="utf-8")
+
+            payload = build_payload(health_file=health, force_unavailable=True)
+
+        self.assertEqual(payload["data_status"], "unavailable")
+        self.assertEqual(payload["strategies"], [])
+
     def test_redacts_untrusted_review_fields_and_keeps_missing_scores_null(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

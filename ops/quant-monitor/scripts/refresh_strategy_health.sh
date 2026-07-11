@@ -11,8 +11,9 @@ mkdir -p "$HEALTH_DIR" "$(dirname "$OUTPUT")"
 
 write_unavailable_snapshot() {
   python3 "$ROOT/scripts/build_dashboard_snapshot.py" \
-    --health-file "$HEALTH_DIR/.collector-unavailable.json" \
+    --health-file "$HEALTH_DIR/ignored-when-unavailable.json" \
     --review-dir "$REVIEW_DIR" \
+    --force-unavailable \
     --output "$OUTPUT"
 }
 
