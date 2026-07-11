@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from service.dual_review import VERDICT_DISAGREEMENT, VERDICT_FAIL
+from service.dual_review import VERDICT_DISAGREEMENT, VERDICT_FAIL, VERDICT_UNAVAILABLE
 from service.dual_review_dispatch import dispatch_dual_review_result
 from service.dual_review_orchestrator import orchestrate_from_payload
 from service.dual_review_primary import (
@@ -135,7 +135,9 @@ def run_pipeline(
         return {"ok": False, "error": "orchestration_failed", "payload": payload}
 
     result = outcome.to_dict()
-    if dispatch:
+    if outcome.outcome == VERDICT_UNAVAILABLE:
+        result["skipped"] = ["reviewers_unavailable"]
+    elif dispatch:
         result["dispatch"] = dispatch_dual_review_result(outcome, dry_run=dry_run)
     result["ok"] = True
     return result

@@ -6,7 +6,7 @@ import json
 import os
 from typing import Any
 
-from service.dual_review import VERDICT_DISAGREEMENT
+from service.dual_review import VERDICT_DISAGREEMENT, VERDICT_UNAVAILABLE
 from service.dual_review_orchestrator import DualReviewResult
 from service.briefing_dispatch import create_github_issue, shutil_which
 
@@ -96,6 +96,9 @@ def dispatch_dual_review_result(
         "skipped": [],
     }
 
+    if result.outcome == VERDICT_UNAVAILABLE:
+        summary["skipped"].append("reviewers_unavailable")
+        return summary
     if result.outcome != VERDICT_DISAGREEMENT:
         summary["skipped"].append("no_disagreement")
         return summary

@@ -52,6 +52,28 @@ class DualReviewPipelineTests(unittest.TestCase):
         )
         self.assertEqual(result.get("outcome"), "disagreement")
 
+    @patch("scripts.run_dual_review_pipeline.orchestrate_from_payload")
+    def test_all_reviewers_unavailable_degrades_without_dispatch(self, mock_orchestrate) -> None:
+        from service.dual_review import DualReviewTrigger
+        from service.dual_review_orchestrator import DualReviewResult
+
+        mock_orchestrate.return_value = DualReviewResult(
+            trigger=DualReviewTrigger.DRIFT,
+            strategy_profile="demo",
+            primary_review={"verdict": "unavailable", "confidence": 0.0},
+            outcome="unavailable",
+        )
+        result = run_pipeline(
+            trigger="drift",
+            strategy_profile="demo",
+            context={"drift_score": 0.95},
+            primary_review={"verdict": "unavailable", "confidence": 0.0},
+            dispatch=True,
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["skipped"], ["reviewers_unavailable"])
+        self.assertNotIn("dispatch", result)
+
     @patch.dict("os.environ", {"DUAL_REVIEW_GATE_SKIP": "1"}, clear=False)
     def test_from_evidence_cli_without_trigger_flags(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

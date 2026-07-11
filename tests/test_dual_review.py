@@ -9,6 +9,7 @@ from service.dual_review import (
     VERDICT_DISAGREEMENT,
     VERDICT_FAIL,
     VERDICT_PASS,
+    VERDICT_UNAVAILABLE,
     DualReviewTrigger,
     compare_reviews,
     compare_three_reviews,
@@ -92,6 +93,20 @@ class TestCompareThreeReviews(unittest.TestCase):
         )
         self.assertEqual(result["verdict"], VERDICT_DISAGREEMENT)
         self.assertIn("split decision", result["reason"])
+
+    def test_all_unavailable_is_not_unanimous_rejection(self) -> None:
+        unavailable = {"verdict": "unavailable", "confidence": 0.0, "error": "provider unavailable"}
+        result = compare_three_reviews(unavailable, unavailable, unavailable)
+        self.assertEqual(result["verdict"], VERDICT_UNAVAILABLE)
+        self.assertFalse(result["agreement"])
+
+    def test_partial_unavailable_requires_arbitration(self) -> None:
+        result = compare_three_reviews(
+            {"verdict": "approve", "confidence": 0.9},
+            {"verdict": "unavailable", "confidence": 0.0, "error": "provider unavailable"},
+            {"verdict": "approve", "confidence": 0.9},
+        )
+        self.assertEqual(result["verdict"], VERDICT_DISAGREEMENT)
 
 
 class TestDualReviewTrigger(unittest.TestCase):

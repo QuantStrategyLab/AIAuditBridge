@@ -67,6 +67,23 @@ class DualReviewSecondaryTests(unittest.TestCase):
         self.assertEqual(payload["gpt"]["verdict"], "approve")
         self.assertEqual(payload["claude"]["verdict"], "approve")
 
+    def test_failed_providers_are_unavailable_not_rejections(self) -> None:
+        class _UnavailableAdapter:
+            def parallel_review(self, **kwargs):
+                return [
+                    LlmResult(provider="openai", model="gpt", output="", success=False, error="missing key"),
+                    LlmResult(provider="anthropic", model="claude", output="", success=False, error="missing key"),
+                ]
+
+        request = DualReviewRequest(
+            trigger=DualReviewTrigger.DRIFT,
+            strategy_profile="demo",
+            primary_review={"verdict": "unavailable", "confidence": 0.0},
+        )
+        payload = run_dual_api_secondary_review(request, adapter=_UnavailableAdapter())
+        self.assertEqual(payload["gpt"]["verdict"], "unavailable")
+        self.assertEqual(payload["claude"]["verdict"], "unavailable")
+
 
 if __name__ == "__main__":
     unittest.main()

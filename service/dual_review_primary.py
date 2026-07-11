@@ -8,6 +8,7 @@ import urllib.error
 from pathlib import Path
 from typing import Any
 
+from service.dual_review import VERDICT_UNAVAILABLE
 from service.dual_review_secondary import parse_llm_review_output
 
 _PRIMARY_SYSTEM = (
@@ -96,7 +97,7 @@ def run_codex_primary_review(
     except (ReviewError, urllib.error.URLError, json.JSONDecodeError, OSError) as exc:
         return {
             "source": "codex_primary",
-            "verdict": "reject",
+            "verdict": VERDICT_UNAVAILABLE,
             "confidence": 0.0,
             "error": str(exc),
         }
