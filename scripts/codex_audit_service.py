@@ -470,7 +470,12 @@ def _require_allowed_claim(payload: dict[str, Any], env_name: str, claim_name: s
     patterns = _split_csv_env(env_name)
     if not patterns:
         raise PermissionError(f"{env_name} is required")
-    value = str(payload.get(claim_name) or "")
+    raw_value = payload.get(claim_name)
+    if raw_value is None or raw_value == "":
+        raise PermissionError(f"OIDC {label} is missing")
+    if not isinstance(raw_value, str):
+        raise PermissionError(f"OIDC {label} must be a string")
+    value = raw_value.strip()
     if not value:
         raise PermissionError(f"OIDC {label} is missing")
     if not _claim_matches(value, patterns):
@@ -487,6 +492,7 @@ def _require_optional_allowed_claim(payload: dict[str, Any], env_name: str, clai
 
 
 def _require_trusted_strategy_drift_job(payload: dict[str, Any], job_workflow_ref: str) -> None:
+    # workflow_ref is a required, allowlisted string before this defense-in-depth check runs.
     raw_workflow_ref = payload.get("workflow_ref")
     if not isinstance(raw_workflow_ref, str):
         raise PermissionError("OIDC workflow_ref must be a string")

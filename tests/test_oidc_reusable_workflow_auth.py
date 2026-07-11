@@ -70,6 +70,15 @@ class ReusableWorkflowOidcAuthTests(unittest.TestCase):
         with self.assertRaisesRegex(PermissionError, "must be a string"):
             self._verify(payload, env)
 
+        payload.pop("job_workflow_ref")
+        payload.pop("workflow_ref")
+        with self.assertRaisesRegex(PermissionError, "workflow_ref is missing"):
+            self._verify(payload, env)
+
+        payload["workflow_ref"] = False
+        with self.assertRaisesRegex(PermissionError, "workflow_ref must be a string"):
+            self._verify(payload, env)
+
     def test_strategy_drift_requires_trusted_qpk_reusable_workflow(self) -> None:
         qpk_job_ref = (
             "QuantStrategyLab/QuantPlatformKit/.github/workflows/"
