@@ -58,6 +58,15 @@ class BriefingDispatchTests(unittest.TestCase):
         self.assertEqual(issue, "https://example.test/issues/1")
         self.assertIn("QuantStrategyLab/CryptoStrategies", check_output.call_args.args[0])
 
+    @patch("service.briefing_dispatch.subprocess.check_output")
+    @patch("service.briefing_dispatch.shutil_which", return_value="/usr/bin/gh")
+    def test_create_github_issue_rejects_invalid_repository(self, _which, check_output) -> None:
+        with patch.dict(os.environ, {"GITHUB_REPOSITORY": "bad/repo --assignee admin"}, clear=True):
+            issue = create_github_issue(title="review unavailable", body="details", labels=())
+
+        self.assertIsNone(issue)
+        check_output.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

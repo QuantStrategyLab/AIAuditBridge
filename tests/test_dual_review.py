@@ -108,7 +108,15 @@ class TestCompareThreeReviews(unittest.TestCase):
             {"verdict": "approve", "confidence": 0.9},
         )
         self.assertEqual(result["verdict"], VERDICT_PASS)
-        self.assertIn("available reviewer quorum", result["reason"])
+        self.assertIn("primary and one available secondary", result["reason"])
+
+    def test_secondary_only_quorum_cannot_replace_primary(self) -> None:
+        result = compare_three_reviews(
+            {"verdict": VERDICT_UNAVAILABLE, "confidence": 0.0, "error": "provider unavailable"},
+            {"verdict": "approve", "confidence": 0.9},
+            {"verdict": "approve", "confidence": 0.9},
+        )
+        self.assertEqual(result["verdict"], VERDICT_DISAGREEMENT)
 
     def test_one_available_reviewer_is_not_a_quorum(self) -> None:
         result = compare_three_reviews(

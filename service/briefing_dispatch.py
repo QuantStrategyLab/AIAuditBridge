@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import urllib.parse
 import urllib.request
@@ -102,6 +103,8 @@ def create_github_issue(*, title: str, body: str, labels: tuple[str, ...] = ("br
         or os.environ.get("GITHUB_REPOSITORY")
         or "QuantStrategyLab/QuantStrategyLab"
     ).strip()
+    if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo) is None:
+        return None
     if not shutil_which("gh"):
         return None
     cmd = [

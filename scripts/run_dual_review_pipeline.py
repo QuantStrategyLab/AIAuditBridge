@@ -148,11 +148,7 @@ def run_pipeline(
 
 def _exit_code(result: dict[str, Any]) -> int:
     if result.get("degraded") and result.get("error") == "reviewers_unavailable":
-        dispatch = result.get("dispatch")
-        durable_alert = isinstance(dispatch, dict) and bool(
-            dispatch.get("github_issue") or dispatch.get("github_dry_run")
-        )
-        return 0 if durable_alert else 1
+        return 3
     if not result.get("ok"):
         return 1
     if result.get("skipped"):

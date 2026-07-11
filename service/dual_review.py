@@ -116,12 +116,12 @@ def compare_three_reviews(
         reason = "codex, gpt, and claude unavailable"
     elif VERDICT_UNAVAILABLE in verdicts:
         available = [item for item in verdicts if item != VERDICT_UNAVAILABLE]
-        if len(available) >= 2 and len(set(available)) == 1:
+        if primary_verdict != VERDICT_UNAVAILABLE and len(available) >= 2 and len(set(available)) == 1:
             verdict = available[0]
-            reason = "available reviewer quorum agrees; one reviewer unavailable"
+            reason = "primary and one available secondary reviewer agree"
         else:
             verdict = VERDICT_DISAGREEMENT
-            reason = "insufficient or conflicting available reviewer quorum"
+            reason = "primary unavailable or available reviewer quorum conflicts"
     elif primary_verdict == gpt_verdict == claude_verdict:
         verdict = primary_verdict
         reason = "codex, gpt, and claude unanimous"
