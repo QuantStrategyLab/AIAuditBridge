@@ -16,6 +16,19 @@ write_unavailable_snapshot() {
     --output "$OUTPUT"
 }
 
+valid_json_file() {
+  python3 - "$1" >/dev/null 2>&1 <<'PY'
+import json
+import sys
+from pathlib import Path
+
+try:
+    json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except (OSError, ValueError):
+    raise SystemExit(1)
+PY
+}
+
 run_lifecycle_dashboard() {
   local help
   help="$(quant_lifecycle dashboard --help 2>&1 || true)"
@@ -33,6 +46,11 @@ run_lifecycle_dashboard() {
       rm -rf "$modern_dir"
       return 1
     fi
+    if ! valid_json_file "$modern_file"; then
+      echo "[dashboard] lifecycle CLI produced invalid JSON" >&2
+      rm -rf "$modern_dir"
+      return 1
+    fi
     cp "$modern_file" "$HEALTH_FILE"
     rm -rf "$modern_dir"
     return
@@ -43,10 +61,18 @@ run_lifecycle_dashboard() {
   local legacy_dir="$HEALTH_DIR/.legacy-dashboard-output"
   rm -rf "$legacy_dir"
   mkdir -p "$legacy_dir"
-  (cd "$legacy_dir" && quant_lifecycle dashboard --format json)
+  if ! (cd "$legacy_dir" && quant_lifecycle dashboard --format json); then
+    rm -rf "$legacy_dir"
+    return 1
+  fi
   local legacy_file="$legacy_dir/dashboard_output/strategy_health_dashboard.json"
   if [[ ! -f "$legacy_file" ]]; then
     echo "[dashboard] lifecycle CLI did not produce strategy_health_dashboard.json" >&2
+    return 1
+  fi
+  if ! valid_json_file "$legacy_file"; then
+    echo "[dashboard] lifecycle CLI produced invalid JSON" >&2
+    rm -rf "$legacy_dir"
     return 1
   fi
   cp "$legacy_file" "$HEALTH_DIR/strategy_health_dashboard.json"
