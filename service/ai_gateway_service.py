@@ -503,7 +503,10 @@ def _recover_orphaned_jobs() -> int:
         job["failure_category"] = "service_restart"
         _write_job(job)
         _record_job_automation_run(job)
-        _release_budget_reservation(job)
+        if bool(job.get("dispatch_started")):
+            _settle_budget_reservation(job, 0.10)
+        else:
+            _release_budget_reservation(job)
         _audit_log(
             "job_failed",
             job_id=job.get("job_id"),
@@ -527,7 +530,10 @@ def _mark_stale_job_failed(job: dict[str, Any]) -> dict[str, Any]:
     job["failure_category"] = "stale_job_timeout"
     _write_job(job)
     _record_job_automation_run(job)
-    _release_budget_reservation(job)
+    if bool(job.get("dispatch_started")):
+        _settle_budget_reservation(job, 0.10)
+    else:
+        _release_budget_reservation(job)
     return job
 
 
@@ -1149,7 +1155,9 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
         adapter = CodexAdapter()
         sandbox = _validate_sandbox(str(payload.get("sandbox") or ""))
         reasoning_effort = _resolve_codex_reasoning_effort(payload, str(payload.get("task") or TASK_EXECUTE))
-        job["dispatch_started"] = False
+        # Persist a conservative possible-dispatch marker before invoking the
+        # external process; crash recovery must not refund ambiguous spend.
+        job["dispatch_started"] = True
         job["updated_at"] = _now()
         _write_job(job)
         result = adapter.execute(
