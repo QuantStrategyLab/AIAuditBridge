@@ -129,6 +129,27 @@ class DashboardSnapshotTests(unittest.TestCase):
         self.assertNotIn("bad", payload["strategies"][0]["review"]["validation"])
         self.assertEqual(payload["strategies"][0]["review"]["validation"]["good"], 1)
 
+    def test_duplicate_review_artifacts_are_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            health = root / "health.json"
+            health.write_text(json.dumps({"strategies": [
+                {"strategy_profile": "safe", "domain": "crypto", "status": "healthy"},
+            ]}), encoding="utf-8")
+            reviews = root / "reviews"
+            reviews.mkdir()
+            for name, stage in (("old.json", "shadow_candidate"), ("new.json", "live_candidate")):
+                (reviews / name).write_text(
+                    json.dumps({"profile": "safe", "requested_stage": stage}),
+                    encoding="utf-8",
+                )
+
+            payload = build_payload(health_file=health, review_dir=reviews)
+
+        self.assertEqual(payload["data_status"], "unavailable")
+        self.assertIn("review_artifact_ambiguous", payload["errors"])
+        self.assertEqual(payload["strategies"], [])
+
     def test_redacts_untrusted_review_fields_and_keeps_missing_scores_null(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

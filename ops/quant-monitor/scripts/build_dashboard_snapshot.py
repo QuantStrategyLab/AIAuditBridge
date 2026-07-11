@@ -60,16 +60,20 @@ def _load_json(path: Path) -> tuple[dict[str, Any] | None, str | None]:
     return value, None
 
 
-def _review_index(review_dir: Path) -> dict[str, dict[str, Any]]:
+def _review_index(review_dir: Path) -> tuple[dict[str, dict[str, Any]], set[str]]:
     index: dict[str, dict[str, Any]] = {}
+    duplicates: set[str] = set()
     if not review_dir.exists():
-        return index
+        return index, duplicates
     for path in sorted(review_dir.rglob("*.json")):
         payload, _ = _load_json(path)
         if not payload:
             continue
         profile = _clean_id(payload.get("profile") or payload.get("strategy_profile"))
         if profile:
+            if profile in index:
+                duplicates.add(profile)
+                continue
             index[profile] = {
                 "requested_stage": _clean_text(payload.get("requested_stage"), 80),
                 "validation": _clean_summary(payload.get("validation")),
@@ -77,7 +81,7 @@ def _review_index(review_dir: Path) -> dict[str, dict[str, Any]]:
                 "kelly_readiness": _clean_summary(payload.get("kelly_readiness")),
                 "evidence_package_id": _clean_text(payload.get("evidence_package_id"), 120),
             }
-    return index
+    return index, duplicates
 
 
 def _clean_id(value: Any) -> str | None:
@@ -185,9 +189,11 @@ def build_payload(
     review_dir: Path | None = None,
 ) -> dict[str, Any]:
     health, error = _load_json(health_file)
-    reviews = _review_index(review_dir) if review_dir else {}
+    reviews, duplicate_reviews = _review_index(review_dir) if review_dir else ({}, set())
     strategies: list[dict[str, Any]] = []
     errors: list[str] = [error] if error else []
+    if duplicate_reviews:
+        errors.append("review_artifact_ambiguous")
 
     upstream_status = (health or {}).get("data_status")
     if upstream_status not in {None, "ready", "stale", "unavailable"}:
@@ -196,6 +202,7 @@ def build_payload(
 
     raw_strategies = (health or {}).get("strategies")
     payload_shape_valid = isinstance(raw_strategies, list) and len(raw_strategies) <= MAX_STRATEGIES
+    payload_shape_valid = payload_shape_valid and not duplicate_reviews
     if not payload_shape_valid:
         errors.append("strategies_not_array" if not isinstance(raw_strategies, list) else "strategies_too_many")
         raw_strategies = []

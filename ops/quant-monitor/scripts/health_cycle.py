@@ -75,6 +75,7 @@ def main() -> int:
 
     strategies: list[dict[str, Any]] = []
     json_path = dash_dir / "strategy_health_dashboard.json"
+    collector_payload_invalid = False
     from build_dashboard_snapshot import build_payload
 
     normalized_path = out_dir / "strategy_health_dashboard.v1.json"
@@ -87,9 +88,15 @@ def main() -> int:
         encoding="utf-8",
     )
     if json_path.is_file():
-        payload = json.loads(json_path.read_text(encoding="utf-8"))
+        try:
+            payload = json.loads(json_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            payload = {}
+            collector_payload_invalid = True
         if isinstance(payload.get("strategies"), list):
             strategies = [row for row in payload["strategies"] if isinstance(row, dict)]
+    else:
+        collector_payload_invalid = True
 
     telegram_lines: list[str] = []
     critical_lines: list[str] = []
@@ -135,7 +142,7 @@ def main() -> int:
         "strategy_count": len(strategies),
         "telegram_alerts": notify_lines,
         "issues_created": len([r for r in issue_results if r.get("issue_url")]),
-        "ok": not notify_lines,
+        "ok": not notify_lines and not collector_payload_invalid,
     }
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     (out_dir / f"cycle_{ts}.json").write_text(
