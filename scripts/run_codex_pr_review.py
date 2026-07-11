@@ -1014,6 +1014,21 @@ def evaluate_findings(
 
 def _sanitize_history_text(value: Any, limit: int = FINDING_HISTORY_TEXT_LIMIT) -> str:
     text = re.sub(r"[\x00-\x1f\x7f]+", " ", str(value or "")).strip()
+    text = re.sub(r"-----BEGIN [^-]+-----.*?-----END [^-]+-----", "[REDACTED]", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b(?:AKIA|ASIA|AIDA|AROA)[A-Z0-9]{16}\b", "[REDACTED]", text)
+    text = re.sub(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b", "[REDACTED]", text)
+    text = re.sub(r"\bglpat-[A-Za-z0-9_-]{10,}\b", "[REDACTED]", text)
+    text = re.sub(
+        r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b",
+        "[REDACTED]",
+        text,
+    )
+    text = re.sub(
+        r"\b[a-z][a-z0-9+.-]*://[^\s/@:]+:[^\s/@]+@[^\s]+",
+        "[REDACTED_DSN]",
+        text,
+        flags=re.IGNORECASE,
+    )
     text = re.sub(
         r"(?i)\b(token|secret|password|api[ _-]?key|authorization|cookie)\b\s*[:=]\s*\S+",
         r"\1=[REDACTED]",
@@ -1021,6 +1036,11 @@ def _sanitize_history_text(value: Any, limit: int = FINDING_HISTORY_TEXT_LIMIT) 
     )
     text = re.sub(r"(?i)\bbearer\s+\S+", "Bearer [REDACTED]", text)
     text = re.sub(r"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,})\b", "[REDACTED]", text)
+    text = re.sub(
+        r"(?<!\S)(?=\S*[A-Za-z])(?=\S*\d)\S{8,39}(?!\S)",
+        "[REDACTED]",
+        text,
+    )
     text = re.sub(r"\b[A-Za-z0-9_+/=-]{40,}\b", "[REDACTED]", text)
     return text[:limit]
 
@@ -1043,10 +1063,12 @@ def build_finding_history_marker(
     status: str | None = None,
 ) -> str:
     """Serialize a bounded, sanitized blocking-finding history into a bot marker."""
-    rounds = list(history[-(FINDING_HISTORY_MAX_ROUNDS - 1):])
     sanitized_findings = [_history_finding(finding) for finding in findings if isinstance(finding, dict)]
+    will_append = bool(sanitized_findings or status)
+    history_limit = FINDING_HISTORY_MAX_ROUNDS - 1 if will_append else FINDING_HISTORY_MAX_ROUNDS
+    rounds = list(history[-history_limit:])
     normalized_head_sha = str(head_sha or "").strip().lower()
-    if sanitized_findings or status:
+    if will_append:
         if not re.fullmatch(r"[0-9a-f]{7,64}", normalized_head_sha):
             return build_invalid_finding_history_marker(normalized_head_sha)
         rounds.append(

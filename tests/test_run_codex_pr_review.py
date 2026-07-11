@@ -210,7 +210,42 @@ class RunCodexPrReviewTests(unittest.TestCase):
             self.assertTrue(valid)
 
         self.assertEqual(len(history), run_codex_pr_review.FINDING_HISTORY_MAX_ROUNDS)
+        republished = run_codex_pr_review.build_finding_history_marker(
+            history, [], "feedface"
+        )
+        republished_history, valid = run_codex_pr_review.parse_finding_history(
+            republished
+        )
+        self.assertTrue(valid)
+        self.assertEqual(republished_history, history)
         self.assertEqual(run_codex_pr_review.parse_finding_history("legacy comment"), ([], True))
+
+    def test_finding_history_scrubs_common_credential_formats(self) -> None:
+        secrets = (
+            "AKIAIOSFODNN7EXAMPLE",
+            "xoxb-123456789012-secretvalue",
+            "glpat-exampleSecret123",
+            "eyJhbGciOiJIUzI1NiJ9.payload.signature",
+            "postgres://reviewer:p%40ssword@db.example.test/audit",
+        )
+        marker = run_codex_pr_review.build_finding_history_marker(
+            [],
+            [{
+                "severity": "high",
+                "category": "security",
+                "file": "service/review.py",
+                "description": " ".join(secrets),
+                "suggestion": "Remove quoted credentials.",
+            }],
+            "deadbeef",
+        )
+        history, valid = run_codex_pr_review.parse_finding_history(marker)
+        serialized = json.dumps(history)
+
+        self.assertTrue(valid)
+        for secret in secrets:
+            self.assertNotIn(secret, serialized)
+        self.assertIn("REDACTED", serialized)
 
     def test_cleared_history_retains_semantics_without_remaining_active(self) -> None:
         head_sha = "7eed3550854ee498edc378f3658e6a8f536299cc"
