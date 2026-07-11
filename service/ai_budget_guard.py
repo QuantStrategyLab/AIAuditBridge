@@ -96,7 +96,7 @@ class AIBudgetGuard:
         self._timezone = str(self._config.get("billing_timezone") or DEFAULT_BILLING_TIMEZONE)
         self._max_age = max(1, int(_number(self._config.get("usage_max_age_seconds"), DEFAULT_MAX_USAGE_AGE_SECONDS)))
         self._settled_period = self.period()
-        ledger_path = os.environ.get("CODEX_AUDIT_SERVICE_AI_BUDGET_LEDGER_PATH", "").strip()
+        ledger_path = str(self._config.get("ledger_path") or os.environ.get("CODEX_AUDIT_SERVICE_AI_BUDGET_LEDGER_PATH", "")).strip()
         if not ledger_path:
             job_dir = os.environ.get("CODEX_AUDIT_SERVICE_JOB_DIR", "").strip()
             ledger_path = str(Path(job_dir) / "ai_budget_ledger.sqlite3") if job_dir else ""

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from service.ai_budget_guard import AIBudgetGuard, DECISION_SCHEMA
 
@@ -151,6 +152,21 @@ def test_settled_delta_is_not_cleared_by_historical_provider_usage() -> None:
     assert guard.settle(reservation, 10)
     follow_up = guard.preflight(task_class="review", provider="openai", estimated_cost_usd=55, usage_snapshot=snapshot)
     assert follow_up["decision"] == "defer"
+
+
+def test_sqlite_ledger_shares_reservations_across_guard_instances() -> None:
+    with TemporaryDirectory() as tmp:
+        config = {"ledger_path": str(Path(tmp) / "budget.sqlite3"), "monthly_budgets": {"openai": {"user_monthly_budget_usd": 10}}}
+        snapshot = {"updated_at": time.time(), "used_usd": 0}
+        first_guard = AIBudgetGuard(config)
+        first = first_guard.preflight(task_class="review", provider="openai", estimated_cost_usd=6, usage_snapshot=snapshot)
+        reservation = first_guard.reserve(first, 6)
+        assert reservation is not None
+
+        second_guard = AIBudgetGuard(config)
+        second = second_guard.preflight(task_class="review", provider="openai", estimated_cost_usd=6, usage_snapshot=snapshot)
+        assert second_guard.reserve(second, 6) is None
+        assert second_guard.settle(reservation.reservation_id, 6)
 
 
 def test_month_period_is_explicit_and_fallback_requires_human_approval() -> None:
