@@ -81,6 +81,23 @@ def test_stale_usage_fails_closed_and_does_not_fallback() -> None:
     assert decision["auto_fallback_allowed"] is False
 
 
+def test_malformed_usage_and_rate_limit_values_fail_closed() -> None:
+    guard = AIBudgetGuard({"monthly_budgets": {"openai": {"user_monthly_budget_usd": 10}}})
+    usage = guard.preflight(
+        task_class="review", provider="openai", estimated_cost_usd=1,
+        usage_snapshot={"updated_at": time.time(), "used_usd": "N/A"},
+    )
+    assert usage["decision"] == "block"
+    codex = guard.preflight(
+        task_class="review", provider="codex",
+        codex_snapshot={"updated_at": time.time(), "rate_limits": {
+            "primary": {"remaining_percent": "unknown"},
+            "secondary": {"remaining_percent": 80},
+        }},
+    )
+    assert codex["decision"] == "defer"
+
+
 def test_codex_uses_tightest_window_and_keeps_reserve() -> None:
     guard = AIBudgetGuard()
     assert guard.preflight(task_class="research", provider="codex", codex_snapshot=_codex_snapshot(35, 90))["decision"] == "allow"

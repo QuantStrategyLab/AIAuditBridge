@@ -8,6 +8,7 @@ work and settle or release the reservation when the work finishes.
 from __future__ import annotations
 
 import json
+import math
 import os
 import sqlite3
 import threading
@@ -139,8 +140,8 @@ class AIBudgetGuard:
         try:
             with sqlite3.connect(self._ledger_path, timeout=30) as db:
                 row = db.execute(
-                    "SELECT period,reserved,settled,baseline FROM ai_budget_ledger WHERE scope=?",
-                    (scope,),
+                    "SELECT period,reserved,settled,baseline FROM ai_budget_ledger WHERE scope=? AND period=?",
+                    (scope, self._settled_period),
                 ).fetchone()
             if row is None:
                 return
@@ -248,7 +249,15 @@ class AIBudgetGuard:
                         break
         if value is None:
             return 0.0, False, "usage_cost_missing"
-        return max(0.0, _number(value)), True, ""
+        if isinstance(value, bool):
+            return 0.0, False, "usage_cost_invalid"
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return 0.0, False, "usage_cost_invalid"
+        if not math.isfinite(parsed) or parsed < 0:
+            return 0.0, False, "usage_cost_invalid"
+        return parsed, True, ""
 
     def _reconcile_settled_locked(self, scope: str, observed: float) -> float:
         settled = self._settled.get(scope, 0.0)
@@ -390,7 +399,19 @@ class AIBudgetGuard:
                 )
             remaining = window.get("remaining_percent")
             if remaining is None and window.get("used_percent") is not None:
-                remaining = 100 - _number(window.get("used_percent"))
+                raw_used = window.get("used_percent")
+                try:
+                    parsed_used = float(raw_used)
+                except (TypeError, ValueError):
+                    parsed_used = float("nan")
+                if not math.isfinite(parsed_used):
+                    return self._decision(
+                        task_class=task, provider_scope=provider_scope, period=period,
+                        observed=snapshot, reserved=0.0, hard_limit=CODEX_RESERVE_RATIO,
+                        remaining=0.0, freshness="invalid", decision="defer",
+                        reasons=["codex_rate_limit_window_invalid"],
+                    )
+                remaining = 100 - parsed_used
             if remaining is None:
                 return self._decision(
                     task_class=task, provider_scope=provider_scope, period=period,
@@ -398,7 +419,18 @@ class AIBudgetGuard:
                     remaining=0.0, freshness="invalid", decision="defer",
                     reasons=["codex_rate_limit_window_invalid"],
                 )
-            ratios.append(max(0.0, min(1.0, _number(remaining) / 100.0)))
+            try:
+                parsed_remaining = float(remaining)
+            except (TypeError, ValueError):
+                parsed_remaining = float("nan")
+            if not math.isfinite(parsed_remaining):
+                return self._decision(
+                    task_class=task, provider_scope=provider_scope, period=period,
+                    observed=snapshot, reserved=0.0, hard_limit=CODEX_RESERVE_RATIO,
+                    remaining=0.0, freshness="invalid", decision="defer",
+                    reasons=["codex_rate_limit_window_invalid"],
+                )
+            ratios.append(max(0.0, min(1.0, parsed_remaining / 100.0)))
             reset_at.append(window.get("resets_at"))
         tightest = min(ratios)
         with self._lock:
