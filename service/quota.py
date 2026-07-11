@@ -219,6 +219,7 @@ class QuotaManager:
         self._daily_budget = DEFAULT_DAILY_BUDGET_USD
         self._weekly_budget = DEFAULT_WEEKLY_BUDGET_USD
         self._repo_budgets: dict[str, dict[str, float]] = {}
+        self._record_failures: set[str] = set()
         self._codex_account_cache: dict[str, Any] | None = None
         self._codex_account_cache_ts = 0.0
         self._codex_account_attempt_ts = 0.0
@@ -322,6 +323,11 @@ class QuotaManager:
     def get_weekly_budget(self, repo: str) -> float:
         return self._repo_budgets.get(repo, {}).get("weekly", self._weekly_budget)
 
+    def mark_recording_failed(self, repo: str) -> None:
+        """Fail closed for a repo after its quota record cannot be persisted."""
+        with self._lock:
+            self._record_failures.add(repo or "unknown")
+
     @staticmethod
     def _api_budget_cost(record: QuotaRecord) -> float:
         """Return spend governed by the internal API-key USD budget.
@@ -396,6 +402,15 @@ class QuotaManager:
         execution handlers set ``codex_account`` after authenticating a request;
         only that internal signal may bypass the API-key budget.
         """
+        with self._lock:
+            if repo in self._record_failures:
+                return {
+                    "allowed": False,
+                    "reason": "quota_ledger_unavailable",
+                    "remaining_usd": 0.0,
+                    "decision": "block",
+                    "deferred_budget": True,
+                }
         tokens_input = estimate_tokens(prompt)
         resolved_model = model
         provider = ""
