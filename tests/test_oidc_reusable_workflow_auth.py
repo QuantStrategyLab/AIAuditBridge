@@ -116,3 +116,8 @@ class ReusableWorkflowOidcAuthTests(unittest.TestCase):
         env["CODEX_AUDIT_SERVICE_ALLOWED_JOB_WORKFLOW_REFS"] = different_job_ref
         with self.assertRaisesRegex(PermissionError, "job workflow ref is not allowed"):
             self._verify(payload, env)
+
+        payload.pop("job_workflow_ref")
+        env["CODEX_AUDIT_SERVICE_ALLOWED_DIRECT_REPOSITORIES"] = "QuantStrategyLab/CnEquityStrategies"
+        with self.assertRaisesRegex(PermissionError, "exact QPK reusable workflow SHA"):
+            self._verify(payload, env)

@@ -487,7 +487,10 @@ def _require_optional_allowed_claim(payload: dict[str, Any], env_name: str, clai
 
 
 def _require_trusted_strategy_drift_job(payload: dict[str, Any], job_workflow_ref: str) -> None:
-    workflow_ref = str(payload.get("workflow_ref") or "")
+    raw_workflow_ref = payload.get("workflow_ref")
+    if not isinstance(raw_workflow_ref, str):
+        raise PermissionError("OIDC workflow_ref must be a string")
+    workflow_ref = raw_workflow_ref.strip()
     allowed_workflow_refs = _split_csv_env("CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS")
     drift_workflow_pattern = re.compile(
         r"QuantStrategyLab/[A-Za-z0-9_.-]+/\.github/workflows/drift-check\.yml@refs/heads/main"
@@ -594,13 +597,13 @@ def _verify_github_oidc(token: str) -> dict[str, Any]:
             "job_workflow_ref",
             "job workflow ref",
         )
-        _require_trusted_strategy_drift_job(payload, job_workflow_ref)
     else:
         direct_repositories = _split_csv_env("CODEX_AUDIT_SERVICE_ALLOWED_DIRECT_REPOSITORIES")
         if not direct_repositories:
             raise PermissionError("CODEX_AUDIT_SERVICE_ALLOWED_DIRECT_REPOSITORIES is required")
         if not _claim_matches(str(payload.get("repository") or ""), direct_repositories):
             raise PermissionError("OIDC job workflow ref is required for this repository")
+    _require_trusted_strategy_drift_job(payload, job_workflow_ref)
     _require_optional_allowed_claim(payload, "CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORY_VISIBILITIES",
                                     "repository_visibility", "repository visibility")
     return payload

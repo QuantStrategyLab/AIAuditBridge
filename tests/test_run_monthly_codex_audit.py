@@ -2481,10 +2481,18 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         }
 
         for script_name, workflow_name in variable_pairs.items():
-            script_line = next(line for line in deploy_script.splitlines() if line.startswith(f'{script_name}="'))
-            workflow_line = next(
-                line.strip() for line in workflow.splitlines() if line.strip().startswith(f"{workflow_name}: ")
+            script_line = next(
+                (line for line in deploy_script.splitlines() if line.startswith(f'{script_name}="')),
+                None,
             )
+            workflow_line = next(
+                (line.strip() for line in workflow.splitlines() if line.strip().startswith(f"{workflow_name}: ")),
+                None,
+            )
+            self.assertIsNotNone(script_line, script_name)
+            self.assertIsNotNone(workflow_line, workflow_name)
+            assert script_line is not None
+            assert workflow_line is not None
             script_prefix = f'{script_name}="${{{workflow_name}:-'
             self.assertTrue(script_line.startswith(script_prefix), script_name)
             self.assertTrue(script_line.endswith('}"'), script_name)
