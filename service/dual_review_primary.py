@@ -106,12 +106,12 @@ def run_codex_primary_review(
         unavailable_markers = (
             "daily budget exceeded",
             "quota",
-            "429",
+            "http 429",
+            "status 429",
             "service job failed",
-            "not configured",
-            "timed out",
-            "connection",
-            "unavailable",
+            "not configured on the service host",
+            "request timed out",
+            "url error",
         )
         verdict = VERDICT_UNAVAILABLE if any(marker in message.lower() for marker in unavailable_markers) else VERDICT_INVALID
         return {

@@ -139,13 +139,20 @@ def run_pipeline(
         result["skipped"] = ["reviewers_unavailable"]
         result["degraded"] = True
         result["warning"] = "all configured reviewers are unavailable"
+        result["error"] = "reviewers_unavailable"
     if dispatch:
         result["dispatch"] = dispatch_dual_review_result(outcome, dry_run=dry_run)
-    result["ok"] = True
+    result["ok"] = outcome.outcome != VERDICT_UNAVAILABLE
     return result
 
 
 def _exit_code(result: dict[str, Any]) -> int:
+    if result.get("degraded") and result.get("error") == "reviewers_unavailable":
+        dispatch = result.get("dispatch")
+        durable_alert = isinstance(dispatch, dict) and bool(
+            dispatch.get("github_issue") or dispatch.get("github_dry_run")
+        )
+        return 0 if durable_alert else 1
     if not result.get("ok"):
         return 1
     if result.get("skipped"):

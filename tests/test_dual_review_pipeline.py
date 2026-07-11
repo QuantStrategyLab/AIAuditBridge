@@ -71,11 +71,16 @@ class DualReviewPipelineTests(unittest.TestCase):
             dispatch=True,
             dry_run=True,
         )
-        self.assertTrue(result["ok"])
+        self.assertFalse(result["ok"])
         self.assertEqual(result["skipped"], ["reviewers_unavailable"])
         self.assertTrue(result["degraded"])
+        self.assertEqual(result["error"], "reviewers_unavailable")
         self.assertEqual(result["warning"], "all configured reviewers are unavailable")
         self.assertIn("github_dry_run", result["dispatch"])
+        self.assertEqual(_exit_code(result), 0)
+
+        result["dispatch"] = {"github_issue": None}
+        self.assertEqual(_exit_code(result), 1)
 
     def test_disagreement_is_a_hard_block(self) -> None:
         self.assertEqual(_exit_code({"ok": True, "outcome": "disagreement"}), 2)

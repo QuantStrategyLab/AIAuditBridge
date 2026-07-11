@@ -117,7 +117,7 @@ def dispatch_dual_review_result(
     if result.outcome == VERDICT_UNAVAILABLE:
         title = f"[dual-review] {result.strategy_profile} — reviewers unavailable"
         body = _format_unavailable_body(result)
-        labels = ("dual-review", result.trigger.value, "review-unavailable")
+        labels = ()
     else:
         title = f"[dual-review] {result.strategy_profile} — {result.trigger.value} disagreement"
         body = _format_disagreement_body(result)

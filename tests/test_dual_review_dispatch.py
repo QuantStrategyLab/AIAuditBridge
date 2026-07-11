@@ -45,7 +45,7 @@ class DualReviewDispatchTests(unittest.TestCase):
         )
         summary = dispatch_dual_review_result(result, dry_run=True)
         self.assertIn("github_dry_run", summary)
-        self.assertIn("review-unavailable", summary["github_dry_run"]["labels"])
+        self.assertEqual(summary["github_dry_run"]["labels"], [])
 
 
 if __name__ == "__main__":

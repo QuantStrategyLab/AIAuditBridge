@@ -103,13 +103,15 @@ def compare_three_reviews(
     claude_verdict = _extract_verdict(claude_review)
 
     verdicts = (primary_verdict, gpt_verdict, claude_verdict)
+    # Invalid responses may indicate corrupted evidence and always block; known
+    # provider outages may be excluded only when two valid reviewers form quorum.
     if VERDICT_INVALID in verdicts:
         verdict = VERDICT_DISAGREEMENT
         reason = "one or more reviewer responses are invalid"
-    elif any(verdict is None for verdict in verdicts):
+    elif any(candidate is None for candidate in verdicts):
         verdict = VERDICT_DISAGREEMENT
         reason = "missing or unrecognized review verdict in primary/gpt/claude"
-    elif all(verdict == VERDICT_UNAVAILABLE for verdict in verdicts):
+    elif all(candidate == VERDICT_UNAVAILABLE for candidate in verdicts):
         verdict = VERDICT_UNAVAILABLE
         reason = "codex, gpt, and claude unavailable"
     elif VERDICT_UNAVAILABLE in verdicts:

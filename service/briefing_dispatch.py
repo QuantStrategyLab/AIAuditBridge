@@ -97,7 +97,11 @@ def send_telegram_alert(*, text: str, token: str, chat_ids: tuple[str, ...]) -> 
 
 
 def create_github_issue(*, title: str, body: str, labels: tuple[str, ...] = ("briefing", "monitoring")) -> str | None:
-    repo = str(os.environ.get("QSL_GITHUB_REPO") or "QuantStrategyLab/QuantStrategyLab").strip()
+    repo = str(
+        os.environ.get("QSL_GITHUB_REPO")
+        or os.environ.get("GITHUB_REPOSITORY")
+        or "QuantStrategyLab/QuantStrategyLab"
+    ).strip()
     if not shutil_which("gh"):
         return None
     cmd = [

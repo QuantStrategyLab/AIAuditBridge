@@ -107,7 +107,15 @@ def main(argv: list[str] | None = None) -> int:
             )
         worst = max(worst, proc.returncode)
 
-    summary = {"ok": True, "domain": domain, "count": len(results), "results": results}
+    degraded_count = sum(1 for result in results if result.get("degraded"))
+    summary = {
+        "ok": worst == 0 and degraded_count == 0,
+        "degraded": degraded_count > 0,
+        "domain": domain,
+        "count": len(results),
+        "degraded_count": degraded_count,
+        "results": results,
+    }
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return worst
 
