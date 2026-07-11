@@ -168,6 +168,21 @@ class AIBudgetGuard:
             return 0.0, False, "usage_cost_missing"
         return max(0.0, _number(value)), True, ""
 
+    def _reconcile_settled_locked(self, scope: str, observed: float) -> float:
+        settled = self._settled.get(scope, 0.0)
+        baseline = self._settled_baseline.get(scope)
+        if settled <= 0 or baseline is None or observed <= baseline:
+            return settled
+        observed_advance = observed - baseline
+        if observed_advance >= settled:
+            self._settled.pop(scope, None)
+            self._settled_baseline.pop(scope, None)
+            return 0.0
+        remaining = settled - observed_advance
+        self._settled[scope] = remaining
+        self._settled_baseline[scope] = observed
+        return remaining
+
     def _decision(self, *, task_class: str, provider_scope: str, period: str, observed: Any,
                   reserved: float, hard_limit: Any, remaining: Any, freshness: str,
                   decision: str, reasons: list[str], reset_at: Any = None,
@@ -233,14 +248,7 @@ class AIBudgetGuard:
                 self._settled_baseline.clear()
                 self._settled_period = current_period
             reserved = self._reserved.get(scope, 0.0)
-            settled = self._settled.get(scope, 0.0)
-            # Once the provider snapshot includes the locally settled amount,
-            # drop the local delta to avoid double counting.
-            baseline = self._settled_baseline.get(scope)
-            if baseline is not None and used >= baseline + settled:
-                settled = 0.0
-                self._settled.pop(scope, None)
-                self._settled_baseline.pop(scope, None)
+            settled = self._reconcile_settled_locked(scope, used)
         remaining = hard_limit - used - settled - reserved - amount
         if remaining < 0:
             reason = "monthly_hard_limit_reached" if remaining <= 0 else "monthly_budget_insufficient"
@@ -342,11 +350,13 @@ class AIBudgetGuard:
         )
         with self._lock:
             hard_limit = _number(decision.get("hard_limit"), float("inf"))
-            observed = _number(decision.get("observed_usage"), 0.0)
-            settled = self._settled.get(scope, 0.0)
-            baseline = self._settled_baseline.get(scope)
-            if baseline is not None and observed >= baseline + settled:
-                settled = 0.0
+            observed_value = decision.get("observed_usage")
+            if isinstance(observed_value, (int, float)) and not isinstance(observed_value, bool):
+                observed = float(observed_value)
+                settled = self._reconcile_settled_locked(scope, observed)
+            else:
+                observed = 0.0
+                settled = self._settled.get(scope, 0.0)
             if hard_limit != float("inf") and observed + settled + self._reserved.get(scope, 0.0) + requested > hard_limit + 1e-12:
                 return None
             self._reservations[reservation.reservation_id] = reservation

@@ -129,6 +129,17 @@ def test_settled_spend_remains_reserved_until_usage_snapshot_catches_up() -> Non
     assert follow_up["decision"] == "defer"
 
 
+def test_settled_delta_is_not_cleared_by_historical_provider_usage() -> None:
+    guard = AIBudgetGuard({"monthly_budgets": {"openai": {"user_monthly_budget_usd": 200}}})
+    snapshot = {"updated_at": time.time(), "used_usd": 100}
+    decision = guard.preflight(task_class="review", provider="openai", estimated_cost_usd=50, usage_snapshot=snapshot)
+    reservation = guard.reserve(decision, 50)
+    assert reservation is not None
+    assert guard.settle(reservation, 10)
+    follow_up = guard.preflight(task_class="review", provider="openai", estimated_cost_usd=55, usage_snapshot=snapshot)
+    assert follow_up["decision"] == "defer"
+
+
 def test_month_period_is_explicit_and_fallback_requires_human_approval() -> None:
     guard = AIBudgetGuard({"billing_timezone": "UTC", "monthly_budgets": {"openai": {"user_monthly_budget_usd": 10}}})
     decision = guard.preflight(
