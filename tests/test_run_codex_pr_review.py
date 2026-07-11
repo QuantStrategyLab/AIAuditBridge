@@ -349,6 +349,9 @@ class RunCodexPrReviewTests(unittest.TestCase):
             {finding["history_head_sha"] for finding in matched},
             {"deadbeef", "feedface"},
         )
+        self.assertEqual(
+            run_codex_pr_review.unresolved_history_findings(history), matched
+        )
 
     def test_history_aware_arbitration_distinguishes_conflict_from_repetition(self) -> None:
         prior = [{
@@ -411,6 +414,12 @@ class RunCodexPrReviewTests(unittest.TestCase):
         self.assertTrue(failed["contract_conflict"])
         self.assertFalse(failed["auto_fix_allowed"])
         self.assertEqual(failed["next_action"], "contract_arbitration")
+        cleared = run_codex_pr_review.apply_arbitration_result(
+            {"blocked": True, "summary": "blocked", "blocking_findings": [{"file": "x.py"}]},
+            {"verdict": "clear", "reason": "false positive", "contract_conflict": False},
+        )
+        self.assertEqual(cleared["blocking_findings"], [])
+        self.assertEqual(cleared["cleared_blocking_findings"], [{"file": "x.py"}])
 
     def test_same_contract_wording_drift_and_unrelated_findings_do_not_conflict(self) -> None:
         prior = {

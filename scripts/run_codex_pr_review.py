@@ -889,6 +889,10 @@ def apply_arbitration_result(
     contract_conflict = bool(arbitration.get("contract_conflict"))
     if arbitration.get("verdict") == "clear":
         result["blocked"] = False
+        result["cleared_blocking_findings"] = list(
+            result.get("blocking_findings") or []
+        )
+        result["blocking_findings"] = []
         result["summary"] = (
             "✅ **Merge allowed**: blocking findings were cleared by independent Codex arbitration"
         )
@@ -1235,6 +1239,17 @@ def previous_matching_round(
         return None
     heads = [str(finding.get("history_head_sha") or "") for finding in findings]
     return {"head_sha": next((head for head in heads if head), ""), "findings": findings}
+
+
+def unresolved_history_findings(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Aggregate every latest unresolved finding key in the bounded history."""
+    all_findings = [
+        finding
+        for round_state in history
+        for finding in (round_state.get("findings") or [])
+        if isinstance(finding, dict)
+    ]
+    return previous_matching_findings(history, all_findings)
 
 
 def has_active_blocking_history(history: list[dict[str, Any]]) -> bool:
@@ -1919,15 +1934,7 @@ def main() -> int:
         current_head_sha=current_head_sha,
     )
     if active_history_clearance_required and finding_history:
-        latest_history = finding_history[-1]
-        previous_findings = [
-            {
-                **finding,
-                "history_head_sha": str(latest_history.get("head_sha") or ""),
-            }
-            for finding in latest_history.get("findings") or []
-            if isinstance(finding, dict)
-        ]
+        previous_findings = unresolved_history_findings(finding_history)
     else:
         previous_findings = previous_matching_findings(
             finding_history, decision["blocking_findings"]
@@ -2025,7 +2032,11 @@ def main() -> int:
         )
         finding_history_marker = build_finding_history_marker(
             finding_history,
-            decision["blocking_findings"],
+            (
+                decision.get("cleared_blocking_findings") or []
+                if arbitration_cleared
+                else decision["blocking_findings"]
+            ),
             current_head_sha,
             status=history_status,
         )
@@ -2054,8 +2065,8 @@ def main() -> int:
         decision,
         exit_code=1 if decision["blocked"] else 0,
         blocking_streak=blocking_streak,
-        finding_fingerprint=finding_fingerprint,
-        finding_fingerprints=finding_fingerprints,
+        finding_fingerprint=finding_fingerprint if decision["blocked"] else "",
+        finding_fingerprints=finding_fingerprints if decision["blocked"] else (),
         repeated_fingerprints=repeated_fingerprints,
         repeated_finding=repeated_finding,
         previous_head_sha=previous_head_sha,
