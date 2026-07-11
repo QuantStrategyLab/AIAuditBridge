@@ -114,6 +114,15 @@ def _snapshots_from_payload(payload: dict[str, Any]) -> list[StrategyWatchSnapsh
                     default_metrics_kind=default_metrics_kind,
                 )
             )
+        else:
+            snapshots.append(
+                StrategyWatchSnapshot(
+                    repo=default_repo,
+                    profile="",
+                    schema_version=default_schema_version,
+                    metrics_kind=default_metrics_kind,
+                )
+            )
     return snapshots
 
 
@@ -255,7 +264,7 @@ def finding_to_automation_task(finding: StrategyWatchFinding) -> AutomationTask:
     finding_type = str(finding.finding_type or "metric_degradation")
     trigger = TriggerRecord(
         source="strategy_optimization_watcher",
-        kind="strategy_metric_degradation",
+        kind="strategy_metrics_contract_invalid" if finding_type == "data_quality" else "strategy_metric_degradation",
         severity=finding.severity,
         reason="; ".join(signal_reasons) or ("strategy metrics contract invalid" if finding_type == "data_quality" else "strategy metrics degraded"),
         subject=finding.snapshot.subject(),

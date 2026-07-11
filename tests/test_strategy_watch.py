@@ -105,7 +105,7 @@ class StrategyWatchTest(unittest.TestCase):
         self.assertEqual(findings[0].finding_type, "data_quality")
         task = finding_to_automation_task(findings[0])
         payload = task.to_dict()
-        self.assertEqual(payload["trigger"]["kind"], "strategy_metric_degradation")
+        self.assertEqual(payload["trigger"]["kind"], "strategy_metrics_contract_invalid")
         self.assertIn("strategy_performance.v2", payload["trigger"]["reason"])
         self.assertEqual(payload["metadata"]["finding_type"], "data_quality")
 
@@ -174,6 +174,19 @@ class StrategyWatchTest(unittest.TestCase):
             watcher_issue_key(finding_to_automation_task(metric_finding)),
             watcher_issue_key(finding_to_automation_task(quality_finding)),
         )
+
+    def test_malformed_snapshot_entry_becomes_data_quality_finding(self) -> None:
+        findings = evaluate_strategy_watch(
+            {
+                "repo": "QuantStrategyLab/TestStrategies",
+                "schema_version": "strategy_performance.v2",
+                "metrics_kind": "performance",
+                "snapshots": [None],
+            }
+        )
+
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].finding_type, "data_quality")
 
 
 if __name__ == "__main__":
