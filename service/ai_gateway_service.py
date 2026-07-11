@@ -1479,7 +1479,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
 
                 get_ai_budget_guard().release(reservation_id)
             raise
-        if reservation_id and result.success:
+        if reservation_id:
             from service.ai_budget_guard import get_ai_budget_guard
 
             get_ai_budget_guard().settle(
@@ -1491,12 +1491,11 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
 
             get_ai_budget_guard().release(reservation_id)
         # A local quota-recording failure must not roll back provider spend.
-        if result.success:
-            try:
-                quota.record(source_repo, resolved_model, req.prompt, result.output)
-            except Exception as exc:  # noqa: BLE001 - provider response is already settled.
-                quota.mark_recording_failed(source_repo)
-                _audit_log("analyze_quota_record_failed", error=type(exc).__name__)
+        try:
+            quota.record(source_repo, resolved_model, req.prompt, result.output if result.success else "")
+        except Exception as exc:  # noqa: BLE001 - provider response is already settled.
+            quota.mark_recording_failed(source_repo)
+            _audit_log("analyze_quota_record_failed", error=type(exc).__name__)
         latency = time.time() - started
 
         # Record quota and health
@@ -1795,7 +1794,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 )
                 if matched_result is not None:
                     remaining_results.remove(matched_result)
-                if matched_result is not None and matched_result.success:
+                if matched_result is not None:
                     get_ai_budget_guard().settle(reservation_id, estimated_cost)
                 else:
                     get_ai_budget_guard().release(reservation_id)
@@ -1816,14 +1815,6 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         # Step 2: optional Codex verification
         codex_result = None
         if req.verifier == "codex" and codex_quota is not None:
-            try:
-                get_quota_manager().record_execute(review_repo)
-            except Exception:
-                if codex_reservation_id:
-                    from service.ai_budget_guard import get_ai_budget_guard
-
-                    get_ai_budget_guard().release(codex_reservation_id)
-                raise
             codex_dispatch_started = False
             try:
                 codex_sandbox = _validate_sandbox("read-only")
@@ -1847,6 +1838,11 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             if codex_reservation_id and bool(getattr(codex_result, "dispatch_started", False)):
                 from service.ai_budget_guard import get_ai_budget_guard
 
+                try:
+                    get_quota_manager().record_execute(review_repo)
+                except Exception as exc:  # noqa: BLE001 - central reservation remains conservative.
+                    get_quota_manager().mark_recording_failed(review_repo)
+                    _audit_log("review_codex_quota_record_failed", error=type(exc).__name__)
                 get_ai_budget_guard().settle(codex_reservation_id, 0.10)
             elif codex_reservation_id:
                 from service.ai_budget_guard import get_ai_budget_guard
