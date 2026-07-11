@@ -125,6 +125,12 @@ def _validate_snapshot_contract(snapshot: StrategyWatchSnapshot) -> list[dict[st
     schema_version = snapshot.schema_version
     metrics_kind = snapshot.metrics_kind
 
+    if not schema_version and not metrics_kind:
+        legacy_metrics = set(snapshot.current_metrics).intersection(snapshot.baseline_metrics, REQUIRED_PERFORMANCE_METRICS)
+        if legacy_metrics:
+            return []
+        return [_data_quality_signal("missing versioned performance metrics; no comparable legacy metrics found")]
+
     if not schema_version:
         issues.append(_data_quality_signal("missing schema_version; expected strategy_performance.v2 payload"))
     if not metrics_kind:
@@ -221,7 +227,7 @@ def finding_to_automation_task(finding: StrategyWatchFinding) -> AutomationTask:
     finding_type = str(finding.finding_type or "metric_degradation")
     trigger = TriggerRecord(
         source="strategy_optimization_watcher",
-        kind="strategy_metrics_data_quality" if finding_type == "data_quality" else "strategy_metric_degradation",
+        kind="strategy_metric_degradation",
         severity=finding.severity,
         reason="; ".join(signal_reasons) or ("strategy metrics contract invalid" if finding_type == "data_quality" else "strategy metrics degraded"),
         subject=finding.snapshot.subject(),

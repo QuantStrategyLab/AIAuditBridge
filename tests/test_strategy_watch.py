@@ -105,8 +105,22 @@ class StrategyWatchTest(unittest.TestCase):
         self.assertEqual(findings[0].finding_type, "data_quality")
         task = finding_to_automation_task(findings[0])
         payload = task.to_dict()
-        self.assertEqual(payload["trigger"]["kind"], "strategy_metrics_data_quality")
+        self.assertEqual(payload["trigger"]["kind"], "strategy_metric_degradation")
         self.assertIn("strategy_performance.v2", payload["trigger"]["reason"])
+        self.assertEqual(payload["metadata"]["finding_type"], "data_quality")
+
+    def test_legacy_performance_payload_remains_compatible(self) -> None:
+        findings = evaluate_strategy_watch(
+            {
+                "repo": "QuantStrategyLab/TestStrategies",
+                "profile": "legacy",
+                "current_metrics": {"sharpe": 0.5},
+                "baseline_metrics": {"sharpe": 1.0},
+            }
+        )
+
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].finding_type, "metric_degradation")
 
 
 if __name__ == "__main__":
