@@ -836,6 +836,7 @@ def build_arbitration_prompt(
     findings: list[dict[str, Any]],
     previous_findings: list[dict[str, Any]] | None = None,
     previous_head_sha: str = "",
+    history_state: str = "",
 ) -> str:
     """Ask an independent Codex pass to adjudicate repeated or conflicting findings."""
     diff_limited = _truncate_lines(diff, DEFAULT_MAX_CONTEXT_LINES * 3)
@@ -854,6 +855,9 @@ PR title: {pr_title}
 
 ## Prior reviewed head
 {previous_head_sha or "not available"}
+
+## Trusted history state
+{history_state or "normal"}
 
 ## Prior blocking findings
 {previous_findings_json}
@@ -1173,6 +1177,8 @@ def previous_matching_round(
         return None
     current_keys = set(blocking_finding_fingerprints(current_findings))
     for round_state in reversed(history):
+        if round_state.get("status") == "cleared":
+            continue
         prior = round_state.get("findings")
         if not isinstance(prior, list):
             continue
@@ -1861,10 +1867,11 @@ def main() -> int:
         else []
     )
     arbitration: dict[str, Any] | None = None
+    confirmation_arbitration_required = history_requires_confirmation
     history_arbitration_required = bool(
         decision["blocked"] and previous_findings
     )
-    if history_arbitration_required or should_arbitrate(
+    if confirmation_arbitration_required or history_arbitration_required or should_arbitrate(
         blocked=bool(decision["blocked"]),
         streak=blocking_streak,
         repeated=repeated_finding,
@@ -1880,6 +1887,11 @@ def main() -> int:
                 str(matched_history_round.get("head_sha") or "")
                 if matched_history_round
                 else previous_head_sha
+            ),
+            history_state=(
+                str(finding_history[-1].get("status") or "")
+                if confirmation_arbitration_required
+                else ""
             ),
         )
         try:
@@ -1899,18 +1911,28 @@ def main() -> int:
                 "reason": f"Arbitration failed closed: {exc}",
                 "contract_conflict": bool(previous_findings),
             }
-            if previous_findings:
+            if previous_findings or confirmation_arbitration_required:
                 decision = apply_arbitration_failure(decision, exc)
         else:
             decision = apply_arbitration_result(decision, arbitration)
-            if previous_findings and arbitration.get("verdict") == "ambiguous":
+            if (
+                confirmation_arbitration_required
+                and arbitration.get("verdict") != "clear"
+            ):
+                arbitration["contract_conflict"] = True
+                decision = apply_arbitration_failure(
+                    decision, ReviewError("history confirmation was not cleared")
+                )
+            elif previous_findings and arbitration.get("verdict") == "ambiguous":
                 arbitration["contract_conflict"] = True
                 decision = apply_arbitration_failure(
                     decision, ReviewError("contract evidence is ambiguous")
                 )
         if arbitration.get("verdict") == "clear":
             blocking_streak = 0
-    if history_requires_confirmation:
+    if history_requires_confirmation and not (
+        arbitration and arbitration.get("verdict") == "clear"
+    ):
         finding_history_marker = build_finding_history_marker(
             finding_history, [], current_head_sha
         )

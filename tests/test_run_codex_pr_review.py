@@ -221,19 +221,22 @@ class RunCodexPrReviewTests(unittest.TestCase):
             "description": "Missing panel must fail fast.",
             "suggestion": "Raise ReviewError.",
         }
+        blocking_marker = run_codex_pr_review.build_finding_history_marker(
+            [], [finding], "deadbeef"
+        )
+        history, valid = run_codex_pr_review.parse_finding_history(blocking_marker)
         marker = run_codex_pr_review.build_finding_history_marker(
-            [], [finding], head_sha, status="cleared"
+            history, [finding], head_sha, status="cleared"
         )
         history, valid = run_codex_pr_review.parse_finding_history(marker)
 
         self.assertTrue(valid)
-        self.assertEqual(history[0]["head_sha"], head_sha)
-        self.assertEqual(history[0]["status"], "cleared")
+        self.assertEqual(history[-1]["head_sha"], head_sha)
+        self.assertEqual(history[-1]["status"], "cleared")
         self.assertFalse(run_codex_pr_review.has_active_blocking_history(history))
-        self.assertEqual(
-            run_codex_pr_review.previous_matching_findings(history, [finding]),
-            history[0]["findings"],
-        )
+        matched = run_codex_pr_review.previous_matching_round(history, [finding])
+        self.assertEqual(matched["head_sha"], "deadbeef")
+        self.assertEqual(matched["status"], "blocking")
 
     def test_malformed_or_oversized_history_fails_closed(self) -> None:
         malformed = "<!-- codex-pr-review-history:v1:not-base64! -->"
@@ -754,7 +757,7 @@ class RunCodexPrReviewTests(unittest.TestCase):
 
         backend.assert_called_once()
 
-    def test_main_keeps_confirmation_required_history_blocked_after_clean_review(self) -> None:
+    def test_main_clears_confirmation_history_only_after_independent_arbitration(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             event_path = self._write_event(tmpdir, ["scripts/run_codex_pr_review.py"])
             prior_comment = (
@@ -784,17 +787,21 @@ class RunCodexPrReviewTests(unittest.TestCase):
                 ),
                 patch(
                     "scripts.run_codex_pr_review.run_codex_review_with_fallback",
-                    return_value='{"summary":"clear","findings":[]}',
+                    side_effect=[
+                        '{"summary":"clear","findings":[]}',
+                        '{"verdict":"clear","reason":"tests define the contract",'
+                        '"contract_conflict":false}',
+                    ],
                 ),
                 patch("scripts.run_codex_pr_review.upsert_pr_comment") as comment,
             ):
-                self.assertEqual(run_codex_pr_review.main(), 1)
+                self.assertEqual(run_codex_pr_review.main(), 0)
 
         body = comment.call_args.args[3]
         history, valid = run_codex_pr_review.parse_finding_history(body)
         self.assertTrue(valid)
-        self.assertEqual(history[-1]["status"], "invalid_history")
-        self.assertIn("codex-pr-review-auto-fix-allowed:false", body)
+        self.assertEqual(history[-1]["status"], "cleared")
+        self.assertIn("Codex Review Arbitration", body)
 
 
     def test_main_blocks_unconfigured_backend_even_with_legacy_opt_in(self) -> None:
