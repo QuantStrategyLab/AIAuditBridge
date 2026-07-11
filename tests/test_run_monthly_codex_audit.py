@@ -2403,7 +2403,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertIn("QuantStrategyLab/QuantPlatformKit", workflow)
         self.assertIn("QuantStrategyLab/CryptoLivePoolPipelines", workflow)
         self.assertIn("QuantStrategyLab/CryptoStrategies/.github/workflows/drift-check.yml@refs/heads/main", workflow)
-        self.assertIn("QuantStrategyLab/QuantPlatformKit/.github/workflows/reusable-drift-check.yml@*", workflow)
+        self.assertIn("QuantStrategyLab/QuantPlatformKit/.github/workflows/reusable-drift-check.yml@644cd9002ae92f2aaca6f7efb4afa4986fae05ea", workflow)
         self.assertNotIn("QuantStrategyLab/CodexAuditBridge", workflow)
         self.assertIn("actions/checkout@v6.0.3", workflow)
 
@@ -2429,7 +2429,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertIn("QuantStrategyLab/QuantPlatformKit", deploy_script)
         self.assertIn("QuantStrategyLab/CryptoLivePoolPipelines", deploy_script)
         self.assertIn("QuantStrategyLab/CryptoStrategies/.github/workflows/drift-check.yml@refs/heads/main", deploy_script)
-        self.assertIn("QuantStrategyLab/QuantPlatformKit/.github/workflows/reusable-drift-check.yml@*", deploy_script)
+        self.assertIn("QuantStrategyLab/QuantPlatformKit/.github/workflows/reusable-drift-check.yml@644cd9002ae92f2aaca6f7efb4afa4986fae05ea", deploy_script)
         self.assertNotIn("QuantStrategyLab/CodexAuditBridge", deploy_script)
         self.assertIn("proxy_pass http://127.0.0.1:{port}", deploy_script)
         self.assertIn('"# CodexAuditBridge route start" not in block', deploy_script)
