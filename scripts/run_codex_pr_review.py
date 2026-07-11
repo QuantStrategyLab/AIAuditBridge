@@ -1087,6 +1087,10 @@ def build_finding_history_marker(
         )
     payload = {"version": 1, "rounds": rounds[-FINDING_HISTORY_MAX_ROUNDS:]}
     raw = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+    while len(raw) > FINDING_HISTORY_MAX_BYTES and len(rounds) > 1:
+        rounds.pop(0)
+        payload["rounds"] = rounds
+        raw = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
     if len(raw) > FINDING_HISTORY_MAX_BYTES:
         overflow_head_sha = normalized_head_sha or str(rounds[-1].get("head_sha") or "")
         if not re.fullmatch(r"[0-9a-f]{7,64}", overflow_head_sha):
@@ -1193,33 +1197,44 @@ def parse_finding_history(body: str) -> tuple[list[dict[str, Any]], bool]:
 def previous_matching_findings(
     history: list[dict[str, Any]], current_findings: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
-    """Return only previous-round findings sharing a coarse arbitration key."""
-    matched_round = previous_matching_round(history, current_findings)
-    return list(matched_round.get("findings") or []) if matched_round else []
+    """Return the latest unresolved historical finding for every current key."""
+    current_keys = set(blocking_finding_fingerprints(current_findings))
+    matched: dict[str, dict[str, Any]] = {}
+    resolved: set[str] = set()
+    for round_state in reversed(history):
+        prior = round_state.get("findings")
+        if not isinstance(prior, list):
+            continue
+        status = round_state.get("status", "blocking")
+        if status in {"clear", "cleared"} and not prior:
+            break
+        for finding in prior:
+            if not isinstance(finding, dict):
+                continue
+            key = blocking_finding_fingerprint([finding])
+            if key not in current_keys or key in resolved or key in matched:
+                continue
+            if status in {"clear", "cleared"}:
+                resolved.add(key)
+                continue
+            matched[key] = {
+                **finding,
+                "history_head_sha": str(round_state.get("head_sha") or ""),
+            }
+        if current_keys.issubset(resolved | set(matched)):
+            break
+    return [matched[key] for key in sorted(matched)]
 
 
 def previous_matching_round(
     history: list[dict[str, Any]], current_findings: list[dict[str, Any]]
 ) -> dict[str, Any] | None:
-    """Return the exact prior round containing findings matching current keys."""
-    if not history:
+    """Compatibility wrapper returning aggregated matches and their newest head."""
+    findings = previous_matching_findings(history, current_findings)
+    if not findings:
         return None
-    current_keys = set(blocking_finding_fingerprints(current_findings))
-    for round_state in reversed(history):
-        if round_state.get("status") == "cleared":
-            continue
-        prior = round_state.get("findings")
-        if not isinstance(prior, list):
-            continue
-        matches = [
-            finding
-            for finding in prior
-            if isinstance(finding, dict)
-            and blocking_finding_fingerprint([finding]) in current_keys
-        ]
-        if matches:
-            return {**round_state, "findings": matches}
-    return None
+    heads = [str(finding.get("history_head_sha") or "") for finding in findings]
+    return {"head_sha": next((head for head in heads if head), ""), "findings": findings}
 
 
 def has_active_blocking_history(history: list[dict[str, Any]]) -> bool:
@@ -1903,15 +1918,26 @@ def main() -> int:
         previous_head_sha=previous_head_sha,
         current_head_sha=current_head_sha,
     )
-    matched_history_round = (
-        finding_history[-1]
-        if active_history_clearance_required and finding_history
-        else previous_matching_round(finding_history, decision["blocking_findings"])
-    )
-    previous_findings = (
-        list(matched_history_round.get("findings") or [])
-        if matched_history_round
-        else []
+    if active_history_clearance_required and finding_history:
+        latest_history = finding_history[-1]
+        previous_findings = [
+            {
+                **finding,
+                "history_head_sha": str(latest_history.get("head_sha") or ""),
+            }
+            for finding in latest_history.get("findings") or []
+            if isinstance(finding, dict)
+        ]
+    else:
+        previous_findings = previous_matching_findings(
+            finding_history, decision["blocking_findings"]
+        )
+    matched_history_heads = sorted(
+        {
+            str(finding.get("history_head_sha") or "")
+            for finding in previous_findings
+            if finding.get("history_head_sha")
+        }
     )
     arbitration: dict[str, Any] | None = None
     confirmation_arbitration_required = bool(
@@ -1931,9 +1957,7 @@ def main() -> int:
             findings=decision["blocking_findings"],
             previous_findings=previous_findings,
             previous_head_sha=(
-                str(matched_history_round.get("head_sha") or "")
-                if matched_history_round
-                else previous_head_sha
+                ", ".join(matched_history_heads) if matched_history_heads else previous_head_sha
             ),
             history_state=(
                 str(finding_history[-1].get("status") or "")

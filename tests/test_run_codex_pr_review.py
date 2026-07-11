@@ -270,9 +270,9 @@ class RunCodexPrReviewTests(unittest.TestCase):
         self.assertEqual(history[-1]["head_sha"], head_sha)
         self.assertEqual(history[-1]["status"], "cleared")
         self.assertFalse(run_codex_pr_review.has_active_blocking_history(history))
-        matched = run_codex_pr_review.previous_matching_round(history, [finding])
-        self.assertEqual(matched["head_sha"], "deadbeef")
-        self.assertEqual(matched["status"], "blocking")
+        self.assertIsNone(
+            run_codex_pr_review.previous_matching_round(history, [finding])
+        )
 
     def test_malformed_or_oversized_history_fails_closed(self) -> None:
         malformed = "<!-- codex-pr-review-history:v1:not-base64! -->"
@@ -323,26 +323,32 @@ class RunCodexPrReviewTests(unittest.TestCase):
         self.assertTrue(valid)
         self.assertFalse(run_codex_pr_review.has_active_blocking_history(recovered))
 
-    def test_matching_history_round_retains_its_own_head_sha(self) -> None:
-        finding = {
+    def test_matching_history_aggregates_keys_from_multiple_rounds(self) -> None:
+        first = {
             "severity": "high",
             "category": "contract",
             "file": "service/review.py",
             "description": "Return a structured result.",
             "suggestion": "Return ReviewResult.",
         }
+        second = dict(first, file="service/auth.py", description="Reject invalid auth.")
         first_marker = run_codex_pr_review.build_finding_history_marker(
-            [], [finding], "deadbeef"
+            [], [first], "deadbeef"
         )
         history, _valid = run_codex_pr_review.parse_finding_history(first_marker)
         second_marker = run_codex_pr_review.build_finding_history_marker(
-            history, [], "feedface", status="clear"
+            history, [second], "feedface"
         )
         history, _valid = run_codex_pr_review.parse_finding_history(second_marker)
 
-        matched = run_codex_pr_review.previous_matching_round(history, [finding])
-        self.assertIsNotNone(matched)
-        self.assertEqual(matched["head_sha"], "deadbeef")
+        matched = run_codex_pr_review.previous_matching_findings(
+            history, [first, second]
+        )
+        self.assertEqual(len(matched), 2)
+        self.assertEqual(
+            {finding["history_head_sha"] for finding in matched},
+            {"deadbeef", "feedface"},
+        )
 
     def test_history_aware_arbitration_distinguishes_conflict_from_repetition(self) -> None:
         prior = [{

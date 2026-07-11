@@ -219,6 +219,8 @@ trusted review comment 只保存最近固定轮数、固定字节上限且脱敏
 
 `verdict=clear` 表示 source-of-truth 已证明当前 finding 为 false positive，因此 required review check 可以通过；即使历史上检测到 `contract_conflict=true`，仍保持 `auto_fix_allowed=false`，防止执行线程继续改代码。这是对错误 finding 的独立仲裁结论，不是绕过 branch protection。`block`、`ambiguous` 或仲裁失败才必须继续 blocked。
 
+已 `cleared` 的 finding key 是历史匹配边界，不得继续回溯并复活更旧的同 key blocker；未被 clear 的多个 current finding key 则必须从最近历史轮分别聚合后统一交给仲裁，不能只取第一个命中的 round。
+
 ### P1：强烈建议补的缺口
 
 #### 3.4 缺少统一的任务状态机
