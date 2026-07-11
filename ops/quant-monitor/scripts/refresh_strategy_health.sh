@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT="${QUANT_MONITOR_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+source "$ROOT/scripts/common_env.sh"
 HEALTH_DIR="$ROOT/data/health/dashboard"
 HEALTH_FILE="$HEALTH_DIR/strategy_health_dashboard.json"
 OUTPUT="$ROOT/data/health/strategy_health_dashboard.v1.json"
@@ -15,20 +16,14 @@ write_unavailable_snapshot() {
     --output "$OUTPUT"
 }
 
-if ! command -v quant-lifecycle >/dev/null 2>&1; then
-  write_unavailable_snapshot
-  echo "[dashboard] quant-lifecycle not installed; wrote an unavailable payload" >&2
-  exit 1
-fi
-
 run_lifecycle_dashboard() {
   local help
-  help="$(quant-lifecycle dashboard --help 2>&1 || true)"
+  help="$(quant_lifecycle dashboard --help 2>&1 || true)"
   if grep -q -- "--output-dir" <<<"$help"; then
     local modern_dir="$HEALTH_DIR/.modern-dashboard-output"
     rm -rf "$modern_dir"
     mkdir -p "$modern_dir"
-    if ! quant-lifecycle dashboard --output-dir "$modern_dir" --format json; then
+    if ! quant_lifecycle dashboard --output-dir "$modern_dir" --format json; then
       rm -rf "$modern_dir"
       return 1
     fi
@@ -48,7 +43,7 @@ run_lifecycle_dashboard() {
   local legacy_dir="$HEALTH_DIR/.legacy-dashboard-output"
   rm -rf "$legacy_dir"
   mkdir -p "$legacy_dir"
-  (cd "$legacy_dir" && quant-lifecycle dashboard --format json)
+  (cd "$legacy_dir" && quant_lifecycle dashboard --format json)
   local legacy_file="$legacy_dir/dashboard_output/strategy_health_dashboard.json"
   if [[ ! -f "$legacy_file" ]]; then
     echo "[dashboard] lifecycle CLI did not produce strategy_health_dashboard.json" >&2

@@ -87,10 +87,7 @@ def main() -> int:
         encoding="utf-8",
     )
     if json_path.is_file():
-        try:
-            payload = json.loads(json_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            payload = {}
+        payload = json.loads(json_path.read_text(encoding="utf-8"))
         if isinstance(payload.get("strategies"), list):
             strategies = [row for row in payload["strategies"] if isinstance(row, dict)]
 
