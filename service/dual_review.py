@@ -14,15 +14,15 @@ from typing import Any
 VERDICT_PASS = "pass"
 VERDICT_FAIL = "fail"
 VERDICT_DISAGREEMENT = "disagreement"
-VERDICT_UNAVAILABLE = "unavailable"
-VERDICT_INVALID = "invalid"
+VERDICT_UNAVAILABLE = "review_unavailable"
+VERDICT_INVALID = "invalid_review"
 
 DEFAULT_ESCALATION_THRESHOLD = 0.8
 
 _PASS_VALUES = frozenset({"pass", "approve", "approved", "accept", "accepted"})
 _FAIL_VALUES = frozenset({"fail", "reject", "rejected", "deny", "denied", "block", "blocked"})
-_UNAVAILABLE_VALUES = frozenset({"unavailable"})
-_INVALID_VALUES = frozenset({"invalid"})
+_UNAVAILABLE_VALUES = frozenset({VERDICT_UNAVAILABLE})
+_INVALID_VALUES = frozenset({VERDICT_INVALID})
 
 
 class DualReviewTrigger(str, Enum):
@@ -161,6 +161,7 @@ def compare_reviews(primary: dict[str, Any], secondary: dict[str, Any]) -> dict[
         verdict = VERDICT_UNAVAILABLE
         reason = "primary and secondary reviewers unavailable"
     elif VERDICT_UNAVAILABLE in {primary_verdict, secondary_verdict}:
+        # DISAGREEMENT is a hard block in run_dual_review_pipeline._exit_code.
         verdict = VERDICT_DISAGREEMENT
         reason = "two-reviewer quorum unavailable"
     elif primary_verdict == secondary_verdict:
