@@ -1129,10 +1129,10 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
         adapter = CodexAdapter()
         sandbox = _validate_sandbox(str(payload.get("sandbox") or ""))
         reasoning_effort = _resolve_codex_reasoning_effort(payload, str(payload.get("task") or TASK_EXECUTE))
-        dispatch_started = True
         job["dispatch_started"] = True
         job["updated_at"] = _now()
         _write_job(job)
+        dispatch_started = True
         result = adapter.execute(
             prompt=str(payload["prompt"]),
             sandbox=sandbox,
@@ -1535,7 +1535,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             if reservation_id:
                 from service.ai_budget_guard import get_ai_budget_guard
 
-                get_ai_budget_guard().settle(reservation_id, 0.0)
+                get_ai_budget_guard().release(reservation_id)
             raise
         get_health_monitor().record("/v1/ai/execute/jobs", time.time() - started, True)
         _json_response(self, HTTPStatus.ACCEPTED, job)
