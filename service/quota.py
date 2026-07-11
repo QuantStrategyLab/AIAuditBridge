@@ -554,6 +554,7 @@ class QuotaManager:
             record.total_cost_usd += cost
             self._records[repo] = record
             self._save_records_locked()
+            self._record_failures.discard(repo or "unknown")
 
     def record_execute(self, repo: str) -> None:
         """Record a Codex exec call with a nominal dashboard estimate only."""
@@ -568,6 +569,7 @@ class QuotaManager:
             record.total_cost_usd += cost
             self._records[repo] = record
             self._save_records_locked()
+            self._record_failures.discard(repo or "unknown")
 
     def _codex_account_snapshot(self, timeout_seconds: float | None = None) -> dict[str, Any] | None:
         with self._codex_account_lock:
