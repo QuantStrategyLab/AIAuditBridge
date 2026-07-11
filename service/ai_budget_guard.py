@@ -118,6 +118,17 @@ class AIBudgetGuard:
                 db.execute(
                     "CREATE TABLE IF NOT EXISTS ai_budget_reservations (reservation_id TEXT PRIMARY KEY, scope TEXT NOT NULL, aggregate_scope TEXT NOT NULL, period TEXT NOT NULL, amount REAL NOT NULL, task_class TEXT NOT NULL, created_at REAL NOT NULL, baseline_usage REAL)"
                 )
+                columns = {
+                    row[1]
+                    for row in db.execute("PRAGMA table_info(ai_budget_reservations)").fetchall()
+                }
+                if "aggregate_scope" not in columns:
+                    db.execute(
+                        "ALTER TABLE ai_budget_reservations ADD COLUMN aggregate_scope TEXT NOT NULL DEFAULT ''"
+                    )
+                    db.execute(
+                        "UPDATE ai_budget_reservations SET aggregate_scope=scope WHERE aggregate_scope=''"
+                    )
         except (OSError, sqlite3.Error):
             self._ledger_path = ""
 
@@ -384,21 +395,27 @@ class AIBudgetGuard:
         with self._lock:
             self._load_scope_locked(scope)
             if any(_number(value, 0.0) and _number(value, 0.0) <= self._clock() for value in reset_at):
-                self._settled.pop(scope, None)
-                self._settled_baseline.pop(scope, None)
+                for key in list(self._reserved):
+                    if key.startswith("codex/"):
+                        self._reserved.pop(key, None)
+                for key in list(self._settled):
+                    if key.startswith("codex/"):
+                        self._settled.pop(key, None)
+                for key in list(self._settled_baseline):
+                    if key.startswith("codex/"):
+                        self._settled_baseline.pop(key, None)
                 for reservation_id, reservation in list(self._reservations.items()):
-                    if reservation.scope.startswith("codex/"):
+                    if reservation.scope.startswith("codex/") or reservation.aggregate_scope.startswith("codex/"):
                         self._reservations.pop(reservation_id, None)
-                        self._reserved[reservation.scope] = 0.0
-                        self._reserved[reservation.aggregate_scope] = 0.0
                 if self._ledger_path:
                     try:
                         with sqlite3.connect(self._ledger_path, timeout=30) as db:
-                            db.execute("DELETE FROM ai_budget_reservations WHERE scope LIKE 'codex/%'")
+                            db.execute(
+                                "DELETE FROM ai_budget_reservations WHERE scope LIKE 'codex/%' OR aggregate_scope LIKE 'codex/%'"
+                            )
                             db.execute("DELETE FROM ai_budget_ledger WHERE scope LIKE 'codex/%'")
                     except (OSError, sqlite3.Error):
                         pass
-                self._save_scope_locked(scope)
             settled = self._settled.get(scope, 0.0)
             reserved = self._reserved.get(scope, 0.0)
         threshold = CODEX_THRESHOLDS.get(task, CODEX_THRESHOLDS["maintenance"])
@@ -550,6 +567,8 @@ class AIBudgetGuard:
                         db.execute("DELETE FROM ai_budget_reservations WHERE reservation_id=?", (rid,))
                     self._reservations.pop(rid, None)
                     self._load_scope_locked(scope)
+                    if aggregate_scope != scope:
+                        self._load_scope_locked(aggregate_scope)
                     return True
                 except (OSError, sqlite3.Error, TypeError, ValueError):
                     return False
@@ -602,6 +621,8 @@ class AIBudgetGuard:
                         db.execute("DELETE FROM ai_budget_reservations WHERE reservation_id=?", (rid,))
                     self._reservations.pop(rid, None)
                     self._load_scope_locked(scope)
+                    if aggregate_scope != scope:
+                        self._load_scope_locked(aggregate_scope)
                     return True
                 except (OSError, sqlite3.Error, TypeError, ValueError):
                     return False
