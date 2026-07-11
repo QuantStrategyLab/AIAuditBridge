@@ -1486,11 +1486,12 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
 
             get_ai_budget_guard().release(reservation_id)
         # A local quota-recording failure must not roll back provider spend.
-        try:
-            quota.record(source_repo, resolved_model, req.prompt, result.output if result.success else "")
-        except Exception as exc:  # noqa: BLE001 - provider response is already settled.
-            quota.mark_recording_failed(source_repo)
-            _audit_log("analyze_quota_record_failed", error=type(exc).__name__)
+        if result.success:
+            try:
+                quota.record(source_repo, resolved_model, req.prompt, result.output)
+            except Exception as exc:  # noqa: BLE001 - provider response is already settled.
+                quota.mark_recording_failed(source_repo)
+                _audit_log("analyze_quota_record_failed", error=type(exc).__name__)
         latency = time.time() - started
 
         # Record quota and health
@@ -1597,9 +1598,11 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
 
                 get_ai_budget_guard().release(reservation_id)
             raise
+        dispatch_started = False
         try:
             sandbox = _validate_sandbox(str(payload.get("sandbox") or ""))
             reasoning_effort = _resolve_codex_reasoning_effort(payload, str(payload.get("task") or TASK_EXECUTE))
+            dispatch_started = True
             result = adapter.execute(
                 prompt=req.prompt,
                 sandbox=sandbox,
@@ -1611,7 +1614,10 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             if reservation_id:
                 from service.ai_budget_guard import get_ai_budget_guard
 
-                get_ai_budget_guard().settle(reservation_id, 0.10)
+                if dispatch_started:
+                    get_ai_budget_guard().settle(reservation_id, 0.10)
+                else:
+                    get_ai_budget_guard().release(reservation_id)
             raise
         if reservation_id:
             from service.ai_budget_guard import get_ai_budget_guard
@@ -1746,6 +1752,8 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         # reservation ledger for every reviewer invocation.
         quota_record_failed = False
         for review_result in llm_results:
+            if not review_result.success:
+                continue
             try:
                 get_quota_manager().record(
                     review_repo,
@@ -1790,9 +1798,11 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
 
                     get_ai_budget_guard().release(codex_reservation_id)
                 raise
+            codex_dispatch_started = False
             try:
                 codex_sandbox = _validate_sandbox("read-only")
                 codex_reasoning_effort = _resolve_codex_reasoning_effort(payload, TASK_REVIEW)
+                codex_dispatch_started = True
                 codex_result = codex.execute(
                     prompt=req.prompt,
                     sandbox=codex_sandbox,
@@ -1803,7 +1813,10 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 if codex_reservation_id:
                     from service.ai_budget_guard import get_ai_budget_guard
 
-                    get_ai_budget_guard().settle(codex_reservation_id, 0.10)
+                    if codex_dispatch_started:
+                        get_ai_budget_guard().settle(codex_reservation_id, 0.10)
+                    else:
+                        get_ai_budget_guard().release(codex_reservation_id)
                 raise
             if codex_reservation_id:
                 from service.ai_budget_guard import get_ai_budget_guard
