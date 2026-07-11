@@ -80,6 +80,7 @@ run_lifecycle_dashboard() {
 }
 
 if ! run_lifecycle_dashboard; then
+  rm -f "$HEALTH_FILE"
   write_unavailable_snapshot
   echo "[dashboard] lifecycle dashboard failed; wrote an unavailable payload" >&2
   exit 1

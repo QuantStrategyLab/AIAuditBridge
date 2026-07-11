@@ -192,8 +192,6 @@ def build_payload(
     reviews, duplicate_reviews = _review_index(review_dir) if review_dir else ({}, set())
     strategies: list[dict[str, Any]] = []
     errors: list[str] = [error] if error else []
-    if duplicate_reviews:
-        errors.append("review_artifact_ambiguous")
 
     upstream_status = (health or {}).get("data_status")
     if upstream_status not in {None, "ready", "stale", "unavailable"}:
@@ -202,12 +200,20 @@ def build_payload(
 
     raw_strategies = (health or {}).get("strategies")
     payload_shape_valid = isinstance(raw_strategies, list) and len(raw_strategies) <= MAX_STRATEGIES
-    payload_shape_valid = payload_shape_valid and not duplicate_reviews
     if not payload_shape_valid:
         errors.append("strategies_not_array" if not isinstance(raw_strategies, list) else "strategies_too_many")
         raw_strategies = []
     if upstream_status == "unavailable":
         raw_strategies = []
+    active_profiles = {
+        _clean_id(raw.get("strategy_profile") or raw.get("profile"))
+        for raw in raw_strategies
+        if isinstance(raw, dict)
+    }
+    active_duplicate_reviews = duplicate_reviews & active_profiles
+    if active_duplicate_reviews:
+        errors.append("review_artifact_ambiguous")
+        payload_shape_valid = False
 
     for raw in raw_strategies[:MAX_STRATEGIES]:
         if not isinstance(raw, dict):
