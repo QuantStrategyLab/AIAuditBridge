@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from service.strategy_watch import evaluate_strategy_watch, finding_to_automation_task, issue_for_task
+from service.strategy_watch import evaluate_strategy_watch, finding_to_automation_task, issue_for_task, watcher_issue_key
 
 
 class StrategyWatchTest(unittest.TestCase):
@@ -121,6 +121,46 @@ class StrategyWatchTest(unittest.TestCase):
 
         self.assertEqual(len(findings), 1)
         self.assertEqual(findings[0].finding_type, "metric_degradation")
+
+    def test_invalid_numeric_value_becomes_data_quality_finding(self) -> None:
+        findings = evaluate_strategy_watch(
+            {
+                "repo": "QuantStrategyLab/TestStrategies",
+                "schema_version": "strategy_performance.v2",
+                "metrics_kind": "performance",
+                "profile": "live",
+                "current_metrics": {"sharpe": "oops", "cagr": 0.1, "calmar": 0.7, "win_rate": 0.52, "max_dd": 0.12},
+                "baseline_metrics": {"sharpe": 1.0, "cagr": 0.2, "calmar": 1.0, "win_rate": 0.58, "max_dd": 0.08},
+            }
+        )
+
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].finding_type, "data_quality")
+
+    def test_data_quality_issue_key_does_not_collide_with_metric_issue(self) -> None:
+        metric_finding = evaluate_strategy_watch(
+            {
+                "repo": "QuantStrategyLab/TestStrategies",
+                "profile": "live",
+                "current_metrics": {"sharpe": 0.5},
+                "baseline_metrics": {"sharpe": 1.0},
+            }
+        )[0]
+        quality_finding = evaluate_strategy_watch(
+            {
+                "repo": "QuantStrategyLab/TestStrategies",
+                "schema_version": "strategy_operational_metrics.v1",
+                "metrics_kind": "operational_quality",
+                "profile": "live",
+                "current_metrics": {"pool_size": 10},
+                "baseline_metrics": {"pool_size": 9},
+            }
+        )[0]
+
+        self.assertNotEqual(
+            watcher_issue_key(finding_to_automation_task(metric_finding)),
+            watcher_issue_key(finding_to_automation_task(quality_finding)),
+        )
 
 
 if __name__ == "__main__":

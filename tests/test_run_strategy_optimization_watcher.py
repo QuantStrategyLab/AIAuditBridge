@@ -234,6 +234,7 @@ class RunStrategyOptimizationWatcherTest(unittest.TestCase):
         self.assertEqual(result["findings"], 1)
         self.assertEqual(result["issues"][0]["task"]["trigger"]["kind"], "strategy_metric_degradation")
         self.assertEqual(result["issues"][0]["task"]["proposed_action"]["target"], "QuantStrategyLab/TestStrategies")
+        self.assertEqual(result["issues"][0]["task"]["finding_type"], "data_quality")
 
 
 if __name__ == "__main__":

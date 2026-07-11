@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import hashlib
 import json
+import math
 from typing import Any
 
 from service.automation_contracts import AutomationTask, EvidenceBundle, GateDecision, ProposedAction, TriggerRecord
@@ -120,6 +121,24 @@ def _data_quality_signal(reason: str, *, metric: str = "data_quality") -> dict[s
     return {"metric": metric, "reason": reason}
 
 
+def _metric_value_issues(metrics: dict[str, Any], *, label: str) -> list[dict[str, Any]]:
+    issues: list[dict[str, Any]] = []
+    for metric in REQUIRED_PERFORMANCE_METRICS:
+        if metric not in metrics:
+            continue
+        value = metrics[metric]
+        if isinstance(value, bool):
+            valid = False
+        else:
+            try:
+                valid = math.isfinite(float(value))
+            except (TypeError, ValueError):
+                valid = False
+        if not valid:
+            issues.append(_data_quality_signal(f"{label}.{metric} must be a finite numeric value", metric=metric))
+    return issues
+
+
 def _validate_snapshot_contract(snapshot: StrategyWatchSnapshot) -> list[dict[str, Any]]:
     issues: list[dict[str, Any]] = []
     schema_version = snapshot.schema_version
@@ -128,7 +147,9 @@ def _validate_snapshot_contract(snapshot: StrategyWatchSnapshot) -> list[dict[st
     if not schema_version and not metrics_kind:
         legacy_metrics = set(snapshot.current_metrics).intersection(snapshot.baseline_metrics, REQUIRED_PERFORMANCE_METRICS)
         if legacy_metrics:
-            return []
+            return _metric_value_issues(snapshot.current_metrics, label="current_metrics") + _metric_value_issues(
+                snapshot.baseline_metrics, label="baseline_metrics"
+            )
         return [_data_quality_signal("missing versioned performance metrics; no comparable legacy metrics found")]
 
     if not schema_version:
@@ -173,6 +194,8 @@ def _validate_snapshot_contract(snapshot: StrategyWatchSnapshot) -> list[dict[st
                 f"baseline_metrics missing required performance metrics: {', '.join(missing_baseline)}"
             )
         )
+    issues.extend(_metric_value_issues(snapshot.current_metrics, label="current_metrics"))
+    issues.extend(_metric_value_issues(snapshot.baseline_metrics, label="baseline_metrics"))
     return issues
 
 
@@ -285,8 +308,14 @@ def finding_to_automation_task(finding: StrategyWatchFinding) -> AutomationTask:
 def watcher_issue_key(task: AutomationTask) -> str:
     payload = task.to_dict()
     trigger = payload.get("trigger") if isinstance(payload.get("trigger"), dict) else {}
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
     subject = str(trigger.get("subject") or "")
-    raw = json.dumps({"subject": subject}, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    key_payload: dict[str, Any] = {"subject": subject}
+    finding_type = str(metadata.get("finding_type") or "metric_degradation")
+    if finding_type != "metric_degradation":
+        key_payload["finding_type"] = finding_type
+        key_payload["trigger_kind"] = str(trigger.get("kind") or "")
+    raw = json.dumps(key_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()[:16]
 
 
