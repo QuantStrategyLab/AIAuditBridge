@@ -375,9 +375,9 @@ class AIBudgetGuard:
             if reservation_aggregate_scope != scope:
                 self._load_scope_locked(reservation_aggregate_scope)
             reserved = self._reserved.get(scope, 0.0)
-            settled = self._reconcile_settled_locked(scope, 0.0)
+            settled = self._reconcile_settled_locked(scope, used if reservation_aggregate_scope == scope else 0.0)
             aggregate_reserved = self._reserved.get(reservation_aggregate_scope, 0.0)
-            aggregate_settled = self._reconcile_settled_locked(reservation_aggregate_scope, used)
+            aggregate_settled = settled if reservation_aggregate_scope == scope else self._reconcile_settled_locked(reservation_aggregate_scope, used)
         repo_remaining = hard_limit - settled - reserved - amount
         aggregate_remaining = aggregate_hard_limit - used - aggregate_settled - aggregate_reserved - amount
         remaining = min(repo_remaining, aggregate_remaining)
