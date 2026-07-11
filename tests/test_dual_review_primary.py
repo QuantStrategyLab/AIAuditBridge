@@ -44,6 +44,15 @@ class DualReviewPrimaryTests(unittest.TestCase):
 
     @patch.dict("os.environ", {"CODEX_AUDIT_SERVICE_URL": "https://service.invalid"})
     @patch("scripts.run_codex_pr_review.run_codex_service_review")
+    def test_capacity_error_is_unavailable(self, review) -> None:
+        from scripts.run_codex_pr_review import ReviewError
+
+        review.side_effect = ReviewError("Codex service request failed: 401 too many active jobs: max 10")
+        result = run_codex_primary_review(prompt="review")
+        self.assertEqual(result["verdict"], VERDICT_UNAVAILABLE)
+
+    @patch.dict("os.environ", {"CODEX_AUDIT_SERVICE_URL": "https://service.invalid"})
+    @patch("scripts.run_codex_pr_review.run_codex_service_review")
     def test_protocol_error_is_invalid(self, review) -> None:
         from scripts.run_codex_pr_review import ReviewError
 

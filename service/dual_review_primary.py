@@ -111,6 +111,7 @@ def run_codex_primary_review(
             "service job failed [unknown_failure]: codex exec failed",
             "not configured on the service host",
             "request timed out",
+            "too many active jobs",
         )
         verdict = VERDICT_UNAVAILABLE if any(marker in message.lower() for marker in unavailable_markers) else VERDICT_INVALID
         return {
