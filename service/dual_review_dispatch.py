@@ -6,7 +6,7 @@ import json
 import os
 from typing import Any
 
-from service.dual_review import VERDICT_DISAGREEMENT
+from service.dual_review import VERDICT_DISAGREEMENT, VERDICT_UNAVAILABLE
 from service.dual_review_orchestrator import DualReviewResult
 from service.briefing_dispatch import create_github_issue, shutil_which
 
@@ -81,6 +81,20 @@ def _format_disagreement_body(result: DualReviewResult) -> str:
     return "\n".join(lines)
 
 
+def _format_unavailable_body(result: DualReviewResult) -> str:
+    return "\n".join(
+        [
+            "## Dual-review infrastructure unavailable",
+            "",
+            f"- **Trigger**: `{result.trigger.value}`",
+            f"- **Strategy**: `{result.strategy_profile}`",
+            f"- **Reason**: {result.reason or 'all configured reviewers are unavailable'}",
+            "",
+            "The underlying strategy alert remains active. Restore reviewer capacity and rerun the review.",
+        ]
+    )
+
+
 def dispatch_dual_review_result(
     result: DualReviewResult,
     *,
@@ -96,16 +110,18 @@ def dispatch_dual_review_result(
         "skipped": [],
     }
 
-    if result.outcome != VERDICT_DISAGREEMENT:
+    if result.outcome not in {VERDICT_DISAGREEMENT, VERDICT_UNAVAILABLE}:
         summary["skipped"].append("no_disagreement")
         return summary
 
-    title = (
-        f"[dual-review] {result.strategy_profile} — "
-        f"{result.trigger.value} disagreement"
-    )
-    body = _format_disagreement_body(result)
-    labels = ("dual-review", result.trigger.value, "needs-human")
+    if result.outcome == VERDICT_UNAVAILABLE:
+        title = f"[dual-review] {result.strategy_profile} — reviewers unavailable"
+        body = _format_unavailable_body(result)
+        labels = ()
+    else:
+        title = f"[dual-review] {result.strategy_profile} — {result.trigger.value} disagreement"
+        body = _format_disagreement_body(result)
+        labels = ("dual-review", result.trigger.value, "needs-human")
 
     if dry_run:
         summary["github_dry_run"] = {"title": title, "body": body, "labels": list(labels)}

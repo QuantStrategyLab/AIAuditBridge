@@ -14,11 +14,15 @@ from typing import Any
 VERDICT_PASS = "pass"
 VERDICT_FAIL = "fail"
 VERDICT_DISAGREEMENT = "disagreement"
+VERDICT_UNAVAILABLE = "review_unavailable"
+VERDICT_INVALID = "invalid_review"
 
 DEFAULT_ESCALATION_THRESHOLD = 0.8
 
 _PASS_VALUES = frozenset({"pass", "approve", "approved", "accept", "accepted"})
 _FAIL_VALUES = frozenset({"fail", "reject", "rejected", "deny", "denied", "block", "blocked"})
+_UNAVAILABLE_VALUES = frozenset({VERDICT_UNAVAILABLE})
+_INVALID_VALUES = frozenset({VERDICT_INVALID})
 
 
 class DualReviewTrigger(str, Enum):
@@ -37,6 +41,10 @@ def _normalize_verdict(value: Any) -> str | None:
         return VERDICT_PASS
     if normalized in _FAIL_VALUES:
         return VERDICT_FAIL
+    if normalized in _UNAVAILABLE_VALUES:
+        return VERDICT_UNAVAILABLE
+    if normalized in _INVALID_VALUES:
+        return VERDICT_INVALID
     return None
 
 
@@ -94,9 +102,26 @@ def compare_three_reviews(
     gpt_verdict = _extract_verdict(gpt_review)
     claude_verdict = _extract_verdict(claude_review)
 
-    if primary_verdict is None or gpt_verdict is None or claude_verdict is None:
+    verdicts = (primary_verdict, gpt_verdict, claude_verdict)
+    # Invalid responses may indicate corrupted evidence and always block; known
+    # provider outages may be excluded only when two valid reviewers form quorum.
+    if VERDICT_INVALID in verdicts:
+        verdict = VERDICT_DISAGREEMENT
+        reason = "one or more reviewer responses are invalid"
+    elif any(candidate is None for candidate in verdicts):
         verdict = VERDICT_DISAGREEMENT
         reason = "missing or unrecognized review verdict in primary/gpt/claude"
+    elif all(candidate == VERDICT_UNAVAILABLE for candidate in verdicts):
+        verdict = VERDICT_UNAVAILABLE
+        reason = "codex, gpt, and claude unavailable"
+    elif VERDICT_UNAVAILABLE in verdicts:
+        available = [item for item in verdicts if item != VERDICT_UNAVAILABLE]
+        if primary_verdict != VERDICT_UNAVAILABLE and len(available) >= 2 and len(set(available)) == 1:
+            verdict = available[0]
+            reason = "primary and one available secondary reviewer agree"
+        else:
+            verdict = VERDICT_DISAGREEMENT
+            reason = "primary unavailable or available reviewer quorum conflicts"
     elif primary_verdict == gpt_verdict == claude_verdict:
         verdict = primary_verdict
         reason = "codex, gpt, and claude unanimous"
@@ -117,7 +142,7 @@ def compare_three_reviews(
         "primary_confidence": _extract_confidence(primary),
         "gpt_confidence": _extract_confidence(gpt_review),
         "claude_confidence": _extract_confidence(claude_review),
-        "agreement": verdict != VERDICT_DISAGREEMENT,
+        "agreement": verdict in {VERDICT_PASS, VERDICT_FAIL},
     }
 
 
@@ -128,9 +153,19 @@ def compare_reviews(primary: dict[str, Any], secondary: dict[str, Any]) -> dict[
     primary_confidence = _extract_confidence(primary)
     secondary_confidence = _extract_confidence(secondary)
 
-    if primary_verdict is None or secondary_verdict is None:
+    if VERDICT_INVALID in {primary_verdict, secondary_verdict}:
+        verdict = VERDICT_DISAGREEMENT
+        reason = "one or more reviewer responses are invalid"
+    elif primary_verdict is None or secondary_verdict is None:
         verdict = VERDICT_DISAGREEMENT
         reason = "missing or unrecognized review verdict"
+    elif primary_verdict == secondary_verdict == VERDICT_UNAVAILABLE:
+        verdict = VERDICT_UNAVAILABLE
+        reason = "primary and secondary reviewers unavailable"
+    elif VERDICT_UNAVAILABLE in {primary_verdict, secondary_verdict}:
+        # DISAGREEMENT is a hard block in run_dual_review_pipeline._exit_code.
+        verdict = VERDICT_DISAGREEMENT
+        reason = "two-reviewer quorum unavailable"
     elif primary_verdict == secondary_verdict:
         verdict = primary_verdict
         reason = "reviews agree"
@@ -145,7 +180,7 @@ def compare_reviews(primary: dict[str, Any], secondary: dict[str, Any]) -> dict[
         "secondary_verdict": secondary_verdict,
         "primary_confidence": primary_confidence,
         "secondary_confidence": secondary_confidence,
-        "agreement": verdict != VERDICT_DISAGREEMENT,
+        "agreement": verdict in {VERDICT_PASS, VERDICT_FAIL},
     }
 
 

@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.run_dual_review_pipeline import main, run_pipeline
+from scripts.run_dual_review_pipeline import _exit_code, main, run_pipeline
 
 
 class DualReviewPipelineTests(unittest.TestCase):
@@ -51,6 +51,39 @@ class DualReviewPipelineTests(unittest.TestCase):
             primary_review={"verdict": "approve", "confidence": 0.4},
         )
         self.assertEqual(result.get("outcome"), "disagreement")
+
+    @patch("scripts.run_dual_review_pipeline.orchestrate_from_payload")
+    def test_all_reviewers_unavailable_degrades_with_durable_alert(self, mock_orchestrate) -> None:
+        from service.dual_review import VERDICT_UNAVAILABLE, DualReviewTrigger
+        from service.dual_review_orchestrator import DualReviewResult
+
+        mock_orchestrate.return_value = DualReviewResult(
+            trigger=DualReviewTrigger.DRIFT,
+            strategy_profile="demo",
+            primary_review={"verdict": VERDICT_UNAVAILABLE, "confidence": 0.0},
+            outcome=VERDICT_UNAVAILABLE,
+        )
+        result = run_pipeline(
+            trigger="drift",
+            strategy_profile="demo",
+            context={"drift_score": 0.95},
+            primary_review={"verdict": VERDICT_UNAVAILABLE, "confidence": 0.0},
+            dispatch=True,
+            dry_run=True,
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["skipped"], ["reviewers_unavailable"])
+        self.assertTrue(result["degraded"])
+        self.assertEqual(result["error"], "reviewers_unavailable")
+        self.assertEqual(result["warning"], "all configured reviewers are unavailable")
+        self.assertIn("github_dry_run", result["dispatch"])
+        self.assertEqual(_exit_code(result), 3)
+
+        result["dispatch"] = {"github_issue": None}
+        self.assertEqual(_exit_code(result), 3)
+
+    def test_disagreement_is_a_hard_block(self) -> None:
+        self.assertEqual(_exit_code({"ok": True, "outcome": "disagreement"}), 2)
 
     @patch.dict("os.environ", {"DUAL_REVIEW_GATE_SKIP": "1"}, clear=False)
     def test_from_evidence_cli_without_trigger_flags(self) -> None:

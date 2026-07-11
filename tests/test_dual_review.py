@@ -8,7 +8,9 @@ from service.dual_review import (
     DEFAULT_ESCALATION_THRESHOLD,
     VERDICT_DISAGREEMENT,
     VERDICT_FAIL,
+    VERDICT_INVALID,
     VERDICT_PASS,
+    VERDICT_UNAVAILABLE,
     DualReviewTrigger,
     compare_reviews,
     compare_three_reviews,
@@ -92,6 +94,45 @@ class TestCompareThreeReviews(unittest.TestCase):
         )
         self.assertEqual(result["verdict"], VERDICT_DISAGREEMENT)
         self.assertIn("split decision", result["reason"])
+
+    def test_all_unavailable_is_not_unanimous_rejection(self) -> None:
+        unavailable = {"verdict": VERDICT_UNAVAILABLE, "confidence": 0.0, "error": "provider unavailable"}
+        result = compare_three_reviews(unavailable, unavailable, unavailable)
+        self.assertEqual(result["verdict"], VERDICT_UNAVAILABLE)
+        self.assertFalse(result["agreement"])
+
+    def test_two_available_reviewers_form_quorum(self) -> None:
+        result = compare_three_reviews(
+            {"verdict": "approve", "confidence": 0.9},
+            {"verdict": VERDICT_UNAVAILABLE, "confidence": 0.0, "error": "provider unavailable"},
+            {"verdict": "approve", "confidence": 0.9},
+        )
+        self.assertEqual(result["verdict"], VERDICT_PASS)
+        self.assertIn("primary and one available secondary", result["reason"])
+
+    def test_secondary_only_quorum_cannot_replace_primary(self) -> None:
+        result = compare_three_reviews(
+            {"verdict": VERDICT_UNAVAILABLE, "confidence": 0.0, "error": "provider unavailable"},
+            {"verdict": "approve", "confidence": 0.9},
+            {"verdict": "approve", "confidence": 0.9},
+        )
+        self.assertEqual(result["verdict"], VERDICT_DISAGREEMENT)
+
+    def test_one_available_reviewer_is_not_a_quorum(self) -> None:
+        result = compare_three_reviews(
+            {"verdict": "approve", "confidence": 0.9},
+            {"verdict": VERDICT_UNAVAILABLE, "confidence": 0.0, "error": "provider unavailable"},
+            {"verdict": VERDICT_UNAVAILABLE, "confidence": 0.0, "error": "provider unavailable"},
+        )
+        self.assertEqual(result["verdict"], VERDICT_DISAGREEMENT)
+
+    def test_parse_error_is_not_dropped_from_quorum(self) -> None:
+        result = compare_three_reviews(
+            {"verdict": "approve", "confidence": 0.9},
+            {"verdict": VERDICT_INVALID, "confidence": 0.0, "parse_error": "empty_output"},
+            {"verdict": "approve", "confidence": 0.9},
+        )
+        self.assertEqual(result["verdict"], VERDICT_DISAGREEMENT)
 
 
 class TestDualReviewTrigger(unittest.TestCase):

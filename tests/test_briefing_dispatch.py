@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from service.briefing_consumer import BriefingAction, BriefingConsumptionResult, BriefingFinding
-from service.briefing_dispatch import dispatch_briefing_result, send_telegram_alert
+from service.briefing_dispatch import create_github_issue, dispatch_briefing_result, send_telegram_alert
 
 
 class BriefingDispatchTests(unittest.TestCase):
@@ -48,6 +48,25 @@ class BriefingDispatchTests(unittest.TestCase):
         mock_urlopen.return_value = _Resp()
         ok = send_telegram_alert(text="hello", token="tok", chat_ids=("123",))
         self.assertTrue(ok)
+
+    @patch("service.briefing_dispatch.subprocess.check_output", return_value="https://example.test/issues/1\n")
+    @patch("service.briefing_dispatch.shutil_which", return_value="/usr/bin/gh")
+    def test_create_github_issue_uses_actions_repository(self, _which, check_output) -> None:
+        with patch.dict(os.environ, {"GITHUB_REPOSITORY": "QuantStrategyLab/CryptoStrategies"}, clear=True):
+            issue = create_github_issue(title="review unavailable", body="details", labels=())
+
+        self.assertEqual(issue, "https://example.test/issues/1")
+        self.assertIn("QuantStrategyLab/CryptoStrategies", check_output.call_args.args[0])
+
+    @patch("service.briefing_dispatch.subprocess.check_output")
+    @patch("service.briefing_dispatch.shutil_which", return_value="/usr/bin/gh")
+    def test_create_github_issue_rejects_invalid_repository(self, _which, check_output) -> None:
+        for repository in ("bad/repo --assignee admin", "QuantStrategyLab/..", ".hidden/repo"):
+            with patch.dict(os.environ, {"GITHUB_REPOSITORY": repository}, clear=True):
+                issue = create_github_issue(title="review unavailable", body="details", labels=())
+            self.assertIsNone(issue)
+
+        check_output.assert_not_called()
 
 
 if __name__ == "__main__":

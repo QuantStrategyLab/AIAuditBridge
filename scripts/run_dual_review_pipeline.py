@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from service.dual_review import VERDICT_DISAGREEMENT, VERDICT_FAIL
+from service.dual_review import VERDICT_DISAGREEMENT, VERDICT_FAIL, VERDICT_UNAVAILABLE
 from service.dual_review_dispatch import dispatch_dual_review_result
 from service.dual_review_orchestrator import orchestrate_from_payload
 from service.dual_review_primary import (
@@ -135,13 +135,22 @@ def run_pipeline(
         return {"ok": False, "error": "orchestration_failed", "payload": payload}
 
     result = outcome.to_dict()
+    if outcome.outcome == VERDICT_UNAVAILABLE:
+        result["skipped"] = ["reviewers_unavailable"]
+        result["degraded"] = True
+        result["warning"] = "all configured reviewers are unavailable"
+        result["error"] = "reviewers_unavailable"
     if dispatch:
         result["dispatch"] = dispatch_dual_review_result(outcome, dry_run=dry_run)
-    result["ok"] = True
+    result["ok"] = outcome.outcome != VERDICT_UNAVAILABLE
     return result
 
 
 def _exit_code(result: dict[str, Any]) -> int:
+    # Exit 3 is a distinct degraded state; workflow callers must handle it
+    # explicitly rather than treating it as review success or a hard crash.
+    if result.get("degraded") and result.get("error") == "reviewers_unavailable":
+        return 3
     if not result.get("ok"):
         return 1
     if result.get("skipped"):

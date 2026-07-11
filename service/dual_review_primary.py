@@ -8,6 +8,7 @@ import urllib.error
 from pathlib import Path
 from typing import Any
 
+from service.dual_review import VERDICT_INVALID, VERDICT_UNAVAILABLE
 from service.dual_review_secondary import parse_llm_review_output
 
 _PRIMARY_SYSTEM = (
@@ -93,10 +94,35 @@ def run_codex_primary_review(
             timeout_minutes=timeout,
             complexity="high",
         )
-    except (ReviewError, urllib.error.URLError, json.JSONDecodeError, OSError) as exc:
+    except json.JSONDecodeError as exc:
         return {
             "source": "codex_primary",
-            "verdict": "reject",
+            "verdict": VERDICT_INVALID,
+            "confidence": 0.0,
+            "error": str(exc),
+        }
+    except ReviewError as exc:
+        message = str(exc)
+        unavailable_markers = (
+            "daily budget exceeded",
+            "quota",
+            "http 429",
+            "status 429",
+            "service job failed [unknown_failure]: codex exec failed",
+            "not configured on the service host",
+            "request timed out",
+        )
+        verdict = VERDICT_UNAVAILABLE if any(marker in message.lower() for marker in unavailable_markers) else VERDICT_INVALID
+        return {
+            "source": "codex_primary",
+            "verdict": verdict,
+            "confidence": 0.0,
+            "error": message,
+        }
+    except (urllib.error.URLError, OSError) as exc:
+        return {
+            "source": "codex_primary",
+            "verdict": VERDICT_UNAVAILABLE,
             "confidence": 0.0,
             "error": str(exc),
         }

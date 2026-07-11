@@ -5,10 +5,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import urllib.error
 from typing import TYPE_CHECKING, Any
 
-from service.adapters.llm_adapter import LlmAdapter, LlmResult
-from service.dual_review import VERDICT_FAIL, extract_confidence, extract_verdict
+from service.adapters.llm_adapter import LlmAdapter, LlmAdapterError, LlmResult
+from service.dual_review import VERDICT_INVALID, VERDICT_UNAVAILABLE, extract_confidence, extract_verdict
 from service.model_router import default_dual_review_model_for_reviewer
 
 if TYPE_CHECKING:
@@ -39,7 +40,7 @@ def parse_llm_review_output(output: str, *, provider: str, model: str) -> dict[s
         "raw_output": output,
     }
     if not output.strip():
-        parsed.update({"verdict": "reject", "confidence": 0.0, "parse_error": "empty_output"})
+        parsed.update({"verdict": VERDICT_INVALID, "confidence": 0.0, "parse_error": "empty_output"})
         return parsed
 
     try:
@@ -64,7 +65,7 @@ def parse_llm_review_output(output: str, *, provider: str, model: str) -> dict[s
     except (json.JSONDecodeError, TypeError, ValueError) as exc:
         parsed.update(
             {
-                "verdict": "reject",
+                "verdict": VERDICT_INVALID,
                 "confidence": 0.0,
                 "parse_error": str(exc),
             }
@@ -104,7 +105,7 @@ def _result_to_review(result: LlmResult) -> dict[str, Any]:
         return {
             "source": result.provider,
             "model": result.model,
-            "verdict": "reject",
+            "verdict": VERDICT_UNAVAILABLE,
             "confidence": 0.0,
             "error": result.error,
             "latency_seconds": result.latency_seconds,
@@ -138,8 +139,8 @@ def run_dual_api_secondary_review(
     if claude_result is None and len(results) > 1:
         claude_result = results[1]
 
-    gpt_review = _result_to_review(gpt_result) if gpt_result else {"verdict": "reject", "confidence": 0.0, "error": "gpt_missing"}
-    claude_review = _result_to_review(claude_result) if claude_result else {"verdict": "reject", "confidence": 0.0, "error": "claude_missing"}
+    gpt_review = _result_to_review(gpt_result) if gpt_result else {"verdict": VERDICT_UNAVAILABLE, "confidence": 0.0, "error": "gpt_missing"}
+    claude_review = _result_to_review(claude_result) if claude_result else {"verdict": VERDICT_UNAVAILABLE, "confidence": 0.0, "error": "claude_missing"}
 
     return {
         "mode": "dual_api",
@@ -159,11 +160,11 @@ def dual_api_secondary_reviewer(request: DualReviewRequest) -> dict[str, Any]:
 
     try:
         return run_dual_api_secondary_review(request)
-    except Exception as exc:
+    except (LlmAdapterError, urllib.error.URLError, OSError) as exc:
         return {
             "mode": "dual_api",
-            "gpt": {"verdict": VERDICT_FAIL, "confidence": 0.0, "error": str(exc)},
-            "claude": {"verdict": VERDICT_FAIL, "confidence": 0.0, "error": str(exc)},
+            "gpt": {"verdict": VERDICT_UNAVAILABLE, "confidence": 0.0, "error": str(exc)},
+            "claude": {"verdict": VERDICT_UNAVAILABLE, "confidence": 0.0, "error": str(exc)},
         }
 
 

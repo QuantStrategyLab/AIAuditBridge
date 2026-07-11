@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import urllib.parse
 import urllib.request
 from typing import Any
 
 from service.briefing_consumer import BriefingAction, BriefingConsumptionResult
+
+_REPOSITORY_RE = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*/"
+    r"[A-Za-z0-9][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*"
+)
 
 
 def _telegram_token() -> str:
@@ -97,7 +103,13 @@ def send_telegram_alert(*, text: str, token: str, chat_ids: tuple[str, ...]) -> 
 
 
 def create_github_issue(*, title: str, body: str, labels: tuple[str, ...] = ("briefing", "monitoring")) -> str | None:
-    repo = str(os.environ.get("QSL_GITHUB_REPO") or "QuantStrategyLab/QuantStrategyLab").strip()
+    repo = str(
+        os.environ.get("QSL_GITHUB_REPO")
+        or os.environ.get("GITHUB_REPOSITORY")
+        or "QuantStrategyLab/QuantStrategyLab"
+    ).strip()
+    if _REPOSITORY_RE.fullmatch(repo) is None:
+        return None
     if not shutil_which("gh"):
         return None
     cmd = [

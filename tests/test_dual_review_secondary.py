@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from service.adapters.llm_adapter import LlmResult
+from service.dual_review import VERDICT_INVALID, VERDICT_UNAVAILABLE, DualReviewTrigger
 from service.dual_review_orchestrator import DualReviewRequest
 from service.dual_review_secondary import (
     build_secondary_prompt,
@@ -12,7 +13,6 @@ from service.dual_review_secondary import (
     run_dual_api_secondary_review,
     secondary_mode,
 )
-from service.dual_review import DualReviewTrigger
 
 
 class DualReviewSecondaryTests(unittest.TestCase):
@@ -24,6 +24,11 @@ class DualReviewSecondaryTests(unittest.TestCase):
         )
         self.assertEqual(review["verdict"], "approve")
         self.assertEqual(review["confidence"], 0.87)
+
+    def test_empty_provider_response_is_invalid_not_unavailable(self) -> None:
+        review = parse_llm_review_output("", provider="openai", model="gpt")
+        self.assertEqual(review["verdict"], VERDICT_INVALID)
+        self.assertEqual(review["parse_error"], "empty_output")
 
     def test_build_secondary_prompt_excludes_primary_verdict(self) -> None:
         request = DualReviewRequest(
@@ -66,6 +71,23 @@ class DualReviewSecondaryTests(unittest.TestCase):
         self.assertEqual(payload["mode"], "dual_api")
         self.assertEqual(payload["gpt"]["verdict"], "approve")
         self.assertEqual(payload["claude"]["verdict"], "approve")
+
+    def test_failed_providers_are_unavailable_not_rejections(self) -> None:
+        class _UnavailableAdapter:
+            def parallel_review(self, **kwargs):
+                return [
+                    LlmResult(provider="openai", model="gpt", output="", success=False, error="missing key"),
+                    LlmResult(provider="anthropic", model="claude", output="", success=False, error="missing key"),
+                ]
+
+        request = DualReviewRequest(
+            trigger=DualReviewTrigger.DRIFT,
+            strategy_profile="demo",
+            primary_review={"verdict": VERDICT_UNAVAILABLE, "confidence": 0.0},
+        )
+        payload = run_dual_api_secondary_review(request, adapter=_UnavailableAdapter())
+        self.assertEqual(payload["gpt"]["verdict"], VERDICT_UNAVAILABLE)
+        self.assertEqual(payload["claude"]["verdict"], VERDICT_UNAVAILABLE)
 
 
 if __name__ == "__main__":
