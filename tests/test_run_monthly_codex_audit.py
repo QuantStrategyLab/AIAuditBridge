@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import subprocess
 import tempfile
 import threading
@@ -2481,15 +2480,16 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         }
 
         for script_name, workflow_name in variable_pairs.items():
-            script_match = re.search(
-                rf'^{script_name}="\$\{{{workflow_name}:-([^}}]+)\}}"$',
-                deploy_script,
-                re.MULTILINE,
+            script_line = next(line for line in deploy_script.splitlines() if line.startswith(f'{script_name}="'))
+            workflow_line = next(
+                line.strip() for line in workflow.splitlines() if line.strip().startswith(f"{workflow_name}: ")
             )
-            workflow_match = re.search(rf"^\s+{workflow_name}: (.+)$", workflow, re.MULTILINE)
-            self.assertIsNotNone(script_match, script_name)
-            self.assertIsNotNone(workflow_match, workflow_name)
-            self.assertEqual(script_match.group(1), workflow_match.group(1))
+            script_prefix = f'{script_name}="${{{workflow_name}:-'
+            self.assertTrue(script_line.startswith(script_prefix), script_name)
+            self.assertTrue(script_line.endswith('}"'), script_name)
+            script_value = script_line[len(script_prefix) : -2]
+            workflow_value = workflow_line.removeprefix(f"{workflow_name}: ")
+            self.assertEqual(script_value, workflow_value)
 
 
 if __name__ == "__main__":

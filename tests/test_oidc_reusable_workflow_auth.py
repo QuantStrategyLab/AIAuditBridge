@@ -102,3 +102,9 @@ class ReusableWorkflowOidcAuthTests(unittest.TestCase):
         payload["job_workflow_ref"] = audit_job_ref
         with self.assertRaisesRegex(PermissionError, "strategy drift caller must use"):
             self._verify(payload, env)
+
+        suffixed_job_ref = f"{qpk_job_ref}_evil"
+        payload["job_workflow_ref"] = suffixed_job_ref
+        env["CODEX_AUDIT_SERVICE_ALLOWED_JOB_WORKFLOW_REFS"] = f"{qpk_job_ref},{suffixed_job_ref}"
+        with self.assertRaisesRegex(PermissionError, "strategy drift caller must use"):
+            self._verify(payload, env)

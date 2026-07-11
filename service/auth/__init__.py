@@ -67,7 +67,11 @@ def _require_trusted_strategy_drift_job(payload: dict[str, Any], job_workflow_re
     if "/.github/workflows/drift-check.yml@" not in workflow_ref:
         return
     trusted_prefix = "QuantStrategyLab/QuantPlatformKit/.github/workflows/reusable-drift-check.yml@"
-    if not job_workflow_ref.startswith(trusted_prefix):
+    allowed_job_refs = _allowed_claim_patterns("CODEX_AUDIT_SERVICE_ALLOWED_JOB_WORKFLOW_REFS")
+    trusted_qpk_refs = {
+        value for value in allowed_job_refs if re.fullmatch(re.escape(trusted_prefix) + r"[0-9a-f]{40}", value)
+    }
+    if job_workflow_ref not in trusted_qpk_refs:
         raise PermissionError("OIDC strategy drift caller must use the trusted QPK reusable workflow")
 
 
