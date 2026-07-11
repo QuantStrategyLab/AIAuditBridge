@@ -37,6 +37,14 @@ def _critical_drifts(domain: str) -> list[dict[str, Any]]:
     return payloads
 
 
+def _aggregate_exit_code(codes: list[int]) -> int:
+    """Preserve hard review failures when another profile is only degraded."""
+    hard_failures = [code for code in codes if code not in {0, 3}]
+    if hard_failures:
+        return max(hard_failures)
+    return 3 if 3 in codes else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Dual-review for critical drift strategies.")
     parser.add_argument("--domain", default=os.environ.get("STRATEGY_DOMAIN", "").strip())
@@ -69,7 +77,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     results: list[dict[str, Any]] = []
-    worst = 0
+    exit_codes: list[int] = []
     for item in critical:
         cmd = [
             sys.executable,
@@ -99,17 +107,18 @@ def main(argv: list[str] | None = None) -> int:
             body = {"ok": False, "error": proc.stdout or proc.stderr}
         body["exit_code"] = proc.returncode
         results.append(body)
+        exit_codes.append(proc.returncode)
         if body.get("degraded"):
             print(
                 f"::warning::Dual review unavailable for {item['strategy_profile']}; "
                 "critical drift alert remains active",
                 file=sys.stderr,
             )
-        worst = max(worst, proc.returncode)
+    exit_code = _aggregate_exit_code(exit_codes)
 
     degraded_count = sum(1 for result in results if result.get("degraded"))
     summary = {
-        "ok": worst == 0 and degraded_count == 0,
+        "ok": exit_code == 0 and degraded_count == 0,
         "degraded": degraded_count > 0,
         "domain": domain,
         "count": len(results),
@@ -117,7 +126,7 @@ def main(argv: list[str] | None = None) -> int:
         "results": results,
     }
     print(json.dumps(summary, ensure_ascii=False, indent=2))
-    return worst
+    return exit_code
 
 
 if __name__ == "__main__":
