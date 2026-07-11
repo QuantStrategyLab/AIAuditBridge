@@ -850,6 +850,8 @@ A contract conflict means that following the current suggestion would reverse or
 
 Treat public interfaces, schemas, tests, and documentation in the base/current source as contract evidence. Use `clear` only when that source of truth proves every current finding false, obsolete, or fixed. Use `block` when a current finding is proven valid. Use `ambiguous` when the source of truth is insufficient. Never clear solely because two reviewers disagree.
 
+When current blocking findings are empty but the trusted history state is `active_blocking_history`, decide whether the prior blocking findings are demonstrably fixed by the current source-of-truth diff. A clean primary review alone is not evidence.
+
 Repository: {repo}
 PR title: {pr_title}
 
@@ -1049,10 +1051,15 @@ def _history_finding(finding: dict[str, Any]) -> dict[str, str]:
     return {
         "severity": _sanitize_history_text(finding.get("severity"), 20).lower(),
         "category": _sanitize_history_text(finding.get("category"), 80).lower(),
-        "file": _sanitize_history_text(finding.get("file"), 300),
+        "file": _sanitize_history_path(finding.get("file")),
         "description": _sanitize_history_text(finding.get("description")),
         "suggestion": _sanitize_history_text(finding.get("suggestion")),
     }
+
+
+def _sanitize_history_path(value: Any) -> str:
+    """Preserve stable PR paths while excluding control characters and excess length."""
+    return re.sub(r"[\x00-\x1f\x7f]+", "", str(value or "")).strip()[:300]
 
 
 def build_finding_history_marker(
@@ -1856,12 +1863,28 @@ def main() -> int:
     history_requires_confirmation = finding_history_requires_confirmation(
         finding_history
     )
+    active_history_clearance_required = bool(
+        active_blocking_history and not decision["blocked"]
+    )
     if history_requires_confirmation:
         decision.update(
             {
                 "contract_conflict": True,
                 "auto_fix_allowed": False,
                 "next_action": "contract_arbitration",
+            }
+        )
+    elif active_history_clearance_required:
+        decision.update(
+            {
+                "blocked": True,
+                "contract_conflict": False,
+                "auto_fix_allowed": False,
+                "next_action": "contract_arbitration",
+                "summary": (
+                    "🚫 **Merge blocked**: active blocking history requires "
+                    "independent source-of-truth clearance"
+                ),
             }
         )
     finding_fingerprint = blocking_finding_fingerprint(decision["blocking_findings"])
@@ -1880,8 +1903,10 @@ def main() -> int:
         previous_head_sha=previous_head_sha,
         current_head_sha=current_head_sha,
     )
-    matched_history_round = previous_matching_round(
-        finding_history, decision["blocking_findings"]
+    matched_history_round = (
+        finding_history[-1]
+        if active_history_clearance_required and finding_history
+        else previous_matching_round(finding_history, decision["blocking_findings"])
     )
     previous_findings = (
         list(matched_history_round.get("findings") or [])
@@ -1890,9 +1915,7 @@ def main() -> int:
     )
     arbitration: dict[str, Any] | None = None
     confirmation_arbitration_required = history_requires_confirmation
-    history_arbitration_required = bool(
-        decision["blocked"] and previous_findings
-    )
+    history_arbitration_required = bool(decision["blocked"] and previous_findings)
     if confirmation_arbitration_required or history_arbitration_required or should_arbitrate(
         blocked=bool(decision["blocked"]),
         streak=blocking_streak,
@@ -1913,7 +1936,7 @@ def main() -> int:
             history_state=(
                 str(finding_history[-1].get("status") or "")
                 if confirmation_arbitration_required
-                else ""
+                else "active_blocking_history" if active_history_clearance_required else ""
             ),
         )
         try:
@@ -1945,6 +1968,17 @@ def main() -> int:
                 decision = apply_arbitration_failure(
                     decision, ReviewError("history confirmation was not cleared")
                 )
+            elif (
+                active_history_clearance_required
+                and arbitration.get("verdict") != "clear"
+            ):
+                decision.update(
+                    {
+                        "blocked": True,
+                        "auto_fix_allowed": False,
+                        "next_action": "contract_arbitration",
+                    }
+                )
             elif previous_findings and arbitration.get("verdict") == "ambiguous":
                 arbitration["contract_conflict"] = True
                 decision = apply_arbitration_failure(
@@ -1952,9 +1986,8 @@ def main() -> int:
                 )
         if arbitration.get("verdict") == "clear":
             blocking_streak = 0
-    if history_requires_confirmation and not (
-        arbitration and arbitration.get("verdict") == "clear"
-    ):
+    arbitration_cleared = bool(arbitration and arbitration.get("verdict") == "clear")
+    if (history_requires_confirmation or active_history_clearance_required) and not arbitration_cleared:
         finding_history_marker = build_finding_history_marker(
             finding_history, [], current_head_sha
         )

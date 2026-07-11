@@ -233,7 +233,7 @@ class RunCodexPrReviewTests(unittest.TestCase):
             [{
                 "severity": "high",
                 "category": "security",
-                "file": "service/review.py",
+                "file": "service/v2/review.py",
                 "description": " ".join(secrets),
                 "suggestion": "Remove quoted credentials.",
             }],
@@ -246,6 +246,7 @@ class RunCodexPrReviewTests(unittest.TestCase):
         for secret in secrets:
             self.assertNotIn(secret, serialized)
         self.assertIn("REDACTED", serialized)
+        self.assertEqual(history[0]["findings"][0]["file"], "service/v2/review.py")
 
     def test_cleared_history_retains_semantics_without_remaining_active(self) -> None:
         head_sha = "7eed3550854ee498edc378f3658e6a8f536299cc"
@@ -791,6 +792,62 @@ class RunCodexPrReviewTests(unittest.TestCase):
                 self.assertEqual(run_codex_pr_review.main(), 0)
 
         backend.assert_called_once()
+
+    def test_main_clears_active_history_only_after_independent_arbitration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            event_path = self._write_event(tmpdir, ["scripts/run_codex_pr_review.py"])
+            finding = {
+                "severity": "high",
+                "category": "logic",
+                "file": "scripts/run_codex_pr_review.py",
+                "description": "Prior source defect.",
+                "suggestion": "Fix the source defect.",
+            }
+            prior_comment = (
+                "<!-- codex-pr-review -->\n"
+                "<!-- codex-pr-review-streak:1 -->\n"
+                "<!-- codex-pr-review-head-sha:deadbeef -->\n"
+                + run_codex_pr_review.build_finding_history_marker(
+                    [], [finding], "deadbeef"
+                )
+            )
+            env = {
+                "GH_TOKEN": "token",
+                "GITHUB_REPOSITORY": "org/repo",
+                "GITHUB_EVENT_PATH": event_path,
+            }
+            with (
+                patch.dict(os.environ, env, clear=True),
+                patch(
+                    "scripts.run_codex_pr_review.fetch_pr_files",
+                    return_value=[{"filename": "scripts/run_codex_pr_review.py"}],
+                ),
+                patch("scripts.run_codex_pr_review.fetch_pr_diff", return_value="source diff"),
+                patch(
+                    "scripts.run_codex_pr_review.load_policy",
+                    return_value=run_codex_pr_review._default_policy(),
+                ),
+                patch(
+                    "scripts.run_codex_pr_review.find_existing_review_comment",
+                    return_value=(99, prior_comment),
+                ),
+                patch(
+                    "scripts.run_codex_pr_review.run_codex_review_with_fallback",
+                    side_effect=[
+                        '{"summary":"clear","findings":[]}',
+                        '{"verdict":"clear","reason":"source diff fixes the prior defect",'
+                        '"contract_conflict":false}',
+                    ],
+                ) as backend,
+                patch("scripts.run_codex_pr_review.upsert_pr_comment") as comment,
+            ):
+                self.assertEqual(run_codex_pr_review.main(), 0)
+
+        self.assertEqual(backend.call_count, 2)
+        body = comment.call_args.args[3]
+        history, valid = run_codex_pr_review.parse_finding_history(body)
+        self.assertTrue(valid)
+        self.assertEqual(history[-1]["status"], "cleared")
 
     def test_main_clears_confirmation_history_only_after_independent_arbitration(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
