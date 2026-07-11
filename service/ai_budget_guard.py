@@ -367,6 +367,7 @@ class AIBudgetGuard:
             self._aggregate_scope(provider_name, provider_scope, current_period)
             if has_provider_project_limit else scope
         )
+        effective_used = used if has_provider_project_limit else 0.0
         with self._lock:
             if self._settled_period != current_period:
                 self._reserved.clear()
@@ -378,11 +379,11 @@ class AIBudgetGuard:
             if reservation_aggregate_scope != scope:
                 self._load_scope_locked(reservation_aggregate_scope)
             reserved = self._reserved.get(scope, 0.0)
-            settled = self._reconcile_settled_locked(scope, used if reservation_aggregate_scope == scope else 0.0)
+            settled = self._reconcile_settled_locked(scope, effective_used if reservation_aggregate_scope == scope else 0.0)
             aggregate_reserved = self._reserved.get(reservation_aggregate_scope, 0.0)
-            aggregate_settled = settled if reservation_aggregate_scope == scope else self._reconcile_settled_locked(reservation_aggregate_scope, used)
+            aggregate_settled = settled if reservation_aggregate_scope == scope else self._reconcile_settled_locked(reservation_aggregate_scope, effective_used)
         repo_remaining = hard_limit - settled - reserved - amount
-        aggregate_accounted = used + aggregate_settled
+        aggregate_accounted = effective_used + aggregate_settled
         aggregate_remaining = aggregate_hard_limit - aggregate_accounted - aggregate_reserved - amount
         remaining = min(repo_remaining, aggregate_remaining)
         if remaining < 0:
@@ -392,14 +393,14 @@ class AIBudgetGuard:
                 observed=0.0, reserved=reserved, hard_limit=round(hard_limit, 8),
                 remaining=round(max(0.0, remaining), 8), freshness="fresh", decision="defer",
                 reasons=[item for item in (reason, "api_fallback_requires_human_approval" if not human_approved_fallback else "") if item],
-                aggregate_observed=used, aggregate_hard_limit=round(aggregate_hard_limit, 8),
+                aggregate_observed=effective_used, aggregate_hard_limit=round(aggregate_hard_limit, 8),
                 aggregate_reserved=aggregate_reserved,
             )
         return self._decision(
             task_class=task, provider_scope=provider_scope, period=current_period,
             observed=0.0, reserved=reserved, hard_limit=round(hard_limit, 8),
             remaining=round(remaining, 8), freshness="fresh", decision="allow", reasons=[],
-            aggregate_observed=used, aggregate_hard_limit=round(aggregate_hard_limit, 8),
+            aggregate_observed=effective_used, aggregate_hard_limit=round(aggregate_hard_limit, 8),
             aggregate_reserved=aggregate_reserved,
             auto_fallback_allowed=human_approved_fallback,
             reservation_scope=scope, aggregate_scope=reservation_aggregate_scope,

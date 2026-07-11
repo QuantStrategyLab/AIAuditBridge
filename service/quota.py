@@ -333,6 +333,10 @@ class QuotaManager:
         """Fail closed for a repo after its quota record cannot be persisted."""
         with self._lock:
             self._record_failures.add(repo or "unknown")
+            try:
+                self._save_records_locked()
+            except Exception:  # noqa: BLE001 - keep the in-memory fail-closed state.
+                pass
 
     @staticmethod
     def _api_budget_cost(record: QuotaRecord) -> float:

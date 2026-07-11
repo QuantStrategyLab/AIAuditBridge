@@ -161,7 +161,7 @@ def test_settled_spend_remains_reserved_until_usage_snapshot_catches_up() -> Non
 
 
 def test_settled_delta_is_not_cleared_by_historical_provider_usage() -> None:
-    guard = AIBudgetGuard({"monthly_budgets": {"openai": {"user_monthly_budget_usd": 200}}})
+    guard = AIBudgetGuard({"monthly_budgets": {"openai": {"user_monthly_budget_usd": 200, "provider_project_limit_usd": 200}}})
     snapshot = {"updated_at": time.time(), "used_usd": 100}
     decision = guard.preflight(task_class="review", provider="openai", estimated_cost_usd=50, usage_snapshot=snapshot)
     reservation = guard.reserve(decision, 50)

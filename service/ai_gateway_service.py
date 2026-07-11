@@ -1145,7 +1145,7 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
         adapter = CodexAdapter()
         sandbox = _validate_sandbox(str(payload.get("sandbox") or ""))
         reasoning_effort = _resolve_codex_reasoning_effort(payload, str(payload.get("task") or TASK_EXECUTE))
-        job["dispatch_started"] = True
+        job["dispatch_started"] = False
         job["updated_at"] = _now()
         _write_job(job)
         result = adapter.execute(
@@ -1156,6 +1156,7 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
             timeout=int(payload.get("timeout_seconds", 2700)),
         )
         job = _read_job(job_id)
+        job["dispatch_started"] = bool(getattr(result, "dispatch_started", False))
         if result.success:
             job["status"] = "succeeded"
             job["output"] = result.output
@@ -1623,10 +1624,14 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 else:
                     get_ai_budget_guard().release(reservation_id)
             raise
-        if reservation_id:
+        if reservation_id and bool(getattr(result, "dispatch_started", False)):
             from service.ai_budget_guard import get_ai_budget_guard
 
             get_ai_budget_guard().settle(reservation_id, 0.10)
+        elif reservation_id:
+            from service.ai_budget_guard import get_ai_budget_guard
+
+            get_ai_budget_guard().release(reservation_id)
         get_health_monitor().record("/v1/ai/execute", time.time() - started, result.success, result.error if not result.success else "")
         if result.success:
             _json_response(self, HTTPStatus.OK, {"status": "ok", "output": result.output})
@@ -1839,10 +1844,14 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                     else:
                         get_ai_budget_guard().release(codex_reservation_id)
                 raise
-            if codex_reservation_id:
+            if codex_reservation_id and bool(getattr(codex_result, "dispatch_started", False)):
                 from service.ai_budget_guard import get_ai_budget_guard
 
                 get_ai_budget_guard().settle(codex_reservation_id, 0.10)
+            elif codex_reservation_id:
+                from service.ai_budget_guard import get_ai_budget_guard
+
+                get_ai_budget_guard().release(codex_reservation_id)
 
         # Step 3: build per-reviewer results with extracted confidence
         results: list[dict[str, Any]] = []
