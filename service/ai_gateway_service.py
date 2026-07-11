@@ -1469,7 +1469,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             if reservation_id:
                 from service.ai_budget_guard import get_ai_budget_guard
 
-                get_ai_budget_guard().release(reservation_id)
+                get_ai_budget_guard().settle(reservation_id, float(qr.get("cost_estimate_usd") or 0.0))
             raise
         if reservation_id:
             from service.ai_budget_guard import get_ai_budget_guard
@@ -1542,7 +1542,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             if reservation_id:
                 from service.ai_budget_guard import get_ai_budget_guard
 
-                get_ai_budget_guard().release(reservation_id)
+                get_ai_budget_guard().settle(reservation_id, 0.10)
             raise
         if reservation_id and bool(job.get("deduped")):
             from service.ai_budget_guard import get_ai_budget_guard
@@ -1590,7 +1590,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             if reservation_id:
                 from service.ai_budget_guard import get_ai_budget_guard
 
-                get_ai_budget_guard().release(reservation_id)
+                get_ai_budget_guard().settle(reservation_id, 0.10)
             raise
         if reservation_id:
             from service.ai_budget_guard import get_ai_budget_guard
@@ -1742,6 +1742,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
 
             get_ai_budget_guard().release(codex_reservation_id)
             codex_reservation_id = ""
+            codex_quota = None
         # Step 2: optional Codex verification
         codex_result = None
         if req.verifier == "codex" and codex_quota is not None:
@@ -1759,7 +1760,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 if codex_reservation_id:
                     from service.ai_budget_guard import get_ai_budget_guard
 
-                    get_ai_budget_guard().release(codex_reservation_id)
+                    get_ai_budget_guard().settle(codex_reservation_id, 0.10)
                 raise
             if codex_reservation_id:
                 from service.ai_budget_guard import get_ai_budget_guard
