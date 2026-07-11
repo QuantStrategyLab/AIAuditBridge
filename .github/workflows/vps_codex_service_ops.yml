@@ -36,6 +36,19 @@ jobs:
       - name: Checkout Bridge
         uses: actions/checkout@v6.0.3
 
+      - name: Verify trusted QPK drift workflow refs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for ref in \
+            644cd9002ae92f2aaca6f7efb4afa4986fae05ea \
+            d0a081ca5868faaf1a6dd870cf4b93643978cd11; do
+            gh api \
+              "repos/QuantStrategyLab/QuantPlatformKit/contents/.github/workflows/reusable-drift-check.yml?ref=${ref}" \
+              --jq '.sha' >/dev/null
+          done
+
       - name: Run VPS service operation
         env:
           CODEX_AUDIT_SSH_UNBAN_IP: ${{ inputs.ssh_unban_ip }}
@@ -43,8 +56,9 @@ jobs:
           # workflow_dispatch emits protected-main workflow_ref claims; the deploy script pins delegated QPK code by exact job_workflow_ref SHA.
           CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS: QuantStrategyLab/AIAuditBridge/.github/workflows/codex_audit.yml@refs/heads/main,QuantStrategyLab/AIAuditBridge/.github/workflows/codex_pr_review.yml@refs/heads/main,QuantStrategyLab/BinancePlatform/.github/workflows/codex_pr_review.yml@refs/heads/main,QuantStrategyLab/CharlesSchwabPlatform/.github/workflows/codex_pr_review.yml@refs/heads/main,QuantStrategyLab/CnEquitySnapshotPipelines/.github/workflows/codex_pr_review.yml@refs/heads/main,QuantStrategyLab/CnEquityStrategies/.github/workflows/codex_pr_review.yml@refs/heads/main,QuantStrategyLab/CryptoLivePoolPipelines/.github/workflows/codex_pr_review.yml@refs/heads/main,QuantStrategyLab/CryptoStrategies/.github/workflows/codex_pr_review.yml@refs/heads/main,QuantStrategyLab/FirstradePlatform/.github/workflows/codex_pr_review.yml@refs/heads/main,QuantStrategyLab/HkEquitySnapshotPipelines/.github/workflows/codex_pr_review.yml@refs/heads/main,QuantStrategyLab/HkEquityStrategies/.github/workflows/codex_pr_review.yml@refs/heads/main,QuantStrategyLab/IBKRGatewayManager/.github/workflows/codex_pr_review.yml@refs/heads/main,QuantStrategyLab/InteractiveBrokersPlatform/.github/workflows/codex_pr_review.yml@refs/heads/main,QuantStrategyLab/LongBridgePlatform/.github/workflows/codex_pr_review.yml@refs/heads/main,QuantStrategyLab/MarketSignalSources/.github/workflows/codex_pr_review.yml@refs/heads/main,QuantStrategyLab/PoliticalEventTrackingResearch/.github/workflows/codex_pr_review.yml@refs/heads/main,QuantStrategyLab/QmtPlatform/.github/workflows/codex_pr_review.yml@refs/heads/main,QuantStrategyLab/QuantAdvisorResearch/.github/workflows/codex_pr_review.yml@refs/heads/main,QuantStrategyLab/QuantPlatformKit/.github/workflows/codex_pr_review.yml@refs/heads/main,QuantStrategyLab/QuantRuntimeSettings/.github/workflows/codex_pr_review.yml@refs/heads/main,QuantStrategyLab/QuantStrategyPlugins/.github/workflows/codex_pr_review.yml@refs/heads/main,QuantStrategyLab/ResearchSignalContextPipelines/.github/workflows/codex_pr_review.yml@refs/heads/main,QuantStrategyLab/SchwabTokenAutoRefresher/.github/workflows/codex_pr_review.yml@refs/heads/main,QuantStrategyLab/UsEquitySnapshotPipelines/.github/workflows/codex_pr_review.yml@refs/heads/main,QuantStrategyLab/UsEquityStrategies/.github/workflows/codex_pr_review.yml@refs/heads/main,QuantStrategyLab/CnEquityStrategies/.github/workflows/drift-check.yml@refs/heads/main,QuantStrategyLab/UsEquityStrategies/.github/workflows/drift-check.yml@refs/heads/main,QuantStrategyLab/CryptoStrategies/.github/workflows/drift-check.yml@refs/heads/main
           CODEX_AUDIT_SERVICE_ALLOWED_REFS: refs/heads/main,refs/pull/*/merge
+          # Rotation tracked in #64; remove the old SHA by 2026-07-18 after final strategy-run verification.
           # Must match the immutable QPK `uses:` ref pinned by all strategy drift callers.
-          CODEX_AUDIT_SERVICE_ALLOWED_JOB_WORKFLOW_REFS: QuantStrategyLab/AIAuditBridge/.github/workflows/codex_pr_review.yml@refs/heads/main,QuantStrategyLab/QuantPlatformKit/.github/workflows/reusable-drift-check.yml@644cd9002ae92f2aaca6f7efb4afa4986fae05ea
+          CODEX_AUDIT_SERVICE_ALLOWED_JOB_WORKFLOW_REFS: QuantStrategyLab/AIAuditBridge/.github/workflows/codex_pr_review.yml@refs/heads/main,QuantStrategyLab/QuantPlatformKit/.github/workflows/reusable-drift-check.yml@644cd9002ae92f2aaca6f7efb4afa4986fae05ea,QuantStrategyLab/QuantPlatformKit/.github/workflows/reusable-drift-check.yml@d0a081ca5868faaf1a6dd870cf4b93643978cd11
           CODEX_AUDIT_SERVICE_ALLOWED_DIRECT_REPOSITORIES: QuantStrategyLab/AIAuditBridge
           CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES: QuantStrategyLab/AIAuditBridge,QuantStrategyLab/BinancePlatform,QuantStrategyLab/CharlesSchwabPlatform,QuantStrategyLab/CnEquitySnapshotPipelines,QuantStrategyLab/CnEquityStrategies,QuantStrategyLab/CryptoLivePoolPipelines,QuantStrategyLab/CryptoStrategies,QuantStrategyLab/FirstradePlatform,QuantStrategyLab/HkEquitySnapshotPipelines,QuantStrategyLab/HkEquityStrategies,QuantStrategyLab/IBKRGatewayManager,QuantStrategyLab/InteractiveBrokersPlatform,QuantStrategyLab/LongBridgePlatform,QuantStrategyLab/MarketSignalSources,QuantStrategyLab/PoliticalEventTrackingResearch,QuantStrategyLab/QmtPlatform,QuantStrategyLab/QuantAdvisorResearch,QuantStrategyLab/QuantPlatformKit,QuantStrategyLab/QuantRuntimeSettings,QuantStrategyLab/QuantStrategyPlugins,QuantStrategyLab/ResearchSignalContextPipelines,QuantStrategyLab/SchwabTokenAutoRefresher,QuantStrategyLab/UsEquitySnapshotPipelines,QuantStrategyLab/UsEquityStrategies
           CODEX_AUDIT_SERVICE_MODEL: ${{ vars.CODEX_AUDIT_SERVICE_MODEL }}
