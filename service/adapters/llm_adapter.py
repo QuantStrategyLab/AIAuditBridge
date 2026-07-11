@@ -94,7 +94,7 @@ def _retry_with_backoff(fn, *, max_retries: int = DEFAULT_MAX_RETRIES, base_seco
     raise LlmAdapterError(str(last_exc)) from last_exc
 
 
-def _resolve_model(model: str) -> tuple[str, str]:
+def resolve_model(model: str) -> tuple[str, str]:
     """Return (provider, resolved_model)."""
     m = model.strip().lower()
     if m.startswith("claude"):
@@ -266,7 +266,7 @@ class LlmAdapter:
 
         ``model`` is auto-routed: ``claude-*`` → Anthropic, ``gpt-*`` → OpenAI.
         """
-        provider, resolved_model = _resolve_model(model)
+        provider, resolved_model = resolve_model(model)
         started = time.time()
         try:
             if provider == PROVIDER_ANTHROPIC:

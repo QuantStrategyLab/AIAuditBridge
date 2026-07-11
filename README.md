@@ -145,7 +145,12 @@ It does not inject API keys into the Codex subprocess.
 When `CODEX_AUDIT_SERVICE_CODEX_ACCOUNT_USAGE=1`, the dashboard reads a
 sanitized Codex rate-limit snapshot through the local authenticated Codex
 app-server; API-key rows remain internal estimates unless a platform usage
-provider is configured separately.
+provider is configured separately. The internal daily and weekly USD budgets
+apply only to API-key and legacy-unclassified usage. The dashboard's Codex
+amount is a nominal estimate for observability and never blocks Codex CLI;
+the authenticated Codex execution handlers, rather than a caller-supplied
+model name, select the Codex-account quota scope. Codex CLI is governed by the
+authenticated account's own rate limits.
 Set `OPENAI_ADMIN_KEY` to an OpenAI Admin API key to add a sanitized
 GPT/OpenAI completions Usage snapshot to `/v1/ai/quota`. Optional
 `CODEX_AUDIT_SERVICE_OPENAI_ADMIN_API_KEY_IDS` can limit that snapshot to

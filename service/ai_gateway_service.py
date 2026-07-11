@@ -44,7 +44,7 @@ from service.contracts import (
     parse_execute_request,
     parse_review_request,
 )
-from service.adapters.llm_adapter import LlmAdapter
+from service.adapters.llm_adapter import LlmAdapter, resolve_model
 from service.adapters.codex_adapter import CodexAdapter
 from service.autonomy import (
     ACTION_AUTO_PR,
@@ -149,6 +149,12 @@ def _json_response(handler: BaseHTTPRequestHandler, status: HTTPStatus, payload:
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
     handler.wfile.write(body)
+
+
+def _resolve_analyze_model(model: str) -> str:
+    """Resolve the API-backed model used by the synchronous analyze endpoint."""
+    _, resolved_model = resolve_model(model)
+    return resolved_model
 
 
 def _split_csv_env(name: str) -> set[str]:
@@ -469,6 +475,33 @@ def _cleanup_expired_jobs() -> None:
                 path.unlink()
             except FileNotFoundError:
                 pass
+
+
+def _recover_orphaned_jobs() -> int:
+    """Fail persisted active jobs whose worker threads were lost on restart."""
+    recovered = 0
+    for path in _job_dir().glob("*.json"):
+        try:
+            job = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        previous_status = str(job.get("status") or "")
+        if previous_status not in ACTIVE_JOB_STATUSES:
+            continue
+        job["status"] = "failed"
+        job["updated_at"] = _now()
+        job["error"] = "codex audit service restarted before job completion"
+        job["failure_category"] = "service_restart"
+        _write_job(job)
+        _record_job_automation_run(job)
+        _audit_log(
+            "job_failed",
+            job_id=job.get("job_id"),
+            error="service_restart",
+            repository=job.get("repository"),
+        )
+        recovered += 1
+    return recovered
 
 
 def _mark_stale_job_failed(job: dict[str, Any]) -> dict[str, Any]:
@@ -1368,7 +1401,8 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
 
         # Quota check
         quota = get_quota_manager()
-        qr = quota.check(source_repo, req.model, req.prompt)
+        resolved_model = _resolve_analyze_model(req.model)
+        qr = quota.check(source_repo, resolved_model, req.prompt)
         if not qr["allowed"]:
             _json_response(self, HTTPStatus.TOO_MANY_REQUESTS, {
                 "status": "error",
@@ -1381,13 +1415,13 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         started = time.time()
         adapter = LlmAdapter()
         result = adapter.complete(
-            model=req.model, system=req.system, user=req.prompt,
+            model=resolved_model, system=req.system, user=req.prompt,
             max_tokens=req.max_tokens, timeout=req.timeout_seconds,
         )
         latency = time.time() - started
 
         # Record quota and health
-        quota.record(source_repo, req.model, req.prompt, result.output if result.success else "")
+        quota.record(source_repo, resolved_model, req.prompt, result.output if result.success else "")
         get_health_monitor().record("/v1/ai/analyze", latency, result.success, result.error if not result.success else "")
 
         _audit_log("analyze_completed", model=result.model, provider=result.provider,
@@ -1419,7 +1453,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
 
         # Quota check
         quota = get_quota_manager()
-        qr = quota.check(quota_repo, "codex-cli", req.prompt)
+        qr = quota.check(quota_repo, "codex-cli", req.prompt, codex_account=True)
         if not qr["allowed"]:
             _json_response(self, HTTPStatus.TOO_MANY_REQUESTS, {
                 "status": "error", "error": qr["reason"],
@@ -1443,7 +1477,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             _validate_source_repo_org(claims, source_repo)
         quota_repo = source_repo or str(claims.get("repository") or "unknown")
         quota = get_quota_manager()
-        qr = quota.check(quota_repo, "codex-cli", req.prompt)
+        qr = quota.check(quota_repo, "codex-cli", req.prompt, codex_account=True)
         if not qr["allowed"]:
             _json_response(self, HTTPStatus.TOO_MANY_REQUESTS, {
                 "status": "error", "error": qr["reason"],
@@ -2016,6 +2050,7 @@ def main() -> int:
 
     # Startup security checks
     _validate_static_token_on_startup()
+    recovered_jobs = _recover_orphaned_jobs()
     if _is_production() and os.environ.get("CODEX_AUDIT_SERVICE_FAKE_OUTPUT") is not None:
         print("[ai-gateway] WARNING: CODEX_AUDIT_SERVICE_FAKE_OUTPUT is set in production!", file=sys.stderr)
 
@@ -2024,6 +2059,8 @@ def main() -> int:
     server = ThreadingHTTPServer((host, port), AiGatewayRequestHandler)
 
     print(f"[ai-gateway] listening on http://{host}:{port}", file=sys.stderr)
+    if recovered_jobs:
+        print(f"[ai-gateway] failed {recovered_jobs} orphaned jobs after restart", file=sys.stderr)
     print("[ai-gateway] security:", file=sys.stderr)
     print(f"  auth_mode: {os.environ.get('CODEX_AUDIT_SERVICE_AUTH', 'github-oidc')}", file=sys.stderr)
     print(f"  production: {_is_production()}", file=sys.stderr)

@@ -1,8 +1,8 @@
-"""Quota management — per-repo API budgets and model cost tracking.
+"""Quota management — per-repo API-key budgets and provider cost tracking.
 
-Prevents a single repo or workflow from exhausting the shared API budget.
-Tracks token consumption, enforces daily limits, and supports model
-tier escalation (try cheap model first, upgrade only when needed).
+Prevents a single repo or workflow from exhausting the shared API-key budget.
+Tracks API-key consumption, keeps separate nominal Codex CLI usage for the
+dashboard, enforces API-key daily limits, and supports model tier escalation.
 
 Configuration via environment::
 
@@ -50,7 +50,7 @@ DEFAULT_MODEL_COSTS: dict[str, dict[str, float]] = {
     "claude-fable-5": {"input": 0.003, "output": 0.015},
     "gpt-5.4-mini": {"input": 0.00015, "output": 0.0006},
     "gpt-5.4": {"input": 0.0025, "output": 0.01},
-    "codex-cli": {"flat": 0.05},  # flat per-execution cost
+    "codex-cli": {"flat": 0.05},  # dashboard-only nominal per-execution estimate
 }
 
 # Model tier for escalation: cheaper → more capable
@@ -83,6 +83,8 @@ class QuotaRecord:
     codex_cost_usd: float = 0.0
     last_reset_daily: float = field(default_factory=time.time)
     last_reset_weekly: float = field(default_factory=time.time)
+    weekly_api_key_cost_usd: float = 0.0
+    weekly_legacy_unknown_cost_usd: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -103,6 +105,8 @@ class QuotaRecord:
             "codex_cost_usd": round(self.codex_cost_usd, 4),
             "last_reset_daily": self.last_reset_daily,
             "last_reset_weekly": self.last_reset_weekly,
+            "weekly_api_key_cost_usd": round(self.weekly_api_key_cost_usd, 4),
+            "weekly_legacy_unknown_cost_usd": round(self.weekly_legacy_unknown_cost_usd, 4),
         }
 
     @classmethod
@@ -121,6 +125,9 @@ class QuotaRecord:
         aggregate_tokens_are_api_key = aggregate_tokens_present and codex_calls == 0
         aggregate_tokens_are_legacy_unknown = aggregate_tokens_present and not aggregate_tokens_are_api_key
         has_cost_split = any(k in d for k in ("api_key_cost_usd", "codex_cost_usd", "legacy_unknown_cost_usd"))
+        has_weekly_cost_split = any(
+            k in d for k in ("weekly_api_key_cost_usd", "weekly_legacy_unknown_cost_usd")
+        )
         cost_is_legacy_unknown = aggregate_tokens_are_legacy_unknown or (has_legacy_tokens and not has_split_api_tokens)
         legacy_unknown_cost_usd = float(d.get("legacy_unknown_cost_usd", total_cost_usd if cost_is_legacy_unknown and not has_cost_split else 0.0))
         codex_cost_usd = float(d.get("codex_cost_usd", 0.0 if legacy_unknown_cost_usd and not has_cost_split else min(total_cost_usd, DEFAULT_MODEL_COSTS.get("codex-cli", {}).get("flat", 0.05) * codex_calls)))
@@ -131,6 +138,18 @@ class QuotaRecord:
         legacy_tokens_output = int(d.get("legacy_tokens_output", tokens_output if aggregate_tokens_are_legacy_unknown else 0))
         legacy_api_activity = api_key_cost_usd > 0 or aggregate_tokens_are_api_key
         api_calls_incomplete = bool(d.get("api_calls_incomplete", False) or (not has_api_calls and legacy_api_activity))
+        now = time.time()
+        last_reset_weekly = float(d.get("last_reset_weekly", now))
+        if has_weekly_cost_split:
+            weekly_api_key_cost_usd = float(d.get("weekly_api_key_cost_usd", 0.0))
+            weekly_legacy_unknown_cost_usd = float(d.get("weekly_legacy_unknown_cost_usd", 0.0))
+        elif now - last_reset_weekly <= 604800:
+            weekly_api_key_cost_usd = api_key_cost_usd
+            weekly_legacy_unknown_cost_usd = legacy_unknown_cost_usd
+        else:
+            last_reset_weekly = now
+            weekly_api_key_cost_usd = 0.0
+            weekly_legacy_unknown_cost_usd = 0.0
         return cls(
             repo=str(d.get("repo", "")),
             tokens_input=tokens_input,
@@ -150,7 +169,9 @@ class QuotaRecord:
             api_key_cost_usd=api_key_cost_usd,
             codex_cost_usd=codex_cost_usd,
             last_reset_daily=float(d.get("last_reset_daily", time.time())),
-            last_reset_weekly=float(d.get("last_reset_weekly", time.time())),
+            last_reset_weekly=last_reset_weekly,
+            weekly_api_key_cost_usd=weekly_api_key_cost_usd,
+            weekly_legacy_unknown_cost_usd=weekly_legacy_unknown_cost_usd,
         )
 
 
@@ -290,6 +311,8 @@ class QuotaManager:
             record.codex_cost_usd = 0.0
             record.last_reset_daily = now
         if now - record.last_reset_weekly > 604800:
+            record.weekly_api_key_cost_usd = 0.0
+            record.weekly_legacy_unknown_cost_usd = 0.0
             record.last_reset_weekly = now
         return record
 
@@ -299,20 +322,36 @@ class QuotaManager:
     def get_weekly_budget(self, repo: str) -> float:
         return self._repo_budgets.get(repo, {}).get("weekly", self._weekly_budget)
 
+    @staticmethod
+    def _api_budget_cost(record: QuotaRecord) -> float:
+        """Return spend governed by the internal API-key USD budget.
+
+        Codex CLI uses the authenticated Codex account, not an API key. Its
+        nominal dashboard estimate must therefore never consume this budget.
+        Legacy unclassified cost remains budgeted conservatively.
+        """
+        return record.api_key_cost_usd + record.legacy_unknown_cost_usd
+
+    @staticmethod
+    def _weekly_api_budget_cost(record: QuotaRecord) -> float:
+        """Return API-key spend accumulated in the current weekly window."""
+        return record.weekly_api_key_cost_usd + record.weekly_legacy_unknown_cost_usd
+
     def remaining_daily(self, repo: str) -> float:
         with self._lock:
             record = self._records.get(repo)
             if not record:
                 return self.get_daily_budget(repo)
             record = self._reset_if_needed(record)
-            return max(0, self.get_daily_budget(repo) - record.total_cost_usd)
+            return max(0, self.get_daily_budget(repo) - self._api_budget_cost(record))
 
     def remaining_weekly(self, repo: str) -> float:
         with self._lock:
             record = self._records.get(repo)
             if not record:
                 return self.get_weekly_budget(repo)
-            return max(0, self.get_weekly_budget(repo) - record.total_cost_usd)
+            record = self._reset_if_needed(record)
+            return max(0, self.get_weekly_budget(repo) - self._weekly_api_budget_cost(record))
 
     def runtime_status(self, repo: str = "") -> dict[str, Any]:
         """Classify quota pressure for autonomy runtime guards.
@@ -340,10 +379,32 @@ class QuotaManager:
             "remaining_ratio": ratio,
         }
 
-    def check(self, repo: str, model: str, prompt: str = "", estimated_output_tokens: int = 0) -> dict[str, Any]:
-        """Check if the repo has enough quota remaining. Returns approval dict."""
+    def check(
+        self,
+        repo: str,
+        model: str,
+        prompt: str = "",
+        estimated_output_tokens: int = 0,
+        *,
+        codex_account: bool = False,
+    ) -> dict[str, Any]:
+        """Check whether the selected provider is allowed to run.
+
+        Internal USD budgets apply only to API-key providers. The trusted Codex
+        execution handlers set ``codex_account`` after authenticating a request;
+        only that internal signal may bypass the API-key budget.
+        """
         tokens_input = estimate_tokens(prompt)
         cost = estimate_cost(model, tokens_input, estimated_output_tokens)
+        if codex_account:
+            if model != "codex-cli":
+                raise ValueError("codex_account quota checks require model=codex-cli")
+            return {
+                "allowed": True,
+                "cost_estimate_usd": cost,
+                "remaining_usd": self.remaining_daily(repo),
+                "quota_scope": "codex_account",
+            }
         remaining = self.remaining_daily(repo)
 
         if remaining < cost:
@@ -382,12 +443,13 @@ class QuotaManager:
                 record.api_key_tokens_input += tokens_input
                 record.api_key_tokens_output += tokens_output
                 record.api_key_cost_usd += cost
+                record.weekly_api_key_cost_usd += cost
             record.total_cost_usd += cost
             self._records[repo] = record
             self._save_records_locked()
 
     def record_execute(self, repo: str) -> None:
-        """Record a codex exec call (flat cost)."""
+        """Record a Codex exec call with a nominal dashboard estimate only."""
         cost = DEFAULT_MODEL_COSTS.get("codex-cli", {}).get("flat", 0.05)
         with self._lock:
             if repo not in self._records:

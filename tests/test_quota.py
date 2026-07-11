@@ -149,6 +149,17 @@ class TestQuotaRecord(unittest.TestCase):
         self.assertEqual(restored.api_key_tokens_input, original.tokens_input)
         self.assertEqual(restored.total_cost_usd, original.total_cost_usd)
 
+    def test_legacy_record_starts_a_fresh_weekly_budget_window(self) -> None:
+        restored = QuotaRecord.from_dict({
+            "repo": "owner/repo",
+            "total_cost_usd": 0.5,
+            "api_key_cost_usd": 0.5,
+            "last_reset_weekly": 0,
+        })
+
+        self.assertEqual(restored.weekly_api_key_cost_usd, 0.0)
+        self.assertGreater(restored.last_reset_weekly, 0)
+
 
 class TestQuotaManager(unittest.TestCase):
     """QuotaManager budget tracking and enforcement."""
@@ -174,24 +185,51 @@ class TestQuotaManager(unittest.TestCase):
         remaining = self.manager.remaining_daily("test/repo")
         self.assertLess(remaining, DEFAULT_DAILY_BUDGET_USD)
 
-    def test_record_execute_reduces_remaining_budget(self) -> None:
+    def test_codex_execute_does_not_consume_api_budget(self) -> None:
         self.manager.record_execute("test/repo")
         remaining = self.manager.remaining_daily("test/repo")
-        self.assertLess(remaining, DEFAULT_DAILY_BUDGET_USD)
+        self.assertEqual(remaining, DEFAULT_DAILY_BUDGET_USD)
+
+    def test_only_trusted_codex_account_checks_ignore_api_budget(self) -> None:
+        self.manager._repo_budgets["test/repo"] = {"daily": 0.05, "weekly": 1.0}
+        self.manager._records["test/repo"] = QuotaRecord(
+            repo="test/repo", total_cost_usd=0.05, api_key_cost_usd=0.05
+        )
+
+        untrusted_result = self.manager.check("test/repo", "codex-cli", "review this pull request")
+        trusted_result = self.manager.check(
+            "test/repo",
+            "codex-cli",
+            "review this pull request",
+            codex_account=True,
+        )
+
+        self.assertFalse(untrusted_result["allowed"])
+        self.assertTrue(trusted_result["allowed"])
+        self.assertEqual(trusted_result["quota_scope"], "codex_account")
+        self.assertEqual(trusted_result["remaining_usd"], 0.0)
 
     def test_runtime_status_reflects_daily_budget_pressure(self) -> None:
         self.assertEqual(self.manager.runtime_status("test/repo")["status"], "ok")
         self.manager._repo_budgets["test/repo"] = {"daily": 0.06, "weekly": 1.0}
-        self.manager.record_execute("test/repo")
+        self.manager._records["test/repo"] = QuotaRecord(
+            repo="test/repo", total_cost_usd=0.05, api_key_cost_usd=0.05
+        )
         self.assertEqual(self.manager.runtime_status("test/repo")["status"], "low")
-        self.manager.record_execute("test/repo")
+        self.manager._records["test/repo"] = QuotaRecord(
+            repo="test/repo", total_cost_usd=0.10, api_key_cost_usd=0.10
+        )
         self.assertEqual(self.manager.runtime_status("test/repo")["status"], "exhausted")
 
     def test_runtime_status_boundary_ratios(self) -> None:
         self.manager._repo_budgets["low/repo"] = {"daily": 1.0, "weekly": 1.0}
-        self.manager._records["low/repo"] = QuotaRecord(repo="low/repo", total_cost_usd=0.75)
+        self.manager._records["low/repo"] = QuotaRecord(
+            repo="low/repo", total_cost_usd=0.75, api_key_cost_usd=0.75
+        )
         self.assertEqual(self.manager.runtime_status("low/repo")["status"], "low")
-        self.manager._records["low/repo"] = QuotaRecord(repo="low/repo", total_cost_usd=0.96)
+        self.manager._records["low/repo"] = QuotaRecord(
+            repo="low/repo", total_cost_usd=0.96, api_key_cost_usd=0.96
+        )
         self.assertEqual(self.manager.runtime_status("low/repo")["status"], "exhausted")
         self.manager._repo_budgets["zero/repo"] = {"daily": 0.0, "weekly": 1.0}
         self.assertEqual(self.manager.runtime_status("zero/repo")["status"], "ok")
@@ -358,6 +396,34 @@ class TestQuotaManager(unittest.TestCase):
         self.assertAlmostEqual(record.codex_cost_usd, 0.0)
         self.assertAlmostEqual(record.legacy_unknown_cost_usd, 0.2)
 
+    def test_historical_codex_only_cost_does_not_consume_api_budget(self) -> None:
+        record = QuotaRecord.from_dict({
+            "repo": "old/codex-only",
+            "codex_calls": 100,
+            "total_cost_usd": 5.0,
+        })
+        self.manager._records[record.repo] = record
+
+        self.assertAlmostEqual(record.api_key_cost_usd, 0.0)
+        self.assertAlmostEqual(record.codex_cost_usd, 5.0)
+        self.assertEqual(self.manager.remaining_daily(record.repo), DEFAULT_DAILY_BUDGET_USD)
+
+    def test_legacy_record_preserves_active_weekly_api_usage(self) -> None:
+        now = time.time()
+        record = QuotaRecord.from_dict({
+            "repo": "old/api",
+            "tokens_input": 1000,
+            "tokens_output": 500,
+            "total_cost_usd": 0.75,
+            "last_reset_weekly": now - 60,
+        })
+
+        self.assertAlmostEqual(record.weekly_api_key_cost_usd, 0.75)
+        self.assertAlmostEqual(record.weekly_legacy_unknown_cost_usd, 0.0)
+        self.manager._repo_budgets[record.repo] = {"daily": 5.0, "weekly": 1.0}
+        self.manager._records[record.repo] = record
+        self.assertAlmostEqual(self.manager.remaining_weekly(record.repo), 0.25)
+
     def test_explicit_legacy_tokens_are_preserved_as_legacy_unknown(self) -> None:
         record = QuotaRecord.from_dict({
             "repo": "old/legacy-explicit",
@@ -419,6 +485,23 @@ class TestQuotaManager(unittest.TestCase):
     def test_get_weekly_budget_respects_repo_overrides(self) -> None:
         self.manager._repo_budgets["premium/repo"] = {"weekly": 250.0}
         self.assertEqual(self.manager.get_weekly_budget("premium/repo"), 250.0)
+
+    def test_weekly_budget_resets_stale_record(self) -> None:
+        self.manager._repo_budgets["test/repo"] = {"daily": 5.0, "weekly": 1.0}
+        self.manager._records["test/repo"] = QuotaRecord(
+            repo="test/repo",
+            total_cost_usd=0.5,
+            api_key_cost_usd=0.5,
+            last_reset_weekly=0,
+            weekly_api_key_cost_usd=0.5,
+        )
+
+        self.assertEqual(self.manager.remaining_weekly("test/repo"), 1.0)
+
+    def test_api_record_reduces_weekly_budget(self) -> None:
+        self.manager.record("test/repo", "claude-sonnet-4-6", "A" * 4000, "B" * 1000)
+
+        self.assertLess(self.manager.remaining_weekly("test/repo"), DEFAULT_DAILY_BUDGET_USD * 5)
 
     def test_records_persist_to_store(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
