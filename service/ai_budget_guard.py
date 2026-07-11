@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import threading
 import time
 import uuid
@@ -95,6 +96,69 @@ class AIBudgetGuard:
         self._timezone = str(self._config.get("billing_timezone") or DEFAULT_BILLING_TIMEZONE)
         self._max_age = max(1, int(_number(self._config.get("usage_max_age_seconds"), DEFAULT_MAX_USAGE_AGE_SECONDS)))
         self._settled_period = self.period()
+        ledger_path = os.environ.get("CODEX_AUDIT_SERVICE_AI_BUDGET_LEDGER_PATH", "").strip()
+        if not ledger_path:
+            job_dir = os.environ.get("CODEX_AUDIT_SERVICE_JOB_DIR", "").strip()
+            ledger_path = str(Path(job_dir) / "ai_budget_ledger.sqlite3") if job_dir else ""
+        self._ledger_path = ledger_path
+        self._init_ledger()
+
+    def _init_ledger(self) -> None:
+        if not self._ledger_path:
+            return
+        try:
+            path = Path(self._ledger_path)
+            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            with sqlite3.connect(path, timeout=30) as db:
+                db.execute(
+                    "CREATE TABLE IF NOT EXISTS ai_budget_ledger (scope TEXT PRIMARY KEY, period TEXT NOT NULL, reserved REAL NOT NULL, settled REAL NOT NULL, baseline REAL, updated_at REAL NOT NULL)"
+                )
+                db.execute(
+                    "CREATE TABLE IF NOT EXISTS ai_budget_reservations (reservation_id TEXT PRIMARY KEY, scope TEXT NOT NULL, amount REAL NOT NULL, task_class TEXT NOT NULL, created_at REAL NOT NULL, baseline_usage REAL)"
+                )
+        except (OSError, sqlite3.Error):
+            self._ledger_path = ""
+
+    def _load_scope_locked(self, scope: str) -> None:
+        if not self._ledger_path:
+            return
+        try:
+            with sqlite3.connect(self._ledger_path, timeout=30) as db:
+                row = db.execute(
+                    "SELECT period,reserved,settled,baseline FROM ai_budget_ledger WHERE scope=?",
+                    (scope,),
+                ).fetchone()
+            if row is None:
+                return
+            period, reserved, settled, baseline = row
+            if period != self._settled_period:
+                return
+            self._reserved[scope] = max(0.0, float(reserved))
+            self._settled[scope] = max(0.0, float(settled))
+            if baseline is not None:
+                self._settled_baseline[scope] = float(baseline)
+        except (OSError, sqlite3.Error, TypeError, ValueError):
+            return
+
+    def _save_scope_locked(self, scope: str) -> None:
+        if not self._ledger_path:
+            return
+        try:
+            with sqlite3.connect(self._ledger_path, timeout=30) as db:
+                db.execute(
+                    "INSERT INTO ai_budget_ledger(scope,period,reserved,settled,baseline,updated_at) VALUES(?,?,?,?,?,?) "
+                    "ON CONFLICT(scope) DO UPDATE SET period=excluded.period,reserved=excluded.reserved,settled=excluded.settled,baseline=excluded.baseline,updated_at=excluded.updated_at",
+                    (
+                        scope,
+                        self._settled_period,
+                        self._reserved.get(scope, 0.0),
+                        self._settled.get(scope, 0.0),
+                        self._settled_baseline.get(scope),
+                        self._clock(),
+                    ),
+                )
+        except (OSError, sqlite3.Error):
+            return
 
     @staticmethod
     def _load_config() -> dict[str, Any]:
@@ -243,6 +307,7 @@ class AIBudgetGuard:
         provider_limit = _number(entry.get("provider_project_limit_usd"), user_limit)
         hard_limit = min(user_limit, provider_limit * 0.80)
         with self._lock:
+            self._load_scope_locked(scope)
             if self._settled_period != current_period:
                 self._settled.clear()
                 self._settled_baseline.clear()
@@ -308,8 +373,11 @@ class AIBudgetGuard:
             reset_at.append(window.get("resets_at"))
         tightest = min(ratios)
         with self._lock:
+            self._load_scope_locked(scope)
             if any(_number(value, 0.0) and _number(value, 0.0) <= self._clock() for value in reset_at):
                 self._settled.pop(scope, None)
+                self._settled_baseline.pop(scope, None)
+                self._save_scope_locked(scope)
             settled = self._settled.get(scope, 0.0)
             reserved = self._reserved.get(scope, 0.0)
         threshold = CODEX_THRESHOLDS.get(task, CODEX_THRESHOLDS["maintenance"])
@@ -349,6 +417,45 @@ class AIBudgetGuard:
             baseline_usage if baseline_usage >= 0 else None,
         )
         with self._lock:
+            if self._ledger_path:
+                try:
+                    with sqlite3.connect(self._ledger_path, timeout=30) as db:
+                        db.execute("BEGIN IMMEDIATE")
+                        row = db.execute(
+                            "SELECT reserved,settled,baseline FROM ai_budget_ledger WHERE scope=? AND period=?",
+                            (scope, self._settled_period),
+                        ).fetchone()
+                        stored_reserved = max(0.0, float(row[0])) if row else 0.0
+                        stored_settled = max(0.0, float(row[1])) if row else 0.0
+                        stored_baseline = float(row[2]) if row and row[2] is not None else None
+                        observed_value = decision.get("observed_usage")
+                        observed = float(observed_value) if isinstance(observed_value, (int, float)) and not isinstance(observed_value, bool) else 0.0
+                        if stored_baseline is not None and observed >= stored_baseline + stored_settled:
+                            stored_settled = 0.0
+                            stored_baseline = None
+                        hard_limit = _number(decision.get("hard_limit"), float("inf"))
+                        if hard_limit != float("inf") and observed + stored_settled + stored_reserved + requested > hard_limit + 1e-12:
+                            return None
+                        new_reserved = stored_reserved + requested
+                        db.execute(
+                            "INSERT INTO ai_budget_ledger(scope,period,reserved,settled,baseline,updated_at) VALUES(?,?,?,?,?,?) "
+                            "ON CONFLICT(scope) DO UPDATE SET period=excluded.period,reserved=excluded.reserved,settled=excluded.settled,baseline=excluded.baseline,updated_at=excluded.updated_at",
+                            (scope, self._settled_period, new_reserved, stored_settled, stored_baseline, self._clock()),
+                        )
+                        db.execute(
+                            "INSERT INTO ai_budget_reservations(reservation_id,scope,amount,task_class,created_at,baseline_usage) VALUES(?,?,?,?,?,?)",
+                            (reservation.reservation_id, reservation.scope, reservation.amount, reservation.task_class, reservation.created_at, reservation.baseline_usage),
+                        )
+                        db.commit()
+                    self._reserved[scope] = new_reserved
+                    self._settled[scope] = stored_settled
+                    if stored_baseline is not None:
+                        self._settled_baseline[scope] = stored_baseline
+                    self._reservations[reservation.reservation_id] = reservation
+                    return reservation
+                except (OSError, sqlite3.Error, TypeError, ValueError):
+                    return None
+            self._load_scope_locked(scope)
             hard_limit = _number(decision.get("hard_limit"), float("inf"))
             observed_value = decision.get("observed_usage")
             if isinstance(observed_value, (int, float)) and not isinstance(observed_value, bool):
@@ -361,20 +468,77 @@ class AIBudgetGuard:
                 return None
             self._reservations[reservation.reservation_id] = reservation
             self._reserved[scope] = self._reserved.get(scope, 0.0) + requested
+            self._save_scope_locked(scope)
         return reservation
 
     def release(self, reservation: Reservation | str) -> bool:
         rid = reservation.reservation_id if isinstance(reservation, Reservation) else str(reservation)
         with self._lock:
+            if self._ledger_path:
+                try:
+                    with sqlite3.connect(self._ledger_path, timeout=30) as db:
+                        db.execute("BEGIN IMMEDIATE")
+                        row = db.execute(
+                            "SELECT scope,amount FROM ai_budget_reservations WHERE reservation_id=?",
+                            (rid,),
+                        ).fetchone()
+                        if row is None:
+                            db.rollback()
+                            return False
+                        scope, amount = row
+                        db.execute(
+                            "UPDATE ai_budget_ledger SET reserved=MAX(0,reserved-?),updated_at=? WHERE scope=?",
+                            (float(amount), self._clock(), scope),
+                        )
+                        db.execute("DELETE FROM ai_budget_reservations WHERE reservation_id=?", (rid,))
+                    self._reservations.pop(rid, None)
+                    self._load_scope_locked(scope)
+                    return True
+                except (OSError, sqlite3.Error, TypeError, ValueError):
+                    return False
             item = self._reservations.pop(rid, None)
             if item is None:
                 return False
             self._reserved[item.scope] = max(0.0, self._reserved.get(item.scope, 0.0) - item.amount)
+            self._save_scope_locked(item.scope)
             return True
 
     def settle(self, reservation: Reservation | str, actual_cost: float) -> bool:
         rid = reservation.reservation_id if isinstance(reservation, Reservation) else str(reservation)
         with self._lock:
+            if self._ledger_path:
+                try:
+                    amount = max(0.0, _number(actual_cost))
+                    with sqlite3.connect(self._ledger_path, timeout=30) as db:
+                        db.execute("BEGIN IMMEDIATE")
+                        row = db.execute(
+                            "SELECT scope,amount,baseline_usage FROM ai_budget_reservations WHERE reservation_id=?",
+                            (rid,),
+                        ).fetchone()
+                        if row is None:
+                            db.rollback()
+                            return False
+                        scope, reserved_amount, baseline_usage = row
+                        ledger = db.execute(
+                            "SELECT period,settled,baseline FROM ai_budget_ledger WHERE scope=?",
+                            (scope,),
+                        ).fetchone()
+                        period = ledger[0] if ledger else self._settled_period
+                        settled = float(ledger[1]) if ledger else 0.0
+                        baseline = ledger[2] if ledger else None
+                        if baseline is None:
+                            baseline = baseline_usage
+                        db.execute(
+                            "INSERT INTO ai_budget_ledger(scope,period,reserved,settled,baseline,updated_at) VALUES(?,?,?,?,?,?) "
+                            "ON CONFLICT(scope) DO UPDATE SET reserved=MAX(0,ai_budget_ledger.reserved-?),settled=ai_budget_ledger.settled+?,baseline=COALESCE(ai_budget_ledger.baseline,excluded.baseline),updated_at=excluded.updated_at",
+                            (scope, period, max(0.0, float(reserved_amount)), settled + amount, baseline, self._clock(), float(reserved_amount), amount),
+                        )
+                        db.execute("DELETE FROM ai_budget_reservations WHERE reservation_id=?", (rid,))
+                    self._reservations.pop(rid, None)
+                    self._load_scope_locked(scope)
+                    return True
+                except (OSError, sqlite3.Error, TypeError, ValueError):
+                    return False
             item = self._reservations.pop(rid, None)
             if item is None:
                 return False
@@ -385,6 +549,7 @@ class AIBudgetGuard:
                 if item.baseline_usage is not None:
                     self._settled_baseline.setdefault(item.scope, item.baseline_usage)
                 self._settled[item.scope] += amount
+            self._save_scope_locked(item.scope)
             return True
 
 

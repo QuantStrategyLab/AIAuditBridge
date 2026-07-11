@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 from service.ai_budget_guard import AIBudgetGuard, DECISION_SCHEMA
 
@@ -55,6 +56,18 @@ def test_nested_budget_scope_resolves_repo_and_task_class() -> None:
     )
     assert decision["decision"] == "allow"
     assert decision["hard_limit"] == 9.6
+
+
+def test_sqlite_ledger_shares_atomic_reservations_between_guard_instances(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_AUDIT_SERVICE_AI_BUDGET_LEDGER_PATH", str(tmp_path / "ledger.sqlite3"))
+    config = {"monthly_budgets": {"openai": {"user_monthly_budget_usd": 10}}}
+    first_guard = AIBudgetGuard(config)
+    second_guard = AIBudgetGuard(config)
+    snapshot = {"updated_at": time.time(), "used_usd": 0}
+    first = first_guard.preflight(task_class="review", provider="openai", estimated_cost_usd=6, usage_snapshot=snapshot)
+    second = second_guard.preflight(task_class="review", provider="openai", estimated_cost_usd=6, usage_snapshot=snapshot)
+    assert first_guard.reserve(first, 6) is not None
+    assert second_guard.reserve(second, 6) is None
 
 
 def test_stale_usage_fails_closed_and_does_not_fallback() -> None:

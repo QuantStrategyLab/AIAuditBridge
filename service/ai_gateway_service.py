@@ -1674,8 +1674,8 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             if review_reservations:
                 from service.ai_budget_guard import get_ai_budget_guard
 
-                for reservation_id, _cost in review_reservations:
-                    get_ai_budget_guard().release(reservation_id)
+                for reservation_id, estimated_cost in review_reservations:
+                    get_ai_budget_guard().settle(reservation_id, estimated_cost)
             if codex_reservation_id:
                 from service.ai_budget_guard import get_ai_budget_guard
 
