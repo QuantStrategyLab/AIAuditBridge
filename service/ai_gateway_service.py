@@ -1614,7 +1614,11 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         ]
         _audit_log("review_started", reviewers=req.reviewers, verifier=req.verifier,
                    changed_paths_count=len(changed_paths))
-        review_repo = str(payload.get("source_repository") or "unknown")
+        review_repo = str(
+            payload.get("source_repository")
+            or claims.get("repository")
+            or "unknown"
+        )
         codex_quota: dict[str, Any] | None = None
         codex_reservation_id = ""
         if req.verifier == "codex":
