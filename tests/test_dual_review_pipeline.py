@@ -74,7 +74,7 @@ class DualReviewPipelineTests(unittest.TestCase):
         self.assertEqual(result["skipped"], ["reviewers_unavailable"])
         self.assertTrue(result["degraded"])
         self.assertEqual(result["warning"], "all configured reviewers are unavailable")
-        self.assertEqual(result["dispatch"]["skipped"], ["reviewers_unavailable"])
+        self.assertNotIn("dispatch", result)
 
     @patch.dict("os.environ", {"DUAL_REVIEW_GATE_SKIP": "1"}, clear=False)
     def test_from_evidence_cli_without_trigger_flags(self) -> None:

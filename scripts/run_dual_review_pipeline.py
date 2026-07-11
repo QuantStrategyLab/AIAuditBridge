@@ -139,7 +139,7 @@ def run_pipeline(
         result["skipped"] = ["reviewers_unavailable"]
         result["degraded"] = True
         result["warning"] = "all configured reviewers are unavailable"
-    if dispatch:
+    elif dispatch:
         result["dispatch"] = dispatch_dual_review_result(outcome, dry_run=dry_run)
     result["ok"] = True
     return result

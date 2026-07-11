@@ -22,6 +22,7 @@ DEFAULT_ESCALATION_THRESHOLD = 0.8
 _PASS_VALUES = frozenset({"pass", "approve", "approved", "accept", "accepted"})
 _FAIL_VALUES = frozenset({"fail", "reject", "rejected", "deny", "denied", "block", "blocked"})
 _UNAVAILABLE_VALUES = frozenset({"unavailable"})
+_INVALID_VALUES = frozenset({"invalid"})
 
 
 class DualReviewTrigger(str, Enum):
@@ -42,6 +43,8 @@ def _normalize_verdict(value: Any) -> str | None:
         return VERDICT_FAIL
     if normalized in _UNAVAILABLE_VALUES:
         return VERDICT_UNAVAILABLE
+    if normalized in _INVALID_VALUES:
+        return VERDICT_INVALID
     return None
 
 
@@ -100,7 +103,10 @@ def compare_three_reviews(
     claude_verdict = _extract_verdict(claude_review)
 
     verdicts = (primary_verdict, gpt_verdict, claude_verdict)
-    if any(verdict is None for verdict in verdicts):
+    if VERDICT_INVALID in verdicts:
+        verdict = VERDICT_DISAGREEMENT
+        reason = "one or more reviewer responses are invalid"
+    elif any(verdict is None for verdict in verdicts):
         verdict = VERDICT_DISAGREEMENT
         reason = "missing or unrecognized review verdict in primary/gpt/claude"
     elif all(verdict == VERDICT_UNAVAILABLE for verdict in verdicts):
@@ -145,7 +151,10 @@ def compare_reviews(primary: dict[str, Any], secondary: dict[str, Any]) -> dict[
     primary_confidence = _extract_confidence(primary)
     secondary_confidence = _extract_confidence(secondary)
 
-    if primary_verdict is None or secondary_verdict is None:
+    if VERDICT_INVALID in {primary_verdict, secondary_verdict}:
+        verdict = VERDICT_DISAGREEMENT
+        reason = "one or more reviewer responses are invalid"
+    elif primary_verdict is None or secondary_verdict is None:
         verdict = VERDICT_DISAGREEMENT
         reason = "missing or unrecognized review verdict"
     elif primary_verdict == secondary_verdict == VERDICT_UNAVAILABLE:
