@@ -110,6 +110,25 @@ class DashboardSnapshotTests(unittest.TestCase):
         self.assertEqual(payload["strategies"], [])
         self.assertEqual(payload["summary"]["strategy_count"], 0)
 
+    def test_non_finite_review_metrics_are_dropped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            health = root / "health.json"
+            health.write_text(json.dumps({
+                "strategies": [{"strategy_profile": "safe", "domain": "crypto", "status": "healthy"}],
+            }), encoding="utf-8")
+            reviews = root / "reviews"
+            reviews.mkdir()
+            (reviews / "safe.json").write_text(
+                '{"profile":"safe","validation":{"bad":NaN,"good":1}}',
+                encoding="utf-8",
+            )
+
+            payload = build_payload(health_file=health, review_dir=reviews)
+
+        self.assertNotIn("bad", payload["strategies"][0]["review"]["validation"])
+        self.assertEqual(payload["strategies"][0]["review"]["validation"]["good"], 1)
+
     def test_redacts_untrusted_review_fields_and_keeps_missing_scores_null(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

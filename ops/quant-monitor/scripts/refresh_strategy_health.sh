@@ -8,11 +8,15 @@ OUTPUT="$ROOT/data/health/strategy_health_dashboard.v1.json"
 REVIEW_DIR="${QUANT_REVIEW_DIR:-$ROOT/data/strategy-reviews}"
 mkdir -p "$HEALTH_DIR" "$(dirname "$OUTPUT")"
 
-if ! command -v quant-lifecycle >/dev/null 2>&1; then
+write_unavailable_snapshot() {
   python3 "$ROOT/scripts/build_dashboard_snapshot.py" \
-    --health-file "$HEALTH_FILE" \
+    --health-file "$HEALTH_DIR/.collector-unavailable.json" \
     --review-dir "$REVIEW_DIR" \
     --output "$OUTPUT"
+}
+
+if ! command -v quant-lifecycle >/dev/null 2>&1; then
+  write_unavailable_snapshot
   echo "[dashboard] quant-lifecycle not installed; wrote an unavailable payload" >&2
   exit 1
 fi
@@ -55,11 +59,8 @@ run_lifecycle_dashboard() {
 }
 
 if ! run_lifecycle_dashboard; then
-  python3 "$ROOT/scripts/build_dashboard_snapshot.py" \
-    --health-file "$HEALTH_FILE" \
-    --review-dir "$REVIEW_DIR" \
-    --output "$OUTPUT"
-  echo "[dashboard] lifecycle dashboard failed; kept the last payload" >&2
+  write_unavailable_snapshot
+  echo "[dashboard] lifecycle dashboard failed; wrote an unavailable payload" >&2
   exit 1
 fi
 

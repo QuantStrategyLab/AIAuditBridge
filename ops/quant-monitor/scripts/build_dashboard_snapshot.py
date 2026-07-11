@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -137,7 +138,11 @@ def _clean_summary(value: Any) -> dict[str, bool | float | int | str]:
             continue
         if any(marker in key.lower() for marker in ("token", "secret", "password", "cookie", "private", "path", "key")):
             continue
-        if isinstance(raw, bool) or (isinstance(raw, (int, float)) and not isinstance(raw, bool)):
+        if isinstance(raw, bool) or (
+            isinstance(raw, (int, float))
+            and not isinstance(raw, bool)
+            and math.isfinite(raw)
+        ):
             result[key] = raw
         elif isinstance(raw, str) and _clean_text(raw, 120) is not None:
             result[key] = raw.strip()
@@ -293,7 +298,10 @@ def main() -> int:
 
     payload = build_payload(health_file=args.health_file, review_dir=args.review_dir)
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    args.output.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
+        encoding="utf-8",
+    )
     print(json.dumps({"output": args.output.name, "data_status": payload["data_status"], "strategies": len(payload["strategies"])}, ensure_ascii=False))
     return 0
 
