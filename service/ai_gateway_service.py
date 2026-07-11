@@ -1537,6 +1537,10 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
 
                 get_ai_budget_guard().release(reservation_id)
             raise
+        if reservation_id and bool(job.get("deduped")):
+            from service.ai_budget_guard import get_ai_budget_guard
+
+            get_ai_budget_guard().release(reservation_id)
         get_health_monitor().record("/v1/ai/execute/jobs", time.time() - started, True)
         _json_response(self, HTTPStatus.ACCEPTED, job)
 

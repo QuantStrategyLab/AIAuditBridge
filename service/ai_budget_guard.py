@@ -567,6 +567,7 @@ class AIBudgetGuard:
                         stored_baseline = float(row[2]) if row and row[2] is not None else None
                         aggregate_reserved = max(0.0, float(aggregate_row[0])) if aggregate_row else 0.0
                         aggregate_settled = max(0.0, float(aggregate_row[1])) if aggregate_row else 0.0
+                        aggregate_baseline = float(aggregate_row[2]) if aggregate_row and aggregate_row[2] is not None else None
                         observed_value = decision.get("observed_usage")
                         observed = float(observed_value) if isinstance(observed_value, (int, float)) and not isinstance(observed_value, bool) else 0.0
                         aggregate_observed_value = decision.get("aggregate_observed_usage")
@@ -591,7 +592,7 @@ class AIBudgetGuard:
                             db.execute(
                                 "INSERT INTO ai_budget_ledger(scope,period,reserved,settled,baseline,updated_at) VALUES(?,?,?,?,?,?) "
                                 "ON CONFLICT(scope,period) DO UPDATE SET reserved=excluded.reserved,settled=excluded.settled,baseline=excluded.baseline,updated_at=excluded.updated_at",
-                                (aggregate_scope, self._settled_period, aggregate_reserved + requested, aggregate_settled, None, self._clock()),
+                                (aggregate_scope, self._settled_period, aggregate_reserved + requested, aggregate_settled, aggregate_baseline, self._clock()),
                             )
                         db.execute(
                             "INSERT INTO ai_budget_reservations(reservation_id,scope,aggregate_scope,period,amount,task_class,created_at,baseline_usage) VALUES(?,?,?,?,?,?,?,?)",
@@ -605,6 +606,8 @@ class AIBudgetGuard:
                         self._settled[aggregate_scope] = aggregate_settled
                     if stored_baseline is not None:
                         self._settled_baseline[scope] = stored_baseline
+                    if aggregate_scope != scope and aggregate_baseline is not None:
+                        self._settled_baseline[aggregate_scope] = aggregate_baseline
                     self._reservations[reservation.reservation_id] = reservation
                     return reservation
                 except (OSError, sqlite3.Error, TypeError, ValueError):
