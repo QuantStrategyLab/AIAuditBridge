@@ -1448,9 +1448,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         started = time.time()
         adapter = LlmAdapter()
         reservation_id = str(qr.get("budget_reservation_id") or "")
-        dispatch_started = False
         try:
-            dispatch_started = True
             result = adapter.complete(
                 model=resolved_model, system=req.system, user=req.prompt,
                 max_tokens=req.max_tokens, timeout=req.timeout_seconds,
@@ -1459,11 +1457,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             if reservation_id:
                 from service.ai_budget_guard import get_ai_budget_guard
 
-                guard = get_ai_budget_guard()
-                if dispatch_started:
-                    guard.settle(reservation_id, float(qr.get("cost_estimate_usd") or 0.0))
-                else:
-                    guard.release(reservation_id)
+                get_ai_budget_guard().release(reservation_id)
             raise
         if reservation_id:
             from service.ai_budget_guard import get_ai_budget_guard
@@ -1565,11 +1559,9 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         quota.record_execute(quota_repo)
         adapter = CodexAdapter()
         reservation_id = str(qr.get("budget_reservation_id") or "")
-        dispatch_started = False
         try:
             sandbox = _validate_sandbox(str(payload.get("sandbox") or ""))
             reasoning_effort = _resolve_codex_reasoning_effort(payload, str(payload.get("task") or TASK_EXECUTE))
-            dispatch_started = True
             result = adapter.execute(
                 prompt=req.prompt,
                 sandbox=sandbox,
@@ -1581,11 +1573,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             if reservation_id:
                 from service.ai_budget_guard import get_ai_budget_guard
 
-                guard = get_ai_budget_guard()
-                if dispatch_started:
-                    guard.settle(reservation_id, 0.10)
-                else:
-                    guard.release(reservation_id)
+                get_ai_budget_guard().release(reservation_id)
             raise
         if reservation_id:
             from service.ai_budget_guard import get_ai_budget_guard
@@ -1718,11 +1706,9 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         codex_result = None
         if req.verifier == "codex" and codex_quota is not None:
             get_quota_manager().record_execute(review_repo)
-            codex_dispatch_started = False
             try:
                 codex_sandbox = _validate_sandbox("read-only")
                 codex_reasoning_effort = _resolve_codex_reasoning_effort(payload, TASK_REVIEW)
-                codex_dispatch_started = True
                 codex_result = codex.execute(
                     prompt=req.prompt,
                     sandbox=codex_sandbox,
@@ -1733,11 +1719,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 if codex_reservation_id:
                     from service.ai_budget_guard import get_ai_budget_guard
 
-                    guard = get_ai_budget_guard()
-                    if codex_dispatch_started:
-                        guard.settle(codex_reservation_id, 0.10)
-                    else:
-                        guard.release(codex_reservation_id)
+                    get_ai_budget_guard().release(codex_reservation_id)
                 raise
             if codex_reservation_id:
                 from service.ai_budget_guard import get_ai_budget_guard

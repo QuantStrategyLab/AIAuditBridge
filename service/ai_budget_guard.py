@@ -358,13 +358,15 @@ class AIBudgetGuard:
         hard_limit = min(user_limit, provider_limit * 0.80)
         aggregate_hard_limit = max(0.0, provider_limit * 0.80)
         with self._lock:
+            if self._settled_period != current_period:
+                self._reserved.clear()
+                self._settled.clear()
+                self._settled_baseline.clear()
+                self._reservations.clear()
+                self._settled_period = current_period
             self._load_scope_locked(scope)
             if aggregate_scope != scope:
                 self._load_scope_locked(aggregate_scope)
-            if self._settled_period != current_period:
-                self._settled.clear()
-                self._settled_baseline.clear()
-                self._settled_period = current_period
             reserved = self._reserved.get(scope, 0.0)
             settled = self._reconcile_settled_locked(scope, 0.0)
             aggregate_reserved = self._reserved.get(aggregate_scope, 0.0)
@@ -458,6 +460,12 @@ class AIBudgetGuard:
             reset_at.append(window.get("resets_at"))
         tightest = min(ratios)
         with self._lock:
+            if self._settled_period != period:
+                self._reserved.clear()
+                self._settled.clear()
+                self._settled_baseline.clear()
+                self._reservations.clear()
+                self._settled_period = period
             self._load_scope_locked(scope)
             if any(
                 (parsed := _reset_timestamp(value)) is not None and parsed <= self._clock()
@@ -530,6 +538,16 @@ class AIBudgetGuard:
             aggregate_scope,
         )
         with self._lock:
+            current_period = self.period()
+            decision_period = str(decision.get("period") or current_period)
+            if decision_period != current_period:
+                return None
+            if self._settled_period != current_period:
+                self._reserved.clear()
+                self._settled.clear()
+                self._settled_baseline.clear()
+                self._reservations.clear()
+                self._settled_period = current_period
             if self._ledger_path:
                 try:
                     with sqlite3.connect(self._ledger_path, timeout=30) as db:
@@ -651,6 +669,8 @@ class AIBudgetGuard:
             item = self._reservations.pop(rid, None)
             if item is None:
                 return False
+            if item.period != self.period():
+                return True
             self._reserved[item.scope] = max(0.0, self._reserved.get(item.scope, 0.0) - item.amount)
             if item.aggregate_scope != item.scope:
                 self._reserved[item.aggregate_scope] = max(0.0, self._reserved.get(item.aggregate_scope, 0.0) - item.amount)
@@ -705,6 +725,8 @@ class AIBudgetGuard:
             item = self._reservations.pop(rid, None)
             if item is None:
                 return False
+            if item.period != self.period():
+                return True
             self._reserved[item.scope] = max(0.0, self._reserved.get(item.scope, 0.0) - item.amount)
             if item.aggregate_scope != item.scope:
                 self._reserved[item.aggregate_scope] = max(0.0, self._reserved.get(item.aggregate_scope, 0.0) - item.amount)

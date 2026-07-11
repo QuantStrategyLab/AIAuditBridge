@@ -111,7 +111,7 @@ jobs:
           CODEX_PR_REVIEW_API_FALLBACK_INPUT: ${{ inputs.api_fallback_enabled }}
           CODEX_PR_REVIEW_DIRECT_API_PRIMARY_INPUT: ${{ inputs.direct_api_primary_enabled }}
           CODEX_PR_REVIEW_API_FALLBACK_DEFAULT: ${{ vars.CODEX_PR_REVIEW_API_FALLBACK_ENABLED || 'false' }}
-          CODEX_PR_REVIEW_DIRECT_API_PRIMARY_DEFAULT: ${{ vars.CODEX_PR_REVIEW_DIRECT_API_PRIMARY_ENABLED || 'false' }}
+          CODEX_PR_REVIEW_DIRECT_API_PRIMARY_DEFAULT: ${{ vars.CODEX_PR_REVIEW_DIRECT_API_PRIMARY_ENABLED || 'true' }}
         working-directory: source
         run: |
           set -euo pipefail
