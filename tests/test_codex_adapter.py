@@ -29,6 +29,16 @@ class CodexAdapterDispatchTests(unittest.TestCase):
         self.assertFalse(result.dispatch_started)
         self.assertTrue(result.dispatch_uncertain)
 
+    def test_prelaunch_command_failure_is_not_dispatched(self) -> None:
+        with patch(
+            "service.adapters.codex_adapter._codex_command",
+            side_effect=RuntimeError("codex CLI was not found on the service host"),
+        ):
+            result = CodexAdapter().execute(prompt="review")
+
+        self.assertFalse(result.dispatch_started)
+        self.assertFalse(result.dispatch_uncertain)
+
 
 if __name__ == "__main__":
     unittest.main()

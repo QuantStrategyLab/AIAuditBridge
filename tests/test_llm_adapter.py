@@ -32,6 +32,16 @@ class LlmAdapterFailureTests(unittest.TestCase):
         self.assertEqual(results[0].error, "worker failed")
         self.assertTrue(results[0].dispatch_uncertain)
 
+    def test_provider_rejection_is_not_ambiguous_dispatch(self) -> None:
+        with patch(
+            "service.adapters.llm_adapter._openai_completion",
+            side_effect=LlmAdapterError("OpenAI HTTP 401: invalid API key"),
+        ):
+            result = LlmAdapter().complete(model="gpt-5.4-mini", user="review")
+
+        self.assertFalse(result.dispatch_started)
+        self.assertFalse(result.dispatch_uncertain)
+
 
 if __name__ == "__main__":
     unittest.main()

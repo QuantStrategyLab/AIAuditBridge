@@ -125,16 +125,20 @@ class CodexAdapter:
         with tempfile.TemporaryDirectory() as tmp:
             output_last_message = Path(tmp) / "codex-final-message.md"
             try:
+                command = _codex_command(
+                    output_last_message,
+                    sandbox=sandbox,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                    output_schema=output_schema,
+                    cwd=cwd,
+                    images=images,
+                )
+            except (RuntimeError, ValueError) as exc:
+                return CodexResult(success=False, error=f"codex command configuration failed: {exc}")
+            try:
                 completed = subprocess.run(
-                    _codex_command(
-                        output_last_message,
-                        sandbox=sandbox,
-                        model=model,
-                        reasoning_effort=reasoning_effort,
-                        output_schema=output_schema,
-                        cwd=cwd,
-                        images=images,
-                    ),
+                    command,
                     input=prompt,
                     text=True,
                     stdout=subprocess.PIPE,

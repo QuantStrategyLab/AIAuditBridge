@@ -1178,17 +1178,19 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
         adapter = CodexAdapter()
         sandbox = _validate_sandbox(str(payload.get("sandbox") or ""))
         reasoning_effort = _resolve_codex_reasoning_effort(payload, str(payload.get("task") or TASK_EXECUTE))
+        prompt = str(payload["prompt"])
+        timeout = int(payload.get("timeout_seconds", 2700))
         # A process crash at this boundary cannot prove whether the provider
         # accepted work.  Preserve that uncertainty without settling it.
         job["dispatch_state"] = "pending_uncertain"
         job["updated_at"] = _now()
         _write_job(job)
         result = adapter.execute(
-            prompt=str(payload["prompt"]),
+            prompt=prompt,
             sandbox=sandbox,
             model=str(payload.get("model") or "").strip() or None,
             reasoning_effort=reasoning_effort,
-            timeout=int(payload.get("timeout_seconds", 2700)),
+            timeout=timeout,
         )
         job = _read_job(job_id)
         job["dispatch_started"] = bool(getattr(result, "dispatch_started", False))

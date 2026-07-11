@@ -107,6 +107,23 @@ def resolve_model(model: str) -> tuple[str, str]:
     return PROVIDER_ANTHROPIC, DEFAULT_ANTHROPIC_MODEL
 
 
+def _dispatch_is_uncertain(error: str) -> bool:
+    """Keep capacity only when provider acceptance cannot be disproven."""
+    text = error.lower()
+    if "api_key is not configured" in text:
+        return False
+    if any(f"http {status}" in text for status in range(400, 500)):
+        return False
+    return not any(marker in text for marker in (
+        "invalid model",
+        "unsupported model",
+        "validation",
+        "malformed",
+        "missing required",
+        "not configured",
+    ))
+
+
 # ── OpenAI ─────────────────────────────────────────────────────────────
 
 
@@ -283,7 +300,6 @@ class LlmAdapter:
                 dispatch_started=True,
             )
         except LlmAdapterError as exc:
-            not_dispatched = "API_KEY is not configured" in str(exc)
             return LlmResult(
                 provider=provider,
                 model=resolved_model,
@@ -292,7 +308,7 @@ class LlmAdapter:
                 error=str(exc),
                 latency_seconds=time.time() - started,
                 dispatch_started=False,
-                dispatch_uncertain=not not_dispatched,
+                dispatch_uncertain=_dispatch_is_uncertain(str(exc)),
             )
 
     def parallel_review(
