@@ -228,6 +228,10 @@ class AIBudgetGuard:
                 self._settled_period = current_period
             reserved = self._reserved.get(scope, 0.0)
             settled = self._settled.get(scope, 0.0)
+            # Once the provider snapshot includes the locally settled amount,
+            # drop the local delta to avoid double counting.
+            if used >= settled:
+                settled = 0.0
         remaining = hard_limit - used - settled - reserved - amount
         if remaining < 0:
             reason = "monthly_hard_limit_reached" if remaining <= 0 else "monthly_budget_insufficient"
@@ -310,7 +314,10 @@ class AIBudgetGuard:
         with self._lock:
             hard_limit = _number(decision.get("hard_limit"), float("inf"))
             observed = _number(decision.get("observed_usage"), 0.0)
-            if hard_limit != float("inf") and observed + self._settled.get(scope, 0.0) + self._reserved.get(scope, 0.0) + requested > hard_limit + 1e-12:
+            settled = self._settled.get(scope, 0.0)
+            if observed >= settled:
+                settled = 0.0
+            if hard_limit != float("inf") and observed + settled + self._reserved.get(scope, 0.0) + requested > hard_limit + 1e-12:
                 return None
             self._reservations[reservation.reservation_id] = reservation
             self._reserved[scope] = self._reserved.get(scope, 0.0) + requested
@@ -332,7 +339,8 @@ class AIBudgetGuard:
             if item is None:
                 return False
             self._reserved[item.scope] = max(0.0, self._reserved.get(item.scope, 0.0) - item.amount)
-            self._settled[item.scope] = self._settled.get(item.scope, 0.0) + max(0.0, _number(actual_cost))
+            if not item.scope.startswith("codex/"):
+                self._settled[item.scope] = self._settled.get(item.scope, 0.0) + max(0.0, _number(actual_cost))
             return True
 
 

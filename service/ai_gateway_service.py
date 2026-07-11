@@ -1627,6 +1627,12 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 for reservation_id, _cost in review_reservations:
                     get_ai_budget_guard().release(reservation_id)
             raise
+        if review_reservations:
+            from service.ai_budget_guard import get_ai_budget_guard
+
+            for reservation_id, estimated_cost in review_reservations:
+                get_ai_budget_guard().settle(reservation_id, estimated_cost)
+            review_reservations = []
 
         # Step 2: optional Codex verification
         codex_result = None
@@ -1670,12 +1676,6 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 from service.ai_budget_guard import get_ai_budget_guard
 
                 get_ai_budget_guard().settle(codex_reservation_id, 0.10 if codex_result.success else 0.0)
-
-        if review_reservations:
-            from service.ai_budget_guard import get_ai_budget_guard
-
-            for reservation_id, estimated_cost in review_reservations:
-                get_ai_budget_guard().settle(reservation_id, estimated_cost)
 
         # Step 3: build per-reviewer results with extracted confidence
         results: list[dict[str, Any]] = []
