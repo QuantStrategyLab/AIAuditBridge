@@ -46,7 +46,7 @@ jobs:
           python3 -m pip install pytest ruff
           python3 -m pip check
           python3 -m ruff check .
-          python3 -m pytest tests -q
+          python3 -m pytest tests ops/quant-monitor/tests -q
 
       - uses: actions/setup-node@v6
         with:

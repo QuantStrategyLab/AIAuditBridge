@@ -39,3 +39,25 @@ sudo systemctl daemon-reload && sudo systemctl enable --now codex-quant.service
 ```
 
 收盘简报 + AIAuditBridge 分发：`bash scripts/daily_briefing_pipeline.sh`
+
+## 策略健康快照（只读）
+
+`health_cycle.py` 会把生命周期 dashboard 规范化为
+`data/health/strategy_health_dashboard.v1.json`。也可以单独刷新：
+
+```bash
+bash scripts/refresh_strategy_health.sh
+```
+
+刷新脚本兼容支持或不支持 `--output-dir` 的 `quant-lifecycle dashboard` CLI；旧 CLI
+的临时输出只在 monitor 数据目录内处理。没有可用输入时输出 `unavailable`，不会生成演示指标。
+
+默认不向外同步。只有在显式设置 `STRATEGY_HEALTH_PUBLISH=1`、专用
+`STRATEGY_HEALTH_SYNC_URL` 和 `STRATEGY_HEALTH_SYNC_TOKEN` 后，才运行：
+
+```bash
+bash scripts/publish_strategy_health.sh
+```
+
+发布脚本只接受 `strategy_health_dashboard.v1`，不回退使用其他 token，也不把 token
+或原始错误写入输出。

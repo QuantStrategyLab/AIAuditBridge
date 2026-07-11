@@ -75,6 +75,17 @@ def main() -> int:
 
     strategies: list[dict[str, Any]] = []
     json_path = dash_dir / "strategy_health_dashboard.json"
+    from build_dashboard_snapshot import build_payload
+
+    normalized_path = out_dir / "strategy_health_dashboard.v1.json"
+    normalized_payload = build_payload(
+        health_file=json_path,
+        review_dir=root / "data" / "strategy-reviews",
+    )
+    normalized_path.write_text(
+        json.dumps(normalized_payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
     if json_path.is_file():
         payload = json.loads(json_path.read_text(encoding="utf-8"))
         if isinstance(payload.get("strategies"), list):
