@@ -14,7 +14,7 @@ import sqlite3
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -93,6 +93,7 @@ class Reservation:
     baseline_usage: float | None = None
     period: str = ""
     aggregate_scope: str = ""
+    state: str = "reserved"
 
 
 class AIBudgetGuard:
@@ -132,7 +133,7 @@ class AIBudgetGuard:
                     "CREATE TABLE IF NOT EXISTS ai_budget_ledger (scope TEXT NOT NULL, period TEXT NOT NULL, reserved REAL NOT NULL, settled REAL NOT NULL, baseline REAL, updated_at REAL NOT NULL, PRIMARY KEY(scope, period))"
                 )
                 db.execute(
-                    "CREATE TABLE IF NOT EXISTS ai_budget_reservations (reservation_id TEXT PRIMARY KEY, scope TEXT NOT NULL, aggregate_scope TEXT NOT NULL, period TEXT NOT NULL, amount REAL NOT NULL, task_class TEXT NOT NULL, created_at REAL NOT NULL, baseline_usage REAL)"
+                    "CREATE TABLE IF NOT EXISTS ai_budget_reservations (reservation_id TEXT PRIMARY KEY, scope TEXT NOT NULL, aggregate_scope TEXT NOT NULL, period TEXT NOT NULL, amount REAL NOT NULL, task_class TEXT NOT NULL, created_at REAL NOT NULL, baseline_usage REAL, state TEXT NOT NULL DEFAULT 'reserved')"
                 )
                 columns = {
                     row[1]
@@ -144,6 +145,10 @@ class AIBudgetGuard:
                     )
                     db.execute(
                         "UPDATE ai_budget_reservations SET aggregate_scope=scope WHERE aggregate_scope=''"
+                    )
+                if "state" not in columns:
+                    db.execute(
+                        "ALTER TABLE ai_budget_reservations ADD COLUMN state TEXT NOT NULL DEFAULT 'reserved'"
                     )
         except (OSError, sqlite3.Error):
             self._ledger_error = True
@@ -490,25 +495,27 @@ class AIBudgetGuard:
             reset_key = aggregate_scope
             if reset_event is not None and reset_event <= self._clock() and reset_event > self._codex_reset_events.get(reset_key, 0.0):
                 self._codex_reset_events[reset_key] = reset_event
+                scope_prefix = f"codex/{provider_scope or 'default'}/"
                 for key in list(self._reserved):
-                    if key.startswith("codex/"):
+                    if key.startswith(scope_prefix):
                         self._reserved.pop(key, None)
                 for key in list(self._settled):
-                    if key.startswith("codex/"):
+                    if key.startswith(scope_prefix):
                         self._settled.pop(key, None)
                 for key in list(self._settled_baseline):
-                    if key.startswith("codex/"):
+                    if key.startswith(scope_prefix):
                         self._settled_baseline.pop(key, None)
                 for reservation_id, reservation in list(self._reservations.items()):
-                    if reservation.scope.startswith("codex/") or reservation.aggregate_scope.startswith("codex/"):
+                    if reservation.scope.startswith(scope_prefix) or reservation.aggregate_scope.startswith(scope_prefix):
                         self._reservations.pop(reservation_id, None)
                 if self._ledger_path:
                     try:
                         with sqlite3.connect(self._ledger_path, timeout=30) as db:
                             db.execute(
-                                "DELETE FROM ai_budget_reservations WHERE scope LIKE 'codex/%' OR aggregate_scope LIKE 'codex/%'"
+                                "DELETE FROM ai_budget_reservations WHERE scope LIKE ? OR aggregate_scope LIKE ?",
+                                (f"{scope_prefix}%", f"{scope_prefix}%"),
                             )
-                            db.execute("DELETE FROM ai_budget_ledger WHERE scope LIKE 'codex/%'")
+                            db.execute("DELETE FROM ai_budget_ledger WHERE scope LIKE ?", (f"{scope_prefix}%",))
                     except (OSError, sqlite3.Error):
                         pass
             settled = self._settled.get(scope, 0.0)
@@ -615,8 +622,8 @@ class AIBudgetGuard:
                                 (aggregate_scope, self._settled_period, aggregate_reserved + requested, aggregate_settled, aggregate_baseline, self._clock()),
                             )
                         db.execute(
-                            "INSERT INTO ai_budget_reservations(reservation_id,scope,aggregate_scope,period,amount,task_class,created_at,baseline_usage) VALUES(?,?,?,?,?,?,?,?)",
-                            (reservation.reservation_id, reservation.scope, reservation.aggregate_scope, reservation.period, reservation.amount, reservation.task_class, reservation.created_at, reservation.baseline_usage),
+                            "INSERT INTO ai_budget_reservations(reservation_id,scope,aggregate_scope,period,amount,task_class,created_at,baseline_usage,state) VALUES(?,?,?,?,?,?,?,?,?)",
+                            (reservation.reservation_id, reservation.scope, reservation.aggregate_scope, reservation.period, reservation.amount, reservation.task_class, reservation.created_at, reservation.baseline_usage, reservation.state),
                         )
                         db.commit()
                     self._load_scope_locked(scope)
@@ -652,6 +659,62 @@ class AIBudgetGuard:
             if aggregate_scope != scope:
                 self._save_scope_locked(aggregate_scope)
         return reservation
+
+    def mark_uncertain(self, reservation: Reservation | str) -> bool:
+        """Persist an ambiguous provider dispatch without refunding its reservation.
+
+        This is deliberately neither release nor settle: only an explicit
+        provider/idempotency reconciliation can decide the final outcome.
+        """
+        rid = reservation.reservation_id if isinstance(reservation, Reservation) else str(reservation)
+        with self._lock:
+            if self._ledger_path:
+                try:
+                    with sqlite3.connect(self._ledger_path, timeout=30) as db:
+                        cursor = db.execute(
+                            "UPDATE ai_budget_reservations SET state='pending_uncertain' WHERE reservation_id=?",
+                            (rid,),
+                        )
+                    if cursor.rowcount != 1:
+                        return False
+                    item = self._reservations.get(rid)
+                    if item is not None:
+                        self._reservations[rid] = replace(item, state="pending_uncertain")
+                    return True
+                except (OSError, sqlite3.Error):
+                    return False
+            item = self._reservations.get(rid)
+            if item is None:
+                return False
+            self._reservations[rid] = replace(item, state="pending_uncertain")
+            return True
+
+    def reconcile_pending_uncertain(
+        self,
+        reservation: Reservation | str,
+        *,
+        dispatched: bool | None,
+        actual_cost: float = 0.0,
+    ) -> bool:
+        """Resolve a pending dispatch only from explicit provider evidence."""
+        if dispatched is None:
+            return False
+        rid = reservation.reservation_id if isinstance(reservation, Reservation) else str(reservation)
+        if self._ledger_path:
+            try:
+                with sqlite3.connect(self._ledger_path, timeout=30) as db:
+                    row = db.execute(
+                        "SELECT state FROM ai_budget_reservations WHERE reservation_id=?", (rid,)
+                    ).fetchone()
+                if row is None or row[0] != "pending_uncertain":
+                    return False
+            except (OSError, sqlite3.Error):
+                return False
+        else:
+            item = self._reservations.get(rid)
+            if item is None or item.state != "pending_uncertain":
+                return False
+        return self.settle(rid, actual_cost) if dispatched else self.release(rid)
 
     def release(self, reservation: Reservation | str) -> bool:
         rid = reservation.reservation_id if isinstance(reservation, Reservation) else str(reservation)

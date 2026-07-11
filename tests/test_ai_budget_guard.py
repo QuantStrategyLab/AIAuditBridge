@@ -195,6 +195,54 @@ def test_sqlite_ledger_shares_reservations_across_guard_instances() -> None:
         assert second_guard.settle(reservation.reservation_id, 6)
 
 
+def test_uncertain_reservation_survives_restart_until_explicit_reconciliation() -> None:
+    with TemporaryDirectory() as tmp:
+        config = {
+            "ledger_path": str(Path(tmp) / "budget.sqlite3"),
+            "monthly_budgets": {"openai": {"user_monthly_budget_usd": 10}},
+        }
+        snapshot = {"updated_at": time.time(), "used_usd": 0}
+        first_guard = AIBudgetGuard(config)
+        decision = first_guard.preflight(task_class="review", provider="openai", estimated_cost_usd=8, usage_snapshot=snapshot)
+        reservation = first_guard.reserve(decision, 8)
+        assert reservation is not None
+        assert first_guard.mark_uncertain(reservation)
+
+        restarted_guard = AIBudgetGuard(config)
+        blocked = restarted_guard.preflight(task_class="review", provider="openai", estimated_cost_usd=0.1, usage_snapshot=snapshot)
+        assert blocked["decision"] == "defer"
+        assert not restarted_guard.reconcile_pending_uncertain(reservation.reservation_id, dispatched=None)
+        assert restarted_guard.reconcile_pending_uncertain(reservation.reservation_id, dispatched=False)
+
+
+def test_codex_reset_only_clears_matching_account_scope() -> None:
+    now = time.time()
+    guard = AIBudgetGuard(clock=lambda: now)
+    for scope in ("account-a", "account-b"):
+        decision = guard.preflight(
+            task_class="review", provider="codex", provider_scope=scope,
+            codex_snapshot=_codex_snapshot(50, 80, observed_at=now, reset_at=now + 60),
+        )
+        reservation = guard.reserve(decision, 0.10)
+        assert reservation is not None
+        assert guard.settle(reservation, 0.10)
+
+    guard.preflight(
+        task_class="review", provider="codex", provider_scope="account-a",
+        codex_snapshot=_codex_snapshot(50, 80, observed_at=now, reset_at=now),
+    )
+    account_a = guard.preflight(
+        task_class="review", provider="codex", provider_scope="account-a",
+        codex_snapshot=_codex_snapshot(50, 80, observed_at=now, reset_at=now),
+    )
+    account_b = guard.preflight(
+        task_class="review", provider="codex", provider_scope="account-b",
+        codex_snapshot=_codex_snapshot(50, 80, observed_at=now, reset_at=now + 60),
+    )
+    assert account_a["reserved_usage"] == 0
+    assert account_b["reserved_usage"] == 0.1
+
+
 def test_month_period_is_explicit_and_fallback_requires_human_approval() -> None:
     guard = AIBudgetGuard({"billing_timezone": "UTC", "monthly_budgets": {"openai": {"user_monthly_budget_usd": 10}}})
     decision = guard.preflight(

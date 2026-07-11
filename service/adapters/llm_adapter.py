@@ -56,6 +56,7 @@ class LlmResult:
     error: str = ""
     latency_seconds: float = 0.0
     dispatch_started: bool = False
+    dispatch_uncertain: bool = False
 
 
 class LlmAdapterError(RuntimeError):
@@ -282,6 +283,7 @@ class LlmAdapter:
                 dispatch_started=True,
             )
         except LlmAdapterError as exc:
+            not_dispatched = "API_KEY is not configured" in str(exc)
             return LlmResult(
                 provider=provider,
                 model=resolved_model,
@@ -289,7 +291,8 @@ class LlmAdapter:
                 success=False,
                 error=str(exc),
                 latency_seconds=time.time() - started,
-                dispatch_started="API_KEY is not configured" not in str(exc),
+                dispatch_started=False,
+                dispatch_uncertain=not not_dispatched,
             )
 
     def parallel_review(
@@ -307,18 +310,25 @@ class LlmAdapter:
         """
         import concurrent.futures
 
-        results: list[LlmResult] = []
+        results: list[LlmResult | None] = [None] * len(reviewers)
         with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(reviewers), 4)) as pool:
             futures = {
-                pool.submit(self.complete, model=model, system=system, user=user, max_tokens=max_tokens, timeout=timeout): (label, model)
-                for label, model in reviewers
+                pool.submit(self.complete, model=model, system=system, user=user, max_tokens=max_tokens, timeout=timeout): (index, label, model)
+                for index, (label, model) in enumerate(reviewers)
             }
             for f in concurrent.futures.as_completed(futures):
+                index, label, model = futures[f]
                 try:
-                    results.append(f.result())
+                    results[index] = f.result()
                 except Exception as exc:
-                    label, model = futures[f]
-                    results.append(
-                        LlmResult(provider=label, model=model, output="", success=False, error=str(exc))
+                    results[index] = (
+                        LlmResult(
+                            provider=label,
+                            model=model,
+                            output="",
+                            success=False,
+                            error=str(exc),
+                            dispatch_uncertain=True,
+                        )
                     )
-        return results
+        return [result for result in results if result is not None]

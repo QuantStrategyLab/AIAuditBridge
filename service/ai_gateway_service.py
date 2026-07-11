@@ -482,10 +482,7 @@ def _cleanup_expired_jobs() -> None:
         if expires_at and expires_at < now:
             reservation_id = str(payload.get("_budget_reservation_id") or "")
             if reservation_id:
-                if bool(payload.get("dispatch_started")):
-                    _settle_budget_reservation(payload, 0.10)
-                else:
-                    _release_budget_reservation(payload)
+                _finalize_budget_reservation(payload, 0.10)
                 if payload.get("_budget_cleanup_pending") or payload.get("_budget_reservation_id"):
                     continue
             try:
@@ -511,10 +508,7 @@ def _recover_orphaned_jobs() -> int:
         job["failure_category"] = "service_restart"
         _write_job(job)
         _record_job_automation_run(job)
-        if bool(job.get("dispatch_started")):
-            _settle_budget_reservation(job, 0.10)
-        else:
-            _release_budget_reservation(job)
+        _finalize_budget_reservation(job, 0.10)
         _audit_log(
             "job_failed",
             job_id=job.get("job_id"),
@@ -538,10 +532,7 @@ def _mark_stale_job_failed(job: dict[str, Any]) -> dict[str, Any]:
     job["failure_category"] = "stale_job_timeout"
     _write_job(job)
     _record_job_automation_run(job)
-    if bool(job.get("dispatch_started")):
-        _settle_budget_reservation(job, 0.10)
-    else:
-        _release_budget_reservation(job)
+    _finalize_budget_reservation(job, 0.10)
     return job
 
 
@@ -573,6 +564,30 @@ def _release_budget_reservation(payload: dict[str, Any]) -> None:
         return
     payload.pop("_budget_reservation_id", None)
     _write_job(payload)
+
+
+def _mark_budget_reservation_uncertain(payload: dict[str, Any]) -> None:
+    reservation_id = str(payload.get("_budget_reservation_id") or "")
+    if not reservation_id:
+        return
+    from service.ai_budget_guard import get_ai_budget_guard
+
+    if not get_ai_budget_guard().mark_uncertain(reservation_id):
+        _audit_log("budget_reservation_uncertain_mark_failed", reservation_id=reservation_id)
+        payload["_budget_cleanup_pending"] = True
+    else:
+        payload["_budget_reservation_state"] = "pending_uncertain"
+    _write_job(payload)
+
+
+def _finalize_budget_reservation(payload: dict[str, Any], actual_cost: float = 0.0) -> None:
+    state = str(payload.get("dispatch_state") or "")
+    if state == "pending_uncertain":
+        _mark_budget_reservation_uncertain(payload)
+    elif state == "dispatched" or (not state and bool(payload.get("dispatch_started"))):
+        _settle_budget_reservation(payload, actual_cost)
+    else:
+        _release_budget_reservation(payload)
 
 
 def _assert_job_access(job: dict[str, Any], claims: dict[str, Any]) -> None:
@@ -1163,9 +1178,9 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
         adapter = CodexAdapter()
         sandbox = _validate_sandbox(str(payload.get("sandbox") or ""))
         reasoning_effort = _resolve_codex_reasoning_effort(payload, str(payload.get("task") or TASK_EXECUTE))
-        # Persist a conservative possible-dispatch marker before invoking the
-        # external process; crash recovery must not refund ambiguous spend.
-        job["dispatch_started"] = True
+        # A process crash at this boundary cannot prove whether the provider
+        # accepted work.  Preserve that uncertainty without settling it.
+        job["dispatch_state"] = "pending_uncertain"
         job["updated_at"] = _now()
         _write_job(job)
         result = adapter.execute(
@@ -1177,6 +1192,7 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
         )
         job = _read_job(job_id)
         job["dispatch_started"] = bool(getattr(result, "dispatch_started", False))
+        job["dispatch_state"] = "dispatched" if job["dispatch_started"] else "not_dispatched"
         if result.success:
             job["status"] = "succeeded"
             job["output"] = result.output
@@ -1208,7 +1224,7 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
             },
             domain=str(job.get("domain") or ""),
         )
-        _settle_budget_reservation(job, 0.10)
+        _finalize_budget_reservation(job, 0.10)
         _audit_log("job_completed", job_id=job_id, status=job["status"],
                    repository=job.get("repository"), task=job.get("task"))
     except Exception as exc:
@@ -1234,10 +1250,7 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
             },
             domain=str(job.get("domain") or ""),
         )
-        if bool(job.get("dispatch_started")):
-            _settle_budget_reservation(job, 0.10)
-        else:
-            _release_budget_reservation(job)
+        _finalize_budget_reservation(job, 0.10)
         _audit_log("job_failed", job_id=job_id, error=type(exc).__name__,
                    repository=job.get("repository"))
 
@@ -1284,6 +1297,7 @@ def _submit_job(claims: dict[str, Any], payload: dict[str, Any]) -> dict[str, ob
         "dedupe_key": dedupe_key,
         "_budget_reservation_id": str(payload.get("_budget_reservation_id") or ""),
         "dispatch_started": False,
+        "dispatch_state": "not_dispatched",
     }
     _write_job(job)
     _record_job_automation_run(job)
@@ -1497,7 +1511,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             if reservation_id:
                 from service.ai_budget_guard import get_ai_budget_guard
 
-                get_ai_budget_guard().settle(reservation_id, float(qr.get("cost_estimate_usd") or 0.0))
+                get_ai_budget_guard().mark_uncertain(reservation_id)
             raise
         if reservation_id and bool(getattr(result, "dispatch_started", False)):
             from service.ai_budget_guard import get_ai_budget_guard
@@ -1506,6 +1520,10 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 reservation_id,
                 float(qr.get("cost_estimate_usd") or 0.0),
             )
+        elif reservation_id and bool(getattr(result, "dispatch_uncertain", False)):
+            from service.ai_budget_guard import get_ai_budget_guard
+
+            get_ai_budget_guard().mark_uncertain(reservation_id)
         elif reservation_id:
             from service.ai_budget_guard import get_ai_budget_guard
 
@@ -1623,11 +1641,11 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
 
                 get_ai_budget_guard().release(reservation_id)
             raise
-        dispatch_started = False
+        adapter_invoked = False
         try:
             sandbox = _validate_sandbox(str(payload.get("sandbox") or ""))
             reasoning_effort = _resolve_codex_reasoning_effort(payload, str(payload.get("task") or TASK_EXECUTE))
-            dispatch_started = True
+            adapter_invoked = True
             result = adapter.execute(
                 prompt=req.prompt,
                 sandbox=sandbox,
@@ -1639,8 +1657,8 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             if reservation_id:
                 from service.ai_budget_guard import get_ai_budget_guard
 
-                if dispatch_started:
-                    get_ai_budget_guard().settle(reservation_id, 0.10)
+                if adapter_invoked:
+                    get_ai_budget_guard().mark_uncertain(reservation_id)
                 else:
                     get_ai_budget_guard().release(reservation_id)
             raise
@@ -1710,7 +1728,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 })
                 return
             codex_reservation_id = str(codex_quota.get("budget_reservation_id") or "")
-        review_reservations: list[tuple[str, float, str]] = []
+        review_reservations: list[tuple[str, float, int]] = []
         if _budget_gate_enabled():
             estimated_total = sum(
                 float(
@@ -1735,7 +1753,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                     "error": "deferred_budget: combined reviewer daily budget is insufficient",
                 })
                 return
-        for reviewer_name, reviewer_model in reviewer_tuples:
+        for reviewer_index, (reviewer_name, reviewer_model) in enumerate(reviewer_tuples):
             review_quota = get_quota_manager().check(
                 review_repo,
                 reviewer_model,
@@ -1748,7 +1766,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 if review_reservations:
                     from service.ai_budget_guard import get_ai_budget_guard
 
-                    for reservation_id, _cost, _model in review_reservations:
+                    for reservation_id, _cost, _index in review_reservations:
                         get_ai_budget_guard().release(reservation_id)
                 if codex_reservation_id:
                     from service.ai_budget_guard import get_ai_budget_guard
@@ -1766,7 +1784,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                     (
                         str(review_quota["budget_reservation_id"]),
                         float(review_quota.get("cost_estimate_usd") or 0.0),
-                        reviewer_model,
+                        reviewer_index,
                     )
                 )
         try:
@@ -1780,8 +1798,8 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             if review_reservations:
                 from service.ai_budget_guard import get_ai_budget_guard
 
-                for reservation_id, _estimated_cost, _model in review_reservations:
-                    get_ai_budget_guard().release(reservation_id)
+                for reservation_id, _estimated_cost, _index in review_reservations:
+                    get_ai_budget_guard().mark_uncertain(reservation_id)
             if codex_reservation_id:
                 from service.ai_budget_guard import get_ai_budget_guard
 
@@ -1807,16 +1825,12 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         if review_reservations:
             from service.ai_budget_guard import get_ai_budget_guard
 
-            remaining_results = list(llm_results)
-            for reservation_id, estimated_cost, reviewer_model in review_reservations:
-                matched_result = next(
-                    (result for result in remaining_results if result.model == reviewer_model),
-                    None,
-                )
-                if matched_result is not None:
-                    remaining_results.remove(matched_result)
+            for reservation_id, estimated_cost, reviewer_index in review_reservations:
+                matched_result = llm_results[reviewer_index] if reviewer_index < len(llm_results) else None
                 if matched_result is not None and bool(getattr(matched_result, "dispatch_started", False)):
                     get_ai_budget_guard().settle(reservation_id, estimated_cost)
+                elif matched_result is None or bool(getattr(matched_result, "dispatch_uncertain", False)):
+                    get_ai_budget_guard().mark_uncertain(reservation_id)
                 else:
                     get_ai_budget_guard().release(reservation_id)
             review_reservations = []
@@ -1836,11 +1850,11 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         # Step 2: optional Codex verification
         codex_result = None
         if req.verifier == "codex" and codex_quota is not None:
-            codex_dispatch_started = False
+            codex_adapter_invoked = False
             try:
                 codex_sandbox = _validate_sandbox("read-only")
                 codex_reasoning_effort = _resolve_codex_reasoning_effort(payload, TASK_REVIEW)
-                codex_dispatch_started = True
+                codex_adapter_invoked = True
                 codex_result = codex.execute(
                     prompt=req.prompt,
                     sandbox=codex_sandbox,
@@ -1851,8 +1865,8 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 if codex_reservation_id:
                     from service.ai_budget_guard import get_ai_budget_guard
 
-                    if codex_dispatch_started:
-                        get_ai_budget_guard().settle(codex_reservation_id, 0.10)
+                    if codex_adapter_invoked:
+                        get_ai_budget_guard().mark_uncertain(codex_reservation_id)
                     else:
                         get_ai_budget_guard().release(codex_reservation_id)
                 raise

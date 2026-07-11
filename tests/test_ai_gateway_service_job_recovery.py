@@ -39,6 +39,32 @@ class AiGatewayJobRecoveryTests(unittest.TestCase):
         record_automation_run.assert_has_calls([call(queued), call(running)], any_order=True)
         self.assertEqual(record_automation_run.call_count, 2)
 
+    def test_restart_keeps_ambiguous_dispatch_reservation_pending(self) -> None:
+        now = time.time()
+        job = {
+            "job_id": "d" * 24,
+            "status": "running",
+            "created_at": now,
+            "updated_at": now,
+            "_budget_reservation_id": "reservation-1",
+            "dispatch_state": "pending_uncertain",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(gateway.os.environ, {"CODEX_AUDIT_SERVICE_JOB_DIR": tmp}, clear=False):
+                gateway._write_job(job)
+                with (
+                    patch.object(gateway, "_record_job_automation_run"),
+                    patch.object(gateway, "_audit_log"),
+                    patch.object(gateway, "_mark_budget_reservation_uncertain") as mark_uncertain,
+                    patch.object(gateway, "_settle_budget_reservation") as settle,
+                    patch.object(gateway, "_release_budget_reservation") as release,
+                ):
+                    self.assertEqual(gateway._recover_orphaned_jobs(), 1)
+
+        mark_uncertain.assert_called_once()
+        settle.assert_not_called()
+        release.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

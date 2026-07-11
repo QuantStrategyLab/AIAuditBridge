@@ -168,6 +168,15 @@ class TestQuotaManager(unittest.TestCase):
         self.assertFalse(manager.check("repo/recovery", "gpt-5.4-mini")["allowed"])
         manager.recover_recording_failure("repo/recovery")
         self.assertTrue(manager.check("repo/recovery", "gpt-5.4-mini")["allowed"])
+
+    def test_recording_failure_persists_across_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = str(Path(tmp) / "quota.json")
+            with patch.dict(os.environ, {"CODEX_AUDIT_SERVICE_QUOTA_STORE": store}, clear=False):
+                manager = QuotaManager()
+                manager.mark_recording_failed("repo/persisted")
+                restarted = QuotaManager()
+            self.assertFalse(restarted.check("repo/persisted", "gpt-5.4-mini")["allowed"])
     """QuotaManager budget tracking and enforcement."""
 
     def setUp(self) -> None:

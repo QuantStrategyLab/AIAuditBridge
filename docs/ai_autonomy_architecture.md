@@ -434,8 +434,12 @@ trusted review comment 只保存最近固定轮数、固定字节上限且脱敏
 - API-key 预算按 provider、key/project scope、repo、task class 和明确的 billing period
   （默认 `UTC` 日历月）记账。未配置月度预算时可用上限为 `0`；内部 hard limit 取用户月度预算
   与 provider/project limit 的 `80%` 两者较小值。
-- usage/cost 快照缺失、过期或无法解析时 fail closed。每次启动先做原子 reservation，完成、失败、
-  取消和超时都必须 settle/release；并发 reservation 不能共同突破 hard limit。
+- usage/cost 快照缺失、过期或无法解析时 fail closed。每次启动先做原子 reservation，并发
+  reservation 不能共同突破 hard limit。reservation 的终态由 provider dispatch 证据决定：明确未
+  dispatch/provider 未接收时才 release；明确已 dispatch、accepted 或 billable 时按 actual 或保守
+  estimate settle；发送边界崩溃、timeout 或重启后无法证明时持久化为 `pending_uncertain`，继续占用
+  额度并 fail closed，直到 provider usage、idempotency 或显式 reconciliation 给出证据。不得静默
+  release，也不得把不确定状态直接永久 settle。
 - Codex 同时读取 primary/secondary rate-limit window，使用更紧张的剩余比例；research、
   maintenance/review/auto-fix、incident 的门槛分别是 `30%/20%/10%`，并永久保留最后 `10%`。
   快照不可用时不启动 research 或 auto-fix。
