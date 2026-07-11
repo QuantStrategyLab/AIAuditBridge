@@ -5,12 +5,18 @@ import time
 from service.ai_budget_guard import AIBudgetGuard, DECISION_SCHEMA
 
 
-def _codex_snapshot(primary: int = 50, secondary: int = 80, observed_at: float | None = None) -> dict:
+def _codex_snapshot(
+    primary: int = 50,
+    secondary: int = 80,
+    observed_at: float | None = None,
+    reset_at: float | None = None,
+) -> dict:
+    reset = time.time() + 3600 if reset_at is None else reset_at
     return {
         "updated_at": time.time() if observed_at is None else observed_at,
         "rate_limits": {
-            "primary": {"remaining_percent": primary, "resets_at": 123},
-            "secondary": {"remaining_percent": secondary, "resets_at": 456},
+            "primary": {"remaining_percent": primary, "resets_at": reset},
+            "secondary": {"remaining_percent": secondary, "resets_at": reset},
         },
     }
 
@@ -65,8 +71,29 @@ def test_codex_uses_tightest_window_and_keeps_reserve() -> None:
     guard = AIBudgetGuard()
     assert guard.preflight(task_class="research", provider="codex", codex_snapshot=_codex_snapshot(35, 90))["decision"] == "allow"
     assert guard.preflight(task_class="research", provider="codex", codex_snapshot=_codex_snapshot(29, 90))["decision"] == "defer"
-    assert guard.preflight(task_class="incident", provider="codex", codex_snapshot=_codex_snapshot(11, 90))["decision"] == "allow"
+    assert guard.preflight(task_class="incident", provider="codex", codex_snapshot=_codex_snapshot(11, 90))["decision"] == "defer"
     assert guard.preflight(task_class="incident", provider="codex", codex_snapshot=_codex_snapshot(19, 90))["remaining_after_reservation"] == 0.09
+
+
+def test_codex_reservation_uses_live_headroom_and_shared_scope() -> None:
+    guard = AIBudgetGuard()
+    snapshot = _codex_snapshot(21, 90)
+    first = guard.preflight(task_class="review", provider="codex", provider_scope="shared", repo="o/a", codex_snapshot=snapshot)
+    second = guard.preflight(task_class="review", provider="codex", provider_scope="shared", repo="o/b", codex_snapshot=snapshot)
+    assert guard.reserve(first, 0.10) is not None
+    assert guard.reserve(second, 0.10) is None
+
+
+def test_codex_settled_usage_remains_reserved_until_reset() -> None:
+    guard = AIBudgetGuard()
+    snapshot = _codex_snapshot(50, 90, reset_at=time.time() + 3600)
+    for _ in range(3):
+        decision = guard.preflight(task_class="review", provider="codex", provider_scope="shared", codex_snapshot=snapshot)
+        reservation = guard.reserve(decision, 0.10)
+        assert reservation is not None
+        assert guard.settle(reservation, 0.10)
+    follow_up = guard.preflight(task_class="review", provider="codex", provider_scope="shared", codex_snapshot=snapshot)
+    assert follow_up["decision"] == "defer"
 
 
 def test_missing_codex_snapshot_defers_research_and_auto_fix() -> None:

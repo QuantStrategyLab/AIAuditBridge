@@ -21,6 +21,7 @@ DECISION_SCHEMA = "ai_budget_decision.v1"
 DEFAULT_BILLING_TIMEZONE = "UTC"
 DEFAULT_MAX_USAGE_AGE_SECONDS = 86_400
 CODEX_RESERVE_RATIO = 0.10
+CODEX_RESERVATION_RATIO = 0.10
 CODEX_THRESHOLDS = {
     "research": 0.30,
     "optimization": 0.20,
@@ -295,15 +296,23 @@ class AIBudgetGuard:
         with self._lock:
             if any(_number(value, 0.0) and _number(value, 0.0) <= self._clock() for value in reset_at):
                 self._settled.pop(scope, None)
+            settled = self._settled.get(scope, 0.0)
+            reserved = self._reserved.get(scope, 0.0)
         threshold = CODEX_THRESHOLDS.get(task, CODEX_THRESHOLDS["maintenance"])
-        allowed = tightest >= threshold and tightest - CODEX_RESERVE_RATIO >= 0
+        headroom = max(0.0, tightest - CODEX_RESERVE_RATIO)
+        remaining = max(0.0, headroom - settled - reserved)
+        allowed = tightest >= threshold and remaining >= CODEX_RESERVATION_RATIO
         return self._decision(
             task_class=task, provider_scope=provider_scope, period=period,
             observed={"primary_remaining_ratio": ratios[0], "secondary_remaining_ratio": ratios[1]},
-            reserved=0.0, hard_limit=round(max(0.0, tightest - CODEX_RESERVE_RATIO), 8),
-            remaining=round(tightest - CODEX_RESERVE_RATIO, 8), freshness="fresh",
+            reserved=round(settled + reserved, 8), hard_limit=round(headroom, 8),
+            remaining=round(remaining, 8), freshness="fresh",
             decision="allow" if allowed else "defer",
-            reasons=[] if allowed else ["codex_rate_limit_below_task_threshold"],
+            reasons=[] if allowed else [
+                "codex_rate_limit_below_task_threshold"
+                if tightest < threshold
+                else "codex_reservation_headroom_insufficient"
+            ],
             reset_at=reset_at,
             reservation_scope=scope,
         )
@@ -363,6 +372,7 @@ __all__ = [
     "AIBudgetGuard",
     "API_TASK_CLASSES",
     "CODEX_RESERVE_RATIO",
+    "CODEX_RESERVATION_RATIO",
     "CODEX_THRESHOLDS",
     "DECISION_SCHEMA",
     "Reservation",
