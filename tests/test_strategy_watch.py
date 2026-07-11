@@ -14,8 +14,10 @@ class StrategyWatchTest(unittest.TestCase):
                     {
                         "strategy_profile": "mean_reversion_live",
                         "plugin": "mean_reversion",
-                        "current_metrics": {"sharpe": 0.7, "max_dd": 0.18},
-                        "baseline_metrics": {"sharpe": 1.0, "max_dd": 0.1},
+                        "schema_version": "strategy_performance.v2",
+                        "metrics_kind": "performance",
+                        "current_metrics": {"sharpe": 0.7, "cagr": 0.11, "calmar": 0.6, "win_rate": 0.52, "max_dd": 0.18},
+                        "baseline_metrics": {"sharpe": 1.0, "cagr": 0.18, "calmar": 1.0, "win_rate": 0.58, "max_dd": 0.1},
                         "source": "data/output/strategy_metrics.json",
                     }
                 ],
@@ -37,20 +39,29 @@ class StrategyWatchTest(unittest.TestCase):
                 "repo": "QuantStrategyLab/TestStrategies",
                 "snapshots": [
                     {"profile": "bad", "current_metrics": "oops", "baseline_metrics": {"sharpe": 1.0}},
-                    {"profile": "live", "current_metrics": {"sharpe": 0.5}, "baseline_metrics": {"sharpe": 1.0}},
+                    {
+                        "profile": "live",
+                        "schema_version": "strategy_performance.v2",
+                        "metrics_kind": "performance",
+                        "current_metrics": {"sharpe": 0.5, "cagr": 0.1, "calmar": 0.7, "win_rate": 0.52, "max_dd": 0.12},
+                        "baseline_metrics": {"sharpe": 1.0, "cagr": 0.2, "calmar": 1.0, "win_rate": 0.58, "max_dd": 0.08},
+                    },
                 ],
             }
         )
 
-        self.assertEqual(len(findings), 1)
-        self.assertEqual(findings[0].snapshot.profile, "live")
+        self.assertEqual(len(findings), 2)
+        self.assertEqual(findings[0].finding_type, "data_quality")
+        self.assertEqual(findings[1].snapshot.profile, "live")
 
     def test_healthy_snapshot_creates_no_finding(self) -> None:
         findings = evaluate_strategy_watch(
             {
                 "repo": "QuantStrategyLab/TestStrategies",
-                "current_metrics": {"sharpe": 1.01, "max_dd": 0.10},
-                "baseline_metrics": {"sharpe": 1.0, "max_dd": 0.1},
+                "schema_version": "strategy_performance.v2",
+                "metrics_kind": "performance",
+                "current_metrics": {"sharpe": 1.01, "cagr": 0.2, "calmar": 1.0, "win_rate": 0.58, "max_dd": 0.10},
+                "baseline_metrics": {"sharpe": 1.0, "cagr": 0.2, "calmar": 1.0, "win_rate": 0.58, "max_dd": 0.1},
             }
         )
 
@@ -61,8 +72,10 @@ class StrategyWatchTest(unittest.TestCase):
             {
                 "repo": "QuantStrategyLab/TestStrategies",
                 "profile": "live",
-                "current_metrics": {"sharpe": 0.8},
-                "baseline_metrics": {"sharpe": 1.0},
+                "schema_version": "strategy_performance.v2",
+                "metrics_kind": "performance",
+                "current_metrics": {"sharpe": 0.8, "cagr": 0.1, "calmar": 0.8, "win_rate": 0.55, "max_dd": 0.12},
+                "baseline_metrics": {"sharpe": 1.0, "cagr": 0.2, "calmar": 1.0, "win_rate": 0.55, "max_dd": 0.12},
             }
         )[0]
 
@@ -75,6 +88,25 @@ class StrategyWatchTest(unittest.TestCase):
         self.assertIn("only opens an issue", issue["body"])
         self.assertIn("does not modify strategy code", issue["body"])
         self.assertIn("sandbox backtest", issue["body"])
+
+    def test_operational_metrics_payload_becomes_data_quality_finding(self) -> None:
+        findings = evaluate_strategy_watch(
+            {
+                "repo": "QuantStrategyLab/TestStrategies",
+                "schema_version": "strategy_operational_metrics.v1",
+                "metrics_kind": "operational_quality",
+                "profile": "live",
+                "current_metrics": {"pool_size": 12},
+                "baseline_metrics": {"pool_size": 10},
+            }
+        )
+
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].finding_type, "data_quality")
+        task = finding_to_automation_task(findings[0])
+        payload = task.to_dict()
+        self.assertEqual(payload["trigger"]["kind"], "strategy_metrics_data_quality")
+        self.assertIn("strategy_performance.v2", payload["trigger"]["reason"])
 
 
 if __name__ == "__main__":
