@@ -369,7 +369,7 @@ class AIBudgetGuard:
             self._aggregate_scope(provider_name, provider_scope, current_period)
             if has_provider_project_limit else scope
         )
-        effective_used = used if has_provider_project_limit else 0.0
+        effective_used = used
         with self._lock:
             if self._settled_period != current_period:
                 self._reserved.clear()

@@ -47,6 +47,15 @@ def test_api_hard_limit_is_min_of_user_and_provider_eighty_percent() -> None:
     assert decision["hard_limit"] == 40
 
 
+def test_repo_budget_includes_fresh_provider_usage_without_project_limit() -> None:
+    guard = AIBudgetGuard({"monthly_budgets": {"openai:default:repo-a:review": {"user_monthly_budget_usd": 10}}})
+    decision = guard.preflight(
+        task_class="review", provider="openai", provider_scope="default", repo="repo-a",
+        estimated_cost_usd=1, usage_snapshot={"updated_at": time.time(), "used_usd": 10},
+    )
+    assert decision["decision"] == "defer"
+
+
 def test_nested_budget_scope_resolves_repo_and_task_class() -> None:
     guard = AIBudgetGuard({"monthly_budgets": {"openai": {"project": {"o/r": {
         "research": {"user_monthly_budget_usd": 12},
