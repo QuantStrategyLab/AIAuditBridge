@@ -1289,12 +1289,12 @@ class RunCodexPrReviewTests(unittest.TestCase):
                 "severity": "high",
                 "category": "contract",
                 "file": "service/review.py",
-                "description": "Missing panel must return a structured blocked result.",
+                "description": "`MissingPanel` must return a structured blocked result.",
                 "suggestion": "Return ReviewResult(blocked=True).",
             }
             current = dict(
                 prior,
-                description="Missing panel must fail fast.",
+                description="`MissingPanel` must fail fast.",
                 suggestion="Raise ReviewError instead of returning a result.",
             )
             fingerprint = run_codex_pr_review.blocking_finding_fingerprint([prior])
@@ -1450,17 +1450,10 @@ class RunCodexPrReviewTests(unittest.TestCase):
             finally:
                 os.chdir(previous_cwd)
 
-            backend.assert_called_once()
-            body = comment.call_args.args[3]
-            decision = json.loads(
-                (Path(tmpdir) / "data/output/codex_pr_review/decision.json").read_text(
-                    encoding="utf-8"
-                )
-            )
-
-        self.assertFalse(decision["blocked"])
-        self.assertEqual(decision["next_action"], "none")
+        backend.assert_not_called()
+        body = comment.call_args.args[3]
         self.assertIn("trusted clearance matches this head and diff", body)
+        self.assertIn("codex-pr-review-next-action:none", body)
         self.assertIn("codex-pr-review-clearance:v1:", body)
         self.assertNotIn("Codex Review Arbitration", body)
 

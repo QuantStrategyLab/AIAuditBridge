@@ -908,7 +908,10 @@ def _contract_subject(finding: dict[str, Any]) -> str:
     anchors = re.findall(r"`([^`]{1,120})`", text)
     anchors.extend(re.findall(r"\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+\b", text))
     normalized = [_normalize_contract_text(anchor) for anchor in anchors]
-    return "|".join(sorted({anchor for anchor in normalized if anchor}))
+    anchored_subject = "|".join(sorted({anchor for anchor in normalized if anchor}))
+    return anchored_subject or _normalize_contract_text(
+        finding.get("suggestion") or text
+    )
 
 
 def _contract_surface(finding: dict[str, Any]) -> tuple[str, str, str, str, str]:
@@ -2090,6 +2093,7 @@ def main() -> int:
     previous_fingerprints = parse_blocking_fingerprints(previous_comment)
     previous_head_sha = parse_reviewed_head_sha(previous_comment)
     clearance_marker_text = extract_clearance_marker(previous_comment)
+    clearance_marker, clearance_valid = parse_clearance_marker(previous_comment)
     finding_history, history_valid = parse_finding_history(previous_comment)
     history_valid = history_source_valid and history_valid
     if history_valid and finding_history:
@@ -2227,7 +2231,8 @@ def main() -> int:
         latest_status = str((finding_history[-1] if finding_history else {}).get("status") or "")
         review_scope = (
             "final_sanity"
-            if previous_streak >= MAX_REMEDIATION_ROUNDS and latest_status == "remediation"
+            if latest_status == "blocked_human_contract"
+            or (previous_streak >= MAX_REMEDIATION_ROUNDS and latest_status == "remediation")
             else "remediation"
         )
 
@@ -2235,6 +2240,36 @@ def main() -> int:
     # only the trusted previous-head delta, unless this is its one final sanity pass.
     diff = fetch_pr_diff(token, repo, pr_number)
     print(f"Fetched diff: {len(diff)} chars, {len(diff.splitlines())} lines")
+    if (
+        clearance_marker
+        and clearance_matches(
+            clearance_marker,
+            repo=repo,
+            pr_number=pr_number,
+            head_sha=current_head_sha,
+            diff_digest=_diff_digest(diff),
+            findings=[],
+        )
+        and clearance_workflow_run_is_trusted(token, repo, clearance_marker)
+    ):
+        decision = {
+            "blocked": False,
+            "blocking_findings": [],
+            "non_blocking_findings": [],
+            "total_findings": 0,
+            "summary": "✅ **Merge allowed**: trusted clearance matches this head and diff",
+            "contract_conflict": False,
+            "auto_fix_allowed": False,
+            "next_action": "none",
+        }
+        return publish_review_decision(
+            token, repo, pr_number, pr_url, decision, exit_code=0,
+            current_head_sha=current_head_sha, reviewed_head_sha=current_head_sha,
+            finding_history_marker=build_finding_history_marker(
+                finding_history, [], current_head_sha
+            ),
+            clearance_marker=clearance_marker_text,
+        )
     review_diff = diff
     if review_scope == "remediation":
         try:
@@ -2440,7 +2475,6 @@ def main() -> int:
         }
     )
     diff_digest = _diff_digest(diff)
-    clearance_marker, clearance_valid = parse_clearance_marker(previous_comment)
     if CLEARANCE_MARKER_PREFIX in previous_comment and not clearance_valid:
         decision = apply_arbitration_failure(
             decision, ReviewError("trusted clearance marker is malformed")
