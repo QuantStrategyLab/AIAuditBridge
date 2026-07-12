@@ -130,6 +130,32 @@ class ContractIdentityTests(unittest.TestCase):
         record["required_behavior"] = [["token=secret-value"]]
         with self.assertRaises(IdentityValidationError):
             verify_persisted_identity(record)
+        for malformed in ("<SECRET:CREDENTIAL:1> <SECRET:BAD>", "<SECRET:CREDENTIAL:1> <SECRET:"):
+            record = identity.as_record()
+            record["required_behavior"] = [[malformed]]
+            with self.assertRaises(IdentityValidationError):
+                verify_persisted_identity(record)
+
+        oversized_secret = self.payload()
+        oversized_secret["required_behavior"] = [["x" * MAX_TOKEN_BYTES + "AKIAIOSFODNN7EXAMPLE"]]
+        with self.assertRaises(IdentityValidationError):
+            build_contract_identity(oversized_secret)
+
+    def test_credential_states_are_not_collapsed_and_common_literals_are_redacted(self) -> None:
+        required = self.payload()
+        required["required_behavior"] = [["authorization=required"]]
+        forbidden = copy.deepcopy(required)
+        forbidden["required_behavior"] = [["authorization=forbidden"]]
+        self.assertNotEqual(
+            build_contract_identity(required).behavior_digest,
+            build_contract_identity(forbidden).behavior_digest,
+        )
+        secrets = self.payload()
+        secrets["required_behavior"] = [["github_pat_" + "x" * 30], ["aws_secret_access_key=secret-value"]]
+        identity = build_contract_identity(secrets)
+        serialized = canonical_json(identity)
+        self.assertNotIn("github_pat_", serialized)
+        self.assertNotIn("secret-value", serialized)
 
     def test_schema_fields_category_unicode_and_controls_are_strict(self) -> None:
         for mutate in (
@@ -154,7 +180,10 @@ class ContractIdentityTests(unittest.TestCase):
             payload = self.payload()
             payload["scope"]["repo"] = repo
             self.assertEqual(build_contract_identity(payload).scope.repo, repo)
-        for repo in ("owner", "/owner/repo", "owner/", "owner//repo", "owner/repo/extra"):
+        for repo in (
+            "owner", "/owner/repo", "owner/", "owner//repo", "owner/repo/extra",
+            "owner_name/repo", "-owner/repo", "owner-/repo", "./repo", "owner/.", "owner/..",
+        ):
             payload = self.payload()
             payload["scope"]["repo"] = repo
             with self.assertRaises(IdentityValidationError):

@@ -22,6 +22,8 @@ ALLOWED_ANCHOR_KINDS = frozenset(
 )
 
 MAX_REPO_BYTES = 200
+MAX_OWNER_LENGTH = 39
+MAX_REPOSITORY_NAME_LENGTH = 100
 MAX_FILE_BYTES = 512
 MAX_ANCHOR_BYTES = 256
 MAX_TOKEN_BYTES = 256
@@ -50,6 +52,9 @@ _TOKEN_RE = re.compile(
     re.UNICODE,
 )
 _PLACEHOLDER_RE = re.compile(r"<SECRET:[A-Z_]+:\d+>")
+_SAFE_CREDENTIAL_STATES = frozenset(
+    {"absent", "disabled", "enabled", "forbidden", "invalid", "missing", "none", "optional", "present", "redacted", "required", "valid"}
+)
 _SECRET_PATTERNS = (
     ("PRIVATE_KEY", re.compile(r"-----BEGIN [^-]+-----.*?-----END [^-]+-----", re.I | re.S)),
     ("AWS", re.compile(r"\b(?:AKIA|ASIA|AIDA|AROA)[A-Z0-9]{16}\b")),
@@ -59,9 +64,9 @@ _SECRET_PATTERNS = (
     ("DSN", re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s/@:]+:[^\s/@]+@[^\s]+", re.I)),
     ("BEARER", re.compile(r"(?i)\bbearer\s+\S+")),
     ("CREDENTIAL", re.compile(
-        r"(?i)(?<!<)\b(?:token|secret|password|api[ _-]?key|authorization|cookie)\b\s*[:=]\s*\S+"
+        r"(?i)(?<!<)\b(?P<key>token|secret|password|api[ _-]?key|authorization|cookie|aws[_ -]?secret[_ -]?access[_ -]?key)\b\s*[:=]\s*(?P<value>\S+)"
     )),
-    ("API_KEY", re.compile(r"\b(?:gh[pousr]_|sk-)[A-Za-z0-9_-]{20,}\b")),
+    ("API_KEY", re.compile(r"\b(?:gh[pousr]_|github_pat_|sk-)[A-Za-z0-9_-]{20,}\b")),
 )
 
 
@@ -151,12 +156,14 @@ class _SecretRedactor:
         text = value
         for secret_type, pattern in _SECRET_PATTERNS:
             def replacement(_match: re.Match[str], kind: str = secret_type) -> str:
+                if kind == "CREDENTIAL" and _match.groupdict().get("value", "").lower() in _SAFE_CREDENTIAL_STATES:
+                    return _match.group(0)
                 self.counts[kind] += 1
                 return f"<SECRET:{kind}:{self.counts[kind]}>"
 
             text = pattern.sub(replacement, text)
-        malformed = re.search(r"<SECRET:[^>]*>", text)
-        if malformed and not _PLACEHOLDER_RE.fullmatch(malformed.group(0)):
+        remainder = _PLACEHOLDER_RE.sub("", text)
+        if "<SECRET:" in remainder:
             raise IdentityValidationError(f"{field} contains an invalid secret placeholder")
         return text
 
@@ -173,6 +180,8 @@ def _text(value: Any, field: str, max_bytes: int, redactor: _SecretRedactor) -> 
     normalized = unicodedata.normalize("NFC", value)
     if not normalized or any(unicodedata.category(char).startswith("C") for char in normalized):
         raise IdentityValidationError(f"{field} is empty or contains control characters")
+    if len(normalized.encode("utf-8")) > max_bytes:
+        raise IdentityValidationError(f"{field} exceeds {max_bytes} bytes")
     normalized = redactor.redact(normalized, field)
     if len(normalized.encode("utf-8")) > max_bytes:
         raise IdentityValidationError(f"{field} exceeds {max_bytes} bytes")
@@ -181,7 +190,19 @@ def _text(value: Any, field: str, max_bytes: int, redactor: _SecretRedactor) -> 
 
 def _repo(value: Any, field: str, redactor: _SecretRedactor) -> str:
     repo = _text(value, field, MAX_REPO_BYTES, redactor)
-    if not re.fullmatch(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+", repo):
+    parts = repo.split("/")
+    if len(parts) != 2:
+        raise IdentityValidationError(f"{field} must be owner/name")
+    owner, name = parts
+    owner_valid = re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?", owner)
+    name_valid = re.fullmatch(r"[A-Za-z0-9._-]+", name)
+    if (
+        not owner_valid
+        or not name_valid
+        or len(owner) > MAX_OWNER_LENGTH
+        or len(name) > MAX_REPOSITORY_NAME_LENGTH
+        or name in {".", ".."}
+    ):
         raise IdentityValidationError(f"{field} must be owner/name")
     return repo
 
