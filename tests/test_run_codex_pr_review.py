@@ -192,6 +192,25 @@ class RunCodexPrReviewTests(unittest.TestCase):
             run_codex_pr_review.conflicting_contract_findings(cleared_history, [opposite]),
             [],
         )
+        severity_only = [dict(same, severity="critical")]
+        self.assertEqual(
+            run_codex_pr_review.conflicting_contract_findings(history, severity_only),
+            [],
+        )
+
+    def test_remediation_round_count_is_independent_of_blocking_streak(self) -> None:
+        finding = {
+            "severity": "high", "category": "logic", "file": "service/review.py",
+            "description": "`Review.run()` keeps the contract.", "suggestion": "Keep `Review.run()` stable.",
+        }
+        first, _ = run_codex_pr_review.parse_finding_history(
+            run_codex_pr_review.build_finding_history_marker([], [finding], "deadbeef", status="initial_review")
+        )
+        second, _ = run_codex_pr_review.parse_finding_history(
+            run_codex_pr_review.build_finding_history_marker(first, [finding], "feedface", status="remediation")
+        )
+        self.assertEqual(run_codex_pr_review.remediation_round_count(second), 1)
+        self.assertLess(run_codex_pr_review.remediation_round_count(second), run_codex_pr_review.MAX_REMEDIATION_ROUNDS)
 
     def test_parse_arbitration_output_requires_supported_verdict(self) -> None:
         self.assertEqual(

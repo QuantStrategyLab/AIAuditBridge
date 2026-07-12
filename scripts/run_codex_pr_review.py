@@ -940,12 +940,11 @@ def _contract_key(finding: dict[str, Any]) -> str:
 
 
 def _behavior_digest(finding: dict[str, Any]) -> str:
-    file_path, category, severity, subject, behavior_text = _contract_surface(finding)
+    file_path, category, _severity, subject, behavior_text = _contract_surface(finding)
     payload = json.dumps(
         {
             "file": file_path,
             "category": category,
-            "severity": severity,
             "subject": subject,
             "behavior": behavior_text,
         },
@@ -1660,10 +1659,10 @@ def conflicting_contract_findings(
         current = current_by_contract.get(contract_key)
         if not current:
             continue
-        current_fingerprint = str(current.get("fingerprint_v2") or _fingerprint_v2(current))
-        prior_fingerprint = str(prior.get("fingerprint_v2") or _fingerprint_v2(prior))
-        if current_fingerprint != prior_fingerprint:
-            conflicts.append({**prior, "current_fingerprint_v2": current_fingerprint})
+        current_behavior = str(current.get("behavior_digest") or _behavior_digest(current))
+        prior_behavior = str(prior.get("behavior_digest") or _behavior_digest(prior))
+        if current_behavior != prior_behavior:
+            conflicts.append({**prior, "current_behavior_digest": current_behavior})
     return conflicts
 
 
@@ -1687,6 +1686,10 @@ def unresolved_history_findings(history: list[dict[str, Any]]) -> list[dict[str,
         if isinstance(finding, dict)
     ]
     return previous_matching_findings(history, all_findings)
+
+
+def remediation_round_count(history: list[dict[str, Any]]) -> int:
+    return sum(1 for round_state in history if round_state.get("status") == "remediation")
 
 
 def has_active_blocking_history(history: list[dict[str, Any]]) -> bool:
@@ -2234,10 +2237,11 @@ def main() -> int:
     )
     if active_blocking_history and new_head_for_scope:
         latest_status = str((finding_history[-1] if finding_history else {}).get("status") or "")
+        completed_remediation_rounds = remediation_round_count(finding_history)
         review_scope = (
             "final_sanity"
             if latest_status == "blocked_human_contract"
-            or (previous_streak >= MAX_REMEDIATION_ROUNDS and latest_status == "remediation")
+            or completed_remediation_rounds >= MAX_REMEDIATION_ROUNDS
             else "remediation"
         )
 
@@ -2520,27 +2524,7 @@ def main() -> int:
                     "next_action": "none",
                 }
             )
-        else:
-            decision = apply_arbitration_failure(
-                decision, ReviewError("trusted clearance does not match this head or diff")
-            )
-            return publish_review_decision(
-                token,
-                repo,
-                pr_number,
-                pr_url,
-                decision,
-                exit_code=1,
-                blocking_streak=previous_streak,
-                previous_head_sha=previous_head_sha,
-                current_head_sha=current_head_sha,
-                reviewed_head_sha=current_head_sha,
-                new_head=bool(previous_head_sha and current_head_sha != previous_head_sha),
-                finding_history_marker=build_invalid_finding_history_marker(current_head_sha),
-                history_valid=False,
-            )
-
-    clearance_marker_out = clearance_marker_text if clearance_marker and not decision["blocked"] else ""
+    clearance_marker_out = ""
     history_requires_confirmation = finding_history_requires_confirmation(
         finding_history
     ) or legacy_blocking_state
@@ -2571,6 +2555,7 @@ def main() -> int:
     repeated_finding = bool(decision["blocked"] and repeated_fingerprints)
     contract_conflicts = conflicting_contract_findings(finding_history, decision["blocking_findings"])
     new_head = bool(previous_head_sha and current_head_sha and previous_head_sha != current_head_sha)
+    completed_remediation_rounds = remediation_round_count(finding_history)
     blocking_streak = next_blocking_streak(
         previous_streak,
         blocked=bool(decision["blocked"]),
@@ -2587,7 +2572,7 @@ def main() -> int:
                 "next_action": "contract_arbitration",
             }
         )
-    elif decision["blocked"] and blocking_streak <= MAX_REMEDIATION_ROUNDS:
+    elif decision["blocked"] and completed_remediation_rounds < MAX_REMEDIATION_ROUNDS:
         decision["next_action"] = "auto_remediation"
     elif decision["blocked"]:
         decision.update(
@@ -2729,7 +2714,7 @@ def main() -> int:
                 history_status = "blocked_human_contract"
             elif decision.get("next_action") == "human_contract_resolution":
                 history_status = "blocked_human_contract"
-            elif blocking_streak > MAX_REMEDIATION_ROUNDS or contract_conflicts or decision.get("next_action") == "contract_arbitration":
+            elif completed_remediation_rounds >= MAX_REMEDIATION_ROUNDS or contract_conflicts or decision.get("next_action") == "contract_arbitration":
                 history_status = "arbitration_required"
             elif blocking_streak > 1:
                 history_status = "remediation"
