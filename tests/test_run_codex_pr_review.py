@@ -1477,7 +1477,7 @@ class CodexPrReviewWorkflowTest(unittest.TestCase):
         self.assertNotIn("Validate bridge checkout token", workflow)
         self.assertIn("required: false", workflow)
         self.assertIn("job.workflow_repository", workflow)
-        self.assertNotIn("github.event.pull_request.base.sha", workflow)
+        self.assertIn("github.event.pull_request.base.sha", workflow)
         self.assertIn("github.event.pull_request.head.sha", workflow)
         self.assertIn("Validate AIAuditBridge self-review ref", workflow)
         self.assertIn("AIAuditBridge self-review requires pull_request_target with a PR head SHA.", workflow)
