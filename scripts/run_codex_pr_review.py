@@ -65,6 +65,7 @@ FINGERPRINTS_MARKER_SUFFIX = " -->"
 HEAD_SHA_MARKER_PREFIX = "<!-- codex-pr-review-head-sha:"
 HEAD_SHA_MARKER_SUFFIX = " -->"
 FINDING_HISTORY_MARKER_PREFIX = "<!-- codex-pr-review-history:v1:"
+FINDING_HISTORY_V2_MARKER_PREFIX = "<!-- codex-pr-review-history:v2:"
 FINDING_HISTORY_MARKER_SUFFIX = " -->"
 CONTRACT_CONFLICT_MARKER_PREFIX = "<!-- codex-pr-review-contract-conflict:"
 AUTO_FIX_ALLOWED_MARKER_PREFIX = "<!-- codex-pr-review-auto-fix-allowed:"
@@ -878,6 +879,17 @@ def _contract_finding(finding: dict[str, Any]) -> dict[str, str]:
     return normalized
 
 
+def _with_contract_identity(finding: dict[str, Any]) -> dict[str, Any]:
+    identity = _contract_finding(finding)
+    return {
+        **finding,
+        **{
+            field: identity[field]
+            for field in ("contract_key", "behavior_digest", "fingerprint_v2")
+        },
+    }
+
+
 def _fingerprint_v2(finding: dict[str, Any]) -> str:
     return _contract_finding(finding)["fingerprint_v2"]
 
@@ -1193,14 +1205,14 @@ def build_finding_history_marker(
         }
         raw = json.dumps(overflow_payload, separators=(",", ":")).encode("utf-8")
     encoded = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
-    return f"{FINDING_HISTORY_MARKER_PREFIX}{encoded}{FINDING_HISTORY_MARKER_SUFFIX}"
+    return f"{FINDING_HISTORY_V2_MARKER_PREFIX}{encoded}{FINDING_HISTORY_MARKER_SUFFIX}"
 
 
 def build_invalid_finding_history_marker(head_sha: str = "") -> str:
     normalized_head_sha = str(head_sha or "").strip().lower()
     if re.fullmatch(r"[0-9a-f]{7,64}", normalized_head_sha):
         payload = {
-            "version": 1,
+            "version": CONTRACT_HISTORY_VERSION,
             "rounds": [
                 {
                     "head_sha": normalized_head_sha,
@@ -1211,18 +1223,26 @@ def build_invalid_finding_history_marker(head_sha: str = "") -> str:
         }
         raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     else:
-        raw = b'{"version":1,"invalid":true}'
+        raw = b'{"version":2,"invalid":true}'
     encoded = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
-    return f"{FINDING_HISTORY_MARKER_PREFIX}{encoded}{FINDING_HISTORY_MARKER_SUFFIX}"
+    return f"{FINDING_HISTORY_V2_MARKER_PREFIX}{encoded}{FINDING_HISTORY_MARKER_SUFFIX}"
 
 
 def parse_finding_history(body: str) -> tuple[list[dict[str, Any]], bool]:
     """Recover trusted history; legacy absence is valid, malformed state fails closed."""
-    if FINDING_HISTORY_MARKER_PREFIX not in (body or ""):
+    text = body or ""
+    if FINDING_HISTORY_V2_MARKER_PREFIX in text:
+        marker_prefix = FINDING_HISTORY_V2_MARKER_PREFIX
+        marker_version = CONTRACT_HISTORY_VERSION
+    elif FINDING_HISTORY_MARKER_PREFIX in text:
+        marker_prefix = FINDING_HISTORY_MARKER_PREFIX
+        marker_version = 1
+    else:
+        # Unknown marker versions are ignored so mixed deployments can roll back safely.
         return [], True
     match = re.search(
-        rf"{re.escape(FINDING_HISTORY_MARKER_PREFIX)}([A-Za-z0-9_-]+){re.escape(FINDING_HISTORY_MARKER_SUFFIX)}",
-        body or "",
+        rf"{re.escape(marker_prefix)}([A-Za-z0-9_-]+){re.escape(FINDING_HISTORY_MARKER_SUFFIX)}",
+        text,
     )
     if not match:
         return [], False
@@ -1237,7 +1257,7 @@ def parse_finding_history(body: str) -> tuple[list[dict[str, Any]], bool]:
         payload = json.loads(raw)
     except (ValueError, json.JSONDecodeError):
         return [], False
-    if not isinstance(payload, dict) or payload.get("version") not in {1, CONTRACT_HISTORY_VERSION}:
+    if not isinstance(payload, dict) or payload.get("version") != marker_version:
         return [], False
     rounds = payload.get("rounds")
     if not isinstance(rounds, list) or len(rounds) > FINDING_HISTORY_MAX_ROUNDS:
@@ -2041,7 +2061,7 @@ def main() -> int:
     if not isinstance(findings, list):
         findings = []
     findings = [
-        {**finding, **_contract_finding(finding)}
+        _with_contract_identity(finding)
         for finding in findings
         if isinstance(finding, dict)
     ]

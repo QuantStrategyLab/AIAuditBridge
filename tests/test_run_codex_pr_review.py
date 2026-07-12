@@ -168,7 +168,7 @@ class RunCodexPrReviewTests(unittest.TestCase):
             "description": "`Review.run()` must reject invalid state.",
             "suggestion": "Reject invalid state in `Review.run()`."}
         marker = run_codex_pr_review.build_finding_history_marker([], [finding], "deadbeef")
-        encoded = re.search(r"history:v1:([A-Za-z0-9_-]+) -->", marker).group(1)
+        encoded = re.search(r"history:v2:([A-Za-z0-9_-]+) -->", marker).group(1)
         payload = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
         payload["rounds"][0]["findings"][0]["behavior_digest"] = "0" * 20
         tampered = base64.urlsafe_b64encode(
@@ -176,7 +176,7 @@ class RunCodexPrReviewTests(unittest.TestCase):
         ).decode().rstrip("=")
         self.assertEqual(
             run_codex_pr_review.parse_finding_history(
-                f"<!-- codex-pr-review-history:v1:{tampered} -->"
+                f"<!-- codex-pr-review-history:v2:{tampered} -->"
             ),
             ([], False),
         )
@@ -204,6 +204,52 @@ class RunCodexPrReviewTests(unittest.TestCase):
         self.assertEqual(
             history[0]["findings"][0]["fingerprint_v2"],
             run_codex_pr_review._contract_finding(finding)["fingerprint_v2"],
+        )
+
+    def test_history_marker_namespaces_support_v1_v2_and_unknown_versions(self) -> None:
+        finding = {
+            "severity": "high", "category": "logic", "file": "service/review.py",
+            "description": "`Review.run()` must reject invalid state.",
+            "suggestion": "Reject invalid state in `Review.run()`."}
+        v2_marker = run_codex_pr_review.build_finding_history_marker(
+            [], [finding], "deadbeef"
+        )
+        self.assertIn("codex-pr-review-history:v2:", v2_marker)
+        self.assertNotIn("codex-pr-review-history:v1:", v2_marker)
+        v2_history, valid = run_codex_pr_review.parse_finding_history(v2_marker)
+        self.assertTrue(valid)
+        self.assertEqual(len(v2_history), 1)
+
+        legacy_payload = {
+            "version": 1,
+            "rounds": [{
+                "head_sha": "deadbeef",
+                "findings": [{
+                    "severity": "high", "category": "logic",
+                    "file": "service/review.py",
+                    "description": finding["description"],
+                    "suggestion": finding["suggestion"],
+                }],
+            }],
+        }
+        legacy_encoded = base64.urlsafe_b64encode(
+            json.dumps(legacy_payload, separators=(",", ":")).encode()
+        ).decode().rstrip("=")
+        v1_marker = f"<!-- codex-pr-review-history:v1:{legacy_encoded} -->"
+        v1_history, valid = run_codex_pr_review.parse_finding_history(v1_marker)
+        self.assertTrue(valid)
+        self.assertEqual(v1_history[0]["head_sha"], "deadbeef")
+        self.assertEqual(
+            run_codex_pr_review.parse_finding_history(
+                v1_marker + "\n" + v2_marker
+            ),
+            (v2_history, True),
+        )
+        self.assertEqual(
+            run_codex_pr_review.parse_finding_history(
+                "<!-- codex-pr-review-history:v9:unknown -->"
+            ),
+            ([], True),
         )
 
     def test_parse_arbitration_output_requires_supported_verdict(self) -> None:
@@ -317,6 +363,38 @@ class RunCodexPrReviewTests(unittest.TestCase):
         self.assertEqual(history[0]["findings"][0]["file"], "service/review.py")
         self.assertIn("[REDACTED]", history[0]["findings"][0]["description"])
         self.assertNotIn("secret-value", marker)
+
+    def test_live_finding_keeps_raw_evidence_history_sanitizes_copy(self) -> None:
+        raw_description = "live evidence AKIAIOSFODNN7EXAMPLE " + ("context " * 100)
+        finding = {
+            "severity": "high",
+            "category": "security",
+            "file": "service/review.py",
+            "line": 37,
+            "description": raw_description,
+            "suggestion": "Reject the invalid state.",
+        }
+        live = run_codex_pr_review._with_contract_identity(finding)
+        decision = run_codex_pr_review.evaluate_findings(
+            [live], [{"filename": finding["file"]}], run_codex_pr_review._default_policy()
+        )
+        blocking = decision["blocking_findings"][0]
+        self.assertEqual(blocking["description"], raw_description)
+        self.assertEqual(blocking["line"], 37)
+        comment = run_codex_pr_review.build_pr_comment(decision, "https://example.test/pr/7")
+        self.assertIn(raw_description, comment)
+        prompt = run_codex_pr_review.build_arbitration_prompt(
+            repo="org/repo", pr_title="preserve evidence", diff="diff", findings=[blocking]
+        )
+        self.assertIn(raw_description, prompt)
+
+        marker = run_codex_pr_review.build_finding_history_marker([], [live], "deadbeef")
+        history, valid = run_codex_pr_review.parse_finding_history(marker)
+        stored = history[0]["findings"][0]
+        self.assertTrue(valid)
+        self.assertNotIn("AKIAIOSFODNN7EXAMPLE", json.dumps(history))
+        self.assertNotEqual(stored["description"], raw_description)
+        self.assertLessEqual(len(stored["description"]), run_codex_pr_review.FINDING_HISTORY_TEXT_LIMIT)
 
     def test_finding_history_is_bounded_and_legacy_comments_remain_compatible(self) -> None:
         history: list[dict[str, object]] = []
