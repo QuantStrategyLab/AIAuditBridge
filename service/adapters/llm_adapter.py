@@ -103,7 +103,10 @@ def _retry_with_backoff(fn, *, max_retries: int = DEFAULT_MAX_RETRIES, base_seco
             dispatched = dispatched or isinstance(exc, urllib.error.HTTPError) or bool(
                 getattr(exc, "dispatch_started", False)
             )
-            uncertain = uncertain or isinstance(exc, (urllib.error.URLError, OSError)) or bool(
+            uncertain = uncertain or (
+                isinstance(exc, (urllib.error.URLError, OSError))
+                and not isinstance(exc, urllib.error.HTTPError)
+            ) or bool(
                 getattr(exc, "dispatch_uncertain", False)
             )
             status = exc.code if isinstance(exc, urllib.error.HTTPError) else None
@@ -196,9 +199,11 @@ def _openai_completion(
             raise LlmAdapterError("OpenAI returned an invalid response shape", dispatch_started=True)
 
         choices = payload.get("choices")
-        if not choices:
-            raise LlmAdapterError("OpenAI returned empty choices", dispatch_started=True)
-        message = choices[0].get("message", {})
+        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+            raise LlmAdapterError("OpenAI returned an invalid choices response", dispatch_started=True)
+        message = choices[0].get("message")
+        if not isinstance(message, dict):
+            raise LlmAdapterError("OpenAI returned an invalid message response", dispatch_started=True)
         content = message.get("content", "") if isinstance(message, dict) else ""
         if not content.strip():
             raise LlmAdapterError("OpenAI returned empty content", dispatch_started=True)
