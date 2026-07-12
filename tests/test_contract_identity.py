@@ -3,11 +3,17 @@ from __future__ import annotations
 import copy
 import json
 import unittest
+from unittest.mock import patch
 
 from scripts.contract_identity import (
     MAX_ANCHOR_BYTES,
+    MAX_CLAUSE_BYTES,
+    MAX_ITEMS,
     MAX_TOKEN_BYTES,
+    MAX_TOKENS_PER_CLAUSE,
     IdentityValidationError,
+    _SecretRedactor,
+    _text,
     build_contract_identity,
     canonical_json,
     operators,
@@ -165,6 +171,22 @@ class ContractIdentityTests(unittest.TestCase):
         self.assertNotIn("github_pat_", serialized)
         self.assertNotIn("secret-value", serialized)
 
+        for state in ("required", "forbidden"):
+            split = self.payload()
+            split["required_behavior"] = [["authorization", "=", state]]
+            split_identity = build_contract_identity(split)
+            self.assertEqual(verify_persisted_identity(split_identity.as_record()), split_identity)
+        for clauses in (
+            [["token", "=", "supersecret"]],
+            [["github_pat_" + "x" * 30], ["aws_secret_access_key", "=", "secret-value"]],
+        ):
+            split = self.payload()
+            split["required_behavior"] = clauses
+            serialized = canonical_json(build_contract_identity(split))
+            self.assertNotIn("supersecret", serialized)
+            self.assertNotIn("github_pat_", serialized)
+            self.assertNotIn("secret-value", serialized)
+
     def test_schema_fields_category_unicode_and_controls_are_strict(self) -> None:
         for mutate in (
             lambda value: value.pop("schema"),
@@ -220,6 +242,29 @@ class ContractIdentityTests(unittest.TestCase):
         secret_ref["evidence"]["location_or_hunk_digest"] = "token=secret-value"
         with self.assertRaises(IdentityValidationError):
             build_contract_identity(secret_ref)
+
+    def test_untrusted_shape_and_normalize_bounds_fail_closed(self) -> None:
+        anchors = self.payload()
+        anchors["anchors"] = anchors["anchors"] * (MAX_ITEMS + 1)
+        with self.assertRaises(IdentityValidationError):
+            build_contract_identity(anchors)
+        clauses = self.payload()
+        clauses["predicates"] = [["x"] * (MAX_TOKENS_PER_CLAUSE + 1)]
+        with self.assertRaises(IdentityValidationError):
+            build_contract_identity(clauses)
+        aggregate = self.payload()
+        aggregate["predicates"] = [["x" * MAX_TOKEN_BYTES] * MAX_TOKENS_PER_CLAUSE]
+        self.assertGreater(sum(map(len, aggregate["predicates"][0])), MAX_CLAUSE_BYTES - 1)
+        with self.assertRaises(IdentityValidationError):
+            build_contract_identity(aggregate)
+        oversized_dict = self.payload()
+        oversized_dict.update({f"extra_{index}": index for index in range(1000)})
+        with self.assertRaises(IdentityValidationError):
+            build_contract_identity(oversized_dict)
+        with patch("scripts.contract_identity.unicodedata.normalize") as normalize:
+            with self.assertRaises(IdentityValidationError):
+                _text("x" * 2_000_000, "oversized", MAX_TOKEN_BYTES, _SecretRedactor(allow_placeholders=False))
+            normalize.assert_not_called()
 
     def test_digest_tamper_order_and_evidence_binding_are_explicit(self) -> None:
         identity = build_contract_identity(self.payload())

@@ -30,6 +30,7 @@ MAX_TOKEN_BYTES = 256
 MAX_EVIDENCE_BYTES = 256
 MAX_ITEMS = 32
 MAX_TOKENS_PER_CLAUSE = 128
+MAX_CLAUSE_BYTES = MAX_TOKEN_BYTES * MAX_TOKENS_PER_CLAUSE
 MAX_CANONICAL_BYTES = 16_384
 
 _TOP_REQUIRED = frozenset(
@@ -180,7 +181,10 @@ class _SecretRedactor:
 
 
 def _exact_fields(value: Any, required: frozenset[str], optional: frozenset[str], field: str) -> dict[str, Any]:
-    if not isinstance(value, dict) or set(value) != required | (set(value) & optional):
+    if not isinstance(value, dict) or len(value) > len(required) + len(optional):
+        raise IdentityValidationError(f"{field} has missing or extra fields")
+    keys = set(value)
+    if not required.issubset(keys) or not keys.difference(required).issubset(optional):
         raise IdentityValidationError(f"{field} has missing or extra fields")
     return value
 
@@ -188,6 +192,11 @@ def _exact_fields(value: Any, required: frozenset[str], optional: frozenset[str]
 def _text(value: Any, field: str, max_bytes: int, redactor: _SecretRedactor) -> str:
     if not isinstance(value, str):
         raise IdentityValidationError(f"{field} must be a string")
+    if len(value) > max_bytes:
+        raise IdentityValidationError(f"{field} exceeds {max_bytes} bytes")
+    raw_bytes = value.encode("utf-8")
+    if len(raw_bytes) > max_bytes:
+        raise IdentityValidationError(f"{field} exceeds {max_bytes} bytes")
     normalized = unicodedata.normalize("NFC", value)
     if not normalized or any(unicodedata.category(char).startswith("C") for char in normalized):
         raise IdentityValidationError(f"{field} is empty or contains control characters")
@@ -238,6 +247,15 @@ def _reference(value: Any, field: str, redactor: _SecretRedactor) -> str:
     return reference
 
 
+def _enum(value: Any, field: str, allowed: frozenset[str]) -> str:
+    if not isinstance(value, str) or len(value) > 64:
+        raise IdentityValidationError(f"{field} is not a bounded string")
+    normalized = value.lower()
+    if normalized not in allowed:
+        raise IdentityValidationError(f"{field} is not controlled")
+    return normalized
+
+
 def _clauses(
     value: Any, field: str, redactor: _SecretRedactor, *, allow_empty: bool
 ) -> tuple[tuple[str, ...], ...]:
@@ -245,12 +263,16 @@ def _clauses(
         raise IdentityValidationError(f"{field} must be a bounded list")
     clauses: list[tuple[str, ...]] = []
     for index, clause in enumerate(value):
-        if not isinstance(clause, list) or not clause:
+        if not isinstance(clause, list) or not clause or len(clause) > MAX_TOKENS_PER_CLAUSE:
             raise IdentityValidationError(f"{field}[{index}] must be a non-empty token list")
-        tokens: list[str] = []
-        for raw_token in clause:
-            token = _text(raw_token, f"{field}[{index}]", MAX_TOKEN_BYTES, redactor)
-            tokens.extend(_TOKEN_RE.findall(token))
+        if any(not isinstance(raw_token, str) or len(raw_token) > MAX_TOKEN_BYTES for raw_token in clause):
+            raise IdentityValidationError(f"{field}[{index}] contains an oversized token")
+        if sum(len(raw_token) for raw_token in clause) > MAX_CLAUSE_BYTES:
+            raise IdentityValidationError(f"{field}[{index}] exceeds aggregate size")
+        joined = _text(" ".join(clause), f"{field}[{index}]", MAX_CLAUSE_BYTES, redactor)
+        tokens = _TOKEN_RE.findall(joined)
+        if any(len(token.encode("utf-8")) > MAX_TOKEN_BYTES for token in tokens):
+            raise IdentityValidationError(f"{field}[{index}] contains an oversized token")
         if not tokens or len(tokens) > MAX_TOKENS_PER_CLAUSE:
             raise IdentityValidationError(f"{field}[{index}] has invalid token count")
         clauses.append(tuple(tokens))
@@ -272,9 +294,7 @@ def build_contract_identity(payload: dict[str, Any], *, _allow_placeholders: boo
     redactor = _SecretRedactor(allow_placeholders=_allow_placeholders)
 
     raw_scope = _exact_fields(top["scope"], frozenset({"repo", "file", "category"}), frozenset(), "scope")
-    category = str(raw_scope["category"]).lower() if isinstance(raw_scope["category"], str) else ""
-    if category not in ALLOWED_CATEGORIES:
-        raise IdentityValidationError("scope.category is not controlled")
+    category = _enum(raw_scope["category"], "scope.category", ALLOWED_CATEGORIES)
     scope = Scope(
         repo=_repo(raw_scope["repo"], "scope.repo", redactor),
         file=_relative_path(raw_scope["file"], "scope.file", redactor),
@@ -287,9 +307,7 @@ def build_contract_identity(payload: dict[str, Any], *, _allow_placeholders: boo
     anchors: list[Anchor] = []
     for index, raw_anchor in enumerate(raw_anchors):
         anchor = _exact_fields(raw_anchor, frozenset({"kind", "value"}), frozenset(), f"anchors[{index}]")
-        kind = str(anchor["kind"]).lower() if isinstance(anchor["kind"], str) else ""
-        if kind not in ALLOWED_ANCHOR_KINDS:
-            raise IdentityValidationError(f"anchors[{index}].kind is not controlled")
+        kind = _enum(anchor["kind"], f"anchors[{index}].kind", ALLOWED_ANCHOR_KINDS)
         anchors.append(Anchor(kind, _text(anchor["value"], f"anchors[{index}].value", MAX_ANCHOR_BYTES, redactor)))
 
     predicates = _clauses(top["predicates"], "predicates", redactor, allow_empty=False)
@@ -327,9 +345,7 @@ def build_contract_identity(payload: dict[str, Any], *, _allow_placeholders: boo
         raise IdentityValidationError("evidence.file must match scope.file")
     severity = top.get("severity")
     if severity is not None:
-        severity = str(severity).lower() if isinstance(severity, str) else ""
-        if severity not in ALLOWED_SEVERITIES:
-            raise IdentityValidationError("severity is not controlled")
+        severity = _enum(severity, "severity", ALLOWED_SEVERITIES)
 
     contract_payload = {
         "schema": SCHEMA,
