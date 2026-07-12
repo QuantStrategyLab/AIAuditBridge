@@ -1,0 +1,54 @@
+{
+  "dispatch_three_state": {
+    "repo": "org/audit-bridge",
+    "pr_number": 75,
+    "head_sha": "d162dd741c5109f308ddcf8c708ad40754782bb0",
+    "same_behavior": {
+      "severity": "high",
+      "category": "logic",
+      "file": "service/adapters/dispatch.py",
+      "description": "`DispatchState.apply()` must keep a local pre-launch failure out of remote reconciliation.",
+      "suggestion": "Set `DispatchState.not_started` before the provider launch boundary."
+    },
+    "same_behavior_reworded": {
+      "severity": "high",
+      "category": "logic",
+      "file": "service/adapters/dispatch.py",
+      "description": "A pre-launch local error in `DispatchState.apply()` is not a remote dispatch.",
+      "suggestion": "Set `DispatchState.not_started` before the provider launch boundary."
+    },
+    "different_contract_same_file": {
+      "severity": "high",
+      "category": "logic",
+      "file": "service/adapters/dispatch.py",
+      "description": "`DispatchState.complete()` must preserve a confirmed provider launch after retry.",
+      "suggestion": "Persist `DispatchState.started` after a confirmed provider response."
+    },
+    "opposite_contract": {
+      "severity": "high",
+      "category": "logic",
+      "file": "service/adapters/dispatch.py",
+      "description": "`DispatchState.apply()` must keep a local pre-launch failure out of remote reconciliation.",
+      "suggestion": "Persist `DispatchState.pending_uncertain` before the provider launch boundary."
+    }
+  },
+  "crypto_scored_date_cached_runner": {
+    "repo": "org/crypto-pipelines",
+    "pr_number": 125,
+    "head_sha": "119a83d5903cb440bc68cd1abc0104ab63b8415b",
+    "scored_date": {
+      "severity": "high",
+      "category": "logic",
+      "file": "src/strategy_lifecycle/backtest_wrapper.py",
+      "description": "`load_preflight_panel()` must reject a scored panel that does not end on the requested completed day.",
+      "suggestion": "Require `load_preflight_panel()` to match the expected completed date exactly."
+    },
+    "cached_runner": {
+      "severity": "high",
+      "category": "logic",
+      "file": "src/strategy_lifecycle/backtest_wrapper.py",
+      "description": "`CryptoBacktestRunner.run()` must validate every requested date window even when a runner is cached.",
+      "suggestion": "Revalidate the requested window in `CryptoBacktestRunner.run()` before reuse."
+    }
+  }
+}

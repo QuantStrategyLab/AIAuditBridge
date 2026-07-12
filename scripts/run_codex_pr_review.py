@@ -66,6 +66,8 @@ HEAD_SHA_MARKER_PREFIX = "<!-- codex-pr-review-head-sha:"
 HEAD_SHA_MARKER_SUFFIX = " -->"
 FINDING_HISTORY_MARKER_PREFIX = "<!-- codex-pr-review-history:v1:"
 FINDING_HISTORY_MARKER_SUFFIX = " -->"
+CLEARANCE_MARKER_PREFIX = "<!-- codex-pr-review-clearance:v1:"
+CLEARANCE_MARKER_SUFFIX = " -->"
 CONTRACT_CONFLICT_MARKER_PREFIX = "<!-- codex-pr-review-contract-conflict:"
 AUTO_FIX_ALLOWED_MARKER_PREFIX = "<!-- codex-pr-review-auto-fix-allowed:"
 NEXT_ACTION_MARKER_PREFIX = "<!-- codex-pr-review-next-action:"
@@ -74,7 +76,10 @@ FINDING_HISTORY_MAX_ROUNDS = 4
 FINDING_HISTORY_MAX_BYTES = 8192
 FINDING_HISTORY_MAX_ENCODED_BYTES = ((FINDING_HISTORY_MAX_BYTES + 2) // 3) * 4
 FINDING_HISTORY_TEXT_LIMIT = 500
-ARBITRATION_REPEAT_THRESHOLD = 2
+MAX_REMEDIATION_ROUNDS = 2
+ARBITRATION_REPEAT_THRESHOLD = MAX_REMEDIATION_ROUNDS + 1
+CLEARANCE_TTL_SECONDS = 7 * 24 * 60 * 60
+CONTRACT_HISTORY_VERSION = 2
 
 
 class ReviewError(RuntimeError):
@@ -280,6 +285,32 @@ def fetch_pr_diff(token: str, repo: str, pr_number: int) -> str:
         raise ReviewError(f"Failed to fetch PR diff: {exc.code} {body[:600]}") from exc
 
 
+def fetch_compare_diff(token: str, repo: str, base_sha: str, head_sha: str) -> str:
+    """Fetch only the remediation delta between two trusted reviewed heads."""
+    compare_url = (
+        f"{API_BASE}/repos/{repo}/compare/"
+        f"{urllib.parse.quote(base_sha, safe='')}...{urllib.parse.quote(head_sha, safe='')}"
+    )
+    req = urllib.request.Request(
+        compare_url,
+        method="GET",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github.v3.diff",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "codex-pr-review",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise ReviewError(f"Failed to fetch remediation delta: {exc.code} {body[:600]}") from exc
+    except urllib.error.URLError as exc:
+        raise ReviewError(f"Failed to fetch remediation delta: {exc.reason}") from exc
+
+
 def fetch_pr_files(token: str, repo: str, pr_number: int) -> list[dict[str, Any]]:
     """Fetch the list of changed files in a PR."""
     files: list[dict[str, Any]] = []
@@ -299,14 +330,75 @@ def fetch_pr_files(token: str, repo: str, pr_number: int) -> list[dict[str, Any]
     return files
 
 
+def _diff_digest(diff: str) -> str:
+    return hashlib.sha256(diff.encode("utf-8")).hexdigest()[:24]
+
+
 # ---------------------------------------------------------------------------
 # Review prompt
 # ---------------------------------------------------------------------------
 
 
-def build_review_prompt(diff: str, pr_title: str, pr_body: str, repo: str) -> str:
+def build_review_prompt(
+    diff: str,
+    pr_title: str,
+    pr_body: str,
+    repo: str,
+    *,
+    changed_file_count: int = 0,
+    changed_line_count: int = 0,
+    changed_paths: list[str] | None = None,
+    review_scope: str = "initial_review",
+    unresolved_findings: list[dict[str, Any]] | None = None,
+) -> str:
     """Build the Codex review prompt with the PR diff and structured output instructions."""
     diff_limited = _truncate_lines(diff, DEFAULT_MAX_CONTEXT_LINES * 3)
+    changed_paths = changed_paths or []
+    high_risk_files = sum(
+        1
+        for path in changed_paths
+        if any(token in path.lower() for token in ("/adapter/", "/adapters/", "/gateway/", "/gateways/", "/runtime/"))
+    )
+    high_risk_pr = (
+        changed_line_count > 1500
+        or changed_file_count > 12
+        or high_risk_files >= 2
+    )
+    preflight_note = ""
+    if high_risk_pr:
+        preflight_note = """
+## High-Risk PR Preflight
+
+This PR is large or crosses adapter/gateway/runtime boundaries. Before proposing code changes, require a vertical slice:
+
+- do not suggest a broad cross-layer rewrite;
+- split by contract boundary first;
+- never delete tests or docs just to shrink the diff;
+- if the change spans more than one runtime surface, ask for a smaller follow-up PR before making risky assumptions.
+"""
+
+    scope_note = ""
+    if review_scope == "remediation":
+        scope_note = f"""
+## Review Scope: Remediation
+
+Review only the unresolved findings below, the remediation delta, and the minimal
+affected context needed to validate their contracts. Do not restart a full PR
+review or introduce unrelated findings.
+
+## Unresolved Findings
+{json.dumps(unresolved_findings or [], ensure_ascii=False, indent=2)}
+"""
+    elif review_scope == "final_sanity":
+        scope_note = f"""
+## Review Scope: Final Sanity
+
+This is the single allowed cumulative-diff sanity pass after bounded remediation.
+Verify that the unresolved contracts are resolved; do not restart remediation.
+
+## Unresolved Findings
+{json.dumps(unresolved_findings or [], ensure_ascii=False, indent=2)}
+"""
 
     template = Template(
         """You are reviewing a pull request for a production codebase. Your job is to find bugs, security issues, and logic errors that could cause real problems.
@@ -317,6 +409,10 @@ def build_review_prompt(diff: str, pr_title: str, pr_body: str, repo: str) -> st
 - PR Title: ${TITLE}
 
 ${BODY}
+
+${PREFLIGHT}
+
+${SCOPE}
 
 ## Review Instructions
 
@@ -362,6 +458,8 @@ ${DIFF}
         REPO=repo,
         TITLE=pr_title,
         BODY=f"### PR Description\n\n{pr_body}" if pr_body.strip() else "",
+        PREFLIGHT=preflight_note,
+        SCOPE=scope_note,
         DIFF=diff_limited,
     )
 
@@ -794,22 +892,103 @@ def parse_arbitration_output(
     return result
 
 
+def _normalize_contract_text(value: Any) -> str:
+    text = _sanitize_history_text(value, 240).lower()
+    tokens = {
+        token
+        for token in re.findall(r"[a-z0-9]+", text)
+        if token not in {"the", "and", "for", "from", "into", "that", "this", "with", "must", "should", "will", "need", "return"}
+    }
+    return " ".join(sorted(tokens))
+
+
+def _contract_subject(finding: dict[str, Any]) -> str:
+    """Extract stable code anchors so same-file findings do not all collide."""
+    text = str(finding.get("description") or finding.get("suggestion") or "")
+    anchors = re.findall(r"`([^`]{1,120})`", text)
+    anchors.extend(re.findall(r"\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+\b", text))
+    normalized = [_normalize_contract_text(anchor) for anchor in anchors]
+    return "|".join(sorted({anchor for anchor in normalized if anchor}))
+
+
+def _contract_surface(finding: dict[str, Any]) -> tuple[str, str, str, str, str]:
+    file_path = _sanitize_history_path(finding.get("file"))
+    category = _sanitize_history_text(finding.get("category"), 80).lower()
+    severity = _sanitize_history_text(finding.get("severity"), 20).lower()
+    subject = _contract_subject(finding)
+    behavior_source = finding.get("suggestion") or finding.get("description") or category
+    behavior_text = _normalize_contract_text(behavior_source)
+    return file_path, category, severity, subject, behavior_text
+
+
+def _contract_key(finding: dict[str, Any]) -> str:
+    file_path, category, _severity, subject, _behavior_text = _contract_surface(finding)
+    payload = json.dumps(
+        {"file": file_path, "category": category, "subject": subject},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:20]
+
+
+def _behavior_digest(finding: dict[str, Any]) -> str:
+    file_path, category, severity, subject, behavior_text = _contract_surface(finding)
+    payload = json.dumps(
+        {
+            "file": file_path,
+            "category": category,
+            "severity": severity,
+            "subject": subject,
+            "behavior": behavior_text,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:20]
+
+
+def _fingerprint_v2(finding: dict[str, Any]) -> str:
+    payload = json.dumps(
+        {
+            "contract_key": _contract_key(finding),
+            "behavior_digest": _behavior_digest(finding),
+            "severity": _sanitize_history_text(finding.get("severity"), 20).lower(),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:20]
+
+
+def _contract_finding(finding: dict[str, Any]) -> dict[str, str]:
+    normalized = {
+        "severity": _sanitize_history_text(finding.get("severity"), 20).lower(),
+        "category": _sanitize_history_text(finding.get("category"), 80).lower(),
+        "file": _sanitize_history_path(finding.get("file")),
+        "description": _sanitize_history_text(finding.get("description")),
+        "suggestion": _sanitize_history_text(finding.get("suggestion")),
+        "contract_key": _contract_key(finding),
+        "behavior_digest": _behavior_digest(finding),
+        "fingerprint_v2": _fingerprint_v2(finding),
+    }
+    return normalized
+
+
 def blocking_finding_fingerprint(findings: list[dict[str, Any]]) -> str:
     """Return a stable arbitration-candidate identifier despite wording drift."""
-    normalized: list[dict[str, str]] = []
-    for finding in findings:
-        if not isinstance(finding, dict):
-            continue
-        normalized.append(
-            {
-                "category": str(finding.get("category") or "").strip().lower(),
-                "file": str(finding.get("file") or "").strip(),
-                "severity": str(finding.get("severity") or "").strip().lower(),
-            }
-        )
-    if not normalized:
+    per_finding = sorted(
+        {
+            _fingerprint_v2(finding)
+            for finding in findings
+            if isinstance(finding, dict)
+            and _fingerprint_v2(finding)
+        }
+    )
+    if not per_finding:
         return ""
-    payload = json.dumps(sorted(normalized, key=lambda item: json.dumps(item, sort_keys=True)), sort_keys=True)
+    if len(per_finding) == 1:
+        return per_finding[0]
+    payload = json.dumps(per_finding, sort_keys=True)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:20]
 
 
@@ -821,7 +1000,7 @@ def blocking_finding_fingerprints(findings: list[dict[str, Any]]) -> tuple[str, 
                 fingerprint
                 for finding in findings
                 if isinstance(finding, dict)
-                for fingerprint in [blocking_finding_fingerprint([finding])]
+                for fingerprint in [_fingerprint_v2(finding)]
                 if fingerprint
             }
         )
@@ -887,7 +1066,7 @@ def apply_arbitration_result(
     """Apply an arbiter verdict without allowing contract-conflict remediation churn."""
     result = dict(decision)
     contract_conflict = bool(arbitration.get("contract_conflict"))
-    if arbitration.get("verdict") == "clear":
+    if arbitration and arbitration.get("verdict") == "clear":
         result["blocked"] = False
         result["cleared_blocking_findings"] = list(
             result.get("blocking_findings") or []
@@ -924,6 +1103,139 @@ def apply_arbitration_failure(
         }
     )
     return result
+
+
+def build_clearance_marker(
+    *,
+    repo: str,
+    pr_number: int,
+    head_sha: str,
+    diff_digest: str,
+    findings: list[dict[str, Any]],
+    arbiter_identity: str,
+    evidence: str,
+    issued_at: int | None = None,
+    expires_at: int | None = None,
+) -> str:
+    contract_keys = sorted(
+        {
+            _contract_key(finding)
+            for finding in findings
+            if isinstance(finding, dict)
+        }
+    )
+    fingerprints = sorted(
+        {
+            _fingerprint_v2(finding)
+            for finding in findings
+            if isinstance(finding, dict)
+        }
+    )
+    timestamp = int(time.time()) if issued_at is None else int(issued_at)
+    expiry = timestamp + CLEARANCE_TTL_SECONDS if expires_at is None else int(expires_at)
+    payload = {
+        "version": 1,
+        "repo": repo,
+        "pr_number": int(pr_number),
+        "head_sha": str(head_sha or "").strip().lower(),
+        "diff_digest": str(diff_digest or "").strip().lower(),
+        "contract_keys": contract_keys,
+        "fingerprints": fingerprints,
+        "evidence_digest": hashlib.sha256(_sanitize_history_text(evidence, 1000).encode("utf-8")).hexdigest()[:24],
+        "arbiter_identity": _sanitize_history_text(arbiter_identity, 120),
+        "issued_at": timestamp,
+        "expires_at": expiry,
+    }
+    raw = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+    encoded = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+    return f"{CLEARANCE_MARKER_PREFIX}{encoded}{CLEARANCE_MARKER_SUFFIX}"
+
+
+def parse_clearance_marker(body: str) -> tuple[dict[str, Any] | None, bool]:
+    if CLEARANCE_MARKER_PREFIX not in (body or ""):
+        return None, True
+    match = re.search(
+        rf"{re.escape(CLEARANCE_MARKER_PREFIX)}([A-Za-z0-9_-]+){re.escape(CLEARANCE_MARKER_SUFFIX)}",
+        body or "",
+    )
+    if not match:
+        return None, False
+    encoded = match.group(1)
+    try:
+        padding = "=" * (-len(encoded) % 4)
+        raw = base64.b64decode(encoded + padding, altchars=b"-_", validate=True)
+        payload = json.loads(raw)
+    except (ValueError, json.JSONDecodeError):
+        return None, False
+    if not isinstance(payload, dict) or payload.get("version") != 1:
+        return None, False
+    required = {
+        "repo": str,
+        "pr_number": int,
+        "head_sha": str,
+        "diff_digest": str,
+        "contract_keys": list,
+        "fingerprints": list,
+        "evidence_digest": str,
+        "arbiter_identity": str,
+        "issued_at": int,
+        "expires_at": int,
+    }
+    for key, expected_type in required.items():
+        if key not in payload or not isinstance(payload.get(key), expected_type):
+            return None, False
+    if not all(isinstance(item, str) and re.fullmatch(r"[0-9a-f]{20}", item) for item in payload["contract_keys"]):
+        return None, False
+    if not all(isinstance(item, str) and re.fullmatch(r"[0-9a-f]{20}", item) for item in payload["fingerprints"]):
+        return None, False
+    return payload, True
+
+
+def extract_clearance_marker(body: str) -> str:
+    match = re.search(
+        rf"{re.escape(CLEARANCE_MARKER_PREFIX)}[A-Za-z0-9_-]+{re.escape(CLEARANCE_MARKER_SUFFIX)}",
+        body or "",
+    )
+    return match.group(0) if match else ""
+
+
+def clearance_matches(
+    clearance: dict[str, Any],
+    *,
+    repo: str,
+    pr_number: int,
+    head_sha: str,
+    diff_digest: str,
+    findings: list[dict[str, Any]],
+) -> bool:
+    if not clearance:
+        return False
+    now = int(time.time())
+    if now > int(clearance.get("expires_at") or 0):
+        return False
+    if str(clearance.get("repo") or "") != repo:
+        return False
+    if int(clearance.get("pr_number") or 0) != int(pr_number):
+        return False
+    if str(clearance.get("head_sha") or "").strip().lower() != str(head_sha or "").strip().lower():
+        return False
+    if str(clearance.get("diff_digest") or "").strip().lower() != str(diff_digest or "").strip().lower():
+        return False
+    current_contract_keys = {
+        _contract_key(finding)
+        for finding in findings
+        if isinstance(finding, dict)
+    }
+    current_fingerprints = {
+        _fingerprint_v2(finding)
+        for finding in findings
+        if isinstance(finding, dict)
+    }
+    if current_contract_keys and not current_contract_keys.issubset(set(clearance.get("contract_keys") or [])):
+        return False
+    if current_fingerprints and not current_fingerprints.issubset(set(clearance.get("fingerprints") or [])):
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -978,6 +1290,7 @@ def evaluate_findings(
 
         enriched = {
             **finding,
+            **_contract_finding(finding),
             "file_risk": file_risk,
             "file_risk_reason": file_risk_reason,
         }
@@ -1052,12 +1365,16 @@ def _sanitize_history_text(value: Any, limit: int = FINDING_HISTORY_TEXT_LIMIT) 
 
 
 def _history_finding(finding: dict[str, Any]) -> dict[str, str]:
+    normalized = _contract_finding(finding)
     return {
-        "severity": _sanitize_history_text(finding.get("severity"), 20).lower(),
-        "category": _sanitize_history_text(finding.get("category"), 80).lower(),
-        "file": _sanitize_history_path(finding.get("file")),
-        "description": _sanitize_history_text(finding.get("description")),
-        "suggestion": _sanitize_history_text(finding.get("suggestion")),
+        "severity": normalized["severity"],
+        "category": normalized["category"],
+        "file": normalized["file"],
+        "description": normalized["description"],
+        "suggestion": normalized["suggestion"],
+        "contract_key": normalized["contract_key"],
+        "behavior_digest": normalized["behavior_digest"],
+        "fingerprint_v2": normalized["fingerprint_v2"],
     }
 
 
@@ -1089,7 +1406,7 @@ def build_finding_history_marker(
                 "status": status or "blocking",
             }
         )
-    payload = {"version": 1, "rounds": rounds[-FINDING_HISTORY_MAX_ROUNDS:]}
+    payload = {"version": CONTRACT_HISTORY_VERSION, "rounds": rounds[-FINDING_HISTORY_MAX_ROUNDS:]}
     raw = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
     while len(raw) > FINDING_HISTORY_MAX_BYTES and len(rounds) > 1:
         rounds.pop(0)
@@ -1100,7 +1417,7 @@ def build_finding_history_marker(
         if not re.fullmatch(r"[0-9a-f]{7,64}", overflow_head_sha):
             return build_invalid_finding_history_marker(overflow_head_sha)
         overflow_payload = {
-            "version": 1,
+            "version": CONTRACT_HISTORY_VERSION,
             "rounds": [
                 {
                     "head_sha": overflow_head_sha,
@@ -1118,7 +1435,7 @@ def build_invalid_finding_history_marker(head_sha: str = "") -> str:
     normalized_head_sha = str(head_sha or "").strip().lower()
     if re.fullmatch(r"[0-9a-f]{7,64}", normalized_head_sha):
         payload = {
-            "version": 1,
+            "version": CONTRACT_HISTORY_VERSION,
             "rounds": [
                 {
                     "head_sha": normalized_head_sha,
@@ -1155,7 +1472,7 @@ def parse_finding_history(body: str) -> tuple[list[dict[str, Any]], bool]:
         payload = json.loads(raw)
     except (ValueError, json.JSONDecodeError):
         return [], False
-    if not isinstance(payload, dict) or payload.get("version") != 1:
+    if not isinstance(payload, dict) or payload.get("version") not in {1, CONTRACT_HISTORY_VERSION}:
         return [], False
     rounds = payload.get("rounds")
     if not isinstance(rounds, list) or len(rounds) > FINDING_HISTORY_MAX_ROUNDS:
@@ -1178,19 +1495,57 @@ def parse_finding_history(body: str) -> tuple[list[dict[str, Any]], bool]:
             return [], False
         if not isinstance(findings, list):
             return [], False
-        if status not in {"blocking", "clear", "cleared", "overflow", "invalid_history"}:
+        if status not in {
+            "initial_review",
+            "blocking",
+            "remediation",
+            "arbitration_required",
+            "blocked_human_contract",
+            "clear",
+            "cleared",
+            "overflow",
+            "invalid_history",
+        }:
             return [], False
         if set(round_state) not in ({"head_sha", "findings"}, {"head_sha", "findings", "status"}):
             return [], False
         checked_findings: list[dict[str, str]] = []
         for finding in findings:
-            if not isinstance(finding, dict) or set(finding) != set(field_limits):
+            if not isinstance(finding, dict):
                 return [], False
-            if any(
-                not isinstance(finding[field], str) or len(finding[field]) > limit
-                for field, limit in field_limits.items()
-            ):
-                return [], False
+            if payload.get("version") == 1:
+                if set(finding) != set(field_limits):
+                    return [], False
+                if any(
+                    not isinstance(finding[field], str) or len(finding[field]) > limit
+                    for field, limit in field_limits.items()
+                ):
+                    return [], False
+                finding = _history_finding(finding)
+            else:
+                required_fields = {
+                    "severity": 20,
+                    "category": 80,
+                    "file": 300,
+                    "description": FINDING_HISTORY_TEXT_LIMIT,
+                    "suggestion": FINDING_HISTORY_TEXT_LIMIT,
+                    "contract_key": 20,
+                    "behavior_digest": 20,
+                    "fingerprint_v2": 20,
+                }
+                if set(finding) != set(required_fields):
+                    return [], False
+                if any(
+                    not isinstance(finding[field], str) or len(finding[field]) > limit
+                    for field, limit in required_fields.items()
+                ):
+                    return [], False
+                if not re.fullmatch(r"[0-9a-f]{20}", finding["contract_key"]):
+                    return [], False
+                if not re.fullmatch(r"[0-9a-f]{20}", finding["behavior_digest"]):
+                    return [], False
+                if not re.fullmatch(r"[0-9a-f]{20}", finding["fingerprint_v2"]):
+                    return [], False
             checked_findings.append(dict(finding))
         validated.append(
             {"head_sha": head_sha, "findings": checked_findings, "status": status}
@@ -1215,7 +1570,7 @@ def previous_matching_findings(
         for finding in prior:
             if not isinstance(finding, dict):
                 continue
-            key = blocking_finding_fingerprint([finding])
+            key = str(finding.get("fingerprint_v2") or blocking_finding_fingerprint([finding]))
             if key not in current_keys or key in resolved or key in matched:
                 continue
             if status in {"clear", "cleared"}:
@@ -1228,6 +1583,40 @@ def previous_matching_findings(
         if current_keys.issubset(resolved | set(matched)):
             break
     return [matched[key] for key in sorted(matched)]
+
+
+def conflicting_contract_findings(
+    history: list[dict[str, Any]], current_findings: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Return prior findings that reuse a contract surface but changed behavior."""
+    current_by_contract = {
+        str(finding.get("contract_key") or _contract_key(finding)): finding
+        for finding in current_findings
+        if isinstance(finding, dict)
+    }
+    conflicts: list[dict[str, Any]] = []
+    for round_state in reversed(history):
+        prior = round_state.get("findings")
+        if not isinstance(prior, list):
+            continue
+        for finding in prior:
+            if not isinstance(finding, dict):
+                continue
+            contract_key = str(finding.get("contract_key") or _contract_key(finding))
+            current = current_by_contract.get(contract_key)
+            if not current:
+                continue
+            current_fingerprint = str(current.get("fingerprint_v2") or _fingerprint_v2(current))
+            prior_fingerprint = str(finding.get("fingerprint_v2") or _fingerprint_v2(finding))
+            if current_fingerprint != prior_fingerprint:
+                conflicts.append(
+                    {
+                        **finding,
+                        "current_fingerprint_v2": current_fingerprint,
+                        "history_head_sha": str(round_state.get("head_sha") or ""),
+                    }
+                )
+    return conflicts
 
 
 def previous_matching_round(
@@ -1258,14 +1647,15 @@ def has_active_blocking_history(history: list[dict[str, Any]]) -> bool:
     latest = history[-1]
     status = latest.get("status", "blocking")
     return finding_history_requires_confirmation(history) or (
-        status == "blocking" and bool(latest.get("findings"))
+        status in {"blocking", "remediation", "arbitration_required", "blocked_human_contract"}
+        and bool(latest.get("findings"))
     )
 
 
 def finding_history_requires_confirmation(history: list[dict[str, Any]]) -> bool:
     return bool(
         history
-        and history[-1].get("status") in {"overflow", "invalid_history"}
+        and history[-1].get("status") in {"overflow", "invalid_history", "blocked_human_contract"}
     )
 
 
@@ -1279,6 +1669,7 @@ def build_pr_comment(
     reviewed_head_sha: str = "",
     arbitration: dict[str, Any] | None = None,
     finding_history_marker: str = "",
+    clearance_marker: str = "",
 ) -> str:
     """Build a markdown comment to post on the PR."""
     lines = [
@@ -1296,6 +1687,8 @@ def build_pr_comment(
         decision["summary"],
         "",
     ]
+    if clearance_marker:
+        lines.insert(5, clearance_marker)
 
     if arbitration:
         verdict = arbitration.get("verdict", "")
@@ -1551,6 +1944,7 @@ def publish_review_decision(
     new_head: bool = False,
     arbitration: dict[str, Any] | None = None,
     finding_history_marker: str = "",
+    clearance_marker: str = "",
     history_valid: bool = True,
 ) -> int:
     """Publish one consistent comment, artifact, and GitHub step-output decision."""
@@ -1567,6 +1961,7 @@ def publish_review_decision(
             reviewed_head_sha=reviewed_head_sha,
             arbitration=arbitration,
             finding_history_marker=finding_history_marker,
+            clearance_marker=clearance_marker,
         ),
     )
     write_decision_outputs(
@@ -1654,6 +2049,7 @@ def main() -> int:
     previous_fingerprint = parse_blocking_fingerprint(previous_comment)
     previous_fingerprints = parse_blocking_fingerprints(previous_comment)
     previous_head_sha = parse_reviewed_head_sha(previous_comment)
+    clearance_marker_text = extract_clearance_marker(previous_comment)
     finding_history, history_valid = parse_finding_history(previous_comment)
     history_valid = history_source_valid and history_valid
     if history_valid and finding_history:
@@ -1714,6 +2110,41 @@ def main() -> int:
             history_valid=False,
         )
 
+    if (
+        finding_history
+        and finding_history[-1].get("status") == "blocked_human_contract"
+        and previous_head_sha == current_head_sha
+    ):
+        decision = {
+            "blocked": True,
+            "blocking_findings": list(finding_history[-1].get("findings") or []),
+            "non_blocking_findings": [],
+            "total_findings": len(finding_history[-1].get("findings") or []),
+            "summary": (
+                "🚫 **Merge blocked**: the bounded remediation limit was reached; "
+                "push a corrective head before requesting another review"
+            ),
+            "contract_conflict": False,
+            "auto_fix_allowed": False,
+            "next_action": "human_contract_resolution",
+        }
+        return publish_review_decision(
+            token,
+            repo,
+            pr_number,
+            pr_url,
+            decision,
+            exit_code=1,
+            blocking_streak=previous_streak,
+            finding_fingerprints=previous_fingerprints,
+            previous_head_sha=previous_head_sha,
+            current_head_sha=current_head_sha,
+            reviewed_head_sha=current_head_sha,
+            finding_history_marker=build_finding_history_marker(
+                finding_history, [], current_head_sha
+            ),
+        )
+
     # First pass: classify files. If all files are low-risk, skip review.
     all_low_risk = changed_files_are_low_risk(changed_paths, policy)
     if (
@@ -1747,23 +2178,85 @@ def main() -> int:
             ),
         )
 
-    # Fetch PR diff
+    review_scope = "initial_review"
+    unresolved_findings = unresolved_history_findings(finding_history)
+    new_head_for_scope = bool(
+        previous_head_sha and current_head_sha and previous_head_sha != current_head_sha
+    )
+    if active_blocking_history and new_head_for_scope:
+        latest_status = str((finding_history[-1] if finding_history else {}).get("status") or "")
+        review_scope = (
+            "final_sanity"
+            if previous_streak >= MAX_REMEDIATION_ROUNDS and latest_status == "remediation"
+            else "remediation"
+        )
+
+    # Keep the cumulative diff for clearance binding. Remediation review uses
+    # only the trusted previous-head delta, unless this is its one final sanity pass.
     diff = fetch_pr_diff(token, repo, pr_number)
     print(f"Fetched diff: {len(diff)} chars, {len(diff.splitlines())} lines")
+    review_diff = diff
+    if review_scope == "remediation":
+        try:
+            review_diff = fetch_compare_diff(
+                token, repo, previous_head_sha, current_head_sha
+            )
+        except ReviewError:
+            decision = {
+                "blocked": True,
+                "blocking_findings": [],
+                "non_blocking_findings": [],
+                "total_findings": 0,
+                "summary": "🚫 **Merge blocked**: remediation delta could not be fetched safely.",
+                "contract_conflict": False,
+                "auto_fix_allowed": False,
+                "next_action": "review_retry",
+            }
+            return publish_review_decision(
+                token,
+                repo,
+                pr_number,
+                pr_url,
+                decision,
+                exit_code=1,
+                blocking_streak=previous_streak,
+                finding_fingerprints=previous_fingerprints,
+                previous_head_sha=previous_head_sha,
+                current_head_sha=current_head_sha,
+                reviewed_head_sha=previous_head_sha,
+                new_head=True,
+                finding_history_marker=build_finding_history_marker(
+                    finding_history, [], current_head_sha
+                ),
+            )
+        print(
+            f"Fetched remediation delta: {len(review_diff)} chars, "
+            f"{len(review_diff.splitlines())} lines"
+        )
 
     # Build review prompt
-    prompt = build_review_prompt(diff, pr_title, pr_body, repo)
+    prompt = build_review_prompt(
+        review_diff,
+        pr_title,
+        pr_body,
+        repo,
+        changed_file_count=len(changed_paths),
+        changed_line_count=len(diff.splitlines()),
+        changed_paths=changed_paths,
+        review_scope=review_scope,
+        unresolved_findings=unresolved_findings,
+    )
     print(f"Built review prompt: {len(prompt)} chars")
 
     # Run Codex review
     try:
-        complexity = _estimate_review_complexity(diff, changed_paths, title=pr_title, body=pr_body)
+        complexity = _estimate_review_complexity(review_diff, changed_paths, title=pr_title, body=pr_body)
         output = run_codex_review_with_fallback(
             prompt,
             DEFAULT_TIMEOUT_MINUTES,
             complexity=complexity,
             changed_file_count=len(changed_paths),
-            changed_line_count=len(diff.splitlines()),
+            changed_line_count=len(review_diff.splitlines()),
         )
     except ReviewError as exc:
         if _review_capacity_is_unavailable(exc):
@@ -1894,6 +2387,7 @@ def main() -> int:
     findings = review.get("findings", [])
     if not isinstance(findings, list):
         findings = []
+    findings = [_contract_finding(finding) for finding in findings if isinstance(finding, dict)]
     print(f"Found {len(findings)} issue(s)")
 
     # Evaluate findings
@@ -1905,22 +2399,81 @@ def main() -> int:
             "next_action": "auto_remediation" if decision["blocked"] else "none",
         }
     )
+    diff_digest = _diff_digest(diff)
+    clearance_marker, clearance_valid = parse_clearance_marker(previous_comment)
+    if CLEARANCE_MARKER_PREFIX in previous_comment and not clearance_valid:
+        decision = apply_arbitration_failure(
+            decision, ReviewError("trusted clearance marker is malformed")
+        )
+        return publish_review_decision(
+            token,
+            repo,
+            pr_number,
+            pr_url,
+            decision,
+            exit_code=1,
+            blocking_streak=previous_streak,
+            previous_head_sha=previous_head_sha,
+            current_head_sha=current_head_sha,
+            reviewed_head_sha=current_head_sha,
+            new_head=bool(previous_head_sha and current_head_sha != previous_head_sha),
+            finding_history_marker=build_invalid_finding_history_marker(current_head_sha),
+            history_valid=False,
+        )
+
+    if clearance_marker and decision["blocked"]:
+        if clearance_matches(
+            clearance_marker,
+            repo=repo,
+            pr_number=pr_number,
+            head_sha=current_head_sha,
+            diff_digest=diff_digest,
+            findings=decision["blocking_findings"],
+        ):
+            decision.update(
+                {
+                    "blocked": False,
+                    "cleared_blocking_findings": list(decision["blocking_findings"]),
+                    "blocking_findings": [],
+                    "summary": "✅ **Merge allowed**: trusted clearance matches this head and diff",
+                    "contract_conflict": False,
+                    "auto_fix_allowed": False,
+                    "next_action": "none",
+                }
+            )
+        else:
+            decision = apply_arbitration_failure(
+                decision, ReviewError("trusted clearance does not match this head or diff")
+            )
+            return publish_review_decision(
+                token,
+                repo,
+                pr_number,
+                pr_url,
+                decision,
+                exit_code=1,
+                blocking_streak=previous_streak,
+                previous_head_sha=previous_head_sha,
+                current_head_sha=current_head_sha,
+                reviewed_head_sha=current_head_sha,
+                new_head=bool(previous_head_sha and current_head_sha != previous_head_sha),
+                finding_history_marker=build_invalid_finding_history_marker(current_head_sha),
+                history_valid=False,
+            )
+
+    clearance_marker_out = clearance_marker_text if clearance_marker and not decision["blocked"] else ""
     history_requires_confirmation = finding_history_requires_confirmation(
         finding_history
     ) or legacy_blocking_state
-    active_history_clearance_required = bool(
-        active_blocking_history and not decision["blocked"]
-    )
-    if history_requires_confirmation:
+    if history_requires_confirmation and decision["blocked"]:
         decision.update(
             {
-                "blocked": True,
                 "contract_conflict": True,
                 "auto_fix_allowed": False,
                 "next_action": "contract_arbitration",
             }
         )
-    elif active_history_clearance_required:
+    if not decision["blocked"] and active_blocking_history and not clearance_marker:
         decision.update(
             {
                 "blocked": True,
@@ -1936,10 +2489,8 @@ def main() -> int:
     finding_fingerprint = blocking_finding_fingerprint(decision["blocking_findings"])
     finding_fingerprints = blocking_finding_fingerprints(decision["blocking_findings"])
     repeated_fingerprints = tuple(sorted(set(finding_fingerprints).intersection(previous_fingerprints)))
-    repeated_finding = bool(
-        decision["blocked"]
-        and repeated_fingerprints
-    )
+    repeated_finding = bool(decision["blocked"] and repeated_fingerprints)
+    contract_conflicts = conflicting_contract_findings(finding_history, decision["blocking_findings"])
     new_head = bool(previous_head_sha and current_head_sha and previous_head_sha != current_head_sha)
     blocking_streak = next_blocking_streak(
         previous_streak,
@@ -1949,7 +2500,26 @@ def main() -> int:
         previous_head_sha=previous_head_sha,
         current_head_sha=current_head_sha,
     )
-    if active_history_clearance_required and finding_history:
+    if decision["blocked"] and contract_conflicts:
+        decision.update(
+            {
+                "contract_conflict": True,
+                "auto_fix_allowed": False,
+                "next_action": "contract_arbitration",
+            }
+        )
+    elif decision["blocked"] and blocking_streak <= MAX_REMEDIATION_ROUNDS:
+        decision["next_action"] = "auto_remediation"
+    elif decision["blocked"]:
+        decision.update(
+            {
+                "auto_fix_allowed": False,
+                "next_action": "contract_arbitration",
+            }
+        )
+    if contract_conflicts:
+        previous_findings = contract_conflicts
+    elif active_blocking_history and not decision["blocking_findings"]:
         previous_findings = unresolved_history_findings(finding_history)
     else:
         previous_findings = previous_matching_findings(
@@ -1963,17 +2533,19 @@ def main() -> int:
         }
     )
     arbitration: dict[str, Any] | None = None
-    confirmation_arbitration_required = bool(
-        history_requires_confirmation and previous_findings
+    confirmation_arbitration_required = bool(history_requires_confirmation and previous_findings)
+    active_history_arbitration_required = bool(
+        active_blocking_history
+        and not decision["blocking_findings"]
+        and any(round_state.get("findings") for round_state in finding_history)
     )
-    history_arbitration_required = bool(decision["blocked"] and previous_findings)
     repeated_arbitration_required = should_arbitrate(
         blocked=bool(decision["blocked"]),
         streak=blocking_streak,
         repeated=repeated_finding,
         new_head=new_head,
     ) and not (history_requires_confirmation and not previous_findings)
-    if confirmation_arbitration_required or history_arbitration_required or repeated_arbitration_required:
+    if confirmation_arbitration_required or active_history_arbitration_required or repeated_arbitration_required:
         arbitration_prompt = build_arbitration_prompt(
             repo=repo,
             pr_title=pr_title,
@@ -1986,7 +2558,7 @@ def main() -> int:
             history_state=(
                 str(finding_history[-1].get("status") or "")
                 if confirmation_arbitration_required
-                else "active_blocking_history" if active_history_clearance_required else ""
+                else "active_blocking_history" if active_history_arbitration_required or (active_blocking_history and not clearance_marker_out) else ""
             ),
         )
         try:
@@ -2018,10 +2590,7 @@ def main() -> int:
                 decision = apply_arbitration_failure(
                     decision, ReviewError("history confirmation was not cleared")
                 )
-            elif (
-                active_history_clearance_required
-                and arbitration.get("verdict") != "clear"
-            ):
+            elif active_blocking_history and not clearance_marker_out and arbitration.get("verdict") != "clear":
                 decision.update(
                     {
                         "blocked": True,
@@ -2034,10 +2603,40 @@ def main() -> int:
                 decision = apply_arbitration_failure(
                     decision, ReviewError("contract evidence is ambiguous")
                 )
-        if arbitration.get("verdict") == "clear":
-            blocking_streak = 0
+    if (
+        arbitration
+        and decision["blocked"]
+        and blocking_streak > MAX_REMEDIATION_ROUNDS
+        and not decision.get("contract_conflict")
+    ):
+        decision.update(
+            {
+                "auto_fix_allowed": False,
+                "next_action": "human_contract_resolution",
+                "summary": (
+                    "🚫 **Merge blocked**: independent arbitration confirmed the "
+                    "contract; automatic remediation reached its two-round limit"
+                ),
+            }
+        )
+    if arbitration and arbitration.get("verdict") == "clear":
+        blocking_streak = 0
+        clearance_marker_out = build_clearance_marker(
+            repo=repo,
+            pr_number=pr_number,
+            head_sha=current_head_sha,
+            diff_digest=diff_digest,
+            findings=decision.get("cleared_blocking_findings")
+            or decision.get("blocking_findings")
+            or previous_findings,
+            arbiter_identity=env_value("GITHUB_ACTOR", "github-actions[bot]"),
+            evidence=str(arbitration.get("reason") or decision.get("summary") or ""),
+        )
     arbitration_cleared = bool(arbitration and arbitration.get("verdict") == "clear")
-    if (history_requires_confirmation or active_history_clearance_required) and not arbitration_cleared:
+    if (
+        history_requires_confirmation
+        or (active_blocking_history and not decision["blocked"] and not clearance_marker)
+    ) and not arbitration_cleared:
         finding_history_marker = build_finding_history_marker(
             finding_history,
             [],
@@ -2045,11 +2644,19 @@ def main() -> int:
             status="invalid_history" if legacy_blocking_state and not finding_history else None,
         )
     else:
-        history_status = (
-            "cleared"
-            if arbitration and arbitration.get("verdict") == "clear"
-            else "blocking" if decision["blocked"] else "clear"
-        )
+        if decision["blocked"]:
+            if history_requires_confirmation:
+                history_status = "blocked_human_contract"
+            elif decision.get("next_action") == "human_contract_resolution":
+                history_status = "blocked_human_contract"
+            elif blocking_streak > MAX_REMEDIATION_ROUNDS or contract_conflicts or decision.get("next_action") == "contract_arbitration":
+                history_status = "arbitration_required"
+            elif blocking_streak > 1:
+                history_status = "remediation"
+            else:
+                history_status = "initial_review"
+        else:
+            history_status = "cleared"
         finding_history_marker = build_finding_history_marker(
             finding_history,
             (
@@ -2094,6 +2701,7 @@ def main() -> int:
         new_head=new_head,
         arbitration=arbitration,
         finding_history_marker=finding_history_marker,
+        clearance_marker=clearance_marker_out,
         reviewed_head_sha=current_head_sha,
         history_valid=serialized_history_valid,
     )

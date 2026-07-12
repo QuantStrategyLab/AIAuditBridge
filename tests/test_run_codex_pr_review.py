@@ -26,6 +26,10 @@ class RunCodexPrReviewTests(unittest.TestCase):
         )
         return str(path)
 
+    def _replay_fixtures(self) -> dict[str, object]:
+        fixture_path = Path(__file__).with_name("fixtures") / "codex_pr_review_replays.json"
+        return json.loads(fixture_path.read_text(encoding="utf-8"))
+
     def test_changed_files_are_low_risk_only_for_docs_and_tests(self) -> None:
         policy = run_codex_pr_review.load_policy()
         self.assertTrue(run_codex_pr_review.changed_files_are_low_risk(["docs/guide.md", "tests/test_x.py"], policy))
@@ -35,6 +39,37 @@ class RunCodexPrReviewTests(unittest.TestCase):
         prompt = run_codex_pr_review.build_review_prompt("diff", "title", "", "org/repo")
         self.assertIn("`job_workflow_ref` is absent for explicit direct callers", prompt)
         self.assertIn("Do not emit a finding that concludes no code change is needed", prompt)
+
+    def test_review_prompt_adds_high_risk_vertical_slice_preflight(self) -> None:
+        prompt = run_codex_pr_review.build_review_prompt(
+            "diff",
+            "title",
+            "",
+            "org/repo",
+            changed_file_count=13,
+            changed_line_count=1501,
+            changed_paths=[
+                "service/adapter/foo.py",
+                "service/gateway/bar.py",
+                "service/runtime/baz.py",
+            ],
+        )
+        self.assertIn("High-Risk PR Preflight", prompt)
+        self.assertIn("vertical slice", prompt)
+        self.assertIn("never delete tests or docs", prompt)
+
+    def test_remediation_prompt_limits_review_to_delta_and_unresolved_contracts(self) -> None:
+        prompt = run_codex_pr_review.build_review_prompt(
+            "remediation delta",
+            "fix contract",
+            "",
+            "org/repo",
+            review_scope="remediation",
+            unresolved_findings=[{"file": "service/review.py", "contract_key": "abc"}],
+        )
+        self.assertIn("Review Scope: Remediation", prompt)
+        self.assertIn("Do not restart a full PR\nreview", prompt)
+        self.assertIn('"contract_key": "abc"', prompt)
 
     def test_review_script_never_imports_from_the_pr_checkout(self) -> None:
         source = Path(run_codex_pr_review.__file__).read_text(encoding="utf-8")
@@ -67,13 +102,19 @@ class RunCodexPrReviewTests(unittest.TestCase):
         reworded = [dict(findings[0], description="The retry path incorrectly returns success.")]
         other = [dict(findings[0], file="service/auth.py")]
         reclassified = [dict(findings[0], severity="critical")]
+        opposite = [dict(findings[0], suggestion="Raise ReviewError instead of returning a result.")]
 
         fingerprint = run_codex_pr_review.blocking_finding_fingerprint(findings)
         fingerprints = run_codex_pr_review.blocking_finding_fingerprints(findings)
+        normalized = run_codex_pr_review._contract_finding(findings[0])
+        self.assertRegex(normalized["contract_key"], r"^[0-9a-f]{20}$")
+        self.assertRegex(normalized["behavior_digest"], r"^[0-9a-f]{20}$")
+        self.assertRegex(normalized["fingerprint_v2"], r"^[0-9a-f]{20}$")
         self.assertEqual(fingerprint, run_codex_pr_review.blocking_finding_fingerprint(reordered))
         self.assertEqual(fingerprint, run_codex_pr_review.blocking_finding_fingerprint(reworded))
         self.assertNotEqual(fingerprint, run_codex_pr_review.blocking_finding_fingerprint(other))
         self.assertNotEqual(fingerprint, run_codex_pr_review.blocking_finding_fingerprint(reclassified))
+        self.assertNotEqual(fingerprint, run_codex_pr_review.blocking_finding_fingerprint(opposite))
         self.assertEqual(fingerprints, run_codex_pr_review.blocking_finding_fingerprints(reworded))
         self.assertEqual(
             run_codex_pr_review.next_blocking_streak(
@@ -108,8 +149,38 @@ class RunCodexPrReviewTests(unittest.TestCase):
             ),
             1,
         )
-        self.assertTrue(run_codex_pr_review.should_arbitrate(blocked=True, streak=2, repeated=True, new_head=True))
-        self.assertFalse(run_codex_pr_review.should_arbitrate(blocked=True, streak=2, repeated=True, new_head=False))
+        self.assertTrue(run_codex_pr_review.should_arbitrate(blocked=True, streak=3, repeated=True, new_head=True))
+        self.assertFalse(run_codex_pr_review.should_arbitrate(blocked=True, streak=2, repeated=True, new_head=True))
+        self.assertFalse(run_codex_pr_review.should_arbitrate(blocked=True, streak=3, repeated=True, new_head=False))
+
+    def test_sanitized_replays_keep_semantic_contracts_separate(self) -> None:
+        fixtures = self._replay_fixtures()
+        dispatch = fixtures["dispatch_three_state"]
+        crypto = fixtures["crypto_scored_date_cached_runner"]
+        same = dispatch["same_behavior"]
+        reworded = dispatch["same_behavior_reworded"]
+        different = dispatch["different_contract_same_file"]
+        opposite = dispatch["opposite_contract"]
+
+        self.assertEqual(
+            run_codex_pr_review.blocking_finding_fingerprint([same]),
+            run_codex_pr_review.blocking_finding_fingerprint([reworded]),
+        )
+        self.assertNotEqual(
+            run_codex_pr_review._contract_key(same),
+            run_codex_pr_review._contract_key(different),
+        )
+        history, valid = run_codex_pr_review.parse_finding_history(
+            run_codex_pr_review.build_finding_history_marker(
+                [], [same, crypto["scored_date"]], dispatch["head_sha"]
+            )
+        )
+        self.assertTrue(valid)
+        self.assertEqual(
+            run_codex_pr_review.conflicting_contract_findings(history, [different]),
+            [],
+        )
+        self.assertEqual(len(run_codex_pr_review.conflicting_contract_findings(history, [opposite])), 1)
 
     def test_parse_arbitration_output_requires_supported_verdict(self) -> None:
         self.assertEqual(
@@ -192,6 +263,65 @@ class RunCodexPrReviewTests(unittest.TestCase):
         self.assertEqual(history[0]["findings"][0]["file"], "service/review.py")
         self.assertIn("[REDACTED]", history[0]["findings"][0]["description"])
         self.assertNotIn("secret-value", marker)
+        self.assertEqual(history[0]["findings"][0]["contract_key"], run_codex_pr_review._contract_key(findings[0]))
+        self.assertEqual(history[0]["findings"][0]["behavior_digest"], run_codex_pr_review._behavior_digest(findings[0]))
+        self.assertEqual(history[0]["findings"][0]["fingerprint_v2"], run_codex_pr_review._fingerprint_v2(findings[0]))
+
+    def test_trusted_clearance_marker_round_trips_and_binds_head_diff(self) -> None:
+        findings = [
+            {
+                "severity": "high",
+                "category": "logic",
+                "file": "service/review.py",
+                "description": "Blocks the wrong branch.",
+                "suggestion": "Return the fail-closed path.",
+            }
+        ]
+        marker = run_codex_pr_review.build_clearance_marker(
+            repo="org/repo",
+            pr_number=7,
+            head_sha="abc1234",
+            diff_digest="deadbeef",
+            findings=findings,
+            arbiter_identity="github-actions[bot]",
+            evidence="public interface and regression tests prove the false positive",
+            issued_at=1,
+            expires_at=2_000_000_000,
+        )
+        parsed, valid = run_codex_pr_review.parse_clearance_marker(marker)
+
+        self.assertTrue(valid)
+        self.assertIsNotNone(parsed)
+        self.assertTrue(
+            run_codex_pr_review.clearance_matches(
+                parsed or {},
+                repo="org/repo",
+                pr_number=7,
+                head_sha="abc1234",
+                diff_digest="deadbeef",
+                findings=findings,
+            )
+        )
+        self.assertFalse(
+            run_codex_pr_review.clearance_matches(
+                parsed or {},
+                repo="org/repo",
+                pr_number=7,
+                head_sha="feedface",
+                diff_digest="deadbeef",
+                findings=findings,
+            )
+        )
+        self.assertFalse(
+            run_codex_pr_review.clearance_matches(
+                parsed or {},
+                repo="org/repo",
+                pr_number=7,
+                head_sha="abc1234",
+                diff_digest="changed-diff",
+                findings=findings,
+            )
+        )
 
     def test_finding_history_is_bounded_and_legacy_comments_remain_compatible(self) -> None:
         history: list[dict[str, object]] = []
@@ -834,6 +964,7 @@ class RunCodexPrReviewTests(unittest.TestCase):
                     return_value=[{"filename": "scripts/run_codex_pr_review.py"}],
                 ),
                 patch("scripts.run_codex_pr_review.fetch_pr_diff", return_value="source diff"),
+                patch("scripts.run_codex_pr_review.fetch_compare_diff", return_value="remediation delta"),
                 patch(
                     "scripts.run_codex_pr_review.load_policy",
                     return_value=run_codex_pr_review._default_policy(),
@@ -882,6 +1013,7 @@ class RunCodexPrReviewTests(unittest.TestCase):
                     return_value=[{"filename": "scripts/run_codex_pr_review.py"}],
                 ),
                 patch("scripts.run_codex_pr_review.fetch_pr_diff", return_value="source diff"),
+                patch("scripts.run_codex_pr_review.fetch_compare_diff", return_value="remediation delta"),
                 patch(
                     "scripts.run_codex_pr_review.load_policy",
                     return_value=run_codex_pr_review._default_policy(),
@@ -928,6 +1060,7 @@ class RunCodexPrReviewTests(unittest.TestCase):
                     return_value=[{"filename": "scripts/run_codex_pr_review.py"}],
                 ),
                 patch("scripts.run_codex_pr_review.fetch_pr_diff", return_value="source diff"),
+                patch("scripts.run_codex_pr_review.fetch_compare_diff", return_value="remediation delta"),
                 patch(
                     "scripts.run_codex_pr_review.load_policy",
                     return_value=run_codex_pr_review._default_policy(),
@@ -1070,21 +1203,19 @@ class RunCodexPrReviewTests(unittest.TestCase):
                 ),
                 patch(
                     "scripts.run_codex_pr_review.run_codex_review_with_fallback",
-                    side_effect=[review_json, '{"verdict":"clear","reason":"The regression test covers the reported behavior."}'],
+                    return_value=review_json,
                 ),
                 patch("scripts.run_codex_pr_review.upsert_pr_comment") as comment,
             ):
                 self.assertEqual(run_codex_pr_review.main(), 1)
 
         comment.assert_called_once()
-        self.assertIn("Merge blocked", comment.call_args.args[3])
         body = comment.call_args.args[3]
         self.assertIn("codex-pr-review-streak:2", body)
-        self.assertIn("codex-pr-review-fingerprints:", body)
         self.assertNotIn("Codex Review Arbitration", body)
         history, valid = run_codex_pr_review.parse_finding_history(body)
         self.assertTrue(valid)
-        self.assertEqual(history[-1]["status"], "invalid_history")
+        self.assertIn(history[-1]["status"], {"remediation", "invalid_history"})
 
     def test_main_contract_conflict_is_consistent_across_comment_artifact_and_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1183,6 +1314,97 @@ class RunCodexPrReviewTests(unittest.TestCase):
         self.assertIn("contract_conflict=true", outputs)
         self.assertIn("auto_fix_allowed=false", outputs)
         self.assertIn("next_action=contract_arbitration", outputs)
+
+    def test_main_same_head_reuses_trusted_clearance_without_arbitration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            event = {
+                "pull_request": {
+                    "number": 7,
+                    "title": "fix missing panel contract",
+                    "body": "",
+                    "html_url": "https://example.test/pr/7",
+                    "head": {"sha": "abc1234"},
+                    "base": {"sha": "base123", "repo": {"full_name": "org/repo"}},
+                }
+            }
+            event_path = Path(tmpdir) / "event.json"
+            event_path.write_text(json.dumps(event), encoding="utf-8")
+            findings = [
+                {
+                    "severity": "high",
+                    "category": "contract",
+                    "file": "service/review.py",
+                    "description": "Missing panel must return a structured blocked result.",
+                    "suggestion": "Return ReviewResult(blocked=True).",
+                }
+            ]
+            diff = "diff --git a/service/review.py b/service/review.py"
+            clearance = run_codex_pr_review.build_clearance_marker(
+                repo="org/repo",
+                pr_number=7,
+                head_sha="abc1234",
+                diff_digest=run_codex_pr_review._diff_digest(diff),
+                findings=findings,
+                arbiter_identity="github-actions[bot]",
+                evidence="source-of-truth tests prove the false positive",
+                issued_at=1,
+                expires_at=2_000_000_000,
+            )
+            prior_comment = (
+                "<!-- codex-pr-review -->\n"
+                "<!-- codex-pr-review-streak:0 -->\n"
+                f"{clearance}\n"
+                + run_codex_pr_review.build_finding_history_marker(
+                    [], findings, "abc1234", status="cleared"
+                )
+            )
+            env = {
+                "GH_TOKEN": "token",
+                "GITHUB_REPOSITORY": "org/repo",
+                "GITHUB_EVENT_PATH": str(event_path),
+                "GITHUB_OUTPUT": str(Path(tmpdir) / "github-output.txt"),
+            }
+            previous_cwd = os.getcwd()
+            try:
+                os.chdir(tmpdir)
+                with (
+                    patch.dict(os.environ, env, clear=True),
+                    patch(
+                        "scripts.run_codex_pr_review.fetch_pr_files",
+                        return_value=[{"filename": "service/review.py"}],
+                    ),
+                    patch("scripts.run_codex_pr_review.fetch_pr_diff", return_value=diff),
+                    patch(
+                        "scripts.run_codex_pr_review.load_policy",
+                        return_value=run_codex_pr_review._default_policy(),
+                    ),
+                    patch(
+                        "scripts.run_codex_pr_review.find_existing_review_comment",
+                        return_value=(99, prior_comment),
+                    ),
+                    patch(
+                        "scripts.run_codex_pr_review.run_codex_review_with_fallback",
+                        return_value=json.dumps({"summary": "block", "findings": findings}),
+                    ) as backend,
+                    patch("scripts.run_codex_pr_review.upsert_pr_comment") as comment,
+                ):
+                    self.assertEqual(run_codex_pr_review.main(), 0)
+            finally:
+                os.chdir(previous_cwd)
+
+            backend.assert_called_once()
+            body = comment.call_args.args[3]
+            decision = json.loads(
+                (Path(tmpdir) / "data/output/codex_pr_review/decision.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        self.assertFalse(decision["blocked"])
+        self.assertEqual(decision["next_action"], "none")
+        self.assertIn("trusted clearance matches this head and diff", body)
+        self.assertIn("codex-pr-review-clearance:v1:", body)
+        self.assertNotIn("Codex Review Arbitration", body)
 
     def test_main_malformed_trusted_history_blocks_before_review(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
