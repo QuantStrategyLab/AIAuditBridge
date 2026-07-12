@@ -13,6 +13,8 @@ import json
 import logging
 import os
 import re
+import socket
+import ssl
 import time
 import urllib.error
 import urllib.request
@@ -96,6 +98,16 @@ def _http_error_detail(exc: urllib.error.HTTPError) -> str:
         return "[response body unavailable]"
 
 
+def _transport_dispatch_is_uncertain(exc: BaseException) -> bool:
+    """Release only transport failures proven to occur before request send."""
+    reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+    if isinstance(reason, TimeoutError):
+        return True
+    if isinstance(reason, (socket.gaierror, ConnectionRefusedError, ssl.SSLError)):
+        return False
+    return True
+
+
 def _should_retry(status_code: int | None) -> bool:
     return status_code is not None and (status_code == 429 or status_code >= 500)
 
@@ -113,8 +125,9 @@ def _retry_with_backoff(fn, *, max_retries: int = DEFAULT_MAX_RETRIES, base_seco
                 getattr(exc, "dispatch_started", False)
             )
             attempt_uncertain = (
-                isinstance(exc, (urllib.error.URLError, OSError))
-                and not isinstance(exc, urllib.error.HTTPError)
+                not isinstance(exc, urllib.error.HTTPError)
+                and isinstance(exc, (urllib.error.URLError, OSError))
+                and _transport_dispatch_is_uncertain(exc)
             ) or bool(
                 getattr(exc, "dispatch_uncertain", False)
             )
@@ -206,7 +219,8 @@ def _openai_completion(
             ) from exc
         except (urllib.error.URLError, OSError) as exc:
             raise LlmAdapterError(
-                f"OpenAI network error: {exc}", dispatch_uncertain=True
+                f"OpenAI network error: {exc}",
+                dispatch_uncertain=_transport_dispatch_is_uncertain(exc),
             ) from exc
         except ValueError as exc:
             raise LlmAdapterError(f"OpenAI request configuration error: {exc}") from exc
@@ -291,7 +305,8 @@ def _anthropic_completion(
             ) from exc
         except (urllib.error.URLError, OSError) as exc:
             raise LlmAdapterError(
-                f"Anthropic network error: {exc}", dispatch_uncertain=True
+                f"Anthropic network error: {exc}",
+                dispatch_uncertain=_transport_dispatch_is_uncertain(exc),
             ) from exc
         except ValueError as exc:
             raise LlmAdapterError(f"Anthropic request configuration error: {exc}") from exc

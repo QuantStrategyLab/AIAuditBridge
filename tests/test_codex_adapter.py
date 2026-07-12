@@ -29,7 +29,7 @@ class CodexAdapterDispatchTests(unittest.TestCase):
         self.assertFalse(result.dispatch_started)
         self.assertTrue(result.dispatch_uncertain)
 
-    def test_unstructured_local_nonzero_exit_remains_uncertain(self) -> None:
+    def test_local_parser_exit_is_not_dispatched(self) -> None:
         completed = Mock(returncode=2, stdout="", stderr="error: unknown option --bad-flag")
         with (
             patch("service.adapters.codex_adapter.shutil.which", return_value="/usr/bin/codex"),
@@ -38,9 +38,9 @@ class CodexAdapterDispatchTests(unittest.TestCase):
             result = CodexAdapter().execute(prompt="review")
 
         self.assertFalse(result.dispatch_started)
-        self.assertTrue(result.dispatch_uncertain)
+        self.assertFalse(result.dispatch_uncertain)
 
-    def test_stderr_prefix_is_not_trusted_as_prelaunch_evidence(self) -> None:
+    def test_parser_exit_uses_stderr_without_stdout_boundary(self) -> None:
         completed = Mock(returncode=2, stdout="progress", stderr="error: unknown option --bad-flag")
         with (
             patch("service.adapters.codex_adapter.shutil.which", return_value="/usr/bin/codex"),
@@ -48,7 +48,7 @@ class CodexAdapterDispatchTests(unittest.TestCase):
         ):
             result = CodexAdapter().execute(prompt="review")
 
-        self.assertTrue(result.dispatch_uncertain)
+        self.assertFalse(result.dispatch_uncertain)
 
     def test_local_prefix_in_stdout_is_not_treated_as_prelaunch_evidence(self) -> None:
         completed = Mock(returncode=2, stdout="error: unknown option --remote", stderr="remote failed")

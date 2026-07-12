@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import socket
 import unittest
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from unittest.mock import patch
 
-from service.adapters.llm_adapter import LlmAdapter, LlmAdapterError, _retry_with_backoff
+from service.adapters.llm_adapter import (
+    LlmAdapter,
+    LlmAdapterError,
+    _retry_with_backoff,
+    _transport_dispatch_is_uncertain,
+)
 
 
 class _Response:
@@ -33,6 +39,10 @@ class _BrokenResponse:
 
 
 class LlmAdapterFailureTests(unittest.TestCase):
+    def test_known_preconnect_failure_is_not_ambiguous_dispatch(self) -> None:
+        self.assertFalse(_transport_dispatch_is_uncertain(URLError(socket.gaierror("DNS failed"))))
+        self.assertTrue(_transport_dispatch_is_uncertain(TimeoutError("timed out")))
+
     def test_complete_returns_empty_output_on_provider_failure(self) -> None:
         with patch(
             "service.adapters.llm_adapter._openai_completion",
