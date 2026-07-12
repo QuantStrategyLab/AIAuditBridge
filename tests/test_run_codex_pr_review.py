@@ -121,7 +121,7 @@ class RunCodexPrReviewTests(unittest.TestCase):
         crypto = fixtures["crypto_pr_125"]["findings"]
         dispatch_identity = run_codex_pr_review._contract_finding(dispatch["finding"])
         reworded_identity = run_codex_pr_review._contract_finding(dispatch["reworded"])
-        self.assertEqual(dispatch_identity["contract_key"], reworded_identity["contract_key"])
+        self.assertNotEqual(dispatch_identity["contract_key"], reworded_identity["contract_key"])
         self.assertNotEqual(dispatch_identity["behavior_digest"], reworded_identity["behavior_digest"])
         self.assertNotEqual(dispatch_identity["fingerprint_v2"], reworded_identity["fingerprint_v2"])
         self.assertNotEqual(
@@ -174,6 +174,47 @@ class RunCodexPrReviewTests(unittest.TestCase):
             run_codex_pr_review._behavior_digest(before),
             run_codex_pr_review._behavior_digest(after),
         )
+
+    def test_identity_preserves_anchors_predicates_and_long_tails(self) -> None:
+        schema = {
+            "category": "contract", "file": "service/review.py",
+            "description": "Validate `schema_v2` before persistence.",
+            "suggestion": "Reject invalid input.",
+        }
+        fingerprint = dict(schema, description="Validate `fingerprint_v2` before persistence.")
+        self.assertNotEqual(
+            run_codex_pr_review._contract_key(schema),
+            run_codex_pr_review._contract_key(fingerprint),
+        )
+
+        auth = {
+            "category": "security", "file": "service/review.py",
+            "description": "`validate()` must check the auth header.",
+            "suggestion": "Reject missing credentials.",
+        }
+        database = dict(auth, description="`validate()` must prevent a database leak.")
+        self.assertNotEqual(
+            run_codex_pr_review._contract_key(auth),
+            run_codex_pr_review._contract_key(database),
+        )
+
+        shared = "`validate()` " + ("predicate context " * 130)
+        first = dict(auth, description=shared + "tail_alpha_unique")
+        second = dict(auth, description=shared + "tail_beta_unique")
+        first_identity = run_codex_pr_review._contract_finding(first)
+        second_identity = run_codex_pr_review._contract_finding(second)
+        self.assertNotEqual(first_identity["fingerprint_v2"], second_identity["fingerprint_v2"])
+        self.assertNotIn("tail_alpha_unique", json.dumps(first_identity))
+        self.assertNotIn("tail_beta_unique", json.dumps(second_identity))
+        self.assertLessEqual(
+            len(first_identity["description"]),
+            run_codex_pr_review.FINDING_HISTORY_TEXT_LIMIT,
+        )
+        redacted = run_codex_pr_review._contract_finding(
+            dict(auth, description="evidence token=secret-value")
+        )
+        self.assertIn("[REDACTED]", redacted["description"])
+        self.assertNotIn("secret-value", json.dumps(redacted))
 
     def test_parse_arbitration_output_requires_supported_verdict(self) -> None:
         self.assertEqual(

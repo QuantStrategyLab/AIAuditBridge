@@ -804,15 +804,25 @@ def parse_arbitration_output(
     return result
 
 
-def _normalize_contract_text(value: Any) -> str:
-    text = _sanitize_history_text(value, 240).lower()
+def _normalize_identity_text(value: Any) -> str:
+    text = str(value or "").lower()
     stop_words = {
         "the", "and", "for", "from", "into", "that", "this", "with",
         "must", "should", "will", "return",
     }
     return " ".join(
-        token for token in re.findall(r"[a-z0-9]+", text) if token not in stop_words
+        token
+        for token in re.findall(r"[a-z0-9_]+(?:\.[a-z0-9_]+)*", text)
+        if token not in stop_words
     )
+
+
+def _normalize_identity_anchor(value: Any) -> str:
+    return _normalize_identity_text(value)
+
+
+def _normalize_contract_text(value: Any) -> str:
+    return _normalize_identity_text(value)
 
 
 def _contract_subject(finding: dict[str, Any]) -> str:
@@ -821,15 +831,22 @@ def _contract_subject(finding: dict[str, Any]) -> str:
     )
     anchors = re.findall(r"`([^`]{1,120})`", text)
     anchors.extend(re.findall(r"\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+\b", text))
-    normalized = {_normalize_contract_text(anchor) for anchor in anchors}
-    return "|".join(sorted(anchor for anchor in normalized if anchor)) or _normalize_contract_text(text)
+    subject = {
+        "anchors": [
+            normalized
+            for anchor in anchors
+            if (normalized := _normalize_identity_anchor(anchor))
+        ],
+        "context": _normalize_identity_text(text),
+    }
+    return json.dumps(subject, ensure_ascii=True, separators=(",", ":"))
 
 
 def _contract_key(finding: dict[str, Any]) -> str:
     payload = json.dumps(
         {
-            "file": _sanitize_history_path(finding.get("file")),
-            "category": _sanitize_history_text(finding.get("category"), 80).lower(),
+            "file": _normalize_identity_text(finding.get("file")),
+            "category": _normalize_identity_text(finding.get("category")),
             "subject": _contract_subject(finding),
         },
         sort_keys=True,
@@ -852,6 +869,8 @@ def _behavior_digest(finding: dict[str, Any]) -> str:
 
 
 def _contract_finding(finding: dict[str, Any]) -> dict[str, str]:
+    contract_key = _contract_key(finding)
+    behavior_digest = _behavior_digest(finding)
     normalized = {
         "severity": _sanitize_history_text(finding.get("severity"), 20).lower(),
         "category": _sanitize_history_text(finding.get("category"), 80).lower(),
@@ -859,8 +878,8 @@ def _contract_finding(finding: dict[str, Any]) -> dict[str, str]:
         "description": _sanitize_history_text(finding.get("description")),
         "suggestion": _sanitize_history_text(finding.get("suggestion")),
     }
-    normalized["contract_key"] = _contract_key(normalized)
-    normalized["behavior_digest"] = _behavior_digest(normalized)
+    normalized["contract_key"] = contract_key
+    normalized["behavior_digest"] = behavior_digest
     normalized["fingerprint_v2"] = hashlib.sha256(
         json.dumps(
             {
