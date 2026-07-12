@@ -93,20 +93,30 @@ def _should_retry(status_code: int | None) -> bool:
 
 def _retry_with_backoff(fn, *, max_retries: int = DEFAULT_MAX_RETRIES, base_seconds: float = DEFAULT_BACKOFF_BASE):
     last_exc: Exception | None = None
+    dispatched = False
+    uncertain = False
     for attempt in range(max_retries + 1):
         try:
             return fn()
         except (LlmAdapterError, urllib.error.HTTPError, urllib.error.URLError, OSError) as exc:
             last_exc = exc
+            dispatched = dispatched or isinstance(exc, urllib.error.HTTPError) or bool(
+                getattr(exc, "dispatch_started", False)
+            )
+            uncertain = uncertain or isinstance(exc, (urllib.error.URLError, OSError)) or bool(
+                getattr(exc, "dispatch_uncertain", False)
+            )
             status = exc.code if isinstance(exc, urllib.error.HTTPError) else None
             if not _should_retry(status) or attempt >= max_retries:
-                if isinstance(exc, LlmAdapterError):
-                    raise exc
-                raise LlmAdapterError(str(exc)) from exc
+                raise LlmAdapterError(
+                    str(exc), dispatch_started=dispatched, dispatch_uncertain=uncertain
+                ) from exc
             wait = base_seconds * (2**attempt)
             _logger.warning("llm_adapter attempt %d/%d failed (status=%s); retrying in %.1fs", attempt + 1, max_retries + 1, status, wait)
             time.sleep(wait)
-    raise LlmAdapterError(str(last_exc)) from last_exc
+    raise LlmAdapterError(
+        str(last_exc), dispatch_started=dispatched, dispatch_uncertain=uncertain
+    ) from last_exc
 
 
 def resolve_model(model: str) -> tuple[str, str]:

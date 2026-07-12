@@ -35,11 +35,11 @@ class CodexResult:
     dispatch_uncertain: bool = False
 
 
-def _codex_dispatch_is_uncertain(detail: str) -> bool:
+def _codex_dispatch_is_uncertain(stderr: str) -> bool:
     """Classify known local CLI failures as definitely not dispatched."""
     return not any(
         line.strip().lower().startswith(prefix)
-        for line in detail.splitlines()
+        for line in stderr.splitlines()
         for prefix in _LOCAL_CODEX_FAILURE_PREFIXES
     )
 
@@ -178,7 +178,7 @@ class CodexAdapter:
                 return CodexResult(
                     success=False,
                     error=f"codex exec failed (rc={completed.returncode})" + (f":\n{detail}" if detail else ""),
-                    dispatch_uncertain=_codex_dispatch_is_uncertain(detail),
+                    dispatch_uncertain=_codex_dispatch_is_uncertain(completed.stderr),
                 )
 
             if output_last_message.exists() and output_last_message.read_text(encoding="utf-8").strip():

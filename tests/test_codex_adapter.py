@@ -50,6 +50,16 @@ class CodexAdapterDispatchTests(unittest.TestCase):
 
         self.assertFalse(result.dispatch_uncertain)
 
+    def test_local_prefix_in_stdout_is_not_treated_as_prelaunch_evidence(self) -> None:
+        completed = Mock(returncode=2, stdout="error: unknown option --remote", stderr="remote failed")
+        with (
+            patch("service.adapters.codex_adapter.shutil.which", return_value="/usr/bin/codex"),
+            patch("service.adapters.codex_adapter.subprocess.run", return_value=completed),
+        ):
+            result = CodexAdapter().execute(prompt="review")
+
+        self.assertTrue(result.dispatch_uncertain)
+
     def test_prelaunch_command_failure_is_not_dispatched(self) -> None:
         with patch(
             "service.adapters.codex_adapter._codex_command",

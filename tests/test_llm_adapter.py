@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import unittest
+from urllib.error import HTTPError
 from unittest.mock import patch
 
-from service.adapters.llm_adapter import LlmAdapter, LlmAdapterError
+from service.adapters.llm_adapter import LlmAdapter, LlmAdapterError, _retry_with_backoff
 
 
 class _Response:
@@ -66,6 +67,13 @@ class LlmAdapterFailureTests(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertTrue(result.dispatch_started)
         self.assertFalse(result.dispatch_uncertain)
+
+    def test_retry_does_not_downgrade_prior_provider_dispatch(self) -> None:
+        attempts = iter((HTTPError("https://provider.test", 500, "error", {}, None), LlmAdapterError("local failure")))
+        with self.assertRaises(LlmAdapterError) as raised:
+            _retry_with_backoff(lambda: (_ for _ in ()).throw(next(attempts)), max_retries=1, base_seconds=0)
+
+        self.assertTrue(raised.exception.dispatch_started)
 
 
 if __name__ == "__main__":
