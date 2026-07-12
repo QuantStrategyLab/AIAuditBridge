@@ -77,6 +77,7 @@ FINDING_HISTORY_MAX_BYTES = 8192
 FINDING_HISTORY_MAX_ENCODED_BYTES = ((FINDING_HISTORY_MAX_BYTES + 2) // 3) * 4
 FINDING_HISTORY_TEXT_LIMIT = 500
 ARBITRATION_REPEAT_THRESHOLD = 2
+CONTRACT_HISTORY_VERSION = 2
 
 
 class ReviewError(RuntimeError):
@@ -804,22 +805,89 @@ def parse_arbitration_output(
     return result
 
 
+def _normalize_contract_text(value: Any) -> str:
+    text = _sanitize_history_text(value, 240).lower()
+    words = {
+        token for token in re.findall(r"[a-z0-9]+", text)
+        if token not in {"the", "and", "for", "from", "into", "that", "this", "with", "must", "should", "will", "return"}
+    }
+    return " ".join(sorted(words))
+
+
+def _contract_subject(finding: dict[str, Any]) -> str:
+    text = " ".join(
+        str(finding.get(field) or "") for field in ("description", "suggestion")
+    )
+    anchors = re.findall(r"`([^`]{1,120})`", text)
+    anchors.extend(re.findall(r"\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+\b", text))
+    normalized = {_normalize_contract_text(anchor) for anchor in anchors}
+    return "|".join(sorted(anchor for anchor in normalized if anchor)) or _normalize_contract_text(
+        finding.get("suggestion") or text
+    )
+
+
+def _contract_key(finding: dict[str, Any]) -> str:
+    payload = json.dumps(
+        {
+            "file": _sanitize_history_path(finding.get("file")),
+            "category": _sanitize_history_text(finding.get("category"), 80).lower(),
+            "subject": _contract_subject(finding),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:20]
+
+
+def _behavior_digest(finding: dict[str, Any]) -> str:
+    payload = json.dumps(
+        {
+            "contract_key": _contract_key(finding),
+            "behavior": _normalize_contract_text(finding.get("suggestion") or finding.get("description")),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:20]
+
+
+def _contract_finding(finding: dict[str, Any]) -> dict[str, str]:
+    normalized = {
+        "severity": _sanitize_history_text(finding.get("severity"), 20).lower(),
+        "category": _sanitize_history_text(finding.get("category"), 80).lower(),
+        "file": _sanitize_history_path(finding.get("file")),
+        "description": _sanitize_history_text(finding.get("description")),
+        "suggestion": _sanitize_history_text(finding.get("suggestion")),
+    }
+    normalized["contract_key"] = _contract_key(normalized)
+    normalized["behavior_digest"] = _behavior_digest(normalized)
+    normalized["fingerprint_v2"] = hashlib.sha256(
+        json.dumps(
+            {
+                "contract_key": normalized["contract_key"],
+                "behavior_digest": normalized["behavior_digest"],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()[:20]
+    return normalized
+
+
+def _fingerprint_v2(finding: dict[str, Any]) -> str:
+    return _contract_finding(finding)["fingerprint_v2"]
+
+
 def blocking_finding_fingerprint(findings: list[dict[str, Any]]) -> str:
     """Return a stable arbitration-candidate identifier despite wording drift."""
-    normalized: list[dict[str, str]] = []
-    for finding in findings:
-        if not isinstance(finding, dict):
-            continue
-        normalized.append(
-            {
-                "category": str(finding.get("category") or "").strip().lower(),
-                "file": str(finding.get("file") or "").strip(),
-                "severity": str(finding.get("severity") or "").strip().lower(),
-            }
-        )
-    if not normalized:
+    fingerprints = sorted(
+        _fingerprint_v2(finding)
+        for finding in findings
+        if isinstance(finding, dict) and _fingerprint_v2(finding)
+    )
+    if not fingerprints:
         return ""
-    payload = json.dumps(sorted(normalized, key=lambda item: json.dumps(item, sort_keys=True)), sort_keys=True)
+    payload = json.dumps(fingerprints, sort_keys=True)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:20]
 
 
@@ -831,7 +899,7 @@ def blocking_finding_fingerprints(findings: list[dict[str, Any]]) -> tuple[str, 
                 fingerprint
                 for finding in findings
                 if isinstance(finding, dict)
-                for fingerprint in [blocking_finding_fingerprint([finding])]
+                for fingerprint in [_fingerprint_v2(finding)]
                 if fingerprint
             }
         )
@@ -1062,13 +1130,7 @@ def _sanitize_history_text(value: Any, limit: int = FINDING_HISTORY_TEXT_LIMIT) 
 
 
 def _history_finding(finding: dict[str, Any]) -> dict[str, str]:
-    return {
-        "severity": _sanitize_history_text(finding.get("severity"), 20).lower(),
-        "category": _sanitize_history_text(finding.get("category"), 80).lower(),
-        "file": _sanitize_history_path(finding.get("file")),
-        "description": _sanitize_history_text(finding.get("description")),
-        "suggestion": _sanitize_history_text(finding.get("suggestion")),
-    }
+    return _contract_finding(finding)
 
 
 def _sanitize_history_path(value: Any) -> str:
@@ -1099,7 +1161,7 @@ def build_finding_history_marker(
                 "status": status or "blocking",
             }
         )
-    payload = {"version": 1, "rounds": rounds[-FINDING_HISTORY_MAX_ROUNDS:]}
+    payload = {"version": CONTRACT_HISTORY_VERSION, "rounds": rounds[-FINDING_HISTORY_MAX_ROUNDS:]}
     raw = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
     while len(raw) > FINDING_HISTORY_MAX_BYTES and len(rounds) > 1:
         rounds.pop(0)
@@ -1110,7 +1172,7 @@ def build_finding_history_marker(
         if not re.fullmatch(r"[0-9a-f]{7,64}", overflow_head_sha):
             return build_invalid_finding_history_marker(overflow_head_sha)
         overflow_payload = {
-            "version": 1,
+            "version": CONTRACT_HISTORY_VERSION,
             "rounds": [
                 {
                     "head_sha": overflow_head_sha,
@@ -1165,7 +1227,7 @@ def parse_finding_history(body: str) -> tuple[list[dict[str, Any]], bool]:
         payload = json.loads(raw)
     except (ValueError, json.JSONDecodeError):
         return [], False
-    if not isinstance(payload, dict) or payload.get("version") != 1:
+    if not isinstance(payload, dict) or payload.get("version") not in {1, CONTRACT_HISTORY_VERSION}:
         return [], False
     rounds = payload.get("rounds")
     if not isinstance(rounds, list) or len(rounds) > FINDING_HISTORY_MAX_ROUNDS:
@@ -1188,20 +1250,37 @@ def parse_finding_history(body: str) -> tuple[list[dict[str, Any]], bool]:
             return [], False
         if not isinstance(findings, list):
             return [], False
-        if status not in {"blocking", "clear", "cleared", "overflow", "invalid_history"}:
+        if status not in {"blocking", "clear", "cleared", "overflow", "invalid_history", "initial_review", "remediation", "arbitration_required", "blocked_human_contract"}:
             return [], False
         if set(round_state) not in ({"head_sha", "findings"}, {"head_sha", "findings", "status"}):
             return [], False
         checked_findings: list[dict[str, str]] = []
         for finding in findings:
-            if not isinstance(finding, dict) or set(finding) != set(field_limits):
+            if not isinstance(finding, dict):
                 return [], False
-            if any(
-                not isinstance(finding[field], str) or len(finding[field]) > limit
-                for field, limit in field_limits.items()
-            ):
-                return [], False
-            checked_findings.append(dict(finding))
+            if payload.get("version") == 1:
+                if set(finding) != set(field_limits) or any(
+                    not isinstance(finding[field], str) or len(finding[field]) > limit
+                    for field, limit in field_limits.items()
+                ):
+                    return [], False
+                checked_findings.append(_history_finding(finding))
+            else:
+                required = {**field_limits, "contract_key": 20, "behavior_digest": 20, "fingerprint_v2": 20}
+                if set(finding) != set(required) or any(
+                    not isinstance(finding[field], str) or len(finding[field]) > limit
+                    for field, limit in required.items()
+                ):
+                    return [], False
+                if not all(re.fullmatch(r"[0-9a-f]{20}", finding[field]) for field in ("contract_key", "behavior_digest", "fingerprint_v2")):
+                    return [], False
+                recomputed = _contract_finding(finding)
+                if any(
+                    finding[field] != recomputed[field]
+                    for field in ("contract_key", "behavior_digest", "fingerprint_v2")
+                ):
+                    return [], False
+                checked_findings.append(dict(finding))
         validated.append(
             {"head_sha": head_sha, "findings": checked_findings, "status": status}
         )
@@ -1225,7 +1304,7 @@ def previous_matching_findings(
         for finding in prior:
             if not isinstance(finding, dict):
                 continue
-            key = blocking_finding_fingerprint([finding])
+            key = str(finding.get("fingerprint_v2") or _fingerprint_v2(finding))
             if key not in current_keys or key in resolved or key in matched:
                 continue
             if status in {"clear", "cleared"}:
@@ -1260,6 +1339,32 @@ def unresolved_history_findings(history: list[dict[str, Any]]) -> list[dict[str,
         if isinstance(finding, dict)
     ]
     return previous_matching_findings(history, all_findings)
+
+
+def conflicting_contract_findings(
+    history: list[dict[str, Any]], current_findings: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Find same-contract findings whose required behavior changed."""
+    current = {
+        str(finding.get("contract_key") or _contract_key(finding)): finding
+        for finding in current_findings
+        if isinstance(finding, dict)
+    }
+    prior_by_contract: dict[str, dict[str, Any]] = {}
+    for round_state in reversed(history):
+        if round_state.get("status") in {"clear", "cleared"} and not round_state.get("findings"):
+            break
+        for finding in round_state.get("findings") or []:
+            if not isinstance(finding, dict):
+                continue
+            key = str(finding.get("contract_key") or _contract_key(finding))
+            prior_by_contract.setdefault(key, finding)
+    conflicts: list[dict[str, Any]] = []
+    for key, prior in prior_by_contract.items():
+        current_finding = current.get(key)
+        if current_finding and str(prior.get("behavior_digest") or _behavior_digest(prior)) != _behavior_digest(current_finding):
+            conflicts.append({**prior, "current_behavior_digest": _behavior_digest(current_finding)})
+    return conflicts
 
 
 def has_active_blocking_history(history: list[dict[str, Any]]) -> bool:
@@ -1943,6 +2048,11 @@ def main() -> int:
     findings = review.get("findings", [])
     if not isinstance(findings, list):
         findings = []
+    findings = [
+        {**finding, **_contract_finding(finding)}
+        for finding in findings
+        if isinstance(finding, dict)
+    ]
     print(f"Found {len(findings)} issue(s)")
 
     # Evaluate findings
@@ -2003,6 +2113,18 @@ def main() -> int:
     else:
         previous_findings = previous_matching_findings(
             finding_history, decision["blocking_findings"]
+        )
+    contract_conflicts = conflicting_contract_findings(
+        finding_history, decision["blocking_findings"]
+    )
+    if contract_conflicts:
+        decision.update(
+            {
+                "blocked": True,
+                "contract_conflict": True,
+                "auto_fix_allowed": False,
+                "next_action": "contract_arbitration",
+            }
         )
     matched_history_heads = sorted(
         {

@@ -1,0 +1,40 @@
+{
+  "dispatch_pr_75": {
+    "repo": "org/audit-bridge",
+    "pr_number": 75,
+    "finding": {
+      "severity": "high",
+      "category": "logic",
+      "file": "service/adapters/dispatch.py",
+      "description": "`DispatchState.apply()` must distinguish pre-launch failure from provider dispatch.",
+      "suggestion": "Persist `DispatchState.not_started` before the provider boundary."
+    },
+    "reworded": {
+      "severity": "high",
+      "category": "logic",
+      "file": "service/adapters/dispatch.py",
+      "description": "A local error in `DispatchState.apply()` is not proof of provider launch.",
+      "suggestion": "Persist `DispatchState.not_started` before the provider boundary."
+    }
+  },
+  "crypto_pr_125": {
+    "repo": "org/crypto-pipelines",
+    "pr_number": 125,
+    "findings": [
+      {
+        "severity": "high",
+        "category": "logic",
+        "file": "src/strategy_lifecycle/backtest_wrapper.py",
+        "description": "`load_preflight_panel()` must validate the requested completed day.",
+        "suggestion": "Require an exact scored-date match."
+      },
+      {
+        "severity": "high",
+        "category": "logic",
+        "file": "src/strategy_lifecycle/backtest_wrapper.py",
+        "description": "`CryptoBacktestRunner.run()` must revalidate each requested window.",
+        "suggestion": "Do not reuse a cached runner without window validation."
+      }
+    ]
+  }
+}

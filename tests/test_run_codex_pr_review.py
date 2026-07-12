@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -15,6 +16,10 @@ from scripts.run_codex_pr_review import ReviewError, run_codex_review_with_fallb
 
 
 class RunCodexPrReviewTests(unittest.TestCase):
+    def _replay_fixtures(self) -> dict[str, object]:
+        path = Path(__file__).with_name("fixtures") / "codex_pr_review_replays.json"
+        return json.loads(path.read_text(encoding="utf-8"))
+
     def _write_event(self, tmpdir: str, files: list[str]) -> str:
         event = {
             "pull_request": {"number": 7, "head": {"sha": "abc1234"}},
@@ -73,7 +78,7 @@ class RunCodexPrReviewTests(unittest.TestCase):
         self.assertEqual(fingerprint, run_codex_pr_review.blocking_finding_fingerprint(reordered))
         self.assertEqual(fingerprint, run_codex_pr_review.blocking_finding_fingerprint(reworded))
         self.assertNotEqual(fingerprint, run_codex_pr_review.blocking_finding_fingerprint(other))
-        self.assertNotEqual(fingerprint, run_codex_pr_review.blocking_finding_fingerprint(reclassified))
+        self.assertEqual(fingerprint, run_codex_pr_review.blocking_finding_fingerprint(reclassified))
         self.assertEqual(fingerprints, run_codex_pr_review.blocking_finding_fingerprints(reworded))
         self.assertEqual(
             run_codex_pr_review.next_blocking_streak(
@@ -110,6 +115,63 @@ class RunCodexPrReviewTests(unittest.TestCase):
         )
         self.assertTrue(run_codex_pr_review.should_arbitrate(blocked=True, streak=2, repeated=True, new_head=True))
         self.assertFalse(run_codex_pr_review.should_arbitrate(blocked=True, streak=2, repeated=True, new_head=False))
+
+    def test_replay_fixtures_keep_contract_identity_stable(self) -> None:
+        fixtures = self._replay_fixtures()
+        dispatch = fixtures["dispatch_pr_75"]
+        crypto = fixtures["crypto_pr_125"]
+        self.assertEqual(
+            run_codex_pr_review._contract_finding(dispatch["finding"])["fingerprint_v2"],
+            run_codex_pr_review._contract_finding(dispatch["reworded"])["fingerprint_v2"],
+        )
+        self.assertEqual(len(crypto["findings"]), 2)
+        self.assertNotEqual(
+            run_codex_pr_review._contract_key(crypto["findings"][0]),
+            run_codex_pr_review._contract_key(crypto["findings"][1]),
+        )
+
+    def test_severity_drift_is_not_contract_conflict(self) -> None:
+        finding = {
+            "severity": "high", "category": "logic", "file": "service/review.py",
+            "description": "`Review.run()` must reject invalid state.",
+            "suggestion": "Reject invalid state in `Review.run()`."}
+        marker = run_codex_pr_review.build_finding_history_marker([], [finding], "deadbeef")
+        history, valid = run_codex_pr_review.parse_finding_history(marker)
+        self.assertTrue(valid)
+        self.assertEqual(
+            run_codex_pr_review.conflicting_contract_findings(
+                history, [{**finding, "severity": "critical"}]
+            ),
+            [],
+        )
+
+    def test_opposite_behavior_conflicts_but_unrelated_same_file_does_not(self) -> None:
+        prior = {
+            "severity": "high", "category": "logic", "file": "service/review.py",
+            "description": "`ReviewContract` must reject invalid state.",
+            "suggestion": "Reject invalid state.",
+        }
+        history, valid = run_codex_pr_review.parse_finding_history(
+            run_codex_pr_review.build_finding_history_marker([], [prior], "deadbeef")
+        )
+        self.assertTrue(valid)
+        opposite = {**prior, "suggestion": "Accept invalid state."}
+        unrelated = {**prior, "description": "`AuditContract` must redact credentials.", "suggestion": "Redact credentials."}
+        self.assertEqual(len(run_codex_pr_review.conflicting_contract_findings(history, [opposite])), 1)
+        self.assertEqual(run_codex_pr_review.conflicting_contract_findings(history, [unrelated]), [])
+
+    def test_v2_history_rejects_tampered_identity_digest(self) -> None:
+        finding = {
+            "severity": "high", "category": "logic", "file": "service/review.py",
+            "description": "`Review.run()` must reject invalid state.",
+            "suggestion": "Reject invalid state in `Review.run()`."}
+        marker = run_codex_pr_review.build_finding_history_marker([], [finding], "deadbeef")
+        encoded = re.search(r"history:v1:([A-Za-z0-9_-]+) -->", marker).group(1)
+        payload = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
+        payload["rounds"][0]["findings"][0]["behavior_digest"] = "0" * 20
+        tampered = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode()).decode().rstrip("=")
+        body = f"<!-- codex-pr-review-history:v1:{tampered} -->"
+        self.assertEqual(run_codex_pr_review.parse_finding_history(body), ([], False))
 
     def test_parse_arbitration_output_requires_supported_verdict(self) -> None:
         self.assertEqual(
@@ -1135,12 +1197,12 @@ class RunCodexPrReviewTests(unittest.TestCase):
                 "severity": "high",
                 "category": "contract",
                 "file": "service/review.py",
-                "description": "Missing panel must return a structured blocked result.",
+                "description": "`PanelContract` must return a structured blocked result.",
                 "suggestion": "Return ReviewResult(blocked=True).",
             }
             current = dict(
                 prior,
-                description="Missing panel must fail fast.",
+                description="`PanelContract` must fail fast.",
                 suggestion="Raise ReviewError instead of returning a result.",
             )
             fingerprint = run_codex_pr_review.blocking_finding_fingerprint([prior])
