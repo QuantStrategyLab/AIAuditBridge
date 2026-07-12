@@ -95,7 +95,7 @@ def _scrub_api_keys(text: str) -> str:
 def _http_error_detail(exc: urllib.error.HTTPError) -> str:
     try:
         return _scrub_api_keys(exc.read().decode("utf-8", errors="replace")[:500])
-    except (OSError, TimeoutError):
+    except (HTTPException, OSError, TimeoutError):
         return "[response body unavailable]"
 
 

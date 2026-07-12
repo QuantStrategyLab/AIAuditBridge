@@ -10,6 +10,7 @@ from unittest.mock import patch
 from service.adapters.llm_adapter import (
     LlmAdapter,
     LlmAdapterError,
+    _http_error_detail,
     _retry_with_backoff,
     _transport_dispatch_is_uncertain,
 )
@@ -52,6 +53,11 @@ class _TruncatedResponse:
 
 
 class LlmAdapterFailureTests(unittest.TestCase):
+    def test_truncated_http_error_body_is_redacted_placeholder(self) -> None:
+        error = HTTPError("https://provider.test", 429, "rate limited", {}, None)
+        with patch.object(error, "read", side_effect=IncompleteRead(b"partial", 10)):
+            self.assertEqual(_http_error_detail(error), "[response body unavailable]")
+
     def test_known_preconnect_failure_is_not_ambiguous_dispatch(self) -> None:
         self.assertFalse(_transport_dispatch_is_uncertain(URLError(socket.gaierror("DNS failed"))))
         self.assertFalse(
