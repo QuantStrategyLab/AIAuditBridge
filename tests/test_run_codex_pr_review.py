@@ -487,6 +487,25 @@ class RunCodexPrReviewTests(unittest.TestCase):
         self.assertTrue(valid)
         self.assertFalse(run_codex_pr_review.has_active_blocking_history(recovered))
 
+    def test_blocked_human_contract_is_not_reclassified_as_invalid_history(self) -> None:
+        marker = run_codex_pr_review.build_finding_history_marker(
+            [],
+            [{
+                "severity": "high",
+                "category": "contract",
+                "file": "service/review.py",
+                "description": "The bounded remediation limit was reached.",
+                "suggestion": "Resolve the contract before another review.",
+            }],
+            "deadbeef",
+            status="blocked_human_contract",
+        )
+        history, valid = run_codex_pr_review.parse_finding_history(marker)
+
+        self.assertTrue(valid)
+        self.assertTrue(run_codex_pr_review.finding_history_requires_confirmation(history))
+        self.assertNotIn(history[-1]["status"], {"overflow", "invalid_history"})
+
     def test_matching_history_aggregates_keys_from_multiple_rounds(self) -> None:
         first = {
             "severity": "high",

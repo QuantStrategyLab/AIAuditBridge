@@ -2711,8 +2711,9 @@ def main() -> int:
     serialized_history, serialized_history_valid = parse_finding_history(
         finding_history_marker
     )
-    serialized_history_requires_confirmation = finding_history_requires_confirmation(
+    serialized_history_requires_confirmation = bool(
         serialized_history
+        and serialized_history[-1].get("status") in {"overflow", "invalid_history"}
     )
     if not serialized_history_valid or serialized_history_requires_confirmation:
         decision = apply_arbitration_failure(
