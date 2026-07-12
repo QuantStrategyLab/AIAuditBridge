@@ -210,9 +210,9 @@ def _openai_completion(
         message = choices[0].get("message")
         if not isinstance(message, dict):
             raise LlmAdapterError("OpenAI returned an invalid message response", dispatch_started=True)
-        content = message.get("content", "") if isinstance(message, dict) else ""
-        if not content.strip():
-            raise LlmAdapterError("OpenAI returned empty content", dispatch_started=True)
+        content = message.get("content")
+        if not isinstance(content, str) or not content.strip():
+            raise LlmAdapterError("OpenAI returned an invalid content response", dispatch_started=True)
         return content.strip()
 
     return _retry_with_backoff(_call)

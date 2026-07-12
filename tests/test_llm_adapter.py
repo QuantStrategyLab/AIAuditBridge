@@ -109,6 +109,19 @@ class LlmAdapterFailureTests(unittest.TestCase):
         self.assertTrue(result.dispatch_started)
         self.assertFalse(result.dispatch_uncertain)
 
+    def test_non_string_provider_content_is_confirmed_dispatch_failure(self) -> None:
+        with (
+            patch.dict("service.adapters.llm_adapter.os.environ", {"OPENAI_API_KEY": "test-key"}, clear=True),
+            patch(
+                "service.adapters.llm_adapter.urllib.request.urlopen",
+                return_value=_Response(b'{"choices":[{"message":{"content":null}}]}'),
+            ),
+        ):
+            result = LlmAdapter().complete(model="gpt-5.4-mini", user="review")
+
+        self.assertFalse(result.success)
+        self.assertTrue(result.dispatch_started)
+
 
 if __name__ == "__main__":
     unittest.main()
