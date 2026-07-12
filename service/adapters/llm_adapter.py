@@ -62,6 +62,17 @@ class LlmResult:
 class LlmAdapterError(RuntimeError):
     """Raised when an LLM API call fails after all retries."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        dispatch_started: bool = False,
+        dispatch_uncertain: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.dispatch_started = dispatch_started
+        self.dispatch_uncertain = dispatch_uncertain
+
 
 # ── helpers ────────────────────────────────────────────────────────────
 
@@ -89,6 +100,8 @@ def _retry_with_backoff(fn, *, max_retries: int = DEFAULT_MAX_RETRIES, base_seco
             last_exc = exc
             status = exc.code if isinstance(exc, urllib.error.HTTPError) else None
             if not _should_retry(status) or attempt >= max_retries:
+                if isinstance(exc, LlmAdapterError):
+                    raise exc
                 raise LlmAdapterError(str(exc)) from exc
             wait = base_seconds * (2**attempt)
             _logger.warning("llm_adapter attempt %d/%d failed (status=%s); retrying in %.1fs", attempt + 1, max_retries + 1, status, wait)
@@ -105,23 +118,6 @@ def resolve_model(model: str) -> tuple[str, str]:
         return PROVIDER_OPENAI, model.strip() or DEFAULT_OPENAI_MODEL
     # default to anthropic
     return PROVIDER_ANTHROPIC, DEFAULT_ANTHROPIC_MODEL
-
-
-def _dispatch_is_uncertain(error: str) -> bool:
-    """Keep capacity only when provider acceptance cannot be disproven."""
-    text = error.lower()
-    if "api_key is not configured" in text:
-        return False
-    if any(f"http {status}" in text for status in range(400, 500)):
-        return False
-    return not any(marker in text for marker in (
-        "invalid model",
-        "unsupported model",
-        "validation",
-        "malformed",
-        "missing required",
-        "not configured",
-    ))
 
 
 # ── OpenAI ─────────────────────────────────────────────────────────────
@@ -172,17 +168,21 @@ def _openai_completion(
                 payload = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             detail = _scrub_api_keys(exc.read().decode("utf-8", errors="replace")[:500])
-            raise LlmAdapterError(f"OpenAI HTTP {exc.code}: {detail}") from exc
+            raise LlmAdapterError(
+                f"OpenAI HTTP {exc.code}: {detail}", dispatch_started=True
+            ) from exc
         except (urllib.error.URLError, OSError, ValueError) as exc:
-            raise LlmAdapterError(f"OpenAI network error: {exc}") from exc
+            raise LlmAdapterError(
+                f"OpenAI network error: {exc}", dispatch_uncertain=True
+            ) from exc
 
         choices = payload.get("choices")
         if not choices:
-            raise LlmAdapterError("OpenAI returned empty choices")
+            raise LlmAdapterError("OpenAI returned empty choices", dispatch_started=True)
         message = choices[0].get("message", {})
         content = message.get("content", "") if isinstance(message, dict) else ""
         if not content.strip():
-            raise LlmAdapterError("OpenAI returned empty content")
+            raise LlmAdapterError("OpenAI returned empty content", dispatch_started=True)
         return content.strip()
 
     return _retry_with_backoff(_call)
@@ -235,20 +235,24 @@ def _anthropic_completion(
                 payload = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             detail = _scrub_api_keys(exc.read().decode("utf-8", errors="replace")[:500])
-            raise LlmAdapterError(f"Anthropic HTTP {exc.code}: {detail}") from exc
+            raise LlmAdapterError(
+                f"Anthropic HTTP {exc.code}: {detail}", dispatch_started=True
+            ) from exc
         except (urllib.error.URLError, OSError, ValueError) as exc:
-            raise LlmAdapterError(f"Anthropic network error: {exc}") from exc
+            raise LlmAdapterError(
+                f"Anthropic network error: {exc}", dispatch_uncertain=True
+            ) from exc
 
         content = payload.get("content")
         if not isinstance(content, list):
-            raise LlmAdapterError("Anthropic returned no content blocks")
+            raise LlmAdapterError("Anthropic returned no content blocks", dispatch_started=True)
         text_parts = [
             str(block.get("text", "")).strip()
             for block in content
             if isinstance(block, dict) and block.get("type") == "text"
         ]
         if not text_parts:
-            raise LlmAdapterError("Anthropic returned no text content")
+            raise LlmAdapterError("Anthropic returned no text content", dispatch_started=True)
         return "\n\n".join(text_parts)
 
     return _retry_with_backoff(_call)
@@ -307,8 +311,8 @@ class LlmAdapter:
                 success=False,
                 error=str(exc),
                 latency_seconds=time.time() - started,
-                dispatch_started=False,
-                dispatch_uncertain=_dispatch_is_uncertain(str(exc)),
+                dispatch_started=exc.dispatch_started,
+                dispatch_uncertain=exc.dispatch_uncertain,
             )
 
     def parallel_review(

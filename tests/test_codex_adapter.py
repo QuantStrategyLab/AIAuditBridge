@@ -30,7 +30,7 @@ class CodexAdapterDispatchTests(unittest.TestCase):
         self.assertTrue(result.dispatch_uncertain)
 
     def test_known_local_nonzero_exit_is_not_dispatched(self) -> None:
-        completed = Mock(returncode=2, stdout="", stderr="unknown option --bad-flag")
+        completed = Mock(returncode=2, stdout="", stderr="error: unknown option --bad-flag")
         with (
             patch("service.adapters.codex_adapter.shutil.which", return_value="/usr/bin/codex"),
             patch("service.adapters.codex_adapter.subprocess.run", return_value=completed),

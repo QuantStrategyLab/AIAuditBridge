@@ -18,19 +18,11 @@ from pathlib import Path
 
 SECRET_ENV_MARKERS = ("TOKEN", "SECRET", "PASSWORD", "PRIVATE_KEY", "CREDENTIAL", "API_KEY", "ADMIN_KEY")
 CODEX_REASONING_EFFORTS = frozenset({"minimal", "low", "medium", "high", "xhigh"})
-_LOCAL_CODEX_FAILURE_MARKERS = (
-    "authentication",
-    "bootstrap",
-    "command not found",
-    "configuration",
-    "invalid option",
-    "invalid sandbox",
-    "no such file",
-    "not logged in",
-    "permission denied",
-    "unrecognized option",
-    "unknown option",
-    "unsupported",
+_LOCAL_CODEX_FAILURE_PREFIXES = (
+    "error: invalid value",
+    "error: unexpected argument",
+    "error: unrecognized option",
+    "error: unknown option",
 )
 
 
@@ -45,8 +37,11 @@ class CodexResult:
 
 def _codex_dispatch_is_uncertain(detail: str) -> bool:
     """Classify known local CLI failures as definitely not dispatched."""
-    text = detail.lower()
-    return not any(marker in text for marker in _LOCAL_CODEX_FAILURE_MARKERS)
+    return not any(
+        line.strip().lower().startswith(prefix)
+        for line in detail.splitlines()
+        for prefix in _LOCAL_CODEX_FAILURE_PREFIXES
+    )
 
 
 def _codex_env() -> dict[str, str]:
