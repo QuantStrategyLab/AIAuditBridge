@@ -148,15 +148,26 @@ class _SecretRedactor:
         self.allow_placeholders = allow_placeholders
         self.counts: dict[str, int] = defaultdict(int)
 
+    @staticmethod
+    def _safe_credential(match: re.Match[str]) -> bool:
+        return match.groupdict().get("value", "").lower() in _SAFE_CREDENTIAL_STATES
+
+    def _has_unredacted_secret(self, value: str) -> bool:
+        for secret_type, pattern in _SECRET_PATTERNS:
+            for match in pattern.finditer(value):
+                if secret_type != "CREDENTIAL" or not self._safe_credential(match):
+                    return True
+        return False
+
     def redact(self, value: str, field: str) -> str:
         if "<SECRET:" in value and not self.allow_placeholders:
             raise IdentityValidationError(f"{field} contains a reserved secret placeholder")
-        if self.allow_placeholders and any(pattern.search(value) for _, pattern in _SECRET_PATTERNS):
+        if self.allow_placeholders and self._has_unredacted_secret(value):
             raise IdentityValidationError(f"{field} persists an unredacted secret")
         text = value
         for secret_type, pattern in _SECRET_PATTERNS:
             def replacement(_match: re.Match[str], kind: str = secret_type) -> str:
-                if kind == "CREDENTIAL" and _match.groupdict().get("value", "").lower() in _SAFE_CREDENTIAL_STATES:
+                if kind == "CREDENTIAL" and self._safe_credential(_match):
                     return _match.group(0)
                 self.counts[kind] += 1
                 return f"<SECRET:{kind}:{self.counts[kind]}>"
@@ -194,7 +205,7 @@ def _repo(value: Any, field: str, redactor: _SecretRedactor) -> str:
     if len(parts) != 2:
         raise IdentityValidationError(f"{field} must be owner/name")
     owner, name = parts
-    owner_valid = re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?", owner)
+    owner_valid = re.fullmatch(r"(?!.*--)[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?", owner)
     name_valid = re.fullmatch(r"[A-Za-z0-9._-]+", name)
     if (
         not owner_valid

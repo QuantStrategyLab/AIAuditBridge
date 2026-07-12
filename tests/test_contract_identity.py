@@ -146,6 +146,14 @@ class ContractIdentityTests(unittest.TestCase):
         required["required_behavior"] = [["authorization=required"]]
         forbidden = copy.deepcopy(required)
         forbidden["required_behavior"] = [["authorization=forbidden"]]
+        self.assertEqual(
+            verify_persisted_identity(build_contract_identity(required).as_record()),
+            build_contract_identity(required),
+        )
+        self.assertEqual(
+            verify_persisted_identity(build_contract_identity(forbidden).as_record()),
+            build_contract_identity(forbidden),
+        )
         self.assertNotEqual(
             build_contract_identity(required).behavior_digest,
             build_contract_identity(forbidden).behavior_digest,
@@ -182,7 +190,7 @@ class ContractIdentityTests(unittest.TestCase):
             self.assertEqual(build_contract_identity(payload).scope.repo, repo)
         for repo in (
             "owner", "/owner/repo", "owner/", "owner//repo", "owner/repo/extra",
-            "owner_name/repo", "-owner/repo", "owner-/repo", "./repo", "owner/.", "owner/..",
+            "owner_name/repo", "-owner/repo", "owner-/repo", "owner--name/repo", "./repo", "owner/.", "owner/..",
         ):
             payload = self.payload()
             payload["scope"]["repo"] = repo
