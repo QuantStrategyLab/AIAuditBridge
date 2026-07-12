@@ -21,6 +21,17 @@ class _Response:
         return self._body
 
 
+class _BrokenResponse:
+    def __enter__(self) -> "_BrokenResponse":
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        raise OSError("connection reset")
+
+
 class LlmAdapterFailureTests(unittest.TestCase):
     def test_complete_returns_empty_output_on_provider_failure(self) -> None:
         with patch(
@@ -137,6 +148,17 @@ class LlmAdapterFailureTests(unittest.TestCase):
 
         self.assertFalse(result.success)
         self.assertTrue(result.dispatch_started)
+
+    def test_provider_response_body_failure_is_confirmed_dispatch(self) -> None:
+        with (
+            patch.dict("service.adapters.llm_adapter.os.environ", {"OPENAI_API_KEY": "test-key"}, clear=True),
+            patch("service.adapters.llm_adapter.urllib.request.urlopen", return_value=_BrokenResponse()),
+        ):
+            result = LlmAdapter().complete(model="gpt-5.4-mini", user="review")
+
+        self.assertFalse(result.success)
+        self.assertTrue(result.dispatch_started)
+        self.assertFalse(result.dispatch_uncertain)
 
 
 if __name__ == "__main__":

@@ -89,6 +89,13 @@ def _scrub_api_keys(text: str) -> str:
     return text
 
 
+def _http_error_detail(exc: urllib.error.HTTPError) -> str:
+    try:
+        return _scrub_api_keys(exc.read().decode("utf-8", errors="replace")[:500])
+    except (OSError, TimeoutError):
+        return "[response body unavailable]"
+
+
 def _should_retry(status_code: int | None) -> bool:
     return status_code is not None and (status_code == 429 or status_code >= 500)
 
@@ -184,9 +191,16 @@ def _openai_completion(
     def _call() -> str:
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
-                raw = resp.read()
+                try:
+                    raw = resp.read()
+                except (OSError, TimeoutError) as exc:
+                    raise LlmAdapterError(
+                        "OpenAI response body unavailable", dispatch_started=True
+                    ) from exc
+        except LlmAdapterError:
+            raise
         except urllib.error.HTTPError as exc:
-            detail = _scrub_api_keys(exc.read().decode("utf-8", errors="replace")[:500])
+            detail = _http_error_detail(exc)
             raise LlmAdapterError(
                 f"OpenAI HTTP {exc.code}: {detail}", dispatch_started=True, status_code=exc.code
             ) from exc
@@ -262,9 +276,16 @@ def _anthropic_completion(
     def _call() -> str:
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
-                raw = resp.read()
+                try:
+                    raw = resp.read()
+                except (OSError, TimeoutError) as exc:
+                    raise LlmAdapterError(
+                        "Anthropic response body unavailable", dispatch_started=True
+                    ) from exc
+        except LlmAdapterError:
+            raise
         except urllib.error.HTTPError as exc:
-            detail = _scrub_api_keys(exc.read().decode("utf-8", errors="replace")[:500])
+            detail = _http_error_detail(exc)
             raise LlmAdapterError(
                 f"Anthropic HTTP {exc.code}: {detail}", dispatch_started=True, status_code=exc.code
             ) from exc
