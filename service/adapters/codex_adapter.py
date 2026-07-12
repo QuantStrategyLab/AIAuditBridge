@@ -172,7 +172,9 @@ class CodexAdapter:
                 return CodexResult(success=False, error=f"codex command not found: {exc}")
 
             if completed.returncode != 0:
-                detail = (completed.stdout[-4000:] + completed.stderr[-4000:]).strip()
+                detail = "\n".join(
+                    part for part in (completed.stdout[-4000:], completed.stderr[-4000:]) if part
+                ).strip()
                 return CodexResult(
                     success=False,
                     error=f"codex exec failed (rc={completed.returncode})" + (f":\n{detail}" if detail else ""),

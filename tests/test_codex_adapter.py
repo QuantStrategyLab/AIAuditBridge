@@ -40,6 +40,16 @@ class CodexAdapterDispatchTests(unittest.TestCase):
         self.assertFalse(result.dispatch_started)
         self.assertFalse(result.dispatch_uncertain)
 
+    def test_local_stderr_prefix_is_preserved_after_stdout(self) -> None:
+        completed = Mock(returncode=2, stdout="progress", stderr="error: unknown option --bad-flag")
+        with (
+            patch("service.adapters.codex_adapter.shutil.which", return_value="/usr/bin/codex"),
+            patch("service.adapters.codex_adapter.subprocess.run", return_value=completed),
+        ):
+            result = CodexAdapter().execute(prompt="review")
+
+        self.assertFalse(result.dispatch_uncertain)
+
     def test_prelaunch_command_failure_is_not_dispatched(self) -> None:
         with patch(
             "service.adapters.codex_adapter._codex_command",
