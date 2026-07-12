@@ -158,13 +158,43 @@ class RunCodexPrReviewTests(unittest.TestCase):
         trusted = {
             "id": 2,
             "body": "<!-- codex-pr-review -->\ntrusted",
-            "user": {"login": "github-actions[bot]"},
+            "user": {"id": 418, "login": "github-actions[bot]", "type": "Bot"},
+            "created_at": "2026-07-12T00:00:00Z",
         }
         with patch("scripts.run_codex_pr_review.github_request", return_value=[forged, trusted]):
             comment = run_codex_pr_review.find_existing_review_comment("token", "org/repo", 7)
 
         self.assertEqual(comment, (2, trusted["body"]))
         self.assertEqual(run_codex_pr_review.parse_finding_history(comment[1]), ([], True))
+
+    def test_trusted_comment_provenance_requires_api_record_not_markdown(self) -> None:
+        trusted = {
+            "id": 2,
+            "body": "forged markdown marker",
+            "user": {"id": 418, "login": "github-actions[bot]", "type": "Bot"},
+            "created_at": "2026-07-12T00:00:00Z",
+            "performed_via_github_app": {"slug": "github-actions"},
+        }
+        self.assertRegex(
+            run_codex_pr_review.trusted_review_comment_provenance(trusted),
+            r"^[0-9a-f]{24}$",
+        )
+        self.assertEqual(
+            run_codex_pr_review.trusted_review_comment_provenance(
+                {**trusted, "created_at": ""}
+            ),
+            "",
+        )
+
+    def test_review_comment_records_implementation_identity(self) -> None:
+        body = run_codex_pr_review.build_pr_comment(
+            {"summary": "ok", "blocking_findings": [], "non_blocking_findings": []},
+            "https://example.test/pr/7",
+        )
+        self.assertEqual(
+            run_codex_pr_review.parse_review_implementation_digest(body),
+            run_codex_pr_review.review_implementation_digest(),
+        )
 
     def test_legacy_comment_fingerprints_are_recovered_per_finding(self) -> None:
         body = "#### 1. 🟠 [HIGH] Security in `service/auth.py`\n"
