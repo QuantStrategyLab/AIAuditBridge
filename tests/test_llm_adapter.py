@@ -76,6 +76,17 @@ class LlmAdapterFailureTests(unittest.TestCase):
         self.assertTrue(raised.exception.dispatch_started)
         self.assertFalse(raised.exception.dispatch_uncertain)
 
+    def test_retry_uses_wrapped_provider_status(self) -> None:
+        attempts = iter((
+            LlmAdapterError("OpenAI HTTP 429", dispatch_started=True, status_code=429),
+            LlmAdapterError("local failure"),
+        ))
+        with self.assertRaises(LlmAdapterError) as raised:
+            _retry_with_backoff(lambda: (_ for _ in ()).throw(next(attempts)), max_retries=1, base_seconds=0)
+
+        self.assertTrue(raised.exception.dispatch_started)
+        self.assertFalse(raised.exception.dispatch_uncertain)
+
     def test_malformed_provider_choices_is_confirmed_dispatch_failure(self) -> None:
         with (
             patch.dict("service.adapters.llm_adapter.os.environ", {"OPENAI_API_KEY": "test-key"}, clear=True),

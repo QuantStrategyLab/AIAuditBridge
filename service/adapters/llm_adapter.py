@@ -68,10 +68,12 @@ class LlmAdapterError(RuntimeError):
         *,
         dispatch_started: bool = False,
         dispatch_uncertain: bool = False,
+        status_code: int | None = None,
     ) -> None:
         super().__init__(message)
         self.dispatch_started = dispatch_started
         self.dispatch_uncertain = dispatch_uncertain
+        self.status_code = status_code
 
 
 # ── helpers ────────────────────────────────────────────────────────────
@@ -100,16 +102,21 @@ def _retry_with_backoff(fn, *, max_retries: int = DEFAULT_MAX_RETRIES, base_seco
             return fn()
         except (LlmAdapterError, urllib.error.HTTPError, urllib.error.URLError, OSError) as exc:
             last_exc = exc
-            dispatched = dispatched or isinstance(exc, urllib.error.HTTPError) or bool(
+            attempt_dispatched = isinstance(exc, urllib.error.HTTPError) or bool(
                 getattr(exc, "dispatch_started", False)
             )
-            uncertain = uncertain or (
+            attempt_uncertain = (
                 isinstance(exc, (urllib.error.URLError, OSError))
                 and not isinstance(exc, urllib.error.HTTPError)
             ) or bool(
                 getattr(exc, "dispatch_uncertain", False)
             )
-            status = exc.code if isinstance(exc, urllib.error.HTTPError) else None
+            if attempt_dispatched:
+                dispatched = True
+                uncertain = False
+            elif not dispatched and attempt_uncertain:
+                uncertain = True
+            status = exc.code if isinstance(exc, urllib.error.HTTPError) else getattr(exc, "status_code", None)
             if not _should_retry(status) or attempt >= max_retries:
                 raise LlmAdapterError(
                     str(exc), dispatch_started=dispatched, dispatch_uncertain=uncertain
@@ -182,7 +189,7 @@ def _openai_completion(
         except urllib.error.HTTPError as exc:
             detail = _scrub_api_keys(exc.read().decode("utf-8", errors="replace")[:500])
             raise LlmAdapterError(
-                f"OpenAI HTTP {exc.code}: {detail}", dispatch_started=True
+                f"OpenAI HTTP {exc.code}: {detail}", dispatch_started=True, status_code=exc.code
             ) from exc
         except (urllib.error.URLError, OSError) as exc:
             raise LlmAdapterError(
@@ -260,7 +267,7 @@ def _anthropic_completion(
         except urllib.error.HTTPError as exc:
             detail = _scrub_api_keys(exc.read().decode("utf-8", errors="replace")[:500])
             raise LlmAdapterError(
-                f"Anthropic HTTP {exc.code}: {detail}", dispatch_started=True
+                f"Anthropic HTTP {exc.code}: {detail}", dispatch_started=True, status_code=exc.code
             ) from exc
         except (urllib.error.URLError, OSError) as exc:
             raise LlmAdapterError(
