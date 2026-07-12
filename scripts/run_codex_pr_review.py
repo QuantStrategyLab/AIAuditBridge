@@ -80,6 +80,13 @@ MAX_REMEDIATION_ROUNDS = 2
 ARBITRATION_REPEAT_THRESHOLD = MAX_REMEDIATION_ROUNDS + 1
 CLEARANCE_TTL_SECONDS = 7 * 24 * 60 * 60
 CONTRACT_HISTORY_VERSION = 2
+REVIEW_TRANSITION_MATRIX = {
+    "initial_review": "remediation",
+    "remediation": "remediation",
+    "final_sanity": "arbitration_required",
+    "arbitration_required": "arbitration_required",
+    "blocked_human_contract": "final_sanity",
+}
 
 
 class ReviewError(RuntimeError):
@@ -337,6 +344,14 @@ def fetch_pr_files(token: str, repo: str, pr_number: int) -> list[dict[str, Any]
 
 def _diff_digest(diff: str) -> str:
     return hashlib.sha256(diff.encode("utf-8")).hexdigest()[:24]
+
+
+def review_implementation_digest() -> str:
+    """Identify the trusted bridge implementation that issued a clearance."""
+    digest = hashlib.sha256()
+    for path in (Path(__file__), PROMPT_TEMPLATE_PATH):
+        digest.update(path.read_bytes())
+    return digest.hexdigest()[:24]
 
 
 # ---------------------------------------------------------------------------
@@ -1122,6 +1137,7 @@ def build_clearance_marker(
     arbiter_identity: str,
     evidence: str,
     workflow_run_id: int,
+    implementation_digest: str | None = None,
     issued_at: int | None = None,
     expires_at: int | None = None,
 ) -> str:
@@ -1152,6 +1168,7 @@ def build_clearance_marker(
         "evidence_digest": hashlib.sha256(_sanitize_history_text(evidence, 1000).encode("utf-8")).hexdigest()[:24],
         "arbiter_identity": _sanitize_history_text(arbiter_identity, 120),
         "workflow_run_id": int(workflow_run_id),
+        "implementation_digest": implementation_digest or review_implementation_digest(),
         "issued_at": timestamp,
         "expires_at": expiry,
     }
@@ -1188,6 +1205,7 @@ def parse_clearance_marker(body: str) -> tuple[dict[str, Any] | None, bool]:
         "evidence_digest": str,
         "arbiter_identity": str,
         "workflow_run_id": int,
+        "implementation_digest": str,
         "issued_at": int,
         "expires_at": int,
     }
@@ -1197,6 +1215,8 @@ def parse_clearance_marker(body: str) -> tuple[dict[str, Any] | None, bool]:
     if not all(isinstance(item, str) and re.fullmatch(r"[0-9a-f]{20}", item) for item in payload["contract_keys"]):
         return None, False
     if not all(isinstance(item, str) and re.fullmatch(r"[0-9a-f]{20}", item) for item in payload["fingerprints"]):
+        return None, False
+    if not re.fullmatch(r"[0-9a-f]{24}", payload["implementation_digest"]):
         return None, False
     return payload, True
 
@@ -1230,6 +1250,8 @@ def clearance_matches(
     if str(clearance.get("head_sha") or "").strip().lower() != str(head_sha or "").strip().lower():
         return False
     if str(clearance.get("diff_digest") or "").strip().lower() != str(diff_digest or "").strip().lower():
+        return False
+    if str(clearance.get("implementation_digest") or "") != review_implementation_digest():
         return False
     current_contract_keys = {
         _contract_key(finding)
@@ -1692,13 +1714,24 @@ def remediation_round_count(history: list[dict[str, Any]]) -> int:
     return sum(1 for round_state in history if round_state.get("status") == "remediation")
 
 
+def review_scope_for_history(history: list[dict[str, Any]], *, new_head: bool) -> str:
+    if not history or not new_head:
+        return "initial_review"
+    status = str(history[-1].get("status") or "")
+    if status == "blocked_human_contract":
+        return "final_sanity"
+    if status in {"initial_review", "remediation"}:
+        return "final_sanity" if remediation_round_count(history) >= MAX_REMEDIATION_ROUNDS else "remediation"
+    return "initial_review"
+
+
 def has_active_blocking_history(history: list[dict[str, Any]]) -> bool:
     if not history:
         return False
     latest = history[-1]
     status = latest.get("status", "blocking")
     return finding_history_requires_confirmation(history) or (
-        status in {"blocking", "remediation", "arbitration_required", "blocked_human_contract"}
+        status in {"initial_review", "blocking", "remediation", "arbitration_required", "blocked_human_contract"}
         and bool(latest.get("findings"))
     )
 
@@ -2236,14 +2269,7 @@ def main() -> int:
         previous_head_sha and current_head_sha and previous_head_sha != current_head_sha
     )
     if active_blocking_history and new_head_for_scope:
-        latest_status = str((finding_history[-1] if finding_history else {}).get("status") or "")
-        completed_remediation_rounds = remediation_round_count(finding_history)
-        review_scope = (
-            "final_sanity"
-            if latest_status == "blocked_human_contract"
-            or completed_remediation_rounds >= MAX_REMEDIATION_ROUNDS
-            else "remediation"
-        )
+        review_scope = review_scope_for_history(finding_history, new_head=True)
 
     # Keep the cumulative diff for clearance binding. Remediation review uses
     # only the trusted previous-head delta, unless this is its one final sanity pass.

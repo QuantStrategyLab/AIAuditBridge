@@ -212,6 +212,17 @@ class RunCodexPrReviewTests(unittest.TestCase):
         self.assertEqual(run_codex_pr_review.remediation_round_count(second), 1)
         self.assertLess(run_codex_pr_review.remediation_round_count(second), run_codex_pr_review.MAX_REMEDIATION_ROUNDS)
 
+    def test_review_transition_matrix_keeps_initial_active_for_two_remediations(self) -> None:
+        finding = {"severity": "high", "category": "logic", "file": "service/review.py", "description": "`Review.run()` blocks.", "suggestion": "Keep `Review.run()` blocked."}
+        history, _ = run_codex_pr_review.parse_finding_history(run_codex_pr_review.build_finding_history_marker([], [finding], "deadbeef", status="initial_review"))
+        self.assertTrue(run_codex_pr_review.has_active_blocking_history(history))
+        self.assertEqual(run_codex_pr_review.review_scope_for_history(history, new_head=True), "remediation")
+        for head in ("feedface", "c0ffee0"):
+            marker = run_codex_pr_review.build_finding_history_marker(history, [finding], head, status="remediation")
+            history, _ = run_codex_pr_review.parse_finding_history(marker)
+        self.assertEqual(run_codex_pr_review.review_scope_for_history(history, new_head=True), "final_sanity")
+        self.assertEqual(run_codex_pr_review.review_scope_for_history(history, new_head=False), "initial_review")
+
     def test_parse_arbitration_output_requires_supported_verdict(self) -> None:
         self.assertEqual(
             run_codex_pr_review.parse_arbitration_output('{"verdict":"clear","reason":"covered by the regression test"}'),
