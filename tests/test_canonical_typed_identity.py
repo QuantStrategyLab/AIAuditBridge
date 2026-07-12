@@ -14,7 +14,7 @@ class CanonicalTypedIdentityTests(unittest.TestCase):
             "schema": "contract_identity.v2",
             "canonicalizer_version": "structured_tokens.v1",
             "scope": {"repo": "acme/audit-bridge", "file": "service/review.py", "category": "logic"},
-            "anchors": [token("identifier", "Review.validate()")],
+            "anchors": [token("identifier", "Review"), token("operator", "::"), token("identifier", "validate()")],
             "predicates": [[token("identifier", "score"), token("operator", ">="), token("identifier", "threshold")]],
             "required_behavior": [[token("policy_state", "required")]],
             "forbidden_behavior": [[token("policy_state", "forbidden")]],
@@ -39,10 +39,10 @@ class CanonicalTypedIdentityTests(unittest.TestCase):
         self.assertEqual((required.contract_key, required.behavior_digest, required.fingerprint_v2), (validate_identity(critical).contract_key, validate_identity(critical).behavior_digest, validate_identity(critical).fingerprint_v2))
     def test_same_file_unrelated_contracts_do_not_collide(self):
         other = self.payload()
-        other["anchors"] = [{"kind": "identifier", "value": "Auth.validate"}]
+        other["anchors"] = [{"kind": "identifier", "value": "Auth"}, {"kind": "operator", "value": "::"}, {"kind": "identifier", "value": "validate"}]
         self.assertNotEqual(validate_identity(self.payload()).contract_key, validate_identity(other).contract_key)
         unknown = self.payload()
-        unknown["anchors"][0]["kind"] = "prose"
+        unknown["anchors"][1]["value"] = "=>"
         self.assert_invalid(unknown)
     def test_strict_fields_paths_controls_and_bounds(self):
         for key in ("evidence", "evidence_digest", "description", "suggestion"):
@@ -70,6 +70,10 @@ class CanonicalTypedIdentityTests(unittest.TestCase):
         valid_repo["scope"]["repo"] = "owner/.github"
         valid_repo["scope"]["category"] = "contract"
         self.assertEqual(validate_identity(valid_repo).payload["scope"]["repo"], "owner/.github")
+        mixed_repo = self.payload()
+        mixed_repo["scope"]["repo"] = "AcMe/Audit-Bridge"
+        self.assertEqual(validate_identity(mixed_repo).payload["scope"]["repo"], "acme/audit-bridge")
+        self.assertEqual(validate_identity(mixed_repo).contract_key, validate_identity(self.payload()).contract_key)
         invalid["scope"]["repo"] = "owner/repo"
         invalid["scope"]["category"] = "other"
         self.assert_invalid(invalid)
@@ -84,7 +88,7 @@ class CanonicalTypedIdentityTests(unittest.TestCase):
             invalid[field] = [[]]
             self.assert_invalid(invalid)
     def test_secret_free_typed_tokens_only(self):
-        for literal in ("github_pat_123456789", "AKIA123456789", "password=supersecret", "raw prose with spaces"):
+        for literal in ("env.github_pat_123456789", "key.AKIA123456789", "api.sk-secret", "password=supersecret", "raw prose with spaces"):
             value = self.payload()
             value["anchors"] = [{"kind": "identifier", "value": literal}]
             self.assert_invalid(value)
@@ -92,10 +96,16 @@ class CanonicalTypedIdentityTests(unittest.TestCase):
         value["predicates"] = [[{"kind": "secret_ref", "value": {"type": "credential", "role": "auth", "position": 0}}]]
         record = validate_identity(value).as_record()
         self.assertNotIn("supersecret", json.dumps(record))
-        for anchor in ("secret_manager", "secret_ref_validator", "Namespace::symbol", "schema_v2"):
+        for anchor in ("secret_manager", "secret_ref_validator", "Class.method", "schema_v2"):
             value = self.payload()
             value["anchors"] = [{"kind": "identifier", "value": anchor}]
             validate_identity(value)
+        namespace = self.payload()
+        namespace["anchors"] = [{"kind": "identifier", "value": "Namespace"}, {"kind": "operator", "value": "::"}, {"kind": "identifier", "value": "symbol"}]
+        validate_identity(namespace)
+        embedded = self.payload()
+        embedded["anchors"] = [{"kind": "identifier", "value": "Namespace::symbol"}]
+        self.assert_invalid(embedded)
         invalid = self.payload()
         invalid["anchors"] = [{"kind": "secret_ref", "value": {"type": "credential", "role": "auth", "position": 0}}]
         self.assert_invalid(invalid)
@@ -111,6 +121,10 @@ class CanonicalTypedIdentityTests(unittest.TestCase):
         record["evidence_digest"] = identity.contract_key
         with self.assertRaises(IdentityError):
             verify_identity_record(record)
+        null_severity = identity.as_record()
+        null_severity["severity"] = None
+        with self.assertRaises(IdentityError):
+            verify_identity_record(null_severity)
         exposed = identity.payload
         exposed["scope"]["file"] = "mutated.py"
         exposed["anchors"][0]["value"] = "mutated"

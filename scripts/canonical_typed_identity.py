@@ -16,7 +16,7 @@ _CATEGORIES = frozenset({"bug", "contract", "logic", "performance", "reliability
 _SEVERITIES = frozenset({"critical", "high", "medium", "low"})
 _OWNER = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$")
 _REPO = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
-_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*(?:::[A-Za-z_][A-Za-z0-9_.-]*)*(?:\(\))?$")
+_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*(?:\(\))?$")
 _SAFE_REF = re.compile(r"^[a-z][a-z0-9_.-]{0,31}$")
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _TEXT_BYTES = 512
@@ -68,6 +68,7 @@ def _scope(value: Any) -> dict[str, str]:
     parts = repo.split("/")
     if len(parts) != 2 or not _OWNER.fullmatch(parts[0]) or "--" in parts[0] or not _REPO.fullmatch(parts[1]) or parts[1] in {".", ".."}:
         raise IdentityError("scope.repo is not owner/name")
+    repo = f"{parts[0].lower()}/{parts[1].lower()}"
     path = _text(scope["file"], "scope.file", _PATH_BYTES)
     if path.startswith("/") or "\\" in path or any(part in {"", ".", ".."} for part in path.split("/")):
         raise IdentityError("scope.file is not a relative POSIX path")
@@ -77,7 +78,7 @@ def _scope(value: Any) -> dict[str, str]:
     return {"repo": repo, "file": path, "category": category}
 def _reject_secret_text(value: str) -> None:
     lowered = value.lower()
-    if lowered.startswith(("github_pat_", "ghp_", "aws_secret_access_key", "akia", "sk-", "eyj")):
+    if any(marker in lowered for marker in ("github_pat_", "ghp_", "aws_secret_access_key", "akia", "sk-", "eyj")):
         raise IdentityError("raw secret-like text is forbidden")
 
 def _token(value: Any, name: str) -> dict[str, Any]:
@@ -112,8 +113,10 @@ def _tokens(value: Any, name: str, *, anchors: bool = False, required: bool = Tr
     result = []
     for index, item in enumerate(value):
         token = _token(item, f"{name}[{index}]")
-        if anchors and token["kind"] != "identifier":
-            raise IdentityError("anchors contain a non-anchor token")
+        if anchors:
+            expected_kind = "identifier" if index % 2 == 0 else "operator"
+            if token["kind"] != expected_kind or (expected_kind == "operator" and token["value"] != "::"):
+                raise IdentityError("anchors must alternate identifier and ::")
         result.append(token)
     return result
 
@@ -150,8 +153,8 @@ def validate_identity(payload: Any) -> CanonicalIdentity:
     required_behavior = _clauses(fields["required_behavior"], "required_behavior", required=True)
     forbidden_behavior = _clauses(fields["forbidden_behavior"], "forbidden_behavior", required=False)
     ordering = _clauses(fields["ordering_constraints"], "ordering_constraints", required=False)
-    severity = fields.get("severity")
-    if severity is not None and _text(severity, "severity", 16) not in _SEVERITIES:
+    severity = _text(fields["severity"], "severity", 16) if "severity" in fields else None
+    if severity is not None and severity not in _SEVERITIES:
         raise IdentityError("severity is not controlled")
     canonical = {
         "schema": SCHEMA,
