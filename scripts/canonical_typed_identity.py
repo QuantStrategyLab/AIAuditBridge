@@ -16,7 +16,12 @@ OWNER = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$")
 REPO = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
 IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*(?:\(\))?$")
 DIGEST = re.compile(r"^[0-9a-f]{64}$")
-MARKERS = ("github_pat_", "ghp_", "ghs_", "aws_secret_access_key", "akia", "asia", "sk-", "eyj")
+SECRET_PATTERNS = (
+    re.compile(r"(?<![A-Za-z0-9_])(?:github_pat_|gh[pours]_)[A-Za-z0-9_]{8,}", re.I),
+    re.compile(r"(?<![A-Za-z0-9_])(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Za-z0-9_])"),
+    re.compile(r"(?<![A-Za-z0-9_])eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+(?![A-Za-z0-9_])"),
+    re.compile(r"(?<![A-Za-z0-9_])sk-[A-Za-z0-9_-]{16,}(?![A-Za-z0-9_])"),
+)
 MAX_ITEMS = 32
 MAX_BYTES = 64 * 1024
 class IdentityError(ValueError):
@@ -70,7 +75,7 @@ def _token(value: Any) -> dict[str, Any]:
             raise IdentityError("invalid secret reference")
         return {"kind": kind, "value": {"type": typ, "role": role, "position": position}}
     item = _text(token["value"])
-    if any(marker in item.lower() for marker in MARKERS):
+    if any(pattern.search(item) for pattern in SECRET_PATTERNS):
         raise IdentityError("reserved secret marker")
     if kind == "operator" and item not in OPS or kind == "policy_state" and item not in POLICY or kind == "identifier" and not IDENTIFIER.fullmatch(item):
         raise IdentityError("invalid typed token")

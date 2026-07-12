@@ -20,11 +20,18 @@ class R1bIdentityTests(unittest.TestCase):
         with self.assertRaises(IdentityError):
             validate_identity(value)
     def test_reserved_markers_anywhere_and_safe_identifiers(self):
-        for safe in ("secret_manager", "secret_ref_validator"):
+        for safe in ("secret_manager", "secret_ref_validator", "Eurasia", "keyJson"):
             value = self.payload()
             value["anchors"] = [self.tok("identifier", safe)]
             validate_identity(value)
-        for marker in ("ghs_123", "env.ghs_123", "ASIA123", "key.ASIA123", "api.sk-secret", "env.eyJtoken"):
+        for marker in (
+            "ghs_1234567890abcdef1234567890abcdef1234",
+            "env.ghs_1234567890abcdef1234567890abcdef1234",
+            "ASIAABCDEFGHIJKLMNOP",
+            "key.ASIAABCDEFGHIJKLMNOP",
+            "api.sk-proj-1234567890abcdef",
+            "env.eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature",
+        ):
             value = self.payload()
             value["anchors"] = [self.tok("identifier", marker)]
             self.invalid(value)
