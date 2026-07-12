@@ -121,7 +121,9 @@ class RunCodexPrReviewTests(unittest.TestCase):
         crypto = fixtures["crypto_pr_125"]["findings"]
         dispatch_identity = run_codex_pr_review._contract_finding(dispatch["finding"])
         reworded_identity = run_codex_pr_review._contract_finding(dispatch["reworded"])
-        self.assertEqual(dispatch_identity["fingerprint_v2"], reworded_identity["fingerprint_v2"])
+        self.assertEqual(dispatch_identity["contract_key"], reworded_identity["contract_key"])
+        self.assertNotEqual(dispatch_identity["behavior_digest"], reworded_identity["behavior_digest"])
+        self.assertNotEqual(dispatch_identity["fingerprint_v2"], reworded_identity["fingerprint_v2"])
         self.assertNotEqual(
             run_codex_pr_review._contract_key(crypto[0]),
             run_codex_pr_review._contract_key(crypto[1]),
@@ -147,6 +149,30 @@ class RunCodexPrReviewTests(unittest.TestCase):
         self.assertNotEqual(
             run_codex_pr_review._contract_key(first),
             run_codex_pr_review._contract_key(second),
+        )
+        self.assertNotEqual(
+            run_codex_pr_review._behavior_digest(first),
+            run_codex_pr_review._behavior_digest(second),
+        )
+        self.assertNotEqual(
+            run_codex_pr_review._fingerprint_v2(first),
+            run_codex_pr_review._fingerprint_v2(second),
+        )
+
+    def test_ordered_contract_text_distinguishes_reversed_behavior(self) -> None:
+        before = {
+            "category": "logic", "file": "service/review.py",
+            "description": "Validate A before B.",
+            "suggestion": "Use the required order.",
+        }
+        after = dict(before, description="Validate B before A.")
+        self.assertEqual(
+            run_codex_pr_review._normalize_contract_text(before["description"]),
+            "validate a before b",
+        )
+        self.assertNotEqual(
+            run_codex_pr_review._behavior_digest(before),
+            run_codex_pr_review._behavior_digest(after),
         )
 
     def test_parse_arbitration_output_requires_supported_verdict(self) -> None:

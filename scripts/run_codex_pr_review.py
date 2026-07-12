@@ -811,7 +811,7 @@ def _normalize_contract_text(value: Any) -> str:
         "must", "should", "will", "return",
     }
     return " ".join(
-        sorted(token for token in re.findall(r"[a-z0-9]+", text) if token not in stop_words)
+        token for token in re.findall(r"[a-z0-9]+", text) if token not in stop_words
     )
 
 
@@ -842,9 +842,8 @@ def _behavior_digest(finding: dict[str, Any]) -> str:
     payload = json.dumps(
         {
             "contract_key": _contract_key(finding),
-            "behavior": _normalize_contract_text(
-                finding.get("suggestion") or finding.get("description")
-            ),
+            "description": _normalize_contract_text(finding.get("description")),
+            "suggestion": _normalize_contract_text(finding.get("suggestion")),
         },
         sort_keys=True,
         separators=(",", ":"),
