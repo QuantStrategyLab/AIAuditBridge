@@ -18,13 +18,6 @@ from pathlib import Path
 
 SECRET_ENV_MARKERS = ("TOKEN", "SECRET", "PASSWORD", "PRIVATE_KEY", "CREDENTIAL", "API_KEY", "ADMIN_KEY")
 CODEX_REASONING_EFFORTS = frozenset({"minimal", "low", "medium", "high", "xhigh"})
-_LOCAL_CLI_PARSE_EXIT_CODE = 2
-_LOCAL_CLI_PARSE_PREFIXES = (
-    "error: invalid value",
-    "error: unexpected argument",
-    "error: unrecognized option",
-    "error: unknown option",
-)
 
 
 @dataclass(frozen=True)
@@ -35,14 +28,6 @@ class CodexResult:
     dispatch_started: bool = False
     dispatch_uncertain: bool = False
 
-
-def _is_local_cli_parse_failure(returncode: int, stderr: str) -> bool:
-    """Only the CLI parser's dedicated exit code proves no subprocess dispatch."""
-    return returncode == _LOCAL_CLI_PARSE_EXIT_CODE and any(
-        line.strip().lower().startswith(prefix)
-        for line in stderr.splitlines()
-        for prefix in _LOCAL_CLI_PARSE_PREFIXES
-    )
 
 def _codex_env() -> dict[str, str]:
     """Strip secrets from the environment before passing to codex subprocess."""
@@ -178,9 +163,7 @@ class CodexAdapter:
                 return CodexResult(
                     success=False,
                     error=f"codex exec failed (rc={completed.returncode})" + (f":\n{detail}" if detail else ""),
-                    dispatch_uncertain=not _is_local_cli_parse_failure(
-                        completed.returncode, completed.stderr
-                    ),
+                    dispatch_uncertain=True,
                 )
 
             if output_last_message.exists() and output_last_message.read_text(encoding="utf-8").strip():
