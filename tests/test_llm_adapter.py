@@ -89,7 +89,7 @@ class LlmAdapterFailureTests(unittest.TestCase):
         self.assertFalse(results[0].success)
         self.assertEqual(results[0].output, "")
         self.assertEqual(results[0].error, "worker failed")
-        self.assertFalse(results[0].dispatch_uncertain)
+        self.assertTrue(results[0].dispatch_uncertain)
 
     def test_provider_rejection_is_not_ambiguous_dispatch(self) -> None:
         with patch(
