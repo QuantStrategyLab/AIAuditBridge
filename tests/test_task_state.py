@@ -13,6 +13,7 @@ class TaskStateTest(unittest.TestCase):
         self.assertEqual(job_task_state({"status": "error"}), "failed")
         self.assertEqual(job_task_state({"status": "failed", "failure_category": "auth_or_config_failure"}), "blocked")
         self.assertEqual(job_task_state({"status": "failed", "failure_category": "patch_contract_failure"}), "blocked")
+        self.assertEqual(job_task_state({"status": "failed", "failure_category": "dispatch_uncertain_failure"}), "blocked")
         self.assertEqual(job_task_state({"status": "mystery"}), "blocked")
 
     def test_change_task_state_priority(self) -> None:

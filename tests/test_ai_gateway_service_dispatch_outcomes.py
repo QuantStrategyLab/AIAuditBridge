@@ -71,6 +71,32 @@ def test_pre_dispatch_failure_is_not_dispatched() -> None:
     assert completed["dispatch_uncertain"] is False
 
 
+def test_post_processing_failure_preserves_definitive_dispatch_state() -> None:
+    job: dict[str, object] = {"job_id": "job-3", "status": "queued", "task": "execute"}
+    result = SimpleNamespace(
+        success=True,
+        output="done",
+        error="",
+        dispatch_started=True,
+        dispatch_uncertain=False,
+    )
+    health = SimpleNamespace(record=lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("telemetry down")))
+    with (
+        patch.object(gateway, "_read_job", return_value=job),
+        patch.object(gateway, "_write_job"),
+        patch.object(gateway, "_record_job_automation_run"),
+        patch.object(gateway, "_audit_log"),
+        patch.object(gateway, "_record_platform_execution_telemetry"),
+        patch.object(gateway, "get_health_monitor", return_value=health),
+        patch.object(gateway.CodexAdapter, "execute", return_value=result),
+    ):
+        gateway._run_job("job-3", {"prompt": "review", "task": "execute"})
+
+    assert job["status"] == "succeeded"
+    assert job["dispatch_state"] == "dispatched"
+    assert job["dispatch_uncertain"] is False
+
+
 def test_uncertain_review_result_is_returned_and_forces_escalation() -> None:
     result = SimpleNamespace(
         success=False,

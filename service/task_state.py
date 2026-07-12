@@ -48,7 +48,7 @@ def job_task_state(job: dict[str, Any]) -> str:
         return STATE_REVIEWED
     if status in {"failed", "error"}:
         failure = str(job.get("failure_category") or "").strip().lower()
-        if failure in {"auth_or_config_failure", "patch_contract_failure"}:
+        if failure in {"auth_or_config_failure", "patch_contract_failure", "dispatch_uncertain_failure"}:
             return STATE_BLOCKED
         return STATE_FAILED
     return STATE_BLOCKED

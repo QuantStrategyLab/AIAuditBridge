@@ -521,7 +521,7 @@ def _mark_stale_job_failed(job: dict[str, Any]) -> dict[str, Any]:
     job["error"] = "codex audit job became stale before completion"
     if previous_status == "running" and str(job.get("dispatch_state") or "") != "not_dispatched":
         _apply_dispatch_state(job, "pending_uncertain")
-        job["failure_category"] = "dispatch_uncertain"
+        job["failure_category"] = "dispatch_uncertain_failure"
     else:
         job["failure_category"] = "stale_job_timeout"
     _write_job(job)
@@ -1168,6 +1168,7 @@ def _find_active_job_by_dedupe_key(dedupe_key: str) -> dict[str, Any] | None:
 def _run_job(job_id: str, payload: dict[str, Any]) -> None:
     started = time.time()
     adapter_invoked = False
+    result_persisted = False
     try:
         job = _read_job(job_id)
         job["status"] = "running"
@@ -1207,6 +1208,7 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
             )
         job["updated_at"] = _now()
         _write_job(job)
+        result_persisted = True
         _record_job_automation_run(job)
         get_health_monitor().record(
             "/v1/ai/execute/jobs/run",
@@ -1231,6 +1233,9 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
         _audit_log("job_completed", job_id=job_id, status=job["status"],
                    repository=job.get("repository"), task=job.get("task"))
     except Exception as exc:
+        if result_persisted:
+            _audit_log("job_post_processing_failed", job_id=job_id, error=type(exc).__name__)
+            return
         try:
             job = _read_job(job_id)
         except Exception:
