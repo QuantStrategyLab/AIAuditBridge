@@ -878,6 +878,13 @@ def _fingerprint_v2(finding: dict[str, Any]) -> str:
     return _contract_finding(finding)["fingerprint_v2"]
 
 
+def _contract_identity(finding: dict[str, Any]) -> tuple[str, str]:
+    return (
+        str(finding.get("contract_key") or _contract_key(finding)),
+        str(finding.get("behavior_digest") or _behavior_digest(finding)),
+    )
+
+
 def blocking_finding_fingerprint(findings: list[dict[str, Any]]) -> str:
     """Return a stable arbitration-candidate identifier despite wording drift."""
     fingerprints = sorted(
@@ -1291,9 +1298,9 @@ def previous_matching_findings(
     history: list[dict[str, Any]], current_findings: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
     """Return the latest unresolved historical finding for every current key."""
-    current_keys = set(blocking_finding_fingerprints(current_findings))
-    matched: dict[str, dict[str, Any]] = {}
-    resolved: set[str] = set()
+    current_keys = {_contract_identity(finding) for finding in current_findings if isinstance(finding, dict)}
+    matched: dict[tuple[str, str], dict[str, Any]] = {}
+    resolved: set[tuple[str, str]] = set()
     for round_state in reversed(history):
         prior = round_state.get("findings")
         if not isinstance(prior, list):
@@ -1304,7 +1311,7 @@ def previous_matching_findings(
         for finding in prior:
             if not isinstance(finding, dict):
                 continue
-            key = str(finding.get("fingerprint_v2") or _fingerprint_v2(finding))
+            key = _contract_identity(finding)
             if key not in current_keys or key in resolved or key in matched:
                 continue
             if status in {"clear", "cleared"}:
@@ -1345,25 +1352,39 @@ def conflicting_contract_findings(
     history: list[dict[str, Any]], current_findings: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
     """Find same-contract findings whose required behavior changed."""
-    current = {
-        str(finding.get("contract_key") or _contract_key(finding)): finding
-        for finding in current_findings
-        if isinstance(finding, dict)
-    }
-    prior_by_contract: dict[str, dict[str, Any]] = {}
+    current: dict[str, set[str]] = {}
+    for finding in current_findings:
+        if not isinstance(finding, dict):
+            continue
+        contract_key, behavior_digest = _contract_identity(finding)
+        current.setdefault(contract_key, set()).add(behavior_digest)
+    prior_by_contract: dict[str, dict[str, dict[str, Any]]] = {}
+    resolved: set[tuple[str, str]] = set()
     for round_state in reversed(history):
-        if round_state.get("status") in {"clear", "cleared"} and not round_state.get("findings"):
+        status = round_state.get("status")
+        findings = round_state.get("findings") or []
+        if status in {"clear", "cleared"} and not findings:
             break
-        for finding in round_state.get("findings") or []:
+        for finding in findings:
             if not isinstance(finding, dict):
                 continue
-            key = str(finding.get("contract_key") or _contract_key(finding))
-            prior_by_contract.setdefault(key, finding)
+            identity = _contract_identity(finding)
+            if status in {"clear", "cleared"}:
+                resolved.add(identity)
+                continue
+            prior_by_contract.setdefault(identity[0], {}).setdefault(identity[1], finding)
     conflicts: list[dict[str, Any]] = []
-    for key, prior in prior_by_contract.items():
-        current_finding = current.get(key)
-        if current_finding and str(prior.get("behavior_digest") or _behavior_digest(prior)) != _behavior_digest(current_finding):
-            conflicts.append({**prior, "current_behavior_digest": _behavior_digest(current_finding)})
+    for contract_key, prior_behaviors in prior_by_contract.items():
+        current_behaviors = current.get(contract_key)
+        if not current_behaviors:
+            continue
+        for behavior_digest, prior in prior_behaviors.items():
+            if (contract_key, behavior_digest) in resolved or behavior_digest in current_behaviors:
+                continue
+            conflicts.append({
+                **prior,
+                "current_behavior_digest": sorted(current_behaviors)[0],
+            })
     return conflicts
 
 

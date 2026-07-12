@@ -160,6 +160,61 @@ class RunCodexPrReviewTests(unittest.TestCase):
         self.assertEqual(len(run_codex_pr_review.conflicting_contract_findings(history, [opposite])), 1)
         self.assertEqual(run_codex_pr_review.conflicting_contract_findings(history, [unrelated]), [])
 
+    def test_contract_conflicts_aggregate_behaviors_and_honor_clear_rounds(self) -> None:
+        prior = {
+            "severity": "high", "category": "logic", "file": "service/review.py",
+            "description": "`ReviewContract` must reject invalid state.",
+            "suggestion": "Reject invalid state.",
+        }
+        history, valid = run_codex_pr_review.parse_finding_history(
+            run_codex_pr_review.build_finding_history_marker([], [prior], "deadbeef")
+        )
+        self.assertTrue(valid)
+        matching = dict(prior)
+        opposite = dict(prior, suggestion="Accept invalid state.")
+        unrelated_behavior = dict(prior, suggestion="Ignore invalid state.")
+
+        self.assertEqual(
+            run_codex_pr_review.conflicting_contract_findings(history, [matching, opposite]),
+            [],
+        )
+        self.assertEqual(
+            len(run_codex_pr_review.conflicting_contract_findings(
+                history, [opposite, unrelated_behavior]
+            )),
+            1,
+        )
+
+        cleared_history, valid = run_codex_pr_review.parse_finding_history(
+            run_codex_pr_review.build_finding_history_marker(
+                history, [prior], "feedface", status="cleared"
+            )
+        )
+        self.assertTrue(valid)
+        self.assertEqual(
+            run_codex_pr_review.previous_matching_findings(cleared_history, [prior]),
+            [],
+        )
+        self.assertEqual(
+            run_codex_pr_review.conflicting_contract_findings(cleared_history, [opposite]),
+            [],
+        )
+
+        boundary_history, valid = run_codex_pr_review.parse_finding_history(
+            run_codex_pr_review.build_finding_history_marker(
+                cleared_history, [], "cafebabe", status="clear"
+            )
+        )
+        self.assertTrue(valid)
+        self.assertEqual(
+            run_codex_pr_review.previous_matching_findings(boundary_history, [prior]),
+            [],
+        )
+        self.assertEqual(
+            run_codex_pr_review.conflicting_contract_findings(boundary_history, [opposite]),
+            [],
+        )
+
     def test_v2_history_rejects_tampered_identity_digest(self) -> None:
         finding = {
             "severity": "high", "category": "logic", "file": "service/review.py",
