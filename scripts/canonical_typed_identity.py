@@ -12,11 +12,11 @@ CANONICALIZER_VERSION = "structured_tokens.v1"
 _OPERATORS = frozenset({">=", "<=", ">", "<", "==", "!=", "===", "!==", "->", "=>", "::"})
 _POLICY_STATES = frozenset({"required", "forbidden", "present", "absent", "enabled", "disabled", "valid", "invalid", "missing", "optional"})
 _TOKEN_KINDS = frozenset({"identifier", "operator", "policy_state", "secret_ref"})
-_CATEGORIES = frozenset({"bug", "logic", "performance", "reliability", "security"})
+_CATEGORIES = frozenset({"bug", "contract", "logic", "performance", "reliability", "security"})
 _SEVERITIES = frozenset({"critical", "high", "medium", "low"})
 _OWNER = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$")
-_REPO = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?$")
-_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
+_REPO = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
+_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*(?:::[A-Za-z_][A-Za-z0-9_.-]*)*(?:\(\))?$")
 _SAFE_REF = re.compile(r"^[a-z][a-z0-9_.-]{0,31}$")
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _TEXT_BYTES = 512
@@ -30,17 +30,17 @@ class IdentityError(ValueError):
 
 @dataclass(frozen=True)
 class CanonicalIdentity:
-    payload: dict[str, Any]
+    _payload_json: str
     contract_key: str
     behavior_digest: str
     fingerprint_v2: str
+    @property
+    def payload(self) -> dict[str, Any]:
+        return json.loads(self._payload_json)
     def as_record(self) -> dict[str, Any]:
-        return {
-            **self.payload,
-            "contract_key": self.contract_key,
-            "behavior_digest": self.behavior_digest,
-            "fingerprint_v2": self.fingerprint_v2,
-        }
+        record = self.payload
+        record.update(contract_key=self.contract_key, behavior_digest=self.behavior_digest, fingerprint_v2=self.fingerprint_v2)
+        return record
 
 def _fields(value: Any, required: set[str], optional: set[str], name: str) -> dict[str, Any]:
     if not isinstance(value, dict) or len(value) > len(required) + len(optional):
@@ -66,7 +66,7 @@ def _scope(value: Any) -> dict[str, str]:
     scope = _fields(value, {"repo", "file", "category"}, set(), "scope")
     repo = _text(scope["repo"], "scope.repo", 140)
     parts = repo.split("/")
-    if len(parts) != 2 or not _OWNER.fullmatch(parts[0]) or "--" in parts[0] or not _REPO.fullmatch(parts[1]):
+    if len(parts) != 2 or not _OWNER.fullmatch(parts[0]) or "--" in parts[0] or not _REPO.fullmatch(parts[1]) or parts[1] in {".", ".."}:
         raise IdentityError("scope.repo is not owner/name")
     path = _text(scope["file"], "scope.file", _PATH_BYTES)
     if path.startswith("/") or "\\" in path or any(part in {"", ".", ".."} for part in path.split("/")):
@@ -77,10 +77,8 @@ def _scope(value: Any) -> dict[str, str]:
     return {"repo": repo, "file": path, "category": category}
 def _reject_secret_text(value: str) -> None:
     lowered = value.lower()
-    if any(marker in lowered for marker in ("github_pat_", "ghp_", "aws_secret_access_key", "api_key=", "password=", "bearer ", "secret", "sk-", "akia", "eyj")):
+    if lowered.startswith(("github_pat_", "ghp_", "aws_secret_access_key", "akia", "sk-", "eyj")):
         raise IdentityError("raw secret-like text is forbidden")
-    if re.search(r"\b(?:token|secret|password|credential)\s*[:=]\s*\S+", value, re.I):
-        raise IdentityError("raw credential assignment is forbidden")
 
 def _token(value: Any, name: str) -> dict[str, Any]:
     token = _fields(value, {"kind", "value"}, set(), name)
@@ -114,7 +112,7 @@ def _tokens(value: Any, name: str, *, anchors: bool = False, required: bool = Tr
     result = []
     for index, item in enumerate(value):
         token = _token(item, f"{name}[{index}]")
-        if anchors and token["kind"] not in {"identifier", "secret_ref"}:
+        if anchors and token["kind"] != "identifier":
             raise IdentityError("anchors contain a non-anchor token")
         result.append(token)
     return result
@@ -128,7 +126,7 @@ def _clauses(value: Any, name: str, *, required: bool) -> list[list[dict[str, An
     for index, clause in enumerate(value):
         if not isinstance(clause, list) or len(clause) > _MAX_TOKENS:
             raise IdentityError(f"{name}[{index}] is not a bounded token list")
-        if not clause and required:
+        if not clause:
             raise IdentityError(f"{name}[{index}] must not be empty")
         result.append([_token(item, f"{name}[{index}][{token_index}]") for token_index, item in enumerate(clause)])
     return result
@@ -170,7 +168,7 @@ def validate_identity(payload: Any) -> CanonicalIdentity:
     contract_key = _hash({k: canonical[k] for k in ("schema", "canonicalizer_version", "scope", "anchors", "predicates")})
     behavior_digest = _hash({"contract_key": contract_key, "required_behavior": required_behavior, "forbidden_behavior": forbidden_behavior, "ordering_constraints": ordering})
     fingerprint = _hash({"contract_key": contract_key, "behavior_digest": behavior_digest})
-    identity = CanonicalIdentity(canonical, contract_key, behavior_digest, fingerprint)
+    identity = CanonicalIdentity(_json(canonical), contract_key, behavior_digest, fingerprint)
     if len(_json(identity.as_record()).encode("utf-8")) > _MAX_CANONICAL_BYTES:
         raise IdentityError("identity is too large")
     return identity

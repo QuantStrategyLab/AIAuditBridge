@@ -14,7 +14,7 @@ class CanonicalTypedIdentityTests(unittest.TestCase):
             "schema": "contract_identity.v2",
             "canonicalizer_version": "structured_tokens.v1",
             "scope": {"repo": "acme/audit-bridge", "file": "service/review.py", "category": "logic"},
-            "anchors": [token("identifier", "Review.validate")],
+            "anchors": [token("identifier", "Review.validate()")],
             "predicates": [[token("identifier", "score"), token("operator", ">="), token("identifier", "threshold")]],
             "required_behavior": [[token("policy_state", "required")]],
             "forbidden_behavior": [[token("policy_state", "forbidden")]],
@@ -66,6 +66,10 @@ class CanonicalTypedIdentityTests(unittest.TestCase):
         invalid = self.payload()
         invalid["scope"]["repo"] = "owner--name/repo"
         self.assert_invalid(invalid)
+        valid_repo = self.payload()
+        valid_repo["scope"]["repo"] = "owner/.github"
+        valid_repo["scope"]["category"] = "contract"
+        self.assertEqual(validate_identity(valid_repo).payload["scope"]["repo"], "owner/.github")
         invalid["scope"]["repo"] = "owner/repo"
         invalid["scope"]["category"] = "other"
         self.assert_invalid(invalid)
@@ -75,15 +79,26 @@ class CanonicalTypedIdentityTests(unittest.TestCase):
         invalid = self.payload()
         invalid["predicates"] = [[{"kind": "identifier", "value": "x"}] * 65]
         self.assert_invalid(invalid)
+        for field in ("forbidden_behavior", "ordering_constraints"):
+            invalid = self.payload()
+            invalid[field] = [[]]
+            self.assert_invalid(invalid)
     def test_secret_free_typed_tokens_only(self):
-        for literal in ("github_pat_123456789", "password=supersecret", "raw prose with spaces"):
+        for literal in ("github_pat_123456789", "AKIA123456789", "password=supersecret", "raw prose with spaces"):
             value = self.payload()
             value["anchors"] = [{"kind": "identifier", "value": literal}]
             self.assert_invalid(value)
         value = self.payload()
-        value["anchors"] = [{"kind": "secret_ref", "value": {"type": "credential", "role": "auth", "position": 0}}]
+        value["predicates"] = [[{"kind": "secret_ref", "value": {"type": "credential", "role": "auth", "position": 0}}]]
         record = validate_identity(value).as_record()
         self.assertNotIn("supersecret", json.dumps(record))
+        for anchor in ("secret_manager", "secret_ref_validator", "Namespace::symbol", "schema_v2"):
+            value = self.payload()
+            value["anchors"] = [{"kind": "identifier", "value": anchor}]
+            validate_identity(value)
+        invalid = self.payload()
+        invalid["anchors"] = [{"kind": "secret_ref", "value": {"type": "credential", "role": "auth", "position": 0}}]
+        self.assert_invalid(invalid)
     def test_canonical_json_roundtrip_and_digest_tamper(self):
         identity = validate_identity(self.payload())
         record = identity.as_record()
@@ -96,3 +111,8 @@ class CanonicalTypedIdentityTests(unittest.TestCase):
         record["evidence_digest"] = identity.contract_key
         with self.assertRaises(IdentityError):
             verify_identity_record(record)
+        exposed = identity.payload
+        exposed["scope"]["file"] = "mutated.py"
+        exposed["anchors"][0]["value"] = "mutated"
+        self.assertNotEqual(identity.payload["scope"]["file"], "mutated.py")
+        verify_identity_record(identity.as_record())
