@@ -493,7 +493,7 @@ def _recover_orphaned_jobs() -> int:
         job["error"] = "codex audit service restarted before job completion"
         if previous_status == "running" and str(job.get("dispatch_state") or "") != "not_dispatched":
             _apply_dispatch_state(job, "pending_uncertain")
-            job["failure_category"] = "dispatch_uncertain"
+            job["failure_category"] = "dispatch_uncertain_failure"
         else:
             job["failure_category"] = "service_restart"
         _write_job(job)
@@ -720,10 +720,10 @@ def _automation_triage_snapshot(
     recommended_action = "open_issue"
     next_step = "open_issue"
 
-    if category in {"auth_or_config_failure", "patch_contract_failure", "dispatch_uncertain"}:
+    if category in {"auth_or_config_failure", "patch_contract_failure", "dispatch_uncertain_failure"}:
         incident_class = "blocked"
-        recommended_action = "escalate" if category == "dispatch_uncertain" else "open_issue"
-        next_step = "reconcile_dispatch" if category == "dispatch_uncertain" else "fix_config_or_contract"
+        recommended_action = "escalate" if category == "dispatch_uncertain_failure" else "open_issue"
+        next_step = "reconcile_dispatch" if category == "dispatch_uncertain_failure" else "fix_config_or_contract"
     elif category == "quota_or_capacity_failure":
         incident_class = "retryable"
         retry_allowed = True
@@ -1177,16 +1177,20 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
         adapter = CodexAdapter()
         sandbox = _validate_sandbox(str(payload.get("sandbox") or ""))
         reasoning_effort = _resolve_codex_reasoning_effort(payload, str(payload.get("task") or TASK_EXECUTE))
-        _apply_dispatch_state(job, "pending_uncertain")
-        job["updated_at"] = _now()
-        _write_job(job)
-        adapter_invoked = True
+        def _mark_dispatch_started() -> None:
+            nonlocal adapter_invoked, job
+            adapter_invoked = True
+            _apply_dispatch_state(job, "pending_uncertain")
+            job["updated_at"] = _now()
+            _write_job(job)
+
         result = adapter.execute(
             prompt=str(payload["prompt"]),
             sandbox=sandbox,
             model=str(payload.get("model") or "").strip() or None,
             reasoning_effort=reasoning_effort,
             timeout=int(payload.get("timeout_seconds", 2700)),
+            on_dispatch_start=_mark_dispatch_started,
         )
         job = _read_job(job_id)
         dispatch_state = _dispatch_state(result)
@@ -1199,7 +1203,7 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
             job["status"] = "failed"
             job["error"] = result.error
             job["failure_category"] = (
-                "dispatch_uncertain" if dispatch_state == "pending_uncertain" else _classify_failure(result.error)
+                "dispatch_uncertain_failure" if dispatch_state == "pending_uncertain" else _classify_failure(result.error)
             )
         job["updated_at"] = _now()
         _write_job(job)
@@ -1236,7 +1240,7 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
         job["error"] = str(exc)[-4000:]
         _apply_dispatch_state(job, "pending_uncertain" if adapter_invoked else "not_dispatched")
         job["failure_category"] = (
-            "dispatch_uncertain" if adapter_invoked else _classify_failure(str(exc))
+            "dispatch_uncertain_failure" if adapter_invoked else _classify_failure(str(exc))
         )
         _write_job(job)
         _record_job_automation_run(job)

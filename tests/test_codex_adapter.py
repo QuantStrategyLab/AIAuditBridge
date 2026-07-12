@@ -18,6 +18,37 @@ class CodexAdapterDispatchTests(unittest.TestCase):
         self.assertFalse(result.dispatch_started)
         self.assertTrue(result.dispatch_uncertain)
 
+    def test_dispatch_callback_runs_immediately_before_subprocess(self) -> None:
+        events: list[str] = []
+        completed = Mock(returncode=0, stdout="done", stderr="")
+        with (
+            patch("service.adapters.codex_adapter.shutil.which", return_value="/usr/bin/codex"),
+            patch(
+                "service.adapters.codex_adapter.subprocess.run",
+                side_effect=lambda *args, **kwargs: events.append("run") or completed,
+            ),
+        ):
+            result = CodexAdapter().execute(
+                prompt="review", on_dispatch_start=lambda: events.append("dispatch")
+            )
+
+        self.assertEqual(events, ["dispatch", "run"])
+        self.assertTrue(result.dispatch_started)
+
+    def test_post_dispatch_decode_failure_is_confirmed_dispatch(self) -> None:
+        with (
+            patch("service.adapters.codex_adapter.shutil.which", return_value="/usr/bin/codex"),
+            patch(
+                "service.adapters.codex_adapter.subprocess.run",
+                side_effect=UnicodeDecodeError("utf-8", b"\\xff", 0, 1, "invalid start byte"),
+            ),
+        ):
+            result = CodexAdapter().execute(prompt="review")
+
+        self.assertFalse(result.success)
+        self.assertTrue(result.dispatch_started)
+        self.assertFalse(result.dispatch_uncertain)
+
     def test_nonzero_exit_is_pending_uncertain_not_confirmed_dispatch(self) -> None:
         completed = Mock(returncode=1, stdout="upstream request interrupted", stderr="")
         with (

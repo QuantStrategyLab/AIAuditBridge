@@ -30,7 +30,7 @@ def test_uncertain_job_failure_is_persisted_and_not_retryable() -> None:
     completed = writes[-1]
     assert completed["dispatch_state"] == "pending_uncertain"
     assert completed["dispatch_uncertain"] is True
-    assert completed["failure_category"] == "dispatch_uncertain"
+    assert completed["failure_category"] == "dispatch_uncertain_failure"
 
     control = {
         "effective_action": "continue",
@@ -44,7 +44,9 @@ def test_uncertain_job_failure_is_persisted_and_not_retryable() -> None:
         patch.object(gateway, "load_autonomy_policy", return_value={}),
         patch.object(gateway, "get_health_monitor"),
     ):
-        triage = gateway._automation_triage_snapshot("QuantStrategyLab/AIAuditBridge", failure_category="dispatch_uncertain")
+        triage = gateway._automation_triage_snapshot(
+            "QuantStrategyLab/AIAuditBridge", failure_category="dispatch_uncertain_failure"
+        )
     assert triage["retry_allowed"] is False
     assert triage["auto_fix_allowed"] is False
     assert triage["next_step"] == "reconcile_dispatch"

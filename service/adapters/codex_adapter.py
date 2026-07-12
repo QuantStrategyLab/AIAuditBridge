@@ -13,6 +13,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -106,6 +107,7 @@ class CodexAdapter:
         output_schema: Path | None = None,
         cwd: Path | None = None,
         images: list[Path] | None = None,
+        on_dispatch_start: Callable[[], None] | None = None,
     ) -> CodexResult:
         """Run ``codex exec`` synchronously and return the result.
 
@@ -137,6 +139,8 @@ class CodexAdapter:
             except (RuntimeError, ValueError) as exc:
                 return CodexResult(success=False, error=f"codex command configuration failed: {exc}")
             try:
+                if on_dispatch_start is not None:
+                    on_dispatch_start()
                 completed = subprocess.run(
                     command,
                     input=prompt,
@@ -155,10 +159,18 @@ class CodexAdapter:
                 )
             except FileNotFoundError as exc:
                 return CodexResult(success=False, error=f"codex command not found: {exc}")
+            except UnicodeDecodeError as exc:
+                return CodexResult(
+                    success=False,
+                    error=f"codex exec response decode failed: {exc}",
+                    dispatch_started=True,
+                )
+            except OSError as exc:
+                return CodexResult(success=False, error=f"codex command failed before launch: {exc}")
 
             if completed.returncode != 0:
                 detail = "\n".join(
-                    part for part in (completed.stdout[-4000:], completed.stderr[-4000:]) if part
+                    part for part in (str(completed.stdout or "")[-4000:], str(completed.stderr or "")[-4000:]) if part
                 ).strip()
                 return CodexResult(
                     success=False,
@@ -166,6 +178,15 @@ class CodexAdapter:
                     dispatch_uncertain=True,
                 )
 
-            if output_last_message.exists() and output_last_message.read_text(encoding="utf-8").strip():
-                return CodexResult(success=True, output=output_last_message.read_text(encoding="utf-8"), dispatch_started=True)
-            return CodexResult(success=True, output=completed.stdout, dispatch_started=True)
+            try:
+                if output_last_message.exists():
+                    output = output_last_message.read_text(encoding="utf-8")
+                    if output.strip():
+                        return CodexResult(success=True, output=output, dispatch_started=True)
+            except (OSError, UnicodeDecodeError) as exc:
+                return CodexResult(
+                    success=False,
+                    error=f"codex exec output read failed: {exc}",
+                    dispatch_started=True,
+                )
+            return CodexResult(success=True, output=str(completed.stdout or ""), dispatch_started=True)

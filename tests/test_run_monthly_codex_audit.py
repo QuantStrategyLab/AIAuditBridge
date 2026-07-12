@@ -613,6 +613,13 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertFalse(is_service_infrastructure_failure("Codex audit service job failed [quota_or_capacity_failure]: budget"))
         self.assertTrue(is_service_infrastructure_failure("Codex audit service job failed [transient_service_failure]: timed out"))
         self.assertFalse(is_service_infrastructure_failure("Codex audit service job failed [patch_contract_failure]: invalid JSON"))
+        self.assertEqual(
+            service_failure_category("Codex audit service job failed [dispatch_uncertain_failure]: timeout"),
+            "dispatch_uncertain_failure",
+        )
+        self.assertFalse(
+            is_service_infrastructure_failure("Codex audit service job failed [dispatch_uncertain_failure]: timeout")
+        )
 
     def test_service_failure_classification_ignores_source_code_secret_words(self) -> None:
         message = "codex exec failed: BLOCKED_PATH_RE = r'.*token.*|.*secret.*'"

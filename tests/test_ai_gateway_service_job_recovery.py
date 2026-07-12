@@ -34,7 +34,7 @@ class AiGatewayJobRecoveryTests(unittest.TestCase):
         self.assertEqual(queued["status"], "failed")
         self.assertEqual(running["status"], "failed")
         self.assertEqual(queued["failure_category"], "service_restart")
-        self.assertEqual(running["failure_category"], "dispatch_uncertain")
+        self.assertEqual(running["failure_category"], "dispatch_uncertain_failure")
         self.assertEqual(running["dispatch_state"], "pending_uncertain")
         self.assertTrue(running["dispatch_uncertain"])
         self.assertEqual(completed["status"], "succeeded")
