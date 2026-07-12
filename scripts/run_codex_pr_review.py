@@ -512,6 +512,8 @@ def run_codex_service_review(prompt: str, timeout_minutes: int, complexity: str 
 
 def _service_review_should_fallback(exc: ReviewError) -> bool:
     message = str(exc).lower()
+    if "[dispatch_uncertain_failure]" in message:
+        return False
     return any(signal in message for signal in CODEX_SERVICE_FALLBACK_SIGNALS)
 
 

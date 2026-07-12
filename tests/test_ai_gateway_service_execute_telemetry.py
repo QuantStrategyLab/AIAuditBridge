@@ -37,7 +37,13 @@ class AiGatewayExecuteTelemetryTests(unittest.TestCase):
         def _write_job(payload: dict[str, object]) -> None:
             writes.append(dict(payload))
 
-        mock_execute.return_value = SimpleNamespace(success=True, output="done", error="")
+        mock_execute.return_value = SimpleNamespace(
+            success=True,
+            output="done",
+            error="",
+            dispatch_started=True,
+            dispatch_uncertain=False,
+        )
         health = mock_health_monitor.return_value
         health.record.return_value = None
 

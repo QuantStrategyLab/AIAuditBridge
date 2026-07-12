@@ -139,42 +139,60 @@ class CodexAdapter:
             except (RuntimeError, ValueError) as exc:
                 return CodexResult(success=False, error=f"codex command configuration failed: {exc}")
             try:
-                if on_dispatch_start is not None:
-                    on_dispatch_start()
-                completed = subprocess.run(
+                process = subprocess.Popen(
                     command,
-                    input=prompt,
                     text=True,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
-                    check=False,
-                    timeout=timeout,
                     env=_codex_env(),
                 )
+            except OSError as exc:
+                return CodexResult(success=False, error=f"codex command failed before launch: {exc}")
+            try:
+                if on_dispatch_start is not None:
+                    on_dispatch_start()
+                completed_stdout, completed_stderr = process.communicate(input=prompt, timeout=timeout)
             except subprocess.TimeoutExpired as exc:
+                try:
+                    process.kill()
+                except (OSError, UnboundLocalError):
+                    pass
                 return CodexResult(
                     success=False,
                     error=f"codex exec timed out after {timeout}s: {exc}",
+                    dispatch_started=True,
                     dispatch_uncertain=True,
                 )
-            except FileNotFoundError as exc:
-                return CodexResult(success=False, error=f"codex command not found: {exc}")
             except UnicodeDecodeError as exc:
                 return CodexResult(
                     success=False,
                     error=f"codex exec response decode failed: {exc}",
                     dispatch_started=True,
+                    dispatch_uncertain=True,
                 )
             except OSError as exc:
-                return CodexResult(success=False, error=f"codex command failed before launch: {exc}")
+                return CodexResult(
+                    success=False,
+                    error=f"codex exec failed after launch: {exc}",
+                    dispatch_started=True,
+                    dispatch_uncertain=True,
+                )
+            except Exception as exc:
+                return CodexResult(
+                    success=False,
+                    error=f"codex exec failed after launch: {exc}",
+                    dispatch_started=True,
+                    dispatch_uncertain=True,
+                )
 
-            if completed.returncode != 0:
+            if process.returncode != 0:
                 detail = "\n".join(
-                    part for part in (str(completed.stdout or "")[-4000:], str(completed.stderr or "")[-4000:]) if part
+                    part for part in (str(completed_stdout or "")[-4000:], str(completed_stderr or "")[-4000:]) if part
                 ).strip()
                 return CodexResult(
                     success=False,
-                    error=f"codex exec failed (rc={completed.returncode})" + (f":\n{detail}" if detail else ""),
+                    error=f"codex exec failed (rc={process.returncode})" + (f":\n{detail}" if detail else ""),
+                    dispatch_started=True,
                     dispatch_uncertain=True,
                 )
 
@@ -188,5 +206,6 @@ class CodexAdapter:
                     success=False,
                     error=f"codex exec output read failed: {exc}",
                     dispatch_started=True,
+                    dispatch_uncertain=True,
                 )
-            return CodexResult(success=True, output=str(completed.stdout or ""), dispatch_started=True)
+            return CodexResult(success=True, output=str(completed_stdout or ""), dispatch_started=True)

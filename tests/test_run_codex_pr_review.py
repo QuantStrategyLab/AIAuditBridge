@@ -40,6 +40,13 @@ class RunCodexPrReviewTests(unittest.TestCase):
         source = Path(run_codex_pr_review.__file__).read_text(encoding="utf-8")
         self.assertNotIn("SOURCE_ROOT = BRIDGE_ROOT.parent / \"source\"", source)
 
+    def test_uncertain_dispatch_never_uses_direct_api_fallback(self) -> None:
+        self.assertFalse(
+            run_codex_pr_review._service_review_should_fallback(
+                ReviewError("Codex service job failed [dispatch_uncertain_failure]: timed out")
+            )
+        )
+
     def test_isolated_review_runtime_imports_from_the_trusted_bridge(self) -> None:
         result = subprocess.run(
             [sys.executable, "-I", str(Path(run_codex_pr_review.__file__))],

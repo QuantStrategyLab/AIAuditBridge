@@ -3,7 +3,7 @@ from __future__ import annotations
 import socket
 import ssl
 import unittest
-from http.client import IncompleteRead
+from http.client import BadStatusLine, IncompleteRead
 from urllib.error import HTTPError, URLError
 from unittest.mock import patch
 
@@ -89,7 +89,26 @@ class LlmAdapterFailureTests(unittest.TestCase):
         self.assertFalse(results[0].success)
         self.assertEqual(results[0].output, "")
         self.assertEqual(results[0].error, "worker failed")
-        self.assertTrue(results[0].dispatch_uncertain)
+        self.assertFalse(results[0].dispatch_uncertain)
+
+    def test_model_resolution_failure_is_not_dispatched(self) -> None:
+        with patch("service.adapters.llm_adapter.resolve_model", side_effect=ValueError("unsupported model")):
+            result = LlmAdapter().complete(model="unknown", user="review")
+
+        self.assertFalse(result.success)
+        self.assertFalse(result.dispatch_started)
+        self.assertFalse(result.dispatch_uncertain)
+
+    def test_header_parse_failure_is_pending_uncertain_dispatch(self) -> None:
+        with (
+            patch.dict("service.adapters.llm_adapter.os.environ", {"OPENAI_API_KEY": "test-key"}, clear=True),
+            patch("service.adapters.llm_adapter.urllib.request.urlopen", side_effect=BadStatusLine("broken header")),
+        ):
+            result = LlmAdapter().complete(model="gpt-5.4-mini", user="review")
+
+        self.assertFalse(result.success)
+        self.assertTrue(result.dispatch_started)
+        self.assertTrue(result.dispatch_uncertain)
 
     def test_provider_rejection_is_not_ambiguous_dispatch(self) -> None:
         with patch(
@@ -139,7 +158,7 @@ class LlmAdapterFailureTests(unittest.TestCase):
         with self.assertRaises(LlmAdapterError) as raised:
             _retry_with_backoff(lambda: (_ for _ in ()).throw(next(attempts)), max_retries=1, base_seconds=0)
 
-        self.assertFalse(raised.exception.dispatch_started)
+        self.assertTrue(raised.exception.dispatch_started)
         self.assertTrue(raised.exception.dispatch_uncertain)
 
     def test_ambiguous_dispatch_is_not_automatically_retried(self) -> None:

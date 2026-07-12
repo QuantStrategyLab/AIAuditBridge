@@ -492,7 +492,11 @@ def _recover_orphaned_jobs() -> int:
         job["updated_at"] = _now()
         job["error"] = "codex audit service restarted before job completion"
         if previous_status == "running" and str(job.get("dispatch_state") or "") != "not_dispatched":
-            _apply_dispatch_state(job, "pending_uncertain")
+            _apply_dispatch_state(
+                job,
+                dispatch_started=bool(job.get("dispatch_started")),
+                dispatch_uncertain=True,
+            )
             job["failure_category"] = "dispatch_uncertain_failure"
         else:
             job["failure_category"] = "service_restart"
@@ -520,7 +524,11 @@ def _mark_stale_job_failed(job: dict[str, Any]) -> dict[str, Any]:
     job["updated_at"] = _now()
     job["error"] = "codex audit job became stale before completion"
     if previous_status == "running" and str(job.get("dispatch_state") or "") != "not_dispatched":
-        _apply_dispatch_state(job, "pending_uncertain")
+        _apply_dispatch_state(
+            job,
+            dispatch_started=bool(job.get("dispatch_started")),
+            dispatch_uncertain=True,
+        )
         job["failure_category"] = "dispatch_uncertain_failure"
     else:
         job["failure_category"] = "stale_job_timeout"
@@ -1096,19 +1104,21 @@ def _classify_failure(error: str) -> str:
     return "unknown_failure"
 
 
-def _dispatch_state(result: Any) -> str:
-    """Classify a completed adapter call without inferring state from text."""
-    if bool(getattr(result, "dispatch_uncertain", False)):
+def _dispatch_state(dispatch_started: bool, dispatch_uncertain: bool) -> str:
+    """Derive a display state without rewriting adapter-provided facts."""
+    if dispatch_uncertain:
         return "pending_uncertain"
-    if bool(getattr(result, "success", False)) or bool(getattr(result, "dispatch_started", False)):
+    if dispatch_started:
         return "dispatched"
     return "not_dispatched"
 
 
-def _apply_dispatch_state(job: dict[str, Any], state: str) -> None:
-    job["dispatch_state"] = state
-    job["dispatch_started"] = state == "dispatched"
-    job["dispatch_uncertain"] = state == "pending_uncertain"
+def _apply_dispatch_state(
+    job: dict[str, Any], *, dispatch_started: bool, dispatch_uncertain: bool
+) -> None:
+    job["dispatch_started"] = dispatch_started
+    job["dispatch_uncertain"] = dispatch_uncertain
+    job["dispatch_state"] = _dispatch_state(dispatch_started, dispatch_uncertain)
 
 
 def _review_result_payload(
@@ -1180,10 +1190,10 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
         reasoning_effort = _resolve_codex_reasoning_effort(payload, str(payload.get("task") or TASK_EXECUTE))
         def _mark_dispatch_started() -> None:
             nonlocal adapter_invoked, job
-            adapter_invoked = True
-            _apply_dispatch_state(job, "pending_uncertain")
+            _apply_dispatch_state(job, dispatch_started=True, dispatch_uncertain=True)
             job["updated_at"] = _now()
             _write_job(job)
+            adapter_invoked = True
 
         result = adapter.execute(
             prompt=str(payload["prompt"]),
@@ -1194,8 +1204,13 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
             on_dispatch_start=_mark_dispatch_started,
         )
         job = _read_job(job_id)
-        dispatch_state = _dispatch_state(result)
-        _apply_dispatch_state(job, dispatch_state)
+        dispatch_started = bool(getattr(result, "dispatch_started", False))
+        dispatch_uncertain = bool(getattr(result, "dispatch_uncertain", False))
+        _apply_dispatch_state(
+            job,
+            dispatch_started=dispatch_started,
+            dispatch_uncertain=dispatch_uncertain,
+        )
         if result.success:
             job["status"] = "succeeded"
             job["output"] = result.output
@@ -1204,7 +1219,7 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
             job["status"] = "failed"
             job["error"] = result.error
             job["failure_category"] = (
-                "dispatch_uncertain_failure" if dispatch_state == "pending_uncertain" else _classify_failure(result.error)
+                "dispatch_uncertain_failure" if dispatch_uncertain else _classify_failure(result.error)
             )
         job["updated_at"] = _now()
         _write_job(job)
@@ -1243,7 +1258,11 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
         job["status"] = "failed"
         job["updated_at"] = _now()
         job["error"] = str(exc)[-4000:]
-        _apply_dispatch_state(job, "pending_uncertain" if adapter_invoked else "not_dispatched")
+        _apply_dispatch_state(
+            job,
+            dispatch_started=adapter_invoked,
+            dispatch_uncertain=adapter_invoked,
+        )
         job["failure_category"] = (
             "dispatch_uncertain_failure" if adapter_invoked else _classify_failure(str(exc))
         )

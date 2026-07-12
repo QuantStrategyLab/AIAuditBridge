@@ -139,13 +139,13 @@ def _retry_with_backoff(fn, *, max_retries: int = DEFAULT_MAX_RETRIES, base_seco
             status = exc.code if isinstance(exc, urllib.error.HTTPError) else getattr(exc, "status_code", None)
             if not _should_retry(status) or attempt >= max_retries:
                 raise LlmAdapterError(
-                    str(exc), dispatch_started=dispatched and not uncertain, dispatch_uncertain=uncertain
+                    str(exc), dispatch_started=dispatched, dispatch_uncertain=uncertain
                 ) from exc
             wait = base_seconds * (2**attempt)
             _logger.warning("llm_adapter attempt %d/%d failed (status=%s); retrying in %.1fs", attempt + 1, max_retries + 1, status, wait)
             time.sleep(wait)
     raise LlmAdapterError(
-        str(last_exc), dispatch_started=dispatched and not uncertain, dispatch_uncertain=uncertain
+        str(last_exc), dispatch_started=dispatched, dispatch_uncertain=uncertain
     ) from last_exc
 
 
@@ -217,6 +217,12 @@ def _openai_completion(
             detail = _http_error_detail(exc)
             raise LlmAdapterError(
                 f"OpenAI HTTP {exc.code}: {detail}", dispatch_started=True, status_code=exc.code
+            ) from exc
+        except HTTPException as exc:
+            raise LlmAdapterError(
+                f"OpenAI response header error: {exc}",
+                dispatch_started=True,
+                dispatch_uncertain=True,
             ) from exc
         except (urllib.error.URLError, OSError) as exc:
             raise LlmAdapterError(
@@ -304,6 +310,12 @@ def _anthropic_completion(
             raise LlmAdapterError(
                 f"Anthropic HTTP {exc.code}: {detail}", dispatch_started=True, status_code=exc.code
             ) from exc
+        except HTTPException as exc:
+            raise LlmAdapterError(
+                f"Anthropic response header error: {exc}",
+                dispatch_started=True,
+                dispatch_uncertain=True,
+            ) from exc
         except (urllib.error.URLError, OSError) as exc:
             raise LlmAdapterError(
                 f"Anthropic network error: {exc}",
@@ -365,8 +377,18 @@ class LlmAdapter:
 
         ``model`` is auto-routed: ``claude-*`` → Anthropic, ``gpt-*`` → OpenAI.
         """
-        provider, resolved_model = resolve_model(model)
         started = time.time()
+        try:
+            provider, resolved_model = resolve_model(model)
+        except Exception as exc:
+            return LlmResult(
+                provider="",
+                model=model,
+                output="",
+                success=False,
+                error=str(exc),
+                latency_seconds=time.time() - started,
+            )
         try:
             if provider == PROVIDER_ANTHROPIC:
                 output, dispatch_uncertain = _anthropic_completion(
@@ -395,6 +417,15 @@ class LlmAdapter:
                 dispatch_started=exc.dispatch_started,
                 dispatch_uncertain=exc.dispatch_uncertain,
             )
+        except Exception as exc:
+            return LlmResult(
+                provider=provider,
+                model=resolved_model,
+                output="",
+                success=False,
+                error=str(exc),
+                latency_seconds=time.time() - started,
+            )
 
     def parallel_review(
         self,
@@ -421,6 +452,16 @@ class LlmAdapter:
                 index, label, model = futures[f]
                 try:
                     results[index] = f.result()
+                except LlmAdapterError as exc:
+                    results[index] = LlmResult(
+                        provider=label,
+                        model=model,
+                        output="",
+                        success=False,
+                        error=str(exc),
+                        dispatch_started=exc.dispatch_started,
+                        dispatch_uncertain=exc.dispatch_uncertain,
+                    )
                 except Exception as exc:
                     results[index] = (
                         LlmResult(
@@ -429,7 +470,6 @@ class LlmAdapter:
                             output="",
                             success=False,
                             error=str(exc),
-                            dispatch_uncertain=True,
                         )
                     )
         return [result for result in results if result is not None]

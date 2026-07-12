@@ -29,6 +29,7 @@ def test_uncertain_job_failure_is_persisted_and_not_retryable() -> None:
 
     completed = writes[-1]
     assert completed["dispatch_state"] == "pending_uncertain"
+    assert completed["dispatch_started"] is False
     assert completed["dispatch_uncertain"] is True
     assert completed["failure_category"] == "dispatch_uncertain_failure"
 
@@ -69,6 +70,15 @@ def test_pre_dispatch_failure_is_not_dispatched() -> None:
     completed = writes[-1]
     assert completed["dispatch_state"] == "not_dispatched"
     assert completed["dispatch_uncertain"] is False
+
+
+def test_pending_uncertain_preserves_independent_started_fact() -> None:
+    job: dict[str, object] = {}
+    gateway._apply_dispatch_state(job, dispatch_started=True, dispatch_uncertain=True)
+
+    assert job["dispatch_state"] == "pending_uncertain"
+    assert job["dispatch_started"] is True
+    assert job["dispatch_uncertain"] is True
 
 
 def test_post_processing_failure_preserves_definitive_dispatch_state() -> None:

@@ -15,7 +15,7 @@ The synchronous `POST /v1/codex-audit` endpoint remains available for local diag
 
 ## Dispatch outcome contract
 
-Jobs persist `dispatch_started`, `dispatch_uncertain`, and `dispatch_state`. Only failures proven by code structure before the subprocess or HTTP invocation are `not_dispatched`; a received provider response is `dispatched`; and every invocation without a trustworthy structured outcome is `pending_uncertain`. In particular, non-zero Codex CLI exits and their stderr text are not evidence of non-dispatch. `pending_uncertain` is never retried automatically and requires reconciliation before any reservation is released. A review response preserves these flags and escalates rather than recommending `auto_pr` or `auto_merge` when any reviewer or verifier is uncertain.
+Jobs persist independent `dispatch_started` and `dispatch_uncertain` facts plus a derived `dispatch_state`. Only failures proven by code structure before the subprocess or HTTP invocation are `not_dispatched`; a received provider response is `dispatched`; and every invocation without a trustworthy structured outcome is `pending_uncertain`. A pending outcome does not infer either value for `dispatch_started`. In particular, non-zero Codex CLI exits and their stderr text are not evidence of non-dispatch. `pending_uncertain` is never retried automatically and requires reconciliation before any reservation is released. A review response preserves these flags and escalates rather than recommending `auto_pr` or `auto_merge` when any reviewer or verifier is uncertain.
 
 ## Boundary with Pigbibi CodexGateway
 

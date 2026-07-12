@@ -2891,6 +2891,14 @@ def main() -> int:
                 if is_infra_failure:
                     post_issue_comment(token, source_repo, issue_number, service_infrastructure_failure_comment(_codex_log))
                     return 0
+                if failure_category == "dispatch_uncertain_failure":
+                    post_issue_comment(
+                        token,
+                        source_repo,
+                        issue_number,
+                        "## Codex Audit\n\nCodex dispatch outcome is uncertain; reconciliation is required before retry or provider fallback.",
+                    )
+                    return return_code
                 if provider == "auto":
                     return run_auto_provider_fallback(
                         token=token,
