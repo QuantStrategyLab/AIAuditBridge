@@ -15,6 +15,10 @@ from scripts.run_codex_pr_review import ReviewError, run_codex_review_with_fallb
 
 
 class RunCodexPrReviewTests(unittest.TestCase):
+    def _replay_fixtures(self) -> dict[str, object]:
+        path = Path(__file__).with_name("fixtures") / "codex_pr_review_replays.json"
+        return json.loads(path.read_text(encoding="utf-8"))
+
     def _write_event(self, tmpdir: str, files: list[str]) -> str:
         event = {
             "pull_request": {"number": 7, "head": {"sha": "abc1234"}},
@@ -110,6 +114,40 @@ class RunCodexPrReviewTests(unittest.TestCase):
         )
         self.assertTrue(run_codex_pr_review.should_arbitrate(blocked=True, streak=2, repeated=True, new_head=True))
         self.assertFalse(run_codex_pr_review.should_arbitrate(blocked=True, streak=2, repeated=True, new_head=False))
+
+    def test_replay_fixtures_cover_pure_contract_identity(self) -> None:
+        fixtures = self._replay_fixtures()
+        dispatch = fixtures["dispatch_pr_75"]
+        crypto = fixtures["crypto_pr_125"]["findings"]
+        dispatch_identity = run_codex_pr_review._contract_finding(dispatch["finding"])
+        reworded_identity = run_codex_pr_review._contract_finding(dispatch["reworded"])
+        self.assertEqual(dispatch_identity["fingerprint_v2"], reworded_identity["fingerprint_v2"])
+        self.assertNotEqual(
+            run_codex_pr_review._contract_key(crypto[0]),
+            run_codex_pr_review._contract_key(crypto[1]),
+        )
+        opposite = dict(dispatch["finding"], suggestion="Reject provider dispatch before launch.")
+        self.assertNotEqual(
+            dispatch_identity["behavior_digest"],
+            run_codex_pr_review._contract_finding(opposite)["behavior_digest"],
+        )
+        critical = dict(dispatch["finding"], severity="critical")
+        self.assertEqual(
+            dispatch_identity["fingerprint_v2"],
+            run_codex_pr_review._contract_finding(critical)["fingerprint_v2"],
+        )
+
+    def test_no_anchor_subject_combines_description_and_suggestion(self) -> None:
+        first = {
+            "category": "logic", "file": "service/review.py",
+            "description": "Reject invalid state before dispatch.",
+            "suggestion": "Persist the rejected state.",
+        }
+        second = dict(first, description="Accept invalid state before dispatch.")
+        self.assertNotEqual(
+            run_codex_pr_review._contract_key(first),
+            run_codex_pr_review._contract_key(second),
+        )
 
     def test_parse_arbitration_output_requires_supported_verdict(self) -> None:
         self.assertEqual(

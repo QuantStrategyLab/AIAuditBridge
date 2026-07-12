@@ -804,6 +804,81 @@ def parse_arbitration_output(
     return result
 
 
+def _normalize_contract_text(value: Any) -> str:
+    text = _sanitize_history_text(value, 240).lower()
+    stop_words = {
+        "the", "and", "for", "from", "into", "that", "this", "with",
+        "must", "should", "will", "return",
+    }
+    return " ".join(
+        sorted(token for token in re.findall(r"[a-z0-9]+", text) if token not in stop_words)
+    )
+
+
+def _contract_subject(finding: dict[str, Any]) -> str:
+    text = " ".join(
+        str(finding.get(field) or "") for field in ("description", "suggestion")
+    )
+    anchors = re.findall(r"`([^`]{1,120})`", text)
+    anchors.extend(re.findall(r"\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+\b", text))
+    normalized = {_normalize_contract_text(anchor) for anchor in anchors}
+    return "|".join(sorted(anchor for anchor in normalized if anchor)) or _normalize_contract_text(text)
+
+
+def _contract_key(finding: dict[str, Any]) -> str:
+    payload = json.dumps(
+        {
+            "file": _sanitize_history_path(finding.get("file")),
+            "category": _sanitize_history_text(finding.get("category"), 80).lower(),
+            "subject": _contract_subject(finding),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:20]
+
+
+def _behavior_digest(finding: dict[str, Any]) -> str:
+    payload = json.dumps(
+        {
+            "contract_key": _contract_key(finding),
+            "behavior": _normalize_contract_text(
+                finding.get("suggestion") or finding.get("description")
+            ),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:20]
+
+
+def _contract_finding(finding: dict[str, Any]) -> dict[str, str]:
+    normalized = {
+        "severity": _sanitize_history_text(finding.get("severity"), 20).lower(),
+        "category": _sanitize_history_text(finding.get("category"), 80).lower(),
+        "file": _sanitize_history_path(finding.get("file")),
+        "description": _sanitize_history_text(finding.get("description")),
+        "suggestion": _sanitize_history_text(finding.get("suggestion")),
+    }
+    normalized["contract_key"] = _contract_key(normalized)
+    normalized["behavior_digest"] = _behavior_digest(normalized)
+    normalized["fingerprint_v2"] = hashlib.sha256(
+        json.dumps(
+            {
+                "contract_key": normalized["contract_key"],
+                "behavior_digest": normalized["behavior_digest"],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()[:20]
+    return normalized
+
+
+def _fingerprint_v2(finding: dict[str, Any]) -> str:
+    return _contract_finding(finding)["fingerprint_v2"]
+
+
 def blocking_finding_fingerprint(findings: list[dict[str, Any]]) -> str:
     """Return a stable arbitration-candidate identifier despite wording drift."""
     normalized: list[dict[str, str]] = []
