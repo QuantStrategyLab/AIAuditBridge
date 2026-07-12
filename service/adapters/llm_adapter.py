@@ -113,19 +113,18 @@ def _retry_with_backoff(fn, *, max_retries: int = DEFAULT_MAX_RETRIES, base_seco
             )
             if attempt_dispatched:
                 dispatched = True
-                uncertain = False
-            elif not dispatched and attempt_uncertain:
+            if attempt_uncertain:
                 uncertain = True
             status = exc.code if isinstance(exc, urllib.error.HTTPError) else getattr(exc, "status_code", None)
             if not _should_retry(status) or attempt >= max_retries:
                 raise LlmAdapterError(
-                    str(exc), dispatch_started=dispatched, dispatch_uncertain=uncertain
+                    str(exc), dispatch_started=dispatched and not uncertain, dispatch_uncertain=uncertain
                 ) from exc
             wait = base_seconds * (2**attempt)
             _logger.warning("llm_adapter attempt %d/%d failed (status=%s); retrying in %.1fs", attempt + 1, max_retries + 1, status, wait)
             time.sleep(wait)
     raise LlmAdapterError(
-        str(last_exc), dispatch_started=dispatched, dispatch_uncertain=uncertain
+        str(last_exc), dispatch_started=dispatched and not uncertain, dispatch_uncertain=uncertain
     ) from last_exc
 
 
