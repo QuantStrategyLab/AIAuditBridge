@@ -18,6 +18,20 @@ from pathlib import Path
 
 SECRET_ENV_MARKERS = ("TOKEN", "SECRET", "PASSWORD", "PRIVATE_KEY", "CREDENTIAL", "API_KEY", "ADMIN_KEY")
 CODEX_REASONING_EFFORTS = frozenset({"minimal", "low", "medium", "high", "xhigh"})
+_LOCAL_CODEX_FAILURE_MARKERS = (
+    "authentication",
+    "bootstrap",
+    "command not found",
+    "configuration",
+    "invalid option",
+    "invalid sandbox",
+    "no such file",
+    "not logged in",
+    "permission denied",
+    "unrecognized option",
+    "unknown option",
+    "unsupported",
+)
 
 
 @dataclass(frozen=True)
@@ -25,6 +39,14 @@ class CodexResult:
     success: bool
     output: str = ""
     error: str = ""
+    dispatch_started: bool = False
+    dispatch_uncertain: bool = False
+
+
+def _codex_dispatch_is_uncertain(detail: str) -> bool:
+    """Classify known local CLI failures as definitely not dispatched."""
+    text = detail.lower()
+    return not any(marker in text for marker in _LOCAL_CODEX_FAILURE_MARKERS)
 
 
 def _codex_env() -> dict[str, str]:
@@ -123,16 +145,20 @@ class CodexAdapter:
         with tempfile.TemporaryDirectory() as tmp:
             output_last_message = Path(tmp) / "codex-final-message.md"
             try:
+                command = _codex_command(
+                    output_last_message,
+                    sandbox=sandbox,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                    output_schema=output_schema,
+                    cwd=cwd,
+                    images=images,
+                )
+            except (RuntimeError, ValueError) as exc:
+                return CodexResult(success=False, error=f"codex command configuration failed: {exc}")
+            try:
                 completed = subprocess.run(
-                    _codex_command(
-                        output_last_message,
-                        sandbox=sandbox,
-                        model=model,
-                        reasoning_effort=reasoning_effort,
-                        output_schema=output_schema,
-                        cwd=cwd,
-                        images=images,
-                    ),
+                    command,
                     input=prompt,
                     text=True,
                     stdout=subprocess.PIPE,
@@ -142,14 +168,22 @@ class CodexAdapter:
                     env=_codex_env(),
                 )
             except subprocess.TimeoutExpired as exc:
-                return CodexResult(success=False, error=f"codex exec timed out after {timeout}s: {exc}")
+                return CodexResult(
+                    success=False,
+                    error=f"codex exec timed out after {timeout}s: {exc}",
+                    dispatch_uncertain=True,
+                )
             except FileNotFoundError as exc:
                 return CodexResult(success=False, error=f"codex command not found: {exc}")
 
             if completed.returncode != 0:
                 detail = (completed.stdout[-4000:] + completed.stderr[-4000:]).strip()
-                return CodexResult(success=False, error=f"codex exec failed (rc={completed.returncode})" + (f":\n{detail}" if detail else ""))
+                return CodexResult(
+                    success=False,
+                    error=f"codex exec failed (rc={completed.returncode})" + (f":\n{detail}" if detail else ""),
+                    dispatch_uncertain=_codex_dispatch_is_uncertain(detail),
+                )
 
             if output_last_message.exists() and output_last_message.read_text(encoding="utf-8").strip():
-                return CodexResult(success=True, output=output_last_message.read_text(encoding="utf-8"))
-            return CodexResult(success=True, output=completed.stdout)
+                return CodexResult(success=True, output=output_last_message.read_text(encoding="utf-8"), dispatch_started=True)
+            return CodexResult(success=True, output=completed.stdout, dispatch_started=True)

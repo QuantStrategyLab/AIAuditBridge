@@ -55,6 +55,8 @@ class LlmResult:
     success: bool = True
     error: str = ""
     latency_seconds: float = 0.0
+    dispatch_started: bool = False
+    dispatch_uncertain: bool = False
 
 
 class LlmAdapterError(RuntimeError):
@@ -103,6 +105,23 @@ def resolve_model(model: str) -> tuple[str, str]:
         return PROVIDER_OPENAI, model.strip() or DEFAULT_OPENAI_MODEL
     # default to anthropic
     return PROVIDER_ANTHROPIC, DEFAULT_ANTHROPIC_MODEL
+
+
+def _dispatch_is_uncertain(error: str) -> bool:
+    """Keep capacity only when provider acceptance cannot be disproven."""
+    text = error.lower()
+    if "api_key is not configured" in text:
+        return False
+    if any(f"http {status}" in text for status in range(400, 500)):
+        return False
+    return not any(marker in text for marker in (
+        "invalid model",
+        "unsupported model",
+        "validation",
+        "malformed",
+        "missing required",
+        "not configured",
+    ))
 
 
 # ── OpenAI ─────────────────────────────────────────────────────────────
@@ -273,7 +292,13 @@ class LlmAdapter:
                 output = _anthropic_completion(resolved_model, system, user, max_tokens=max_tokens, timeout=timeout)
             else:
                 output = _openai_completion(resolved_model, system, user, max_tokens=max_tokens, timeout=timeout)
-            return LlmResult(provider=provider, model=resolved_model, output=output, latency_seconds=time.time() - started)
+            return LlmResult(
+                provider=provider,
+                model=resolved_model,
+                output=output,
+                latency_seconds=time.time() - started,
+                dispatch_started=True,
+            )
         except LlmAdapterError as exc:
             return LlmResult(
                 provider=provider,
@@ -282,6 +307,8 @@ class LlmAdapter:
                 success=False,
                 error=str(exc),
                 latency_seconds=time.time() - started,
+                dispatch_started=False,
+                dispatch_uncertain=_dispatch_is_uncertain(str(exc)),
             )
 
     def parallel_review(
@@ -299,18 +326,24 @@ class LlmAdapter:
         """
         import concurrent.futures
 
-        results: list[LlmResult] = []
+        results: list[LlmResult | None] = [None] * len(reviewers)
         with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(reviewers), 4)) as pool:
             futures = {
-                pool.submit(self.complete, model=model, system=system, user=user, max_tokens=max_tokens, timeout=timeout): (label, model)
-                for label, model in reviewers
+                pool.submit(self.complete, model=model, system=system, user=user, max_tokens=max_tokens, timeout=timeout): (index, label, model)
+                for index, (label, model) in enumerate(reviewers)
             }
             for f in concurrent.futures.as_completed(futures):
+                index, label, model = futures[f]
                 try:
-                    results.append(f.result())
+                    results[index] = f.result()
                 except Exception as exc:
-                    label, model = futures[f]
-                    results.append(
-                        LlmResult(provider=label, model=model, output="", success=False, error=str(exc))
+                    results[index] = (
+                        LlmResult(
+                            provider=label,
+                            model=model,
+                            output="",
+                            success=False,
+                            error=str(exc),
+                        )
                     )
-        return results
+        return [result for result in results if result is not None]
