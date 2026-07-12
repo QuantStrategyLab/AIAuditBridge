@@ -165,16 +165,25 @@ def _openai_completion(
     def _call() -> str:
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
-                payload = json.loads(resp.read().decode("utf-8"))
+                raw = resp.read()
         except urllib.error.HTTPError as exc:
             detail = _scrub_api_keys(exc.read().decode("utf-8", errors="replace")[:500])
             raise LlmAdapterError(
                 f"OpenAI HTTP {exc.code}: {detail}", dispatch_started=True
             ) from exc
-        except (urllib.error.URLError, OSError, ValueError) as exc:
+        except (urllib.error.URLError, OSError) as exc:
             raise LlmAdapterError(
                 f"OpenAI network error: {exc}", dispatch_uncertain=True
             ) from exc
+        except ValueError as exc:
+            raise LlmAdapterError(f"OpenAI request configuration error: {exc}") from exc
+
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise LlmAdapterError("OpenAI returned an invalid response body", dispatch_started=True) from exc
+        if not isinstance(payload, dict):
+            raise LlmAdapterError("OpenAI returned an invalid response shape", dispatch_started=True)
 
         choices = payload.get("choices")
         if not choices:
@@ -232,16 +241,25 @@ def _anthropic_completion(
     def _call() -> str:
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
-                payload = json.loads(resp.read().decode("utf-8"))
+                raw = resp.read()
         except urllib.error.HTTPError as exc:
             detail = _scrub_api_keys(exc.read().decode("utf-8", errors="replace")[:500])
             raise LlmAdapterError(
                 f"Anthropic HTTP {exc.code}: {detail}", dispatch_started=True
             ) from exc
-        except (urllib.error.URLError, OSError, ValueError) as exc:
+        except (urllib.error.URLError, OSError) as exc:
             raise LlmAdapterError(
                 f"Anthropic network error: {exc}", dispatch_uncertain=True
             ) from exc
+        except ValueError as exc:
+            raise LlmAdapterError(f"Anthropic request configuration error: {exc}") from exc
+
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise LlmAdapterError("Anthropic returned an invalid response body", dispatch_started=True) from exc
+        if not isinstance(payload, dict):
+            raise LlmAdapterError("Anthropic returned an invalid response shape", dispatch_started=True)
 
         content = payload.get("content")
         if not isinstance(content, list):
