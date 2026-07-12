@@ -119,21 +119,19 @@ class LlmAdapterFailureTests(unittest.TestCase):
         self.assertFalse(raised.exception.dispatch_started)
         self.assertTrue(raised.exception.dispatch_uncertain)
 
-    def test_success_after_ambiguous_retry_remains_uncertain(self) -> None:
-        attempts = iter((LlmAdapterError("network error", dispatch_uncertain=True), "output"))
+    def test_ambiguous_dispatch_is_not_automatically_retried(self) -> None:
+        attempts = 0
 
         def call() -> str:
-            value = next(attempts)
-            if isinstance(value, Exception):
-                raise value
-            return value
+            nonlocal attempts
+            attempts += 1
+            raise LlmAdapterError("network error", dispatch_uncertain=True)
 
-        output, dispatch_uncertain = _retry_with_backoff(
-            call, max_retries=1, base_seconds=0
-        )
+        with self.assertRaises(LlmAdapterError) as raised:
+            _retry_with_backoff(call, max_retries=1, base_seconds=0)
 
-        self.assertEqual(output, "output")
-        self.assertTrue(dispatch_uncertain)
+        self.assertEqual(attempts, 1)
+        self.assertTrue(raised.exception.dispatch_uncertain)
 
     def test_malformed_provider_choices_is_confirmed_dispatch_failure(self) -> None:
         with (

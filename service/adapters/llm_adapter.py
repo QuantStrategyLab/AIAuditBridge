@@ -136,7 +136,7 @@ def _retry_with_backoff(fn, *, max_retries: int = DEFAULT_MAX_RETRIES, base_seco
             if attempt_uncertain:
                 uncertain = True
             status = exc.code if isinstance(exc, urllib.error.HTTPError) else getattr(exc, "status_code", None)
-            if (not _should_retry(status) and not attempt_uncertain) or attempt >= max_retries:
+            if not _should_retry(status) or attempt >= max_retries:
                 raise LlmAdapterError(
                     str(exc), dispatch_started=dispatched and not uncertain, dispatch_uncertain=uncertain
                 ) from exc
