@@ -287,6 +287,11 @@ def fetch_pr_diff(token: str, repo: str, pr_number: int) -> str:
 
 def fetch_compare_diff(token: str, repo: str, base_sha: str, head_sha: str) -> str:
     """Fetch only the remediation delta between two trusted reviewed heads."""
+    comparison = github_request(
+        token, "GET", f"/repos/{repo}/compare/{base_sha}...{head_sha}"
+    )
+    if not isinstance(comparison, dict) or comparison.get("status") != "ahead":
+        raise ReviewError("remediation head is not a strict descendant of the trusted reviewed head")
     compare_url = (
         f"{API_BASE}/repos/{repo}/compare/"
         f"{urllib.parse.quote(base_sha, safe='')}...{urllib.parse.quote(head_sha, safe='')}"
@@ -2185,7 +2190,7 @@ def main() -> int:
             current_head_sha=current_head_sha,
             reviewed_head_sha=current_head_sha,
             finding_history_marker=build_finding_history_marker(
-                finding_history, [], current_head_sha
+                finding_history, [], ""
             ),
         )
 
@@ -2301,7 +2306,7 @@ def main() -> int:
                 reviewed_head_sha=previous_head_sha,
                 new_head=True,
                 finding_history_marker=build_finding_history_marker(
-                    finding_history, [], current_head_sha
+                    finding_history, [], ""
                 ),
             )
         print(
