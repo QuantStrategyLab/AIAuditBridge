@@ -491,7 +491,11 @@ def _recover_orphaned_jobs() -> int:
         job["status"] = "failed"
         job["updated_at"] = _now()
         job["error"] = "codex audit service restarted before job completion"
-        job["failure_category"] = "service_restart"
+        if previous_status == "running" and str(job.get("dispatch_state") or "") != "not_dispatched":
+            _apply_dispatch_state(job, "pending_uncertain")
+            job["failure_category"] = "dispatch_uncertain"
+        else:
+            job["failure_category"] = "service_restart"
         _write_job(job)
         _record_job_automation_run(job)
         _audit_log(
@@ -507,6 +511,7 @@ def _recover_orphaned_jobs() -> int:
 def _mark_stale_job_failed(job: dict[str, Any]) -> dict[str, Any]:
     if job.get("status") not in {"queued", "running"}:
         return job
+    previous_status = str(job.get("status") or "")
     timeout_seconds = int(job.get("timeout_seconds", 2700))
     updated_at = float(job.get("updated_at") or job.get("created_at") or 0)
     if updated_at and _now() <= updated_at + timeout_seconds + 120:
@@ -514,7 +519,11 @@ def _mark_stale_job_failed(job: dict[str, Any]) -> dict[str, Any]:
     job["status"] = "failed"
     job["updated_at"] = _now()
     job["error"] = "codex audit job became stale before completion"
-    job["failure_category"] = "stale_job_timeout"
+    if previous_status == "running" and str(job.get("dispatch_state") or "") != "not_dispatched":
+        _apply_dispatch_state(job, "pending_uncertain")
+        job["failure_category"] = "dispatch_uncertain"
+    else:
+        job["failure_category"] = "stale_job_timeout"
     _write_job(job)
     _record_job_automation_run(job)
     return job
@@ -543,6 +552,9 @@ def _public_job_payload(job: dict[str, Any]) -> dict[str, object]:
         "source_repository": str(job.get("source_repository") or ""),
         "task": str(job.get("task") or ""),
         "task_state": job_task_state(job),
+        "dispatch_started": bool(job.get("dispatch_started")),
+        "dispatch_uncertain": bool(job.get("dispatch_uncertain")),
+        "dispatch_state": str(job.get("dispatch_state") or "not_dispatched"),
     }
     if job.get("status") == "succeeded":
         payload["output"] = str(job.get("output") or "")
@@ -708,10 +720,10 @@ def _automation_triage_snapshot(
     recommended_action = "open_issue"
     next_step = "open_issue"
 
-    if category in {"auth_or_config_failure", "patch_contract_failure"}:
+    if category in {"auth_or_config_failure", "patch_contract_failure", "dispatch_uncertain"}:
         incident_class = "blocked"
-        recommended_action = "open_issue"
-        next_step = "fix_config_or_contract"
+        recommended_action = "escalate" if category == "dispatch_uncertain" else "open_issue"
+        next_step = "reconcile_dispatch" if category == "dispatch_uncertain" else "fix_config_or_contract"
     elif category == "quota_or_capacity_failure":
         incident_class = "retryable"
         retry_allowed = True
@@ -1084,6 +1096,62 @@ def _classify_failure(error: str) -> str:
     return "unknown_failure"
 
 
+def _dispatch_state(result: Any) -> str:
+    """Classify a completed adapter call without inferring state from text."""
+    if bool(getattr(result, "dispatch_uncertain", False)):
+        return "pending_uncertain"
+    if bool(getattr(result, "success", False)) or bool(getattr(result, "dispatch_started", False)):
+        return "dispatched"
+    return "not_dispatched"
+
+
+def _apply_dispatch_state(job: dict[str, Any], state: str) -> None:
+    job["dispatch_state"] = state
+    job["dispatch_started"] = state == "dispatched"
+    job["dispatch_uncertain"] = state == "pending_uncertain"
+
+
+def _review_result_payload(
+    reviewer: str,
+    model: str,
+    result: Any,
+    *,
+    latency_seconds: float | None = None,
+) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "reviewer": reviewer,
+        "model": model,
+        "success": bool(result.success),
+        "output": result.output if result.success else "",
+        "error": result.error if not result.success else "",
+        "confidence": _extract_confidence_from_output(result.output) if result.success else 0.0,
+        "dispatch_started": bool(getattr(result, "dispatch_started", False)),
+        "dispatch_uncertain": bool(getattr(result, "dispatch_uncertain", False)),
+    }
+    if latency_seconds is not None:
+        entry["latency_seconds"] = latency_seconds
+    return entry
+
+
+def _fail_closed_for_uncertain_dispatch(action: dict[str, Any], results: list[dict[str, Any]]) -> dict[str, Any]:
+    if not any(bool(result.get("dispatch_uncertain")) for result in results):
+        return action
+    guarded = dict(action)
+    guarded.update(
+        {
+            "action": "escalate",
+            "initial_action": "escalate",
+            "reason": "A reviewer or verifier has an uncertain provider dispatch; human reconciliation is required",
+            "human_review_required": True,
+            "auto_merge_allowed": False,
+        }
+    )
+    authority = guarded.get("automation_authority")
+    if isinstance(authority, dict):
+        guarded["automation_authority"] = {**authority, "final_action": "escalate", "human_review_required": True}
+    return guarded
+
+
 def _find_active_job_by_dedupe_key(dedupe_key: str) -> dict[str, Any] | None:
     if os.environ.get("CODEX_AUDIT_SERVICE_DEDUPE_JOBS", "true").strip().lower() in {"0", "false", "no", "off"}:
         return None
@@ -1099,6 +1167,7 @@ def _find_active_job_by_dedupe_key(dedupe_key: str) -> dict[str, Any] | None:
 
 def _run_job(job_id: str, payload: dict[str, Any]) -> None:
     started = time.time()
+    adapter_invoked = False
     try:
         job = _read_job(job_id)
         job["status"] = "running"
@@ -1108,6 +1177,10 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
         adapter = CodexAdapter()
         sandbox = _validate_sandbox(str(payload.get("sandbox") or ""))
         reasoning_effort = _resolve_codex_reasoning_effort(payload, str(payload.get("task") or TASK_EXECUTE))
+        _apply_dispatch_state(job, "pending_uncertain")
+        job["updated_at"] = _now()
+        _write_job(job)
+        adapter_invoked = True
         result = adapter.execute(
             prompt=str(payload["prompt"]),
             sandbox=sandbox,
@@ -1116,6 +1189,8 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
             timeout=int(payload.get("timeout_seconds", 2700)),
         )
         job = _read_job(job_id)
+        dispatch_state = _dispatch_state(result)
+        _apply_dispatch_state(job, dispatch_state)
         if result.success:
             job["status"] = "succeeded"
             job["output"] = result.output
@@ -1123,7 +1198,9 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
         else:
             job["status"] = "failed"
             job["error"] = result.error
-            job["failure_category"] = _classify_failure(result.error)
+            job["failure_category"] = (
+                "dispatch_uncertain" if dispatch_state == "pending_uncertain" else _classify_failure(result.error)
+            )
         job["updated_at"] = _now()
         _write_job(job)
         _record_job_automation_run(job)
@@ -1157,7 +1234,10 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
         job["status"] = "failed"
         job["updated_at"] = _now()
         job["error"] = str(exc)[-4000:]
-        job["failure_category"] = _classify_failure(str(exc))
+        _apply_dispatch_state(job, "pending_uncertain" if adapter_invoked else "not_dispatched")
+        job["failure_category"] = (
+            "dispatch_uncertain" if adapter_invoked else _classify_failure(str(exc))
+        )
         _write_job(job)
         _record_job_automation_run(job)
         get_health_monitor().record("/v1/ai/execute/jobs/run", time.time() - started, False, type(exc).__name__)
@@ -1216,6 +1296,9 @@ def _submit_job(claims: dict[str, Any], payload: dict[str, Any]) -> dict[str, ob
         "mode": str(payload.get("mode") or MODE_REVIEW_ONLY),
         "timeout_seconds": int(payload.get("timeout_seconds", 2700)),
         "dedupe_key": dedupe_key,
+        "dispatch_started": False,
+        "dispatch_uncertain": False,
+        "dispatch_state": "not_dispatched",
     }
     _write_job(job)
     _record_job_automation_run(job)
@@ -1548,25 +1631,13 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         # Step 3: build per-reviewer results with extracted confidence
         results: list[dict[str, Any]] = []
         for r in llm_results:
-            entry: dict[str, Any] = {
-                "reviewer": r.provider,
-                "model": r.model,
-                "success": r.success,
-                "output": r.output if r.success else "",
-                "error": r.error if not r.success else "",
-                "latency_seconds": r.latency_seconds,
-                "confidence": _extract_confidence_from_output(r.output) if r.success else 0.0,
-            }
-            results.append(entry)
+            results.append(
+                _review_result_payload(
+                    r.provider, r.model, r, latency_seconds=r.latency_seconds
+                )
+            )
         if codex_result is not None:
-            results.append({
-                "reviewer": "codex",
-                "model": "codex-cli",
-                "success": codex_result.success,
-                "output": codex_result.output if codex_result.success else "",
-                "error": codex_result.error if not codex_result.success else "",
-                "confidence": _extract_confidence_from_output(codex_result.output) if codex_result.success else 0.0,
-            })
+            results.append(_review_result_payload("codex", "codex-cli", codex_result))
 
         # Step 4: compute consensus + recommended action
         consensus = _compute_consensus(results)
@@ -1592,6 +1663,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             quota_status=str(quota_status),
             org_health_status=org_health_status,
         )
+        action = _fail_closed_for_uncertain_dispatch(action, results)
         _audit_log("review_completed", consensus=consensus, all_success=all_ok,
                    action=action["action"], confidence=action["confidence"], risk=action["risk"])
 

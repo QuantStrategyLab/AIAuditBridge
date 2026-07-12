@@ -57,6 +57,9 @@ class AiGatewayExecuteTelemetryTests(unittest.TestCase):
         self.assertEqual(execution_result["status"], "succeeded")
         self.assertEqual(execution_result["model"], "gpt-5.4-mini")
         self.assertEqual(call_domain, "cn_equity")
+        self.assertTrue(writes[-1]["dispatch_started"])
+        self.assertFalse(writes[-1]["dispatch_uncertain"])
+        self.assertEqual(writes[-1]["dispatch_state"], "dispatched")
 
 
 if __name__ == "__main__":
