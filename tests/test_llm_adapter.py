@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import socket
+import ssl
 import unittest
+from http.client import IncompleteRead
 from urllib.error import HTTPError, URLError
 from unittest.mock import patch
 
@@ -38,9 +40,24 @@ class _BrokenResponse:
         raise OSError("connection reset")
 
 
+class _TruncatedResponse:
+    def __enter__(self) -> "_TruncatedResponse":
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        raise IncompleteRead(b"partial", 10)
+
+
 class LlmAdapterFailureTests(unittest.TestCase):
     def test_known_preconnect_failure_is_not_ambiguous_dispatch(self) -> None:
         self.assertFalse(_transport_dispatch_is_uncertain(URLError(socket.gaierror("DNS failed"))))
+        self.assertFalse(
+            _transport_dispatch_is_uncertain(URLError(ssl.SSLCertVerificationError(1, "certificate failed")))
+        )
+        self.assertTrue(_transport_dispatch_is_uncertain(URLError(ssl.SSLError("EOF after request"))))
         self.assertTrue(_transport_dispatch_is_uncertain(TimeoutError("timed out")))
 
     def test_complete_returns_empty_output_on_provider_failure(self) -> None:
@@ -163,6 +180,28 @@ class LlmAdapterFailureTests(unittest.TestCase):
             patch("service.adapters.llm_adapter.urllib.request.urlopen", return_value=_BrokenResponse()),
         ):
             result = LlmAdapter().complete(model="gpt-5.4-mini", user="review")
+
+        self.assertFalse(result.success)
+        self.assertTrue(result.dispatch_started)
+        self.assertFalse(result.dispatch_uncertain)
+
+    def test_truncated_openai_response_is_confirmed_dispatch(self) -> None:
+        with (
+            patch.dict("service.adapters.llm_adapter.os.environ", {"OPENAI_API_KEY": "test-key"}, clear=True),
+            patch("service.adapters.llm_adapter.urllib.request.urlopen", return_value=_TruncatedResponse()),
+        ):
+            result = LlmAdapter().complete(model="gpt-5.4-mini", user="review")
+
+        self.assertFalse(result.success)
+        self.assertTrue(result.dispatch_started)
+        self.assertFalse(result.dispatch_uncertain)
+
+    def test_truncated_anthropic_response_is_confirmed_dispatch(self) -> None:
+        with (
+            patch.dict("service.adapters.llm_adapter.os.environ", {"ANTHROPIC_API_KEY": "test-key"}, clear=True),
+            patch("service.adapters.llm_adapter.urllib.request.urlopen", return_value=_TruncatedResponse()),
+        ):
+            result = LlmAdapter().complete(model="claude-sonnet-4-6", user="review")
 
         self.assertFalse(result.success)
         self.assertTrue(result.dispatch_started)

@@ -10,6 +10,7 @@ Consumed by:
 from __future__ import annotations
 
 import json
+from http.client import HTTPException
 import logging
 import os
 import re
@@ -103,7 +104,7 @@ def _transport_dispatch_is_uncertain(exc: BaseException) -> bool:
     reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
     if isinstance(reason, TimeoutError):
         return True
-    if isinstance(reason, (socket.gaierror, ConnectionRefusedError, ssl.SSLError)):
+    if isinstance(reason, (socket.gaierror, ConnectionRefusedError, ssl.SSLCertVerificationError)):
         return False
     return True
 
@@ -206,7 +207,7 @@ def _openai_completion(
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 try:
                     raw = resp.read()
-                except (OSError, TimeoutError) as exc:
+                except (HTTPException, OSError, TimeoutError) as exc:
                     raise LlmAdapterError(
                         "OpenAI response body unavailable", dispatch_started=True
                     ) from exc
@@ -292,7 +293,7 @@ def _anthropic_completion(
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 try:
                     raw = resp.read()
-                except (OSError, TimeoutError) as exc:
+                except (HTTPException, OSError, TimeoutError) as exc:
                     raise LlmAdapterError(
                         "Anthropic response body unavailable", dispatch_started=True
                     ) from exc
