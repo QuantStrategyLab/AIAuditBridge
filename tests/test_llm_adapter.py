@@ -98,6 +98,22 @@ class LlmAdapterFailureTests(unittest.TestCase):
         self.assertFalse(raised.exception.dispatch_started)
         self.assertTrue(raised.exception.dispatch_uncertain)
 
+    def test_success_after_ambiguous_retry_remains_uncertain(self) -> None:
+        attempts = iter((LlmAdapterError("network error", dispatch_uncertain=True), "output"))
+
+        def call() -> str:
+            value = next(attempts)
+            if isinstance(value, Exception):
+                raise value
+            return value
+
+        output, dispatch_uncertain = _retry_with_backoff(
+            call, max_retries=1, base_seconds=0
+        )
+
+        self.assertEqual(output, "output")
+        self.assertTrue(dispatch_uncertain)
+
     def test_malformed_provider_choices_is_confirmed_dispatch_failure(self) -> None:
         with (
             patch.dict("service.adapters.llm_adapter.os.environ", {"OPENAI_API_KEY": "test-key"}, clear=True),

@@ -99,7 +99,7 @@ def _retry_with_backoff(fn, *, max_retries: int = DEFAULT_MAX_RETRIES, base_seco
     uncertain = False
     for attempt in range(max_retries + 1):
         try:
-            return fn()
+            return fn(), uncertain
         except (LlmAdapterError, urllib.error.HTTPError, urllib.error.URLError, OSError) as exc:
             last_exc = exc
             attempt_dispatched = isinstance(exc, urllib.error.HTTPError) or bool(
@@ -116,7 +116,7 @@ def _retry_with_backoff(fn, *, max_retries: int = DEFAULT_MAX_RETRIES, base_seco
             if attempt_uncertain:
                 uncertain = True
             status = exc.code if isinstance(exc, urllib.error.HTTPError) else getattr(exc, "status_code", None)
-            if not _should_retry(status) or attempt >= max_retries:
+            if (not _should_retry(status) and not attempt_uncertain) or attempt >= max_retries:
                 raise LlmAdapterError(
                     str(exc), dispatch_started=dispatched and not uncertain, dispatch_uncertain=uncertain
                 ) from exc
@@ -156,7 +156,7 @@ def _openai_completion(
     *,
     max_tokens: int = DEFAULT_MAX_TOKENS,
     timeout: float = DEFAULT_TIMEOUT,
-) -> str:
+) -> tuple[str, bool]:
     api_key = _env("OPENAI_API_KEY")
     if not api_key:
         raise LlmAdapterError("OPENAI_API_KEY is not configured on the service host")
@@ -235,7 +235,7 @@ def _anthropic_completion(
     *,
     max_tokens: int = DEFAULT_MAX_TOKENS,
     timeout: float = DEFAULT_TIMEOUT,
-) -> str:
+) -> tuple[str, bool]:
     api_key = _env("ANTHROPIC_API_KEY")
     if not api_key:
         raise LlmAdapterError("ANTHROPIC_API_KEY is not configured on the service host")
@@ -332,15 +332,20 @@ class LlmAdapter:
         started = time.time()
         try:
             if provider == PROVIDER_ANTHROPIC:
-                output = _anthropic_completion(resolved_model, system, user, max_tokens=max_tokens, timeout=timeout)
+                output, dispatch_uncertain = _anthropic_completion(
+                    resolved_model, system, user, max_tokens=max_tokens, timeout=timeout
+                )
             else:
-                output = _openai_completion(resolved_model, system, user, max_tokens=max_tokens, timeout=timeout)
+                output, dispatch_uncertain = _openai_completion(
+                    resolved_model, system, user, max_tokens=max_tokens, timeout=timeout
+                )
             return LlmResult(
                 provider=provider,
                 model=resolved_model,
                 output=output,
                 latency_seconds=time.time() - started,
-                dispatch_started=True,
+                dispatch_started=not dispatch_uncertain,
+                dispatch_uncertain=dispatch_uncertain,
             )
         except LlmAdapterError as exc:
             return LlmResult(
