@@ -383,8 +383,8 @@ This PR is large or crosses adapter/gateway/runtime boundaries. Before proposing
 ## Review Scope: Remediation
 
 Review only the unresolved findings below, the remediation delta, and the minimal
-affected context needed to validate their contracts. Do not restart a full PR
-review or introduce unrelated findings.
+affected context needed to validate their contracts. Do not reopen untouched
+parts of the PR, but report any new blocking issue found in the remediation delta.
 
 ## Unresolved Findings
 {json.dumps(unresolved_findings or [], ensure_ascii=False, indent=2)}
@@ -1114,6 +1114,7 @@ def build_clearance_marker(
     findings: list[dict[str, Any]],
     arbiter_identity: str,
     evidence: str,
+    workflow_run_id: int,
     issued_at: int | None = None,
     expires_at: int | None = None,
 ) -> str:
@@ -1143,6 +1144,7 @@ def build_clearance_marker(
         "fingerprints": fingerprints,
         "evidence_digest": hashlib.sha256(_sanitize_history_text(evidence, 1000).encode("utf-8")).hexdigest()[:24],
         "arbiter_identity": _sanitize_history_text(arbiter_identity, 120),
+        "workflow_run_id": int(workflow_run_id),
         "issued_at": timestamp,
         "expires_at": expiry,
     }
@@ -1178,6 +1180,7 @@ def parse_clearance_marker(body: str) -> tuple[dict[str, Any] | None, bool]:
         "fingerprints": list,
         "evidence_digest": str,
         "arbiter_identity": str,
+        "workflow_run_id": int,
         "issued_at": int,
         "expires_at": int,
     }
@@ -1236,6 +1239,31 @@ def clearance_matches(
     if current_fingerprints and not current_fingerprints.issubset(set(clearance.get("fingerprints") or [])):
         return False
     return True
+
+
+def clearance_workflow_run_is_trusted(
+    token: str, repo: str, clearance: dict[str, Any]
+) -> bool:
+    """Verify that a clearance was emitted by a successful review workflow run."""
+    run_id = int(clearance.get("workflow_run_id") or 0)
+    if run_id <= 0:
+        return False
+    try:
+        run = github_request(token, "GET", f"/repos/{repo}/actions/runs/{run_id}")
+    except ReviewError:
+        return False
+    if not isinstance(run, dict):
+        return False
+    workflow_path = str(run.get("path") or "")
+    run_repo = run.get("repository") if isinstance(run.get("repository"), dict) else {}
+    return bool(
+        run.get("event") == "pull_request_target"
+        and run.get("conclusion") == "success"
+        and str(run.get("head_sha") or "").strip().lower()
+        == str(clearance.get("head_sha") or "").strip().lower()
+        and str(run_repo.get("full_name") or "") == repo
+        and workflow_path.startswith(".github/workflows/codex_pr_review.yml@")
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1594,28 +1622,40 @@ def conflicting_contract_findings(
         for finding in current_findings
         if isinstance(finding, dict)
     }
-    conflicts: list[dict[str, Any]] = []
+    latest_by_contract: dict[str, dict[str, Any]] = {}
+    resolved_contracts: set[str] = set()
     for round_state in reversed(history):
         prior = round_state.get("findings")
         if not isinstance(prior, list):
+            continue
+        status = round_state.get("status", "blocking")
+        if status in {"clear", "cleared"}:
+            if not prior:
+                break
+            resolved_contracts.update(
+                str(finding.get("contract_key") or _contract_key(finding))
+                for finding in prior
+                if isinstance(finding, dict)
+            )
             continue
         for finding in prior:
             if not isinstance(finding, dict):
                 continue
             contract_key = str(finding.get("contract_key") or _contract_key(finding))
-            current = current_by_contract.get(contract_key)
-            if not current:
-                continue
-            current_fingerprint = str(current.get("fingerprint_v2") or _fingerprint_v2(current))
-            prior_fingerprint = str(finding.get("fingerprint_v2") or _fingerprint_v2(finding))
-            if current_fingerprint != prior_fingerprint:
-                conflicts.append(
-                    {
-                        **finding,
-                        "current_fingerprint_v2": current_fingerprint,
-                        "history_head_sha": str(round_state.get("head_sha") or ""),
-                    }
-                )
+            if contract_key not in resolved_contracts and contract_key not in latest_by_contract:
+                latest_by_contract[contract_key] = {
+                    **finding,
+                    "history_head_sha": str(round_state.get("head_sha") or ""),
+                }
+    conflicts: list[dict[str, Any]] = []
+    for contract_key, prior in latest_by_contract.items():
+        current = current_by_contract.get(contract_key)
+        if not current:
+            continue
+        current_fingerprint = str(current.get("fingerprint_v2") or _fingerprint_v2(current))
+        prior_fingerprint = str(prior.get("fingerprint_v2") or _fingerprint_v2(prior))
+        if current_fingerprint != prior_fingerprint:
+            conflicts.append({**prior, "current_fingerprint_v2": current_fingerprint})
     return conflicts
 
 
@@ -2429,7 +2469,7 @@ def main() -> int:
             head_sha=current_head_sha,
             diff_digest=diff_digest,
             findings=decision["blocking_findings"],
-        ):
+        ) and clearance_workflow_run_is_trusted(token, repo, clearance_marker):
             decision.update(
                 {
                     "blocked": False,
@@ -2631,6 +2671,7 @@ def main() -> int:
             or previous_findings,
             arbiter_identity=env_value("GITHUB_ACTOR", "github-actions[bot]"),
             evidence=str(arbitration.get("reason") or decision.get("summary") or ""),
+            workflow_run_id=int(env_value("GITHUB_RUN_ID", "0") or 0),
         )
     arbitration_cleared = bool(arbitration and arbitration.get("verdict") == "clear")
     if (

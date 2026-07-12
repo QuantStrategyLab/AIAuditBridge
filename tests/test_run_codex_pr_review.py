@@ -68,7 +68,8 @@ class RunCodexPrReviewTests(unittest.TestCase):
             unresolved_findings=[{"file": "service/review.py", "contract_key": "abc"}],
         )
         self.assertIn("Review Scope: Remediation", prompt)
-        self.assertIn("Do not restart a full PR\nreview", prompt)
+        self.assertIn("Do not reopen untouched\nparts of the PR", prompt)
+        self.assertIn("new blocking issue found in the remediation delta", prompt)
         self.assertIn('"contract_key": "abc"', prompt)
 
     def test_review_script_never_imports_from_the_pr_checkout(self) -> None:
@@ -181,6 +182,16 @@ class RunCodexPrReviewTests(unittest.TestCase):
             [],
         )
         self.assertEqual(len(run_codex_pr_review.conflicting_contract_findings(history, [opposite])), 1)
+        cleared_history, valid = run_codex_pr_review.parse_finding_history(
+            run_codex_pr_review.build_finding_history_marker(
+                history, [same], "feedface", status="cleared"
+            )
+        )
+        self.assertTrue(valid)
+        self.assertEqual(
+            run_codex_pr_review.conflicting_contract_findings(cleared_history, [opposite]),
+            [],
+        )
 
     def test_parse_arbitration_output_requires_supported_verdict(self) -> None:
         self.assertEqual(
@@ -285,6 +296,7 @@ class RunCodexPrReviewTests(unittest.TestCase):
             findings=findings,
             arbiter_identity="github-actions[bot]",
             evidence="public interface and regression tests prove the false positive",
+            workflow_run_id=123,
             issued_at=1,
             expires_at=2_000_000_000,
         )
@@ -312,6 +324,28 @@ class RunCodexPrReviewTests(unittest.TestCase):
                 findings=findings,
             )
         )
+        trusted_run = {
+            "event": "pull_request_target",
+            "conclusion": "success",
+            "head_sha": "abc1234",
+            "path": ".github/workflows/codex_pr_review.yml@base-sha",
+            "repository": {"full_name": "org/repo"},
+        }
+        with patch("scripts.run_codex_pr_review.github_request", return_value=trusted_run):
+            self.assertTrue(
+                run_codex_pr_review.clearance_workflow_run_is_trusted(
+                    "token", "org/repo", parsed or {}
+                )
+            )
+        with patch(
+            "scripts.run_codex_pr_review.github_request",
+            return_value={**trusted_run, "event": "workflow_dispatch"},
+        ):
+            self.assertFalse(
+                run_codex_pr_review.clearance_workflow_run_is_trusted(
+                    "token", "org/repo", parsed or {}
+                )
+            )
         self.assertFalse(
             run_codex_pr_review.clearance_matches(
                 parsed or {},
@@ -1347,6 +1381,7 @@ class RunCodexPrReviewTests(unittest.TestCase):
                 findings=findings,
                 arbiter_identity="github-actions[bot]",
                 evidence="source-of-truth tests prove the false positive",
+                workflow_run_id=123,
                 issued_at=1,
                 expires_at=2_000_000_000,
             )
@@ -1386,6 +1421,10 @@ class RunCodexPrReviewTests(unittest.TestCase):
                         "scripts.run_codex_pr_review.run_codex_review_with_fallback",
                         return_value=json.dumps({"summary": "block", "findings": findings}),
                     ) as backend,
+                    patch(
+                        "scripts.run_codex_pr_review.clearance_workflow_run_is_trusted",
+                        return_value=True,
+                    ),
                     patch("scripts.run_codex_pr_review.upsert_pr_comment") as comment,
                 ):
                     self.assertEqual(run_codex_pr_review.main(), 0)

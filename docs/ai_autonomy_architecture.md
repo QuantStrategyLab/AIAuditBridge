@@ -211,7 +211,7 @@ trusted review comment 只保存最近固定轮数、固定字节上限且脱敏
 
 初次 review 审阅累计 diff；remediation 只审阅受信任上一 head 到当前 head 的 delta、未解决 contract 与必要影响上下文。达到上限时仅允许一次累计 diff sanity，再交给独立仲裁；同一 head 不会反复重新开启 remediation。`tests/fixtures/codex_pr_review_replays.json` 保存了脱敏的 dispatch 三态与 scored-date/cached-runner replay 输入，用于防止同义措辞、同文件不同 contract 和错误 clearance 回归。
 
-当仲裁给出 `clear` 时，系统会写入受信任的 `clearance.v1`，绑定 repo、PR、head SHA、diff digest、contract_key、证据摘要和仲裁身份；同一 head 重新运行时可验证 clearance 并直接通过 required review check。若 head/diff 变化、clearance 过期、或被伪造，则继续 fail closed。
+当仲裁给出 `clear` 时，系统会写入受信任的 `clearance.v1`，绑定 repo、PR、head SHA、diff digest、contract_key、证据摘要、仲裁身份和成功的 `pull_request_target` review workflow run；同一 head 重新运行时可验证 clearance 并直接通过 required review check。若 head/diff 变化、clearance 过期、workflow run 不匹配或被伪造，则继续 fail closed。
 
 对大 PR，review prompt 会先要求纵向切片：超过 1500 行、12 个文件，或跨 adapter/gateway/runtime 边界时，不允许用删 tests/docs 的方式“缩小”变更面，而是先拆成更小的 contract PR。
 
