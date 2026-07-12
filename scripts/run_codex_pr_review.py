@@ -69,6 +69,8 @@ FINDING_HISTORY_MARKER_SUFFIX = " -->"
 CONTRACT_CONFLICT_MARKER_PREFIX = "<!-- codex-pr-review-contract-conflict:"
 AUTO_FIX_ALLOWED_MARKER_PREFIX = "<!-- codex-pr-review-auto-fix-allowed:"
 NEXT_ACTION_MARKER_PREFIX = "<!-- codex-pr-review-next-action:"
+IMPLEMENTATION_MARKER_PREFIX = "<!-- codex-pr-review-implementation:v1:"
+IMPLEMENTATION_MARKER_SUFFIX = " -->"
 DECISION_MARKER_SUFFIX = " -->"
 FINDING_HISTORY_MAX_ROUNDS = 4
 FINDING_HISTORY_MAX_BYTES = 8192
@@ -364,6 +366,14 @@ ${DIFF}
         BODY=f"### PR Description\n\n{pr_body}" if pr_body.strip() else "",
         DIFF=diff_limited,
     )
+
+
+def review_implementation_digest() -> str:
+    """Return the identity of the trusted bridge implementation that reviews a PR."""
+    digest = hashlib.sha256()
+    for path in (Path(__file__), PROMPT_TEMPLATE_PATH):
+        digest.update(path.read_bytes())
+    return digest.hexdigest()[:24]
 
 
 def _truncate_lines(text: str, max_lines: int) -> str:
@@ -1291,6 +1301,7 @@ def build_pr_comment(
         f"{CONTRACT_CONFLICT_MARKER_PREFIX}{str(bool(decision.get('contract_conflict'))).lower()}{DECISION_MARKER_SUFFIX}",
         f"{AUTO_FIX_ALLOWED_MARKER_PREFIX}{str(bool(decision.get('auto_fix_allowed', True))).lower()}{DECISION_MARKER_SUFFIX}",
         f"{NEXT_ACTION_MARKER_PREFIX}{decision.get('next_action', 'none')}{DECISION_MARKER_SUFFIX}",
+        f"{IMPLEMENTATION_MARKER_PREFIX}{review_implementation_digest()}{IMPLEMENTATION_MARKER_SUFFIX}",
         "## 🤖 Codex PR Review",
         "",
         decision["summary"],
@@ -1396,7 +1407,7 @@ def find_existing_review_comment(
 
 
 def _is_trusted_review_comment(comment: Any) -> bool:
-    """Accept review state only from the GitHub Actions identity that writes it."""
+    """Accept state only from a complete trusted GitHub comment record."""
     if not isinstance(comment, dict):
         return False
     user = comment.get("user")
@@ -1404,7 +1415,45 @@ def _is_trusted_review_comment(comment: Any) -> bool:
         return False
     expected_login = env_value("CODEX_PR_REVIEW_COMMENT_AUTHOR", "github-actions[bot]").strip().casefold()
     actual_login = str(user.get("login") or "").strip().casefold()
-    return bool(expected_login and actual_login == expected_login)
+    if not expected_login or actual_login != expected_login:
+        return False
+    if str(user.get("type") or "").strip().casefold() != "bot":
+        return False
+    if not isinstance(comment.get("id"), int) or comment["id"] <= 0:
+        return False
+    if not isinstance(comment.get("created_at"), str) or not comment["created_at"].strip():
+        return False
+    app = comment.get("performed_via_github_app")
+    if app is not None and (
+        not isinstance(app, dict)
+        or str(app.get("slug") or "").strip().casefold() != "github-actions"
+    ):
+        return False
+    return True
+
+
+def trusted_review_comment_provenance(comment: Any) -> str:
+    """Derive provenance from API record fields, never from comment markdown."""
+    if not _is_trusted_review_comment(comment):
+        return ""
+    user = comment["user"]
+    record = {
+        "comment_id": comment["id"],
+        "author_id": user.get("id"),
+        "author_login": str(user.get("login") or "").casefold(),
+        "created_at": comment["created_at"],
+        "updated_at": comment.get("updated_at"),
+    }
+    raw = json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:24]
+
+
+def parse_review_implementation_digest(body: str) -> str:
+    match = re.search(
+        rf"{re.escape(IMPLEMENTATION_MARKER_PREFIX)}([0-9a-f]{{24}}){re.escape(IMPLEMENTATION_MARKER_SUFFIX)}",
+        body or "",
+    )
+    return match.group(1) if match else ""
 
 
 def parse_blocking_streak(body: str) -> int:
