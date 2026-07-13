@@ -92,3 +92,11 @@ class R1bIdentityTests(unittest.TestCase):
             value = self.payload()
             value["predicates"] = [[self.tok("secret_ref", {"type": marker, "role": "auth", "position": 0})]]
             self.invalid(value)
+    def test_scope_rejects_secret_markers_but_allows_ordinary_names(self):
+        for repo, path in (("owner/ghs_1234567890abcdef", "service/review.py"), ("owner/ASIAABCDEFGHIJKLMNOP", "service/review.py"), ("owner/audit-bridge", "service/ghs_1234567890abcdef.py")):
+            value = self.payload()
+            value["scope"]["repo"], value["scope"]["file"] = repo, path
+            self.invalid(value)
+        value = self.payload()
+        value["scope"]["repo"], value["scope"]["file"] = "owner/Eurasia", "service/keyJson.py"
+        validate_identity(value)

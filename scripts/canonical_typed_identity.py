@@ -60,13 +60,19 @@ def _text(value: Any, limit: int = 512) -> str:
     if any(unicodedata.category(char).startswith("C") for char in value) or normalized_size > limit:
         raise IdentityError("invalid text")
     return value
+def _secret_marker(value: str) -> bool:
+    return any(pattern.search(value) for pattern in SECRET_PATTERNS)
 def _scope(value: Any) -> dict[str, str]:
     scope = _obj(value, {"repo", "file", "category"})
     repo = _text(scope["repo"], 140)
+    if _secret_marker(repo):
+        raise IdentityError("reserved secret marker")
     parts = repo.split("/")
     if len(parts) != 2 or not OWNER.fullmatch(parts[0]) or "--" in parts[0] or not REPO.fullmatch(parts[1]) or parts[1] in {".", ".."}:
         raise IdentityError("invalid repo")
     path = _text(scope["file"], 1024)
+    if _secret_marker(path):
+        raise IdentityError("reserved secret marker")
     if path.startswith("/") or "\\" in path or any(part in {"", ".", ".."} for part in path.split("/")):
         raise IdentityError("invalid path")
     category = _text(scope["category"], 32)
@@ -81,13 +87,13 @@ def _token(value: Any) -> dict[str, Any]:
     if kind == "secret_ref":
         ref = _obj(token["value"], {"type", "role", "position"})
         typ, role, position = _text(ref["type"], 32), _text(ref["role"], 32), ref["position"]
-        if any(pattern.search(candidate) for pattern in SECRET_PATTERNS for candidate in (typ, role)):
+        if any(_secret_marker(candidate) for candidate in (typ, role)):
             raise IdentityError("reserved secret marker")
         if not re.fullmatch(r"[a-z][a-z0-9_.-]{0,31}", typ) or not re.fullmatch(r"[a-z][a-z0-9_.-]{0,31}", role) or isinstance(position, bool) or not isinstance(position, int) or not 0 <= position <= 1024:
             raise IdentityError("invalid secret reference")
         return {"kind": kind, "value": {"type": typ, "role": role, "position": position}}
     item = _text(token["value"])
-    if any(pattern.search(item) for pattern in SECRET_PATTERNS):
+    if _secret_marker(item):
         raise IdentityError("reserved secret marker")
     if kind == "operator" and item not in OPS or kind == "policy_state" and item not in POLICY or kind == "identifier" and not IDENTIFIER.fullmatch(item):
         raise IdentityError("invalid typed token")
