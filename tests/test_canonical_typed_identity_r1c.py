@@ -33,6 +33,10 @@ class R1cIdentityTests(unittest.TestCase):
             bad = self.payload()
             bad["predicates"] = [[self.tok("secret_ref", ref)]]
             self.invalid(bad)
+        for typ, role in (([], "auth"), ({"name": "credential"}, "auth"), ("credential", []), ("credential", {"name": "auth"}), (1, "auth"), ("credential", 1)):
+            bad = self.payload()
+            bad["predicates"] = [[self.tok("secret_ref", {"type": typ, "role": role, "position": 0})]]
+            self.invalid(bad)
     def test_wire_is_canonical_and_digests_are_exact(self):
         identity = validate_identity(self.payload())
         record = identity.as_record()

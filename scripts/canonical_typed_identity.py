@@ -77,6 +77,9 @@ def _token(value: Any) -> dict[str, Any]:
     if kind == "secret_ref":
         ref = _obj(token["value"], {"type", "role", "position"})
         typ, role, position = ref["type"], ref["role"], ref["position"]
+        if not isinstance(typ, str) or not isinstance(role, str):
+            raise IdentityError("invalid secret reference")
+        typ, role = _text(typ, 32), _text(role, 32)
         if typ not in SECRET_TYPES or role not in SECRET_ROLES or isinstance(position, bool) or not isinstance(position, int) or not 0 <= position <= 1024:
             raise IdentityError("invalid secret reference")
         return {"kind": kind, "value": {"type": typ, "role": role, "position": position}}
