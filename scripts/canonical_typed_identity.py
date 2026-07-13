@@ -44,10 +44,20 @@ def _obj(value: Any, required: set[str], optional: set[str] = set()) -> dict[str
         raise IdentityError("invalid object fields")
     return value
 def _text(value: Any, limit: int = 512) -> str:
-    if not isinstance(value, str) or len(value) > limit or len(value.encode()) > limit:
+    if not isinstance(value, str) or len(value) > limit:
+        raise IdentityError("invalid bounded text")
+    try:
+        raw_size = len(value.encode())
+    except UnicodeEncodeError as exc:
+        raise IdentityError("invalid unicode text") from exc
+    if raw_size > limit:
         raise IdentityError("invalid bounded text")
     value = unicodedata.normalize("NFC", value)
-    if any(unicodedata.category(char).startswith("C") for char in value) or len(value.encode()) > limit:
+    try:
+        normalized_size = len(value.encode())
+    except UnicodeEncodeError as exc:
+        raise IdentityError("invalid unicode text") from exc
+    if any(unicodedata.category(char).startswith("C") for char in value) or normalized_size > limit:
         raise IdentityError("invalid text")
     return value
 def _scope(value: Any) -> dict[str, str]:
@@ -71,6 +81,8 @@ def _token(value: Any) -> dict[str, Any]:
     if kind == "secret_ref":
         ref = _obj(token["value"], {"type", "role", "position"})
         typ, role, position = _text(ref["type"], 32), _text(ref["role"], 32), ref["position"]
+        if any(pattern.search(candidate) for pattern in SECRET_PATTERNS for candidate in (typ, role)):
+            raise IdentityError("reserved secret marker")
         if not re.fullmatch(r"[a-z][a-z0-9_.-]{0,31}", typ) or not re.fullmatch(r"[a-z][a-z0-9_.-]{0,31}", role) or isinstance(position, bool) or not isinstance(position, int) or not 0 <= position <= 1024:
             raise IdentityError("invalid secret reference")
         return {"kind": kind, "value": {"type": typ, "role": role, "position": position}}
@@ -123,6 +135,8 @@ def verify_identity_record(record: Any) -> CanonicalIdentity:
     identity = validate_identity({name: record[name] for name in fields - {"contract_key", "behavior_digest", "fingerprint_v2"}})
     if (identity.contract_key, identity.behavior_digest, identity.fingerprint_v2) != tuple(record[name] for name in ("contract_key", "behavior_digest", "fingerprint_v2")):
         raise IdentityError("digest mismatch")
+    if identity.as_record() != record:
+        raise IdentityError("noncanonical record")
     return identity
 def canonical_json(identity: CanonicalIdentity) -> str:
     if not isinstance(identity, CanonicalIdentity):

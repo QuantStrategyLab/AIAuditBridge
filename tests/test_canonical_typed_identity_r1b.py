@@ -78,3 +78,17 @@ class R1bIdentityTests(unittest.TestCase):
         record["contract_key"] = "0" * 64
         with self.assertRaises(IdentityError):
             verify_identity_record(record)
+    def test_surrogates_fail_closed_as_identity_error(self):
+        value = self.payload()
+        value["scope"]["file"] = "bad\ud800.py"
+        self.invalid(value)
+    def test_verified_record_must_be_canonical_wire_form(self):
+        record = validate_identity(self.payload()).as_record()
+        record["scope"]["repo"] = "AcMe/Audit-Bridge"
+        with self.assertRaises(IdentityError):
+            verify_identity_record(record)
+    def test_secret_ref_metadata_rejects_reserved_markers(self):
+        for marker in ("ghs_1234567890abcdef", "ASIAABCDEFGHIJKLMNOP", "api.sk-proj-1234567890abcdef"):
+            value = self.payload()
+            value["predicates"] = [[self.tok("secret_ref", {"type": marker, "role": "auth", "position": 0})]]
+            self.invalid(value)
