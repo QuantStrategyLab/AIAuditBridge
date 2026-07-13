@@ -17,10 +17,10 @@ REPO = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
 IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*(?:\(\))?$")
 DIGEST = re.compile(r"^[0-9a-f]{64}$")
 SECRET_PATTERNS = (
-    re.compile(r"(?<![A-Za-z0-9_])(?:github_pat_|gh[pours]_)[A-Za-z0-9_]{8,}", re.I),
-    re.compile(r"(?<![A-Za-z0-9_])(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Za-z0-9_])"),
-    re.compile(r"(?<![A-Za-z0-9_])eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+(?![A-Za-z0-9_])"),
-    re.compile(r"(?<![A-Za-z0-9_])sk-[A-Za-z0-9_-]{16,}(?![A-Za-z0-9_])"),
+    re.compile(r"(?<![A-Za-z0-9])(?:github_pat_|gh[pours]_)[A-Za-z0-9_]{8,}", re.I),
+    re.compile(r"(?<![A-Za-z0-9])(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Za-z0-9])"),
+    re.compile(r"(?<![A-Za-z0-9])eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+(?![A-Za-z0-9])"),
+    re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{16,}(?![A-Za-z0-9])"),
 )
 MAX_ITEMS = 32
 MAX_BYTES = 64 * 1024
