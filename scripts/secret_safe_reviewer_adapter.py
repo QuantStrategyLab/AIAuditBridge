@@ -13,15 +13,14 @@ R1_FIELDS = {"schema", "canonicalizer_version", "scope", "anchors", "predicates"
 ROOT_FIELDS = {"schema", "summary", "findings"}
 FINDING_FIELDS = {"severity", "category", "file", "line", "description", "suggestion", "structured_tokens"}
 SHAPES = (
-    ("credential", re.compile(r"ghs_[A-Za-z0-9]{36}")),
+    ("credential", re.compile(r"gh[pousr]_[A-Za-z0-9_]{20,}")),
     ("credential", re.compile(r"github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}")),
     ("api_key", re.compile(r"AKIA[A-Z0-9]{16}")),
     ("api_key", re.compile(r"ASIA[A-Z0-9]{16}")),
     ("authorization", re.compile(r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}")),
     ("api_key", re.compile(r"sk-[A-Za-z0-9_-]{20,}")),
 )
-BOUNDARY = r"(?<![A-Za-z0-9_-])(?:%s)(?![A-Za-z0-9_-])"
-PROSE_SHAPES = tuple(re.compile(BOUNDARY % pattern.pattern) for _, pattern in SHAPES)
+PROSE_SHAPES = tuple(pattern for _, pattern in SHAPES)
 MARKER = re.compile(r"(?<![A-Za-z0-9_-])(?:ghs_|github_pat_|AKIA|ASIA|eyJ|sk-)[A-Za-z0-9_.-]*(?![A-Za-z0-9_-])")
 _MISSING = object()
 class AdapterError(ValueError):

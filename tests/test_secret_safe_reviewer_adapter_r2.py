@@ -35,7 +35,7 @@ def review(*findings, schema="reviewer_output.v2", summary="Review complete.", *
 def credential(prefix):
     if prefix == "github_pat_":
         return prefix + "A" * 22 + "_" + "B" * 59
-    sizes = {"ghs_": 36, "AKIA": 16, "ASIA": 16, "sk-": 24}
+    sizes = {"ghs_": 36, "ghp_": 24, "gho_": 24, "ghu_": 24, "ghr_": 24, "AKIA": 16, "ASIA": 16, "sk-": 24}
     return prefix + "A" * sizes[prefix] if prefix in sizes else "eyJ" + "A" * 8 + "." + "B" * 8 + "." + "C" * 8
 class SecretSafeReviewerAdapterR2Tests(unittest.TestCase):
     def test_trusted_mapping_redacts_display_and_strips_material(self):
@@ -49,12 +49,11 @@ class SecretSafeReviewerAdapterR2Tests(unittest.TestCase):
         self.assertNotIn("structured_tokens", result["display"]["findings"][0])
         self.assertTrue(material not in json.dumps(result, ensure_ascii=False), "credential material leaked")
     def test_all_shape_classes_map_to_declared_types(self):
-        cases = [("ghs_", "credential"), ("github_pat_", "credential"), ("AKIA", "api_key"),
-                 ("ASIA", "api_key"), ("jwt", "authorization"), ("sk-", "api_key")]
+        cases = [("ghs_", "credential"), ("github_pat_", "credential"), ("ghp_", "credential"), ("gho_", "credential"), ("ghu_", "credential"), ("ghr_", "credential"), ("AKIA", "api_key"), ("ASIA", "api_key"), ("jwt", "authorization"), ("sk-", "api_key")]
         for prefix, kind in cases:
             with self.subTest(prefix=prefix):
                 material = credential(prefix)
-                result = adapt_reviewer_output(review(finding(payload(secret_token=secret(material, kind)))))
+                result = adapt_reviewer_output(review(finding(payload(secret_token=secret(material, kind)), description=f"prefix{material}suffix")))
                 self.assertEqual(result["status"], "trusted")
                 self.assertTrue(material not in json.dumps(result), "credential material leaked")
     def test_near_miss_identifiers_remain_identifiers(self):
@@ -64,7 +63,7 @@ class SecretSafeReviewerAdapterR2Tests(unittest.TestCase):
                 self.assertEqual(result["status"], "trusted")
     def test_legacy_is_unverified_and_prose_is_redacted(self):
         material = credential("sk-")
-        result = adapt_reviewer_output(review(finding(tokens={}, description=f"Do not print {material}."), schema=None, summary=f"Found {material}."))
+        result = adapt_reviewer_output(review(finding(tokens={}, description=f"Do not print prefix{material}suffix."), schema=None, summary=f"Found prefix{material}suffix."))
         self.assertEqual(result["status"], "legacy_unverified")
         self.assertEqual(result["structured_records"], [])
         rendered = json.dumps(result, ensure_ascii=False)
@@ -87,10 +86,10 @@ class SecretSafeReviewerAdapterR2Tests(unittest.TestCase):
     def test_identity_screening_and_ambiguous_prose(self):
         material = credential("AKIA")
         bad = review(finding(payload(anchor="subject")))
-        bad["findings"][0]["structured_tokens"]["scope"]["file"] = f"src/{material}.py"
+        bad["findings"][0]["structured_tokens"]["scope"]["file"] = f"src/prefix{material}suffix.py"
         with self.assertRaises(AdapterError) as ctx:
             adapt_reviewer_output(bad)
-        self.assertEqual(ctx.exception.code, "credential_material_in_identity")
+        self.assertTrue(ctx.exception.code == "credential_material_in_identity" and material not in str(ctx.exception), "credential leaked in identity error")
         with self.assertRaises(AdapterError) as ctx:
             adapt_reviewer_output(review(finding(description="Observed ghs_invalid_marker in output.")))
         self.assertEqual(ctx.exception.code, "ambiguous_credential_material")
@@ -101,7 +100,7 @@ class SecretSafeReviewerAdapterR2Tests(unittest.TestCase):
         self.assertEqual(ctx.exception.code, "duplicate_json_key")
         material = credential("ghs_")
         with self.assertRaises(AdapterError) as ctx:
-            adapt_reviewer_output(review(finding(), **{f"unexpected_{material}": True}))
+            adapt_reviewer_output(review(finding(), **{f"unexpectedprefix{material}suffix": True}))
         self.assertTrue(ctx.exception.code == "unknown_field" and material not in str(ctx.exception), "unsafe unknown-field error")
         data = review(finding(payload()))
         with patch.object(r1, "build_identity_record", return_value={"canonical": "record"}) as build:
