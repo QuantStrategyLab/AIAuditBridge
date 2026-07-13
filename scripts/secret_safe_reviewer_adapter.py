@@ -31,9 +31,7 @@ class AdapterError(ValueError):
     def __str__(self) -> str:
         return f"{self.code} at {self.path}"
 class AdapterResult(dict[str, Any]):
-    @property
-    def status(self) -> str:
-        return self["status"]
+    pass
 def _fail(code: str, path: str = "/") -> None:
     raise AdapterError(code, path)
 def _pointer(path: str, key: Any) -> str:
@@ -111,7 +109,7 @@ def _object(value: Any, fields: set[str], path: str, code: str = "wrong_type") -
         _fail(code, path)
     extra = set(value) - fields
     if extra:
-        _fail("unknown_field", _pointer(path, sorted(extra)[0]))
+        _fail("unknown_field", _pointer(path, "<unknown>"))
     if set(value) != fields:
         _fail(code, path)
     return value
@@ -122,8 +120,6 @@ def _bounded(value: Any, path: str, chars: int, bytes_limit: int, code: str) -> 
     if len(value) > chars or len(encoded) > bytes_limit:
         _fail("size_limit_exceeded", path)
     return value
-def _shape(value: str) -> str | None:
-    return next((kind for kind, pattern in SHAPES if pattern.fullmatch(value)), None)
 def _display_text(value: Any, path: str, chars: int, byte_limit: int) -> str:
     text = _bounded(value, path, chars, byte_limit, "invalid_display_field")
     for pattern in PROSE_SHAPES:
@@ -156,7 +152,7 @@ def _map_secret(token: dict[str, Any], path: str) -> dict[str, Any]:
     material = value["material"]
     if type(material) is not str or material != material.strip():
         _fail("ambiguous_credential_material", _pointer(_pointer(path, "value"), "material"))
-    derived = _shape(material)
+    derived = next((kind for kind, pattern in SHAPES if pattern.fullmatch(material)), None)
     if derived is None:
         _fail("ambiguous_credential_material", _pointer(_pointer(path, "value"), "material"))
     if type(value["type"]) is not str or value["type"] != derived:
@@ -176,7 +172,7 @@ def _structured(value: Any, path: str) -> dict[str, Any]:
 def _display(root: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]], str | None]:
     extra = set(root) - ROOT_FIELDS
     if extra:
-        _fail("unknown_field", _pointer("/", sorted(extra)[0]))
+        _fail("unknown_field", _pointer("/", "<unknown>"))
     for required in ("summary", "findings"):
         if required not in root:
             _fail("wrong_type", _pointer("/", required))
@@ -198,7 +194,7 @@ def _display(root: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]
             _fail("wrong_type", path)
         extra = set(finding) - FINDING_FIELDS
         if extra:
-            _fail("unknown_field", _pointer(path, sorted(extra)[0]))
+            _fail("unknown_field", _pointer(path, "<unknown>"))
         required = {"severity", "category", "file", "line", "description", "suggestion"}
         if not required <= set(finding):
             _fail("wrong_type", path)
@@ -218,13 +214,13 @@ def _display(root: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]
 def adapt_reviewer_output(value: Any) -> AdapterResult:
     root = _load(value)
     display, payloads, schema = _display(root)
+    trusted = schema == "reviewer_output.v2" and all(payload is not _MISSING for payload in payloads)
     records = []
-    for index, payload in enumerate(payloads):
-        if payload is not _MISSING:
+    if trusted:
+        for index, payload in enumerate(payloads):
             if type(payload) is not dict:
                 _fail("invalid_structured_payload", f"/findings/{index}/structured_tokens")
             records.append({"finding_index": index, "record": _structured(payload, f"/findings/{index}/structured_tokens")})
-    trusted = schema == "reviewer_output.v2" and all(payload is not _MISSING for payload in payloads)
     if not trusted:
         records = []
     if len(_compact(records)) > MAX_RECORDS:

@@ -27,8 +27,8 @@ def finding(tokens=None, description="Review is safe."):
     if tokens is not None:
         item["structured_tokens"] = tokens
     return item
-def review(*findings, schema="reviewer_output.v2", summary="Review complete."):
-    result = {"summary": summary, "findings": list(findings)}
+def review(*findings, schema="reviewer_output.v2", summary="Review complete.", **extra):
+    result = {"summary": summary, "findings": list(findings), **extra}
     if schema is not None:
         result["schema"] = schema
     return result
@@ -64,7 +64,7 @@ class SecretSafeReviewerAdapterR2Tests(unittest.TestCase):
                 self.assertEqual(result["status"], "trusted")
     def test_legacy_is_unverified_and_prose_is_redacted(self):
         material = credential("sk-")
-        result = adapt_reviewer_output(review(finding(description=f"Do not print {material}."), schema=None, summary=f"Found {material}."))
+        result = adapt_reviewer_output(review(finding(tokens={}, description=f"Do not print {material}."), schema=None, summary=f"Found {material}."))
         self.assertEqual(result["status"], "legacy_unverified")
         self.assertEqual(result["structured_records"], [])
         rendered = json.dumps(result, ensure_ascii=False)
@@ -99,6 +99,10 @@ class SecretSafeReviewerAdapterR2Tests(unittest.TestCase):
         with self.assertRaises(AdapterError) as ctx:
             adapt_reviewer_output(raw)
         self.assertEqual(ctx.exception.code, "duplicate_json_key")
+        material = credential("ghs_")
+        with self.assertRaises(AdapterError) as ctx:
+            adapt_reviewer_output(review(finding(), **{f"unexpected_{material}": True}))
+        self.assertTrue(ctx.exception.code == "unknown_field" and material not in str(ctx.exception), "unsafe unknown-field error")
         data = review(finding(payload()))
         with patch.object(r1, "build_identity_record", return_value={"canonical": "record"}) as build:
             result = adapt_reviewer_output(data)
