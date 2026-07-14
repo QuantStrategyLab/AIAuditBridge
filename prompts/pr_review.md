@@ -18,6 +18,12 @@ You are reviewing a pull request for a **production quantitative trading and dat
 - Minor refactoring opportunities
 - Test coverage suggestions
 
+## Review completeness
+
+- Review the entire diff holistically and report all independent actionable findings in one response. Do not stop after the first blocking issue.
+- Do not invent backward-compatibility requirements that are absent from the repository and PR contract. If both explicitly define a clean-slate namespace, check for accidental legacy fallback instead of requesting dual-read or migration. This never overrides security or data-integrity findings.
+- For public JSON/wire contracts, systematically check optional-key presence versus explicit null, recursive JSON-safe types, every identity-bearing integer range, one canonical timestamp representation, deterministic encode/decode round-trips and digests, deep immutability, and identifier/path safety.
+
 ## Severity definitions
 
 | Severity | Definition | Example |
