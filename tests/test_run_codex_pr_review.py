@@ -36,6 +36,20 @@ class RunCodexPrReviewTests(unittest.TestCase):
         self.assertIn("`job_workflow_ref` is absent for explicit direct callers", prompt)
         self.assertIn("Do not emit a finding that concludes no code change is needed", prompt)
 
+    def test_review_prompt_requires_holistic_contract_review(self) -> None:
+        prompt = run_codex_pr_review.build_review_prompt(
+            "diff",
+            "clean-slate contract",
+            "Legacy compatibility is explicitly out of scope.",
+            "org/repo",
+        )
+        self.assertIn("report all independent actionable findings in one response", prompt)
+        self.assertIn("Do not stop after the first blocking issue", prompt)
+        self.assertIn("clean-slate", prompt)
+        self.assertIn("optional-key presence versus explicit null", prompt)
+        self.assertIn("every identity-bearing integer", prompt)
+        self.assertIn("one canonical timestamp representation", prompt)
+
     def test_review_script_never_imports_from_the_pr_checkout(self) -> None:
         source = Path(run_codex_pr_review.__file__).read_text(encoding="utf-8")
         self.assertNotIn("SOURCE_ROOT = BRIDGE_ROOT.parent / \"source\"", source)
