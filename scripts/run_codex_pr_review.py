@@ -325,10 +325,12 @@ ${BODY}
 1. Focus on **security vulnerabilities, logic errors, data corruption, crash bugs, race conditions, and API compatibility breaks**.
 2. Do NOT flag: code style, formatting, naming suggestions, minor refactoring preferences, or documentation issues.
 3. Do not emit a finding that concludes no code change is needed. For OIDC, `job_workflow_ref` is absent for explicit direct callers; flag a bypass only when a non-direct repository can reach the direct-caller path despite the allowlists.
-4. Review the entire diff holistically and report all independent actionable findings in one response. Do not stop after the first blocking issue.
-5. Do not invent backward-compatibility requirements that are absent from the repository and PR contract. When the repository and PR explicitly define a clean-slate namespace with legacy compatibility out of scope, review that boundary for accidental fallback instead of requesting dual-read or migration. This never overrides security or data-integrity findings.
-6. For public JSON/wire contracts, systematically check optional-key presence versus explicit null, recursive JSON-safe types, every identity-bearing integer range, one canonical timestamp representation, deterministic encode/decode round-trips and digests, deep immutability, and identifier/path safety.
-7. For each finding, classify its severity:
+4. Assign **critical** or **high** only when the supplied PR context proves all of the following: an exact changed path and line; a current caller or entry point proven by the supplied PR context, whether pre-existing or introduced by this PR, or an explicitly declared public untrusted boundary; reachability under the current configuration and inputs; and a concrete correctness, security, or data-integrity impact. State that reachability and impact in the finding description. If any element is missing, downgrade it to medium or low or omit it.
+5. Do not block on a hypothetical future consumer, forged internal object state, or generic defense-in-depth concern. Do not request a new parser, store, registry, or event-persistence layer unless the changed code already exposes that current boundary and the defect is reachable through it.
+6. Review the entire diff holistically and report all independent actionable findings in one response. Do not stop after the first blocking issue.
+7. Do not invent backward-compatibility requirements that are absent from the repository and PR contract. When the repository and PR explicitly define a clean-slate namespace with legacy compatibility out of scope, review that boundary for accidental fallback instead of requesting dual-read or migration. This never overrides security or data-integrity findings.
+8. Only for a public JSON/wire contract proven by rule 4, check optional-key presence versus explicit null, recursive JSON-safe types, every identity-bearing integer range, one canonical timestamp representation, deterministic round-trips and digests, immutability, and identifier/path safety.
+9. For each finding, classify its severity:
    - **critical**: security vulnerability, data loss, production crash
    - **high**: logic error that produces wrong results, API break, memory/connection leak
    - **medium**: missing error handling, performance degradation, race condition
