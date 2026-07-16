@@ -36,19 +36,52 @@ class RunCodexPrReviewTests(unittest.TestCase):
         self.assertIn("`job_workflow_ref` is absent for explicit direct callers", prompt)
         self.assertIn("Do not emit a finding that concludes no code change is needed", prompt)
 
-    def test_review_prompt_requires_holistic_contract_review(self) -> None:
+    def test_review_prompt_requires_reachable_current_diff_evidence(self) -> None:
         prompt = run_codex_pr_review.build_review_prompt(
             "diff",
             "clean-slate contract",
             "Legacy compatibility is explicitly out of scope.",
             "org/repo",
         )
-        self.assertIn("report all independent actionable findings in one response", prompt)
+        self.assertIn("report all independent reachable findings in one response", prompt)
         self.assertIn("Do not stop after the first blocking issue", prompt)
         self.assertIn("clean-slate", prompt)
-        self.assertIn("optional-key presence versus explicit null", prompt)
-        self.assertIn("every identity-bearing integer", prompt)
-        self.assertIn("one canonical timestamp representation", prompt)
+        self.assertIn("repository-backed caller or a declared public untrusted boundary", prompt)
+        self.assertIn("Do not invent a raw JSON/parser boundary", prompt)
+        self.assertIn('"evidence"', prompt)
+        self.assertNotIn("systematically check optional-key presence", prompt)
+
+    def test_findings_without_concrete_reachability_evidence_cannot_block(self) -> None:
+        policy = run_codex_pr_review.load_policy()
+        changed_files = [{"filename": "service/review.py", "status": "modified"}]
+        finding = {
+            "severity": "high",
+            "category": "logic",
+            "file": "service/review.py",
+            "line": 11,
+            "description": "A hypothetical caller could forge private state.",
+            "suggestion": "Add another public parser.",
+        }
+
+        unproven = run_codex_pr_review.evaluate_findings([finding], changed_files, policy)
+        proven = run_codex_pr_review.evaluate_findings(
+            [
+                {
+                    **finding,
+                    "evidence": (
+                        "service/handler.py calls review() with request.body from the public "
+                        "POST /review boundary."
+                    ),
+                }
+            ],
+            changed_files,
+            policy,
+        )
+
+        self.assertFalse(unproven["blocked"])
+        self.assertEqual(unproven["non_blocking_findings"][0]["blocking_evidence"], False)
+        self.assertTrue(proven["blocked"])
+        self.assertEqual(proven["blocking_findings"][0]["blocking_evidence"], True)
 
     def test_review_script_never_imports_from_the_pr_checkout(self) -> None:
         source = Path(run_codex_pr_review.__file__).read_text(encoding="utf-8")
@@ -124,6 +157,28 @@ class RunCodexPrReviewTests(unittest.TestCase):
         )
         self.assertTrue(run_codex_pr_review.should_arbitrate(blocked=True, streak=2, repeated=True, new_head=True))
         self.assertFalse(run_codex_pr_review.should_arbitrate(blocked=True, streak=2, repeated=True, new_head=False))
+
+    def test_fingerprint_distinguishes_different_reachability_evidence(self) -> None:
+        base = {
+            "severity": "high",
+            "category": "logic",
+            "file": "service/review.py",
+            "description": "Wrong result.",
+            "suggestion": "Fix it.",
+        }
+        first = [{**base, "evidence": "public submit() passes an empty account id"}]
+        reworded = [
+            {
+                **base,
+                "description": "The result is incorrect.",
+                "evidence": "public submit() passes an empty account id",
+            }
+        ]
+        different = [{**base, "evidence": "scheduler retry calls close() twice"}]
+
+        fingerprint = run_codex_pr_review.blocking_finding_fingerprint(first)
+        self.assertEqual(fingerprint, run_codex_pr_review.blocking_finding_fingerprint(reworded))
+        self.assertNotEqual(fingerprint, run_codex_pr_review.blocking_finding_fingerprint(different))
 
     def test_parse_arbitration_output_requires_supported_verdict(self) -> None:
         self.assertEqual(
@@ -223,6 +278,7 @@ class RunCodexPrReviewTests(unittest.TestCase):
                 "severity": "high",
                 "category": "contract",
                 "file": "service/review.py",
+                "evidence": "service/handler.py passes the public request body to review().",
                 "description": "Missing panel returns a structured result; token=secret-value",
                 "suggestion": "Return ReviewResult(blocked=True).",
             }
@@ -234,8 +290,31 @@ class RunCodexPrReviewTests(unittest.TestCase):
         self.assertTrue(valid)
         self.assertEqual(history[0]["head_sha"], "abc1234")
         self.assertEqual(history[0]["findings"][0]["file"], "service/review.py")
+        self.assertIn("handler.py", history[0]["findings"][0]["evidence"])
         self.assertIn("[REDACTED]", history[0]["findings"][0]["description"])
         self.assertNotIn("secret-value", marker)
+
+    def test_review_comment_exposes_blocking_evidence(self) -> None:
+        body = run_codex_pr_review.build_pr_comment(
+            {
+                "summary": "blocked",
+                "blocking_findings": [
+                    {
+                        "severity": "high",
+                        "category": "logic",
+                        "file": "service/review.py",
+                        "line": 7,
+                        "evidence": "public submit() calls review() with request.body",
+                        "description": "The supported request returns the wrong result.",
+                        "suggestion": "Use the validated value.",
+                    }
+                ],
+                "non_blocking_findings": [],
+            },
+            "https://example.test/pr/7",
+        )
+
+        self.assertIn("**Evidence:** public submit() calls review() with request.body", body)
 
     def test_finding_history_is_bounded_and_legacy_comments_remain_compatible(self) -> None:
         history: list[dict[str, object]] = []
@@ -1081,6 +1160,7 @@ class RunCodexPrReviewTests(unittest.TestCase):
                             "category": "security",
                             "file": "scripts/run_codex_pr_review.py",
                             "line": 1,
+                            "evidence": "main() executes the changed blocking decision path.",
                             "description": "example blocking finding",
                             "suggestion": "fix it",
                         }
@@ -1301,6 +1381,7 @@ class RunCodexPrReviewTests(unittest.TestCase):
                             "category": "security",
                             "file": "scripts/run_codex_pr_review.py",
                             "line": 1,
+                            "evidence": "main() executes the changed blocking decision path.",
                             "description": "example blocking finding",
                             "suggestion": "fix it",
                         }

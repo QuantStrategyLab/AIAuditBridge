@@ -205,7 +205,11 @@ AIAuditBridge 是 QuantStrategyLab 的 AI 审计控制面，负责：
 
 Contract Oscillation Guard 是 `AIAuditBridge` 的中央 PR review gate 语义，不是要求每个消费者仓库新增一套 branch rule。消费者仍使用原有 required check、branch protection 和 merge queue；guard 不提供 label、admin 或人工确认绕过。
 
-trusted review comment 只保存最近固定轮数、固定字节上限且脱敏后的 blocking finding 摘要，包括 head SHA、file、category、severity、description 和 suggestion。历史只能由已验证的 review bot comment 恢复；legacy comment 没有 history marker 时保持兼容，但既有 blocker 会被迁移为 `invalid_history` 并继续 fail closed，不能因一次 clean review 自动清除。畸形或超限 history 同样 fail closed。
+仓库自有的 `Codex PR Review` 是唯一具有 finding fingerprint、contract arbitration、remediation/freeze 语义的 AI 阻断源。GitHub 官方 `chatgpt-codex-connector` review 仅作为 advisory：`Codex Review Gate` 仍执行可阻断的静态 secret/path/metadata 检查，但 connector 的 `CHANGES_REQUESTED` 不得进入自有 finding history，也不得触发 closure、freeze、merge 或 reslice。connector review 通过 `pull_request_review: submitted` 事件即时报告，不再轮询等待。
+
+blocking finding 必须给出当前 diff 到真实 repository caller 或已声明 public untrusted boundary 的可达证据。私有 typed value 不因假设存在 raw JSON caller、`object.__new__`/`object.__setattr__`、自定义 stateful mapping、损坏私有文件或未来 consumer 而升级成阻断项；JSON/wire 审计只覆盖当前变更实际暴露的边界与契约。缺少具体 `evidence` 的 finding 可保留为 advisory，但不能阻断合并。
+
+trusted review comment 只保存最近固定轮数、固定字节上限且脱敏后的 blocking finding 摘要，包括 head SHA、file、category、severity、evidence、description 和 suggestion。历史只能由已验证的 review bot comment 恢复；legacy comment 没有 history marker 时保持兼容，但既有 blocker 会被迁移为 `invalid_history` 并继续 fail closed，不能因一次 clean review 自动清除。畸形或超限 history 同样 fail closed。
 
 若 `overflow` / `invalid_history` 状态中没有可供仲裁的 trusted prior finding，系统不得用空上下文自动 `clear`。此时需要人工确认 source-of-truth 后修复或删除损坏的 trusted bot state，再重新运行普通 required review check；这只恢复可审计状态，不直接放行 merge，也不绕过 branch protection。
 

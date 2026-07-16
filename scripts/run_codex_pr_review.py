@@ -325,12 +325,15 @@ ${BODY}
 1. Focus on **security vulnerabilities, logic errors, data corruption, crash bugs, race conditions, and API compatibility breaks**.
 2. Do NOT flag: code style, formatting, naming suggestions, minor refactoring preferences, or documentation issues.
 3. Do not emit a finding that concludes no code change is needed. For OIDC, `job_workflow_ref` is absent for explicit direct callers; flag a bypass only when a non-direct repository can reach the direct-caller path despite the allowlists.
-4. Review the entire diff holistically and report all independent actionable findings in one response. Do not stop after the first blocking issue.
+4. Review the entire diff holistically and report all independent reachable findings in one response. Do not stop after the first blocking issue.
 5. Do not invent backward-compatibility requirements that are absent from the repository and PR contract. When the repository and PR explicitly define a clean-slate namespace with legacy compatibility out of scope, review that boundary for accidental fallback instead of requesting dual-read or migration. This never overrides security or data-integrity findings.
-6. For public JSON/wire contracts, systematically check optional-key presence versus explicit null, recursive JSON-safe types, every identity-bearing integer range, one canonical timestamp representation, deterministic encode/decode round-trips and digests, deep immutability, and identifier/path safety.
-7. For each finding, classify its severity:
+6. Emit a finding only when the current diff causes or exposes a defect on a supported input through a repository-backed caller or a declared public untrusted boundary. Cite that concrete path in `evidence`.
+7. Do not invent a raw JSON/parser boundary for private typed values. Do not treat `object.__new__`, `object.__setattr__`, `dataclasses.replace`, custom stateful mappings, corrupted private files, or similar escape hatches as reachable unless the repository or PR contract explicitly exposes them.
+8. For JSON/wire code, check only requirements evidenced by the changed public boundary and its real callers. Do not expand the task into a generic canonicalization or adversarial-parser checklist.
+9. Do not flag hypothetical future consumers, general defense-in-depth, or robustness outside the PR goal. If reachability cannot be proven from repository or PR evidence, omit the finding.
+10. For each finding, classify its severity:
    - **critical**: security vulnerability, data loss, production crash
-   - **high**: logic error that produces wrong results, API break, memory/connection leak
+   - **high**: concrete supported call path produces wrong results, reachable API break, memory/connection leak
    - **medium**: missing error handling, performance degradation, race condition
    - **low**: misleading comment, unclear variable name, redundant code
 
@@ -347,6 +350,7 @@ Return exactly one JSON object and no surrounding prose:
       "category": "security|bug|performance|logic|reliability",
       "file": "relative/path/to/file.py",
       "line": 42,
+      "evidence": "Concrete changed call path or declared public boundary proving reachability",
       "description": "What the problem is",
       "suggestion": "How to fix it"
     }
@@ -813,13 +817,15 @@ def blocking_finding_fingerprint(findings: list[dict[str, Any]]) -> str:
     for finding in findings:
         if not isinstance(finding, dict):
             continue
-        normalized.append(
-            {
-                "category": str(finding.get("category") or "").strip().lower(),
-                "file": str(finding.get("file") or "").strip(),
-                "severity": str(finding.get("severity") or "").strip().lower(),
-            }
-        )
+        identity = {
+            "category": str(finding.get("category") or "").strip().lower(),
+            "file": str(finding.get("file") or "").strip(),
+            "severity": str(finding.get("severity") or "").strip().lower(),
+        }
+        evidence = finding.get("evidence")
+        if type(evidence) is str and evidence.strip():
+            identity["evidence"] = re.sub(r"\s+", " ", evidence).strip().lower()
+        normalized.append(identity)
     if not normalized:
         return ""
     payload = json.dumps(sorted(normalized, key=lambda item: json.dumps(item, sort_keys=True)), sort_keys=True)
@@ -976,6 +982,8 @@ def evaluate_findings(
 
         severity = str(finding.get("severity", "")).strip().lower()
         file_path = str(finding.get("file", "")).strip()
+        evidence = finding.get("evidence")
+        has_blocking_evidence = type(evidence) is str and bool(evidence.strip())
 
         # Classify the file's risk level
         if file_path not in file_risk_cache:
@@ -987,12 +995,14 @@ def evaluate_findings(
             severity in BLOCK_SEVERITIES
             and file_risk == "high"
             and file_path in changed_paths  # only block on actually changed files
+            and has_blocking_evidence
         )
 
         enriched = {
             **finding,
             "file_risk": file_risk,
             "file_risk_reason": file_risk_reason,
+            "blocking_evidence": has_blocking_evidence,
         }
 
         if should_block:
@@ -1069,6 +1079,7 @@ def _history_finding(finding: dict[str, Any]) -> dict[str, str]:
         "severity": _sanitize_history_text(finding.get("severity"), 20).lower(),
         "category": _sanitize_history_text(finding.get("category"), 80).lower(),
         "file": _sanitize_history_path(finding.get("file")),
+        "evidence": _sanitize_history_text(finding.get("evidence")),
         "description": _sanitize_history_text(finding.get("description")),
         "suggestion": _sanitize_history_text(finding.get("suggestion")),
     }
@@ -1178,8 +1189,12 @@ def parse_finding_history(body: str) -> tuple[list[dict[str, Any]], bool]:
         "severity": 20,
         "category": 80,
         "file": 300,
+        "evidence": FINDING_HISTORY_TEXT_LIMIT,
         "description": FINDING_HISTORY_TEXT_LIMIT,
         "suggestion": FINDING_HISTORY_TEXT_LIMIT,
+    }
+    legacy_field_limits = {
+        field: limit for field, limit in field_limits.items() if field != "evidence"
     }
     for round_state in rounds:
         if not isinstance(round_state, dict):
@@ -1197,11 +1212,14 @@ def parse_finding_history(body: str) -> tuple[list[dict[str, Any]], bool]:
             return [], False
         checked_findings: list[dict[str, str]] = []
         for finding in findings:
-            if not isinstance(finding, dict) or set(finding) != set(field_limits):
+            if not isinstance(finding, dict):
+                return [], False
+            limits = field_limits if set(finding) == set(field_limits) else legacy_field_limits
+            if set(finding) != set(limits):
                 return [], False
             if any(
                 not isinstance(finding[field], str) or len(finding[field]) > limit
-                for field, limit in field_limits.items()
+                for field, limit in limits.items()
             ):
                 return [], False
             checked_findings.append(dict(finding))
@@ -1361,6 +1379,7 @@ def _format_finding(index: int, finding: dict[str, Any]) -> list[str]:
     file_path = finding.get("file", "?")
     line = finding.get("line")
     description = finding.get("description", "No description")
+    evidence = finding.get("evidence", "")
     suggestion = finding.get("suggestion", "")
 
     emoji = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🔵"}.get(severity, "⚪")
@@ -1372,6 +1391,8 @@ def _format_finding(index: int, finding: dict[str, Any]) -> list[str]:
     ]
     if line:
         lines[-1] += f" (line {line})"
+    if evidence:
+        lines.extend(["", f"**Evidence:** {evidence}"])
     if suggestion:
         lines.extend(["", f"**Suggestion:** {suggestion}"])
     lines.append("")

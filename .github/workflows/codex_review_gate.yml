@@ -1,14 +1,15 @@
 name: Codex Review Gate
 
-# Two-mode gate for the Codex GitHub App (chatgpt-codex-connector):
+# Static gate plus advisory observer for the Codex GitHub App
+# (chatgpt-codex-connector):
 #
-# 1. WAIT mode (PR opened/synchronized):
-#    Creates a pending check → polls for Codex review up to N minutes.
-#    If Codex responds → check reflects review state.
-#    If Codex times out → check passes (don't block when App is broken).
+# 1. PR mode (PR opened/synchronized):
+#    Runs the blocking static security guard, then observes any current-head
+#    connector review without polling.
 #
 # 2. REACT mode (Codex submits review):
-#    Updates check instantly — CHANGES_REQUESTED → fail, APPROVED → pass.
+#    Reports the advisory review immediately. Connector verdicts never block;
+#    the repository-owned Codex PR Review workflow is the AI merge gate.
 #
 # No API keys needed — reads the App's review via GitHub API.
 
@@ -39,8 +40,6 @@ jobs:
     timeout-minutes: 15
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
-      CODEX_GATE_POLL_SECONDS: ${{ vars.CODEX_GATE_POLL_SECONDS || '30' }}
-      CODEX_GATE_MAX_WAIT_MINUTES: ${{ vars.CODEX_GATE_MAX_WAIT_MINUTES || '5' }}
 
     steps:
       - name: Checkout

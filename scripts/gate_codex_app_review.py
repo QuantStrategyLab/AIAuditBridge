@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""PR merge gate: static scan + Codex App review → job exit code = check status.
+"""PR check: blocking static scan plus advisory Codex App review.
 
 Two phases, zero API keys needed:
   1. STATIC — scan diff for secrets, blocked files, metadata issues (<30s).
               Fail job immediately on hard violations.
-  2. WAIT   — poll for Codex GitHub App review up to N min.
-              Fail job on CHANGES_REQUESTED, pass on APPROVED/timeout.
-  3. REACT  — on Codex bot review submitted: update instantly.
+  2. OBSERVE — read a current-head Codex GitHub App review without polling.
+  3. REACT   — on Codex bot review submitted: report it immediately.
 
-The workflow job IS the check — exit 0 = pass, exit 1 = fail.
+Only the static guard can fail this check. The repository-owned Codex PR Review
+workflow remains the authoritative AI review gate.
 """
 
 from __future__ import annotations
@@ -16,7 +16,6 @@ from __future__ import annotations
 import json
 import os
 import sys
-import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -64,13 +63,6 @@ def check_metadata(files: list[dict[str, Any]], policy: dict[str, Any]) -> list[
 
 def env(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
-
-
-def env_int(name: str, default: int) -> int:
-    try:
-        return int(env(name, str(default)))
-    except ValueError:
-        return default
 
 
 def github_request(token: str, method: str, path: str,
@@ -150,12 +142,21 @@ def run_static_guard(token: str, repo: str, pr_number: int) -> int:
 
 # ─── app review ──────────────────────────────────────────────────────────────
 
-def get_codex_review(token: str, repo: str, pr_number: int) -> dict[str, Any] | None:
+def get_codex_review(
+    token: str,
+    repo: str,
+    pr_number: int,
+    head_sha: str,
+) -> dict[str, Any] | None:
     reviews = github_request(token, "GET", f"/repos/{repo}/pulls/{pr_number}/reviews?per_page=100")
     if not isinstance(reviews, list):
         return None
     for r in reversed(reviews):
-        if isinstance(r, dict) and (r.get("user") or {}).get("login") == BOT_LOGIN:
+        if (
+            isinstance(r, dict)
+            and (r.get("user") or {}).get("login") == BOT_LOGIN
+            and r.get("commit_id") == head_sha
+        ):
             return r
     return None
 
@@ -163,8 +164,11 @@ def get_codex_review(token: str, repo: str, pr_number: int) -> dict[str, Any] | 
 def app_decision(review: dict[str, Any] | None) -> tuple[int, str, str]:
     """(exit_code, title, summary)"""
     if review is None:
-        return (0, "Codex: no review — passed through",
-                "Codex did not respond in time. Merge allowed to avoid blocking development.")
+        return (
+            0,
+            "Codex advisory: no current-head review",
+            "No current-head connector review is available; this advisory does not block merge.",
+        )
     state = (review.get("state") or "").strip().upper()
     url = review.get("html_url", "")
     body = (review.get("body") or "").strip()
@@ -172,11 +176,15 @@ def app_decision(review: dict[str, Any] | None) -> tuple[int, str, str]:
 
     if state == "CHANGES_REQUESTED":
         snippet = (body[:500] + "...") if len(body) > 500 else body
-        return (1, "Codex: changes requested — MERGE BLOCKED",
-                f"Codex **requested changes** at {at}.\n\n{snippet}\n\n[View review]({url})")
+        return (
+            0,
+            "Codex advisory: changes requested",
+            f"Codex **requested changes** at {at}, but this advisory does not block merge.\n\n"
+            f"{snippet}\n\n[View review]({url})",
+        )
     if state == "APPROVED":
-        return (0, "Codex: approved", f"Codex approved at {at}. [View review]({url})")
-    return (0, f"Codex: reviewed ({state.lower()})",
+        return (0, "Codex advisory: approved", f"Codex approved at {at}. [View review]({url})")
+    return (0, f"Codex advisory: reviewed ({state.lower()})",
             f"Codex state `{state}` at {at}. Not blocking. [View review]({url})")
 
 
@@ -216,7 +224,7 @@ def main() -> int:
             return 1
         print("STATIC → clean")
 
-    # ── Phase 2: App review ───────────────────────────────────────────
+    # ── Phase 2: advisory App review ──────────────────────────────────
     # REACT: Codex just submitted a review
     review_event = event.get("review") or {}
     if event_name == "pull_request_review" and (review_event.get("user") or {}).get("login") == BOT_LOGIN:
@@ -227,7 +235,7 @@ def main() -> int:
 
     # WAIT: poll for existing or upcoming review
     try:
-        existing = get_codex_review(token, repo, pr_number)
+        existing = get_codex_review(token, repo, pr_number, head_sha)
     except RuntimeError:
         existing = None
 
@@ -237,26 +245,11 @@ def main() -> int:
         step_summary(f"## {title}\n\n{summary}")
         return rc
 
-    poll_s = env_int("CODEX_GATE_POLL_SECONDS", 30)
-    max_w = env_int("CODEX_GATE_MAX_WAIT_MINUTES", 5)
-    deadline = time.time() + max_w * 60
-    print(f"WAIT → polling every {poll_s}s for up to {max_w}min")
-
-    while time.time() < deadline:
-        time.sleep(poll_s)
-        try:
-            review = get_codex_review(token, repo, pr_number)
-        except RuntimeError:
-            continue
-        if review is not None:
-            rc, title, summary = app_decision(review)
-            print(f"WAIT → found review → exit={rc}: {title}")
-            step_summary(f"## {title}\n\n{summary}")
-            return rc
-
-    # Timeout
-    print(f"TIMEOUT → Codex did not respond in {max_w}min; passing through")
-    step_summary(f"## Codex: timeout after {max_w}min\n\nPassed through to avoid blocking development.")
+    print("ADVISORY → no current-head connector review; not waiting")
+    step_summary(
+        "## Codex advisory pending\n\n"
+        "No current-head connector review is available. The event-driven review hook will report it when submitted."
+    )
     return 0
 
 

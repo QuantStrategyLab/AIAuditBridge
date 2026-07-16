@@ -5,6 +5,7 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,6 +24,44 @@ STATIC_SPEC.loader.exec_module(gate_codex_app_review_static)
 
 
 class GateCodexAppReviewTest(unittest.TestCase):
+    def test_connector_changes_requested_is_advisory(self) -> None:
+        exit_code, title, summary = gate_codex_app_review.app_decision(
+            {
+                "state": "CHANGES_REQUESTED",
+                "body": "Consider another validation layer.",
+                "submitted_at": "2026-07-17T00:00:00Z",
+                "html_url": "https://example.test/review/1",
+            }
+        )
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("advisory", title.lower())
+        self.assertIn("does not block", summary.lower())
+
+    def test_connector_review_is_bound_to_current_head(self) -> None:
+        reviews = [
+            {
+                "user": {"login": gate_codex_app_review.BOT_LOGIN},
+                "commit_id": "old-head",
+                "state": "CHANGES_REQUESTED",
+            },
+            {
+                "user": {"login": gate_codex_app_review.BOT_LOGIN},
+                "commit_id": "current-head",
+                "state": "COMMENTED",
+            },
+        ]
+        with patch.object(gate_codex_app_review, "github_request", return_value=reviews):
+            current = gate_codex_app_review.get_codex_review(
+                "token", "org/repo", 7, "current-head"
+            )
+            missing = gate_codex_app_review.get_codex_review(
+                "token", "org/repo", 7, "other-head"
+            )
+
+        self.assertEqual(current, reviews[1])
+        self.assertIsNone(missing)
+
     def test_wrapper_exports_shared_static_functions(self) -> None:
         sample = "diff --git a/example.py b/example.py\n+++ b/example.py\n+api_key= \"x\""
         files = [{"filename": "example.py", "status": "modified", "additions": 0, "deletions": 0}]
