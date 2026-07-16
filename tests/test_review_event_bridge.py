@@ -15,6 +15,7 @@ from service.review_event_notification import (
     expected_review_event_run_id,
     parse_review_event_metadata,
 )
+from service.review_event_store import ReviewEventStore, ReviewEventStoreError
 
 
 class ReviewEventEmitterTests(unittest.TestCase):
@@ -107,6 +108,34 @@ class ReviewEventEmitterTests(unittest.TestCase):
                 "notification was not delivered",
             ):
                 emit_pr_review_event.post_event("https://audit.example", "oidc", {})
+
+
+class ReviewEventStoreTests(unittest.TestCase):
+    def test_store_persists_status_without_automation_ledger_semantics(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "review_events.json"
+            store = ReviewEventStore(storage_path=path, max_events=2)
+            store.set_status("review:repo:1:a:1", "pending")
+            store.set_status("review:repo:1:a:1", "sent")
+
+            reloaded = ReviewEventStore(storage_path=path, max_events=2)
+
+        self.assertEqual(reloaded.get_status("review:repo:1:a:1"), "sent")
+
+    def test_store_is_bounded_and_rejects_corrupt_state(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "review_events.json"
+            store = ReviewEventStore(storage_path=path, max_events=2)
+            with patch("service.review_event_store.time.time", side_effect=[1.0, 2.0, 3.0]):
+                store.set_status("review:repo:1:a:1", "sent")
+                store.set_status("review:repo:2:b:2", "sent")
+                store.set_status("review:repo:3:c:3", "sent")
+            self.assertIsNone(store.get_status("review:repo:1:a:1"))
+            self.assertEqual(store.get_status("review:repo:3:c:3"), "sent")
+
+            path.write_text("not-json", encoding="utf-8")
+            with self.assertRaises(ReviewEventStoreError):
+                ReviewEventStore(storage_path=path)
 
 
 class ReviewEventNotificationTests(unittest.TestCase):

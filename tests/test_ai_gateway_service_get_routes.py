@@ -305,7 +305,10 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
 
         self.assertEqual(responses[0]["notification"]["status"], "sent")
         self.assertEqual(responses[1]["notification"]["status"], "deduplicated")
+        self.assertNotIn("control", responses[0])
+        self.assertNotIn("run", responses[0])
         dispatch.assert_called_once()
+        self.assertIsNone(get_automation_run_ledger().get(payload["run_id"]))
 
     @patch("service.ai_gateway_service.dispatch_review_event_notification")
     def test_review_event_rejects_unbound_run_id_before_notification(self, dispatch) -> None:
