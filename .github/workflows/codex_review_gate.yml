@@ -1,13 +1,14 @@
 name: Codex Review Gate
 
-# Required deterministic static gate. The connector review is reported by the
-# separate non-required Codex Review Advisory workflow.
+# Trusted driver for the required deterministic static check. The connector's
+# native GitHub review remains separate, non-required advisory evidence.
 
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
+  checks: write
   contents: read
   pull-requests: read
 
@@ -17,6 +18,7 @@ concurrency:
 
 jobs:
   gate:
+    name: Publish head gate
     if: github.event.pull_request.draft == false
 
     runs-on: ubuntu-latest

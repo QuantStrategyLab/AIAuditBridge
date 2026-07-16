@@ -32,6 +32,7 @@ except ModuleNotFoundError as exc:
 
 API_BASE = "https://api.github.com"
 POLICY_PATH = Path(".github/codex_auto_merge_policy.json")
+HEAD_CHECK_NAME = "Codex Review Gate"
 
 
 def load_policy(path: Path = POLICY_PATH) -> dict[str, Any]:
@@ -83,6 +84,46 @@ def step_summary(text: str) -> None:
     if p:
         with open(p, "a", encoding="utf-8") as f:
             f.write(text + "\n")
+
+
+def create_head_check(token: str, repo: str, pr_number: int, head_sha: str) -> int:
+    payload: dict[str, Any] = {
+        "name": HEAD_CHECK_NAME,
+        "head_sha": head_sha,
+        "status": "in_progress",
+        "external_id": f"codex-review-gate:{repo}:{pr_number}:{env('GITHUB_RUN_ID')}",
+    }
+    run_id = env("GITHUB_RUN_ID")
+    if run_id:
+        server = env("GITHUB_SERVER_URL", "https://github.com")
+        payload["details_url"] = f"{server}/{repo}/actions/runs/{run_id}"
+    result = github_request(token, "POST", f"/repos/{repo}/check-runs", payload)
+    check_id = result.get("id") if isinstance(result, dict) else None
+    if type(check_id) is not int or check_id <= 0:
+        raise RuntimeError("GitHub Checks API did not return a valid check id")
+    return check_id
+
+
+def complete_head_check(
+    token: str,
+    repo: str,
+    check_id: int,
+    conclusion: str,
+    summary: str,
+) -> None:
+    github_request(
+        token,
+        "PATCH",
+        f"/repos/{repo}/check-runs/{check_id}",
+        {
+            "status": "completed",
+            "conclusion": conclusion,
+            "output": {
+                "title": f"Static gate {conclusion}",
+                "summary": summary,
+            },
+        },
+    )
 
 
 def run_static_guard(token: str, repo: str, pr_number: int) -> int:
@@ -147,19 +188,39 @@ def main() -> int:
     pr_number = pr.get("number")
     head_sha = (pr.get("head") or {}).get("sha")
     if not pr_number or not head_sha:
-        print("::warning::Cannot resolve PR context")
-        return 0
+        print("::error::Cannot resolve PR context", file=sys.stderr)
+        return 1
 
     print(f"PR #{pr_number}  sha={head_sha[:12]}")
+    try:
+        check_id = create_head_check(token, repo, pr_number, head_sha)
+    except RuntimeError as exc:
+        print(f"::error::Cannot publish head gate: {exc}", file=sys.stderr)
+        return 1
+
     try:
         rc = run_static_guard(token, repo, pr_number)
     except RuntimeError as exc:
         print(f"::error::Static guard unavailable: {exc}", file=sys.stderr)
+        try:
+            complete_head_check(token, repo, check_id, "failure", "Static guard unavailable.")
+        except RuntimeError as update_exc:
+            print(f"::error::Cannot complete head gate: {update_exc}", file=sys.stderr)
         return 1
-    if rc != 0:
+    conclusion = "success" if rc == 0 else "failure"
+    summary = (
+        "Static policy checks passed."
+        if rc == 0
+        else "Static policy checks blocked this PR."
+    )
+    try:
+        complete_head_check(token, repo, check_id, conclusion, summary)
+    except RuntimeError as exc:
+        print(f"::error::Cannot complete head gate: {exc}", file=sys.stderr)
         return 1
-    print("STATIC → clean")
-    return 0
+    if rc == 0:
+        print("STATIC → clean")
+    return rc
 
 
 if __name__ == "__main__":

@@ -56,11 +56,10 @@ AIAuditBridge 是 QuantStrategyLab 的 AI 审计控制面，负责：
 
 - `codex_review_gate.yml`
   - 只执行确定性的 secret / path / metadata 静态门禁。
-  - 使用受信任 base 代码检查 PR diff；API 读取失败时 fail closed。
-
-- `codex_review_advisory.yml`
-  - 事件驱动报告 current-head Codex GitHub App review。
-  - 使用独立非 required check，不覆盖静态门禁结果，也不轮询。
+  - 使用受信任 base 代码检查 PR diff，并通过 Checks API 把 `Codex Review Gate`
+    明确发布到 current head SHA；API 失败时 fail closed。
+  - Codex connector 的原生 GitHub review 与 unresolved threads 仅作为非 required
+    advisory evidence，不再镜像成仓库自建 check。
 
 - `monthly-orchestrator.yml`
   - 生成月度审计 issue。
@@ -106,10 +105,7 @@ AIAuditBridge 是 QuantStrategyLab 的 AI 审计控制面，负责：
   - service 失败时可按条件回退到 API review。
 
 - `scripts/gate_codex_app_review.py`
-  - 以静态 gate 的形式保护合并；不处理 AI review verdict。
-
-- `scripts/report_codex_app_review.py`
-  - 只报告 current-head connector review 的 advisory 状态。
+  - 以 current-head 静态 check 的形式保护合并；不处理 AI review verdict。
 
 ### 1.3 已经具备的自动化能力
 
