@@ -58,7 +58,8 @@ class RunCodexPrReviewTests(unittest.TestCase):
             "org/repo",
         )
 
-        self.assertIn("merged current caller", prompt)
+        self.assertIn("current caller or entry point proven by the supplied PR context", prompt)
+        self.assertIn("introduced by this PR", prompt)
         self.assertIn("explicitly declared public untrusted boundary", prompt)
         self.assertIn("current configuration and inputs", prompt)
         self.assertIn("downgrade it to medium or low", prompt)
@@ -68,7 +69,8 @@ class RunCodexPrReviewTests(unittest.TestCase):
     def test_repository_review_template_uses_the_same_reachability_gate(self) -> None:
         template = run_codex_pr_review.PROMPT_TEMPLATE_PATH.read_text(encoding="utf-8")
 
-        self.assertIn("merged current caller", template)
+        self.assertIn("current caller or entry point proven by the supplied PR context", template)
+        self.assertIn("introduced by this PR", template)
         self.assertIn("explicitly declared public untrusted boundary", template)
         self.assertIn("downgrade it to medium or low", template)
         self.assertIn("hypothetical future consumer", template)

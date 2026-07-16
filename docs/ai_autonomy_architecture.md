@@ -225,7 +225,7 @@ trusted review comment 只保存最近固定轮数、固定字节上限且脱敏
 
 #### 3.3.2 Blocking finding 的可达性证据
 
-repository Review 只有在 PR 上下文能够同时证明 exact changed path/line、merged current caller 或明确声明的 public untrusted boundary、当前配置和输入下可达，以及具体 correctness/security/data-integrity 影响时，才能给出 `critical` 或 `high`。证据不足的 finding 必须降为 `medium/low` 或省略，不能依靠 future consumer、伪造内部对象或通用 defense-in-depth 推测阻塞当前 PR。
+repository Review 只有在 PR 上下文能够同时证明 exact changed path/line、当前 caller/entry point（可为既有路径或本 PR 新增路径）或明确声明的 public untrusted boundary、当前配置和输入下可达，以及具体 correctness/security/data-integrity 影响时，才能给出 `critical` 或 `high`。证据不足的 finding 必须降为 `medium/low` 或省略，不能依靠 future consumer、伪造内部对象或通用 defense-in-depth 推测阻塞当前 PR。
 
 Review 不得为了 hypothetical 风险要求新增 parser、store、registry 或 event-persistence 层。只有当前变更已经暴露对应真实边界，而且缺陷能从该边界到达时，才允许提出此类修改建议。
 
