@@ -1,22 +1,11 @@
 #!/usr/bin/env python3
-"""PR merge gate: static scan + Codex App review → job exit code = check status.
-
-Two phases, zero API keys needed:
-  1. STATIC — scan diff for secrets, blocked files, metadata issues (<30s).
-              Fail job immediately on hard violations.
-  2. WAIT   — poll for Codex GitHub App review up to N min.
-              Fail job on CHANGES_REQUESTED, pass on APPROVED/timeout.
-  3. REACT  — on Codex bot review submitted: update instantly.
-
-The workflow job IS the check — exit 0 = pass, exit 1 = fail.
-"""
+"""Required PR static gate; connector reviews are reported separately."""
 
 from __future__ import annotations
 
 import json
 import os
 import sys
-import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -42,8 +31,8 @@ except ModuleNotFoundError as exc:
     )
 
 API_BASE = "https://api.github.com"
-BOT_LOGIN = "chatgpt-codex-connector[bot]"
 POLICY_PATH = Path(".github/codex_auto_merge_policy.json")
+HEAD_CHECK_NAME = "Codex Review Gate"
 
 
 def load_policy(path: Path = POLICY_PATH) -> dict[str, Any]:
@@ -66,13 +55,6 @@ def env(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
 
 
-def env_int(name: str, default: int) -> int:
-    try:
-        return int(env(name, str(default)))
-    except ValueError:
-        return default
-
-
 def github_request(token: str, method: str, path: str,
                    payload: dict[str, Any] | None = None) -> Any:
     url = f"{API_BASE}{path}" if not path.startswith("https://") else path
@@ -92,6 +74,8 @@ def github_request(token: str, method: str, path: str,
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"GitHub API {method} {url}: {exc.code} {detail[:500]}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"GitHub API {method} {url} unavailable") from exc
     return json.loads(body) if body else {}
 
 
@@ -102,17 +86,54 @@ def step_summary(text: str) -> None:
             f.write(text + "\n")
 
 
+def create_head_check(token: str, repo: str, pr_number: int, head_sha: str) -> int:
+    payload: dict[str, Any] = {
+        "name": HEAD_CHECK_NAME,
+        "head_sha": head_sha,
+        "status": "in_progress",
+        "external_id": f"codex-review-gate:{repo}:{pr_number}:{env('GITHUB_RUN_ID')}",
+    }
+    run_id = env("GITHUB_RUN_ID")
+    if run_id:
+        server = env("GITHUB_SERVER_URL", "https://github.com")
+        payload["details_url"] = f"{server}/{repo}/actions/runs/{run_id}"
+    result = github_request(token, "POST", f"/repos/{repo}/check-runs", payload)
+    check_id = result.get("id") if isinstance(result, dict) else None
+    if type(check_id) is not int or check_id <= 0:
+        raise RuntimeError("GitHub Checks API did not return a valid check id")
+    return check_id
+
+
+def complete_head_check(
+    token: str,
+    repo: str,
+    check_id: int,
+    conclusion: str,
+    summary: str,
+) -> None:
+    github_request(
+        token,
+        "PATCH",
+        f"/repos/{repo}/check-runs/{check_id}",
+        {
+            "status": "completed",
+            "conclusion": conclusion,
+            "output": {
+                "title": f"Static gate {conclusion}",
+                "summary": summary,
+            },
+        },
+    )
+
+
 def run_static_guard(token: str, repo: str, pr_number: int) -> int:
     """Return 0 if clean, 1 if blocked."""
     policy = load_policy(POLICY_PATH)
     files: list[dict[str, Any]] = []
     page = 1
     while True:
-        try:
-            batch = github_request(token, "GET",
-                f"/repos/{repo}/pulls/{pr_number}/files?per_page=100&page={page}")
-        except RuntimeError:
-            break
+        batch = github_request(token, "GET",
+            f"/repos/{repo}/pulls/{pr_number}/files?per_page=100&page={page}")
         if not isinstance(batch, list) or not batch:
             break
         files.extend(batch)
@@ -133,8 +154,8 @@ def run_static_guard(token: str, repo: str, pr_number: int) -> int:
         )
         with urllib.request.urlopen(req, timeout=30) as resp:
             diff_text = resp.read().decode("utf-8", errors="replace")
-    except Exception:
-        pass
+    except (OSError, urllib.error.URLError) as exc:
+        raise RuntimeError("Failed to fetch PR diff") from exc
 
     issues = collect_static_gate_issues(files, diff_text, policy)
     if not issues:
@@ -146,38 +167,6 @@ def run_static_guard(token: str, repo: str, pr_number: int) -> int:
     step_summary(f"## Merge blocked: {len(issues)} static issue(s)\n\n" +
                  "\n".join(f"- {i}" for i in issues))
     return 1
-
-
-# ─── app review ──────────────────────────────────────────────────────────────
-
-def get_codex_review(token: str, repo: str, pr_number: int) -> dict[str, Any] | None:
-    reviews = github_request(token, "GET", f"/repos/{repo}/pulls/{pr_number}/reviews?per_page=100")
-    if not isinstance(reviews, list):
-        return None
-    for r in reversed(reviews):
-        if isinstance(r, dict) and (r.get("user") or {}).get("login") == BOT_LOGIN:
-            return r
-    return None
-
-
-def app_decision(review: dict[str, Any] | None) -> tuple[int, str, str]:
-    """(exit_code, title, summary)"""
-    if review is None:
-        return (0, "Codex: no review — passed through",
-                "Codex did not respond in time. Merge allowed to avoid blocking development.")
-    state = (review.get("state") or "").strip().upper()
-    url = review.get("html_url", "")
-    body = (review.get("body") or "").strip()
-    at = review.get("submitted_at", "")
-
-    if state == "CHANGES_REQUESTED":
-        snippet = (body[:500] + "...") if len(body) > 500 else body
-        return (1, "Codex: changes requested — MERGE BLOCKED",
-                f"Codex **requested changes** at {at}.\n\n{snippet}\n\n[View review]({url})")
-    if state == "APPROVED":
-        return (0, "Codex: approved", f"Codex approved at {at}. [View review]({url})")
-    return (0, f"Codex: reviewed ({state.lower()})",
-            f"Codex state `{state}` at {at}. Not blocking. [View review]({url})")
 
 
 # ─── main ────────────────────────────────────────────────────────────────────
@@ -195,69 +184,43 @@ def main() -> int:
         return 1
 
     event = json.loads(event_path.read_text(encoding="utf-8"))
-    event_name = env("GITHUB_EVENT_NAME", "")
     pr = event.get("pull_request") or {}
     pr_number = pr.get("number")
     head_sha = (pr.get("head") or {}).get("sha")
     if not pr_number or not head_sha:
-        print("::warning::Cannot resolve PR context")
-        return 0
+        print("::error::Cannot resolve PR context", file=sys.stderr)
+        return 1
 
-    print(f"PR #{pr_number}  sha={head_sha[:12]}  event={event_name}")
-
-    # ── Phase 1: Static guard (skip on review-only events) ────────────
-    if event_name != "pull_request_review":
-        try:
-            rc = run_static_guard(token, repo, pr_number)
-        except RuntimeError as exc:
-            print(f"::warning::Static guard error: {exc}")
-            rc = 0
-        if rc != 0:
-            return 1
-        print("STATIC → clean")
-
-    # ── Phase 2: App review ───────────────────────────────────────────
-    # REACT: Codex just submitted a review
-    review_event = event.get("review") or {}
-    if event_name == "pull_request_review" and (review_event.get("user") or {}).get("login") == BOT_LOGIN:
-        rc, title, summary = app_decision(review_event)
-        print(f"REACT → exit={rc}: {title}")
-        step_summary(f"## {title}\n\n{summary}")
-        return rc
-
-    # WAIT: poll for existing or upcoming review
+    print(f"PR #{pr_number}  sha={head_sha[:12]}")
     try:
-        existing = get_codex_review(token, repo, pr_number)
-    except RuntimeError:
-        existing = None
+        check_id = create_head_check(token, repo, pr_number, head_sha)
+    except RuntimeError as exc:
+        print(f"::error::Cannot publish head gate: {exc}", file=sys.stderr)
+        return 1
 
-    if existing is not None:
-        rc, title, summary = app_decision(existing)
-        print(f"EXISTING → exit={rc}: {title}")
-        step_summary(f"## {title}\n\n{summary}")
-        return rc
-
-    poll_s = env_int("CODEX_GATE_POLL_SECONDS", 30)
-    max_w = env_int("CODEX_GATE_MAX_WAIT_MINUTES", 5)
-    deadline = time.time() + max_w * 60
-    print(f"WAIT → polling every {poll_s}s for up to {max_w}min")
-
-    while time.time() < deadline:
-        time.sleep(poll_s)
+    try:
+        rc = run_static_guard(token, repo, pr_number)
+    except RuntimeError as exc:
+        print(f"::error::Static guard unavailable: {exc}", file=sys.stderr)
         try:
-            review = get_codex_review(token, repo, pr_number)
-        except RuntimeError:
-            continue
-        if review is not None:
-            rc, title, summary = app_decision(review)
-            print(f"WAIT → found review → exit={rc}: {title}")
-            step_summary(f"## {title}\n\n{summary}")
-            return rc
-
-    # Timeout
-    print(f"TIMEOUT → Codex did not respond in {max_w}min; passing through")
-    step_summary(f"## Codex: timeout after {max_w}min\n\nPassed through to avoid blocking development.")
-    return 0
+            complete_head_check(token, repo, check_id, "failure", "Static guard unavailable.")
+        except RuntimeError as update_exc:
+            print(f"::error::Cannot complete head gate: {update_exc}", file=sys.stderr)
+        return 1
+    conclusion = "success" if rc == 0 else "failure"
+    summary = (
+        "Static policy checks passed."
+        if rc == 0
+        else "Static policy checks blocked this PR."
+    )
+    try:
+        complete_head_check(token, repo, check_id, conclusion, summary)
+    except RuntimeError as exc:
+        print(f"::error::Cannot complete head gate: {exc}", file=sys.stderr)
+        return 1
+    if rc == 0:
+        print("STATIC → clean")
+    return rc
 
 
 if __name__ == "__main__":
