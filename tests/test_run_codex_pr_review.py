@@ -50,6 +50,29 @@ class RunCodexPrReviewTests(unittest.TestCase):
         self.assertIn("every identity-bearing integer", prompt)
         self.assertIn("one canonical timestamp representation", prompt)
 
+    def test_review_prompt_requires_reachability_evidence_for_blockers(self) -> None:
+        prompt = run_codex_pr_review.build_review_prompt(
+            "diff",
+            "bounded implementation",
+            "Future consumers are out of scope.",
+            "org/repo",
+        )
+
+        self.assertIn("merged current caller", prompt)
+        self.assertIn("explicitly declared public untrusted boundary", prompt)
+        self.assertIn("current configuration and inputs", prompt)
+        self.assertIn("downgrade it to medium or low", prompt)
+        self.assertIn("hypothetical future consumer", prompt)
+        self.assertIn("Do not request a new parser, store, registry, or event-persistence layer", prompt)
+
+    def test_repository_review_template_uses_the_same_reachability_gate(self) -> None:
+        template = run_codex_pr_review.PROMPT_TEMPLATE_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("merged current caller", template)
+        self.assertIn("explicitly declared public untrusted boundary", template)
+        self.assertIn("downgrade it to medium or low", template)
+        self.assertIn("hypothetical future consumer", template)
+
     def test_review_script_never_imports_from_the_pr_checkout(self) -> None:
         source = Path(run_codex_pr_review.__file__).read_text(encoding="utf-8")
         self.assertNotIn("SOURCE_ROOT = BRIDGE_ROOT.parent / \"source\"", source)
