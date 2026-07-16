@@ -255,6 +255,155 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
                     server.shutdown()
                     server.server_close()
 
+    @patch("service.ai_gateway_service.dispatch_review_event_notification")
+    def test_review_event_is_strictly_bound_and_notified_once(self, dispatch) -> None:
+        dispatch.return_value = {"status": "sent"}
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "CODEX_AUDIT_SERVICE_AUTH": "none",
+                "CODEX_AUDIT_SERVICE_ALLOW_NO_AUTH_FOR_LOCAL_TESTS": "true",
+                "CODEX_AUDIT_SERVICE_JOB_DIR": tmp,
+                "CODEX_AUDIT_SERVICE_AUTOMATION_OPERATOR_REPOSITORIES": "local",
+            }
+            metadata = {
+                "schema": "qsl.pr_review_event.v1",
+                "repository": "local/repo-a",
+                "pr_number": 17,
+                "head_sha": "a" * 40,
+                "workflow_run_id": "123456789",
+                "review_outcome": "failure",
+                "blocked": True,
+                "contract_conflict": False,
+            }
+            payload = {
+                "run_id": f"review:local/repo-a:17:{'a' * 40}:123456789",
+                "task_state": "completed",
+                "task": "pr_review_completed",
+                "mode": "review_only",
+                "source_repository": "local/repo-a",
+                "metadata": metadata,
+            }
+            with patch.dict(os.environ, env, clear=False):
+                server = ThreadingHTTPServer(("127.0.0.1", 0), AiGatewayRequestHandler)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    base_url = f"http://127.0.0.1:{server.server_port}"
+                    responses = []
+                    for _ in range(2):
+                        request = urllib.request.Request(
+                            f"{base_url}/v1/ai/automation/runs",
+                            data=json.dumps(payload).encode("utf-8"),
+                            method="POST",
+                            headers={"Content-Type": "application/json"},
+                        )
+                        with urllib.request.urlopen(request, timeout=5) as response:
+                            responses.append(json.loads(response.read().decode("utf-8")))
+                finally:
+                    server.shutdown()
+                    server.server_close()
+
+        self.assertEqual(responses[0]["notification"]["status"], "sent")
+        self.assertEqual(responses[1]["notification"]["status"], "deduplicated")
+        dispatch.assert_called_once()
+
+    @patch("service.ai_gateway_service.dispatch_review_event_notification")
+    def test_review_event_rejects_unbound_run_id_before_notification(self, dispatch) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "CODEX_AUDIT_SERVICE_AUTH": "none",
+                "CODEX_AUDIT_SERVICE_ALLOW_NO_AUTH_FOR_LOCAL_TESTS": "true",
+                "CODEX_AUDIT_SERVICE_JOB_DIR": tmp,
+                "CODEX_AUDIT_SERVICE_AUTOMATION_OPERATOR_REPOSITORIES": "local",
+            }
+            payload = {
+                "run_id": "forged-run-id",
+                "task_state": "completed",
+                "task": "pr_review_completed",
+                "mode": "review_only",
+                "source_repository": "local/repo-a",
+                "metadata": {
+                    "schema": "qsl.pr_review_event.v1",
+                    "repository": "local/repo-a",
+                    "pr_number": 17,
+                    "head_sha": "a" * 40,
+                    "workflow_run_id": "123456789",
+                    "review_outcome": "failure",
+                    "blocked": True,
+                    "contract_conflict": False,
+                },
+            }
+            with patch.dict(os.environ, env, clear=False):
+                server = ThreadingHTTPServer(("127.0.0.1", 0), AiGatewayRequestHandler)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    request = urllib.request.Request(
+                        f"http://127.0.0.1:{server.server_port}/v1/ai/automation/runs",
+                        data=json.dumps(payload).encode("utf-8"),
+                        method="POST",
+                        headers={"Content-Type": "application/json"},
+                    )
+                    with self.assertRaises(urllib.error.HTTPError) as ctx:
+                        urllib.request.urlopen(request, timeout=5)
+                    self.assertEqual(ctx.exception.code, 400)
+                finally:
+                    server.shutdown()
+                    server.server_close()
+
+        dispatch.assert_not_called()
+
+    @patch("service.ai_gateway_service.dispatch_review_event_notification")
+    def test_review_event_retries_after_notification_failure(self, dispatch) -> None:
+        dispatch.side_effect = [{"status": "failed"}, {"status": "sent"}]
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "CODEX_AUDIT_SERVICE_AUTH": "none",
+                "CODEX_AUDIT_SERVICE_ALLOW_NO_AUTH_FOR_LOCAL_TESTS": "true",
+                "CODEX_AUDIT_SERVICE_JOB_DIR": tmp,
+                "CODEX_AUDIT_SERVICE_AUTOMATION_OPERATOR_REPOSITORIES": "local",
+            }
+            metadata = {
+                "schema": "qsl.pr_review_event.v1",
+                "repository": "local/repo-a",
+                "pr_number": 17,
+                "head_sha": "a" * 40,
+                "workflow_run_id": "123456789",
+                "review_outcome": "failure",
+                "blocked": True,
+                "contract_conflict": False,
+            }
+            payload = {
+                "run_id": f"review:local/repo-a:17:{'a' * 40}:123456789",
+                "task_state": "completed",
+                "task": "pr_review_completed",
+                "mode": "review_only",
+                "source_repository": "local/repo-a",
+                "metadata": metadata,
+            }
+            with patch.dict(os.environ, env, clear=False):
+                server = ThreadingHTTPServer(("127.0.0.1", 0), AiGatewayRequestHandler)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    base_url = f"http://127.0.0.1:{server.server_port}"
+                    statuses = []
+                    for _ in range(2):
+                        request = urllib.request.Request(
+                            f"{base_url}/v1/ai/automation/runs",
+                            data=json.dumps(payload).encode("utf-8"),
+                            method="POST",
+                            headers={"Content-Type": "application/json"},
+                        )
+                        with urllib.request.urlopen(request, timeout=5) as response:
+                            statuses.append(json.loads(response.read().decode("utf-8"))["notification"]["status"])
+                finally:
+                    server.shutdown()
+                    server.server_close()
+
+        self.assertEqual(statuses, ["failed", "sent"])
+        self.assertEqual(dispatch.call_count, 2)
+
     def test_external_automation_run_update_cannot_overwrite_service_job_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             env = {

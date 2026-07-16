@@ -1517,6 +1517,7 @@ class CodexPrReviewWorkflowTest(unittest.TestCase):
         self.assertIn("tr '[:upper:]' '[:lower:]'", workflow)
         self.assertIn('if ! api_fallback_enabled="$(resolve_boolean', workflow)
         self.assertIn('timeout --signal=TERM --kill-after=60s 25m python -I "${script_path}"', workflow)
+        self.assertIn('rm -rf "${GITHUB_WORKSPACE}/source/data/output/codex_pr_review"', workflow)
         self.assertIn("inputs.caller_concurrency_key || github.event.pull_request.number || github.run_id", workflow)
         self.assertNotIn("Validate bridge checkout token", workflow)
         self.assertIn("required: false", workflow)
@@ -1536,6 +1537,14 @@ class CodexPrReviewWorkflowTest(unittest.TestCase):
         self.assertIn("Trusted Codex review script not found", workflow)
         self.assertNotIn("source/scripts/run_codex_pr_review.py", workflow)
         self.assertIn("source/data/output/codex_pr_review/", workflow)
+        self.assertIn("Emit review completion event", workflow)
+        self.assertIn("if: always()", workflow)
+        self.assertIn("continue-on-error: true", workflow)
+        self.assertIn("bridge/scripts/emit_pr_review_event.py", workflow)
+        self.assertIn("CODEX_REVIEW_STEP_OUTCOME: ${{ steps.review.outcome }}", workflow)
+        self.assertIn("CODEX_REVIEW_PR_NUMBER: ${{ github.event.pull_request.number }}", workflow)
+        self.assertIn("CODEX_REVIEW_HEAD_SHA: ${{ github.event.pull_request.head.sha }}", workflow)
+        self.assertIn("CODEX_AUDIT_SERVICE_AUDIENCE", workflow)
 
     def test_repo_root_can_be_overridden_for_reusable_workflow(self) -> None:
         source = Path("scripts/run_codex_pr_review.py").read_text(encoding="utf-8")

@@ -115,6 +115,7 @@ jobs:
         working-directory: source
         run: |
           set -euo pipefail
+          rm -rf "${GITHUB_WORKSPACE}/source/data/output/codex_pr_review"
           bridge_script="${GITHUB_WORKSPACE}/bridge/scripts/run_codex_pr_review.py"
           if [ -f "${bridge_script}" ]; then
             script_path="${bridge_script}"
@@ -154,3 +155,22 @@ jobs:
           name: codex-pr-review-${{ github.event.pull_request.number || github.run_id }}-${{ github.run_id }}
           path: source/data/output/codex_pr_review/
           if-no-files-found: warn
+
+      - name: Emit review completion event
+        if: always()
+        continue-on-error: true
+        env:
+          CODEX_AUDIT_SERVICE_URL: ${{ secrets.CODEX_AUDIT_SERVICE_URL }}
+          CODEX_AUDIT_SERVICE_AUDIENCE: ${{ vars.CODEX_AUDIT_SERVICE_AUDIENCE || 'quant-codex-audit' }}
+          CODEX_REVIEW_STEP_OUTCOME: ${{ steps.review.outcome }}
+          CODEX_REVIEW_DECISION_PATH: ${{ github.workspace }}/source/data/output/codex_pr_review/decision.json
+          CODEX_REVIEW_PR_NUMBER: ${{ github.event.pull_request.number }}
+          CODEX_REVIEW_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          emitter="${GITHUB_WORKSPACE}/bridge/scripts/emit_pr_review_event.py"
+          if [ ! -f "${emitter}" ]; then
+            echo "::warning::Trusted review event emitter not found."
+            exit 1
+          fi
+          timeout --signal=TERM --kill-after=5s 60s python -I "${emitter}"

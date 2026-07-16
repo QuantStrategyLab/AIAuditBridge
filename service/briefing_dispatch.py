@@ -8,7 +8,7 @@ import re
 import subprocess
 import urllib.parse
 import urllib.request
-from typing import Any
+from typing import Any, Mapping
 
 from service.briefing_consumer import BriefingAction, BriefingConsumptionResult
 
@@ -18,25 +18,25 @@ _REPOSITORY_RE = re.compile(
 )
 
 
-def _telegram_token() -> str:
+def _telegram_token(env: Mapping[str, str] = os.environ) -> str:
     for key in (
         "TELEGRAM_TOKEN",
         "TG_TOKEN",
         "STRATEGY_PLUGIN_ALERT_TELEGRAM_BOT_TOKEN",
     ):
-        value = str(os.environ.get(key) or "").strip()
+        value = str(env.get(key) or "").strip()
         if value:
             return value
     return ""
 
 
-def _telegram_chat_ids() -> tuple[str, ...]:
+def _telegram_chat_ids(env: Mapping[str, str] = os.environ) -> tuple[str, ...]:
     for key in (
         "GLOBAL_TELEGRAM_CHAT_ID",
         "QSL_GLOBAL_TELEGRAM_CHAT_ID",
         "STRATEGY_PLUGIN_ALERT_TELEGRAM_CHAT_IDS",
     ):
-        raw = os.environ.get(key)
+        raw = env.get(key)
         if not raw:
             continue
         ids = [
@@ -47,6 +47,12 @@ def _telegram_chat_ids() -> tuple[str, ...]:
         if ids:
             return tuple(ids)
     return ()
+
+
+def telegram_delivery_config(env: Mapping[str, str] | None = None) -> tuple[str, tuple[str, ...]]:
+    """Return the existing Telegram delivery configuration without exposing values."""
+    source = os.environ if env is None else env
+    return _telegram_token(source), _telegram_chat_ids(source)
 
 
 def _format_telegram_body(result: BriefingConsumptionResult) -> str:

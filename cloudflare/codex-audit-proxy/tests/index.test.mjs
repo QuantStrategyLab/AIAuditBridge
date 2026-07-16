@@ -108,3 +108,39 @@ test("worker allows authenticated job status polling subroutes", async () => {
     globalThis.fetch = originalFetch;
   }
 });
+
+test("worker proxies authenticated review event records only via POST", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    assert.equal(url, "https://origin.example/v1/ai/automation/runs");
+    assert.equal(init.method, "POST");
+    assert.equal(init.headers.get("Authorization"), "Bearer test-token");
+    return new Response(JSON.stringify({ status: "ok", notification: { status: "sent" } }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+
+  try {
+    const response = await worker.fetch(
+      new Request("https://proxy.example/v1/ai/automation/runs", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: "{}",
+      }),
+      { CODEX_AUDIT_ORIGIN_URL: "https://origin.example" },
+    );
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { status: "ok", notification: { status: "sent" } });
+
+    const rejected = await worker.fetch(
+      new Request("https://proxy.example/v1/ai/automation/runs", {
+        headers: { Authorization: "Bearer test-token" },
+      }),
+      { CODEX_AUDIT_ORIGIN_URL: "https://origin.example" },
+    );
+    assert.equal(rejected.status, 405);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

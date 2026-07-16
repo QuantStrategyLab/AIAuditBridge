@@ -13,6 +13,7 @@
     POST /v1/ai/execute
     POST /v1/ai/execute/jobs
     POST /v1/ai/review
+    POST /v1/ai/automation/runs
     POST /v1/ai/feedback/register
     POST /v1/ai/feedback/evaluate
     POST /v1/ai/feedback/shadow
@@ -32,6 +33,7 @@ const ALLOWED_ROUTES = [
   "/v1/ai/execute",
   "/v1/ai/execute/jobs",
   "/v1/ai/review",
+  "/v1/ai/automation/runs",
   "/v1/ai/health",
   "/v1/ai/quota",
   "/v1/ai/changes",
@@ -116,7 +118,7 @@ function methodAllowed(method, pathname) {
   if (pathname === "/v1/ai/changes") return method === "GET";
   // All other routes: POST only
   if (["/v1/ai/analyze", "/v1/ai/execute", "/v1/ai/execute/jobs",
-       "/v1/ai/review", "/v1/ai/feedback/register", "/v1/ai/feedback/evaluate",
+       "/v1/ai/review", "/v1/ai/automation/runs", "/v1/ai/feedback/register", "/v1/ai/feedback/evaluate",
        "/v1/codex-audit", "/v1/codex-audit/jobs"].includes(pathname)) {
     return method === "POST";
   }

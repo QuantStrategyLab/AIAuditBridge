@@ -6,7 +6,7 @@ This Worker should stay separate from the Pigbibi CodexGateway Worker so origin 
 
 The Worker is intentionally thin:
 
-- serves `GET /healthz` locally, proxies legacy `POST /v1/codex-audit`, and proxies async `POST /v1/codex-audit/jobs` plus `GET /v1/codex-audit/jobs/{job_id}`;
+- serves `GET /healthz` locally, proxies legacy/async Codex routes, and permits authenticated `POST /v1/ai/automation/runs` for sanitized review completion events;
 - requires a bearer token before proxying and forwards the GitHub Actions OIDC `Authorization` header to the existing Codex audit service;
 - keeps the VPS origin URL in a Cloudflare Worker secret, not in git;
 - does not store provider keys, GitHub tokens, or Codex credentials.

@@ -2471,6 +2471,8 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertIn("ANTHROPIC_USAGE_WINDOW_DAYS=", deploy_script)
         self.assertIn("CODEX_AUDIT_SERVICE_ADMIN_ENV_FILE", deploy_script)
         self.assertIn("EnvironmentFile=-${ADMIN_ENV_FILE}", deploy_script)
+        self.assertIn('TELEGRAM_ENV_FILE="${CODEX_AUDIT_SERVICE_TELEGRAM_ENV_FILE:-/etc/codex-audit-bridge/telegram.env}"', deploy_script)
+        self.assertIn("EnvironmentFile=-${TELEGRAM_ENV_FILE}", deploy_script)
         self.assertIn("sudo install -m 0600 -o root -g root", deploy_script)
         self.assertIn('sudo rm -f "$ADMIN_ENV_FILE"', deploy_script)
         self.assertNotIn("Environment=OPENAI_ADMIN_KEY=", deploy_script)

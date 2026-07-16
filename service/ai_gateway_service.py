@@ -93,6 +93,13 @@ from service.quota import get_quota_manager
 from service.task_state import TERMINAL_STATES, job_task_state
 from service.health import get_health_monitor
 from service.org_health import read_org_health
+from service.review_event_notification import (
+    EVENT_TASK as PR_REVIEW_EVENT_TASK,
+    assert_review_event_provenance,
+    dispatch_review_event_notification,
+    expected_review_event_run_id,
+    parse_review_event_metadata,
+)
 try:
     from quant_platform_kit.strategy_lifecycle.performance_monitor import try_record_platform_execution
 except ModuleNotFoundError:  # pragma: no cover - optional in CI
@@ -138,6 +145,7 @@ _audit.addHandler(_audit_handler)
 _audit.propagate = False
 
 _JOB_WRITE_LOCK = threading.Lock()
+_REVIEW_EVENT_LOCK = threading.Lock()
 
 # ── helpers ────────────────────────────────────────────────────────────
 
@@ -578,11 +586,17 @@ def _automation_control_snapshot(
         recent_runs = []
         retention = {}
         ledger_unavailable = True
+    recent_runs = [
+        run
+        for run in recent_runs
+        if not isinstance(run, dict) or str(run.get("task_name") or "") != PR_REVIEW_EVENT_TASK
+    ]
     if pending_run is not None:
         pending_run_id = str(pending_run.get("run_id") or "")
         if pending_run_id:
             recent_runs = [run for run in recent_runs if str(run.get("run_id") or "") != pending_run_id]
-        recent_runs = [pending_run, *recent_runs]
+        if str(pending_run.get("task_name") or "") != PR_REVIEW_EVENT_TASK:
+            recent_runs = [pending_run, *recent_runs]
     evicted_by_repo = (
         retention.get("evicted_runs_by_repo") if isinstance(retention.get("evicted_runs_by_repo"), dict) else {}
     )
@@ -1737,6 +1751,16 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 raise PermissionError("automation run is service-owned")
             _assert_automation_run_access(existing, claims)
         task_name = str(payload.get("task") or payload.get("task_name") or "")
+        review_event = None
+        if task_name == PR_REVIEW_EVENT_TASK:
+            review_event = parse_review_event_metadata(repo, metadata)
+            assert_review_event_provenance(claims, review_event)
+            if run_id != expected_review_event_run_id(review_event):
+                raise ValueError("review event run_id does not match metadata")
+            if payload.get("task_state") != "completed":
+                raise ValueError("review event task_state must be completed")
+            if payload.get("mode") != MODE_REVIEW_ONLY:
+                raise ValueError("review event mode must be review_only")
         existing_state = str(existing.get("task_state") or "") if isinstance(existing, dict) else ""
         task_state = str(payload.get("task_state") or payload.get("state") or existing_state or "running")
         existing_metadata = existing.get("metadata") if isinstance(existing, dict) and isinstance(existing.get("metadata"), dict) else {}
@@ -1760,19 +1784,67 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         run_metadata["requested_mode"] = requested_mode
         pending_run = {"run_id": run_id, "task_name": task_name, "task_state": task_state, "metadata": run_metadata}
         control = _automation_control_snapshot(repo, task_name=task_name, requested_mode=requested_mode, pending_run=pending_run)
-        record = get_automation_run_ledger().record(
-            run_id,
-            task_state,
-            task_name=task_name,
-            suggested_action=str(control.get("effective_action") or control.get("action") or ""),
-            service_health=str(control.get("service_health") or ""),
-            quota_status=control.get("quota_status") or "",
-            org_health_status=str(control.get("org_health_status") or ""),
-            metadata=run_metadata,
-            owner_repository=repo,
-        )
+        notification = None
+        if review_event is not None:
+            with _REVIEW_EVENT_LOCK:
+                current = ledger.get(run_id)
+                current_metadata: dict[str, Any] = {}
+                if current is not None:
+                    current_owner = _automation_run_owner_repository(current)
+                    if current_owner and current_owner != repo:
+                        raise PermissionError("automation run_id belongs to another repository")
+                    current_metadata = current.get("metadata") if isinstance(current.get("metadata"), dict) else {}
+                    if current_metadata.get("origin") == "service_job":
+                        raise PermissionError("automation run is service-owned")
+                    if current.get("task_name") != PR_REVIEW_EVENT_TASK:
+                        raise ValueError("review event run_id belongs to another task")
+                    _assert_automation_run_access(current, claims)
+                if current is not None and current_metadata.get("review_notification_status") == "sent":
+                    record = current
+                    notification = {"status": "deduplicated"}
+                else:
+                    run_metadata["review_notification_status"] = "pending"
+                    record = ledger.record(
+                        run_id,
+                        task_state,
+                        task_name=task_name,
+                        suggested_action=str(control.get("effective_action") or control.get("action") or ""),
+                        service_health=str(control.get("service_health") or ""),
+                        quota_status=control.get("quota_status") or "",
+                        org_health_status=str(control.get("org_health_status") or ""),
+                        metadata=run_metadata,
+                        owner_repository=repo,
+                    )
+                    notification = dispatch_review_event_notification(review_event)
+                    run_metadata["review_notification_status"] = str(notification.get("status") or "failed")
+                    record = ledger.record(
+                        run_id,
+                        task_state,
+                        task_name=task_name,
+                        suggested_action=str(control.get("effective_action") or control.get("action") or ""),
+                        service_health=str(control.get("service_health") or ""),
+                        quota_status=control.get("quota_status") or "",
+                        org_health_status=str(control.get("org_health_status") or ""),
+                        metadata=run_metadata,
+                        owner_repository=repo,
+                    )
+        else:
+            record = ledger.record(
+                run_id,
+                task_state,
+                task_name=task_name,
+                suggested_action=str(control.get("effective_action") or control.get("action") or ""),
+                service_health=str(control.get("service_health") or ""),
+                quota_status=control.get("quota_status") or "",
+                org_health_status=str(control.get("org_health_status") or ""),
+                metadata=run_metadata,
+                owner_repository=repo,
+            )
         control = _automation_control_snapshot(repo, task_name=task_name, requested_mode=requested_mode, pending_run=record)
-        _json_response(self, HTTPStatus.OK, {"status": "ok", "run": record, "control": control})
+        response = {"status": "ok", "run": record, "control": control}
+        if review_event is not None:
+            response["notification"] = notification
+        _json_response(self, HTTPStatus.OK, response)
 
     def _handle_automation_authority(self, claims: dict[str, Any], payload: dict[str, Any]) -> None:
         source_repo = str(payload.get("source_repository") or "")

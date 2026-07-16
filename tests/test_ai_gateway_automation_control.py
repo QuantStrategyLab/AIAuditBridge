@@ -170,6 +170,47 @@ class TestAutomationControlSnapshot(unittest.TestCase):
 
         self.assertEqual(control["effective_action"], "escalate")
 
+    def test_review_events_do_not_reset_failure_history(self) -> None:
+        runs = [
+            {
+                "run_id": "review-event",
+                "task_name": "pr_review_completed",
+                "task_state": "completed",
+                "metadata": {"origin": "external_workflow", "source_repository": "QuantStrategyLab/TargetRepo"},
+            },
+            {
+                "run_id": "failed-run",
+                "task_name": "monthly",
+                "task_state": "failed",
+                "metadata": {"origin": "service_job", "source_repository": "QuantStrategyLab/TargetRepo"},
+            },
+        ]
+        health = type("Health", (), {"status": "healthy"})()
+        quota = type("Quota", (), {"runtime_status": lambda self, repo: {"status": "ok"}})()
+        ledger = type("Ledger", (), {"snapshot": lambda self, limit=None: {"runs": runs}})()
+        pending_review = {
+            "run_id": "pending-review",
+            "task_name": "pr_review_completed",
+            "task_state": "completed",
+            "metadata": {"origin": "external_workflow", "source_repository": "QuantStrategyLab/TargetRepo"},
+        }
+
+        with (
+            patch("service.ai_gateway_service.read_org_health", return_value={"status": "ok"}),
+            patch("service.ai_gateway_service.get_health_monitor", return_value=health),
+            patch("service.ai_gateway_service.get_quota_manager", return_value=quota),
+            patch("service.ai_gateway_service.get_automation_run_ledger", return_value=ledger),
+            patch("service.ai_gateway_service.load_execution_policy", return_value={"default": {"max_consecutive_failures": 2}}),
+        ):
+            control = _automation_control_snapshot(
+                "QuantStrategyLab/TargetRepo",
+                task_name="pr_review_completed",
+                requested_mode="review_only",
+                pending_run=pending_review,
+            )
+
+        self.assertEqual(control["execution"]["consecutive_failures"], 1)
+
     def test_control_snapshot_fails_closed_after_ledger_eviction(self) -> None:
         runs = [
             {

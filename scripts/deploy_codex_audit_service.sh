@@ -21,6 +21,7 @@ ALLOWED_DIRECT_REPOSITORIES="${CODEX_AUDIT_SERVICE_ALLOWED_DIRECT_REPOSITORIES:-
 ALLOWED_SOURCE_REPOSITORIES="${CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES:-QuantStrategyLab/AIAuditBridge,QuantStrategyLab/BinancePlatform,QuantStrategyLab/CharlesSchwabPlatform,QuantStrategyLab/CnEquitySnapshotPipelines,QuantStrategyLab/CnEquityStrategies,QuantStrategyLab/CryptoLivePoolPipelines,QuantStrategyLab/CryptoStrategies,QuantStrategyLab/FirstradePlatform,QuantStrategyLab/HkEquitySnapshotPipelines,QuantStrategyLab/HkEquityStrategies,QuantStrategyLab/IBKRGatewayManager,QuantStrategyLab/InteractiveBrokersPlatform,QuantStrategyLab/LongBridgePlatform,QuantStrategyLab/MarketSignalSources,QuantStrategyLab/PoliticalEventTrackingResearch,QuantStrategyLab/QmtPlatform,QuantStrategyLab/QuantAdvisorResearch,QuantStrategyLab/QuantPlatformKit,QuantStrategyLab/QuantRuntimeSettings,QuantStrategyLab/QuantStrategyPlugins,QuantStrategyLab/ResearchSignalContextPipelines,QuantStrategyLab/SchwabTokenAutoRefresher,QuantStrategyLab/UsEquitySnapshotPipelines,QuantStrategyLab/UsEquityStrategies}"
 JOB_DIR="${CODEX_AUDIT_SERVICE_JOB_DIR:-/var/lib/codex-audit-bridge/jobs}"
 ADMIN_ENV_FILE="${CODEX_AUDIT_SERVICE_ADMIN_ENV_FILE:-/etc/codex-audit-bridge/admin.env}"
+TELEGRAM_ENV_FILE="${CODEX_AUDIT_SERVICE_TELEGRAM_ENV_FILE:-/etc/codex-audit-bridge/telegram.env}"
 EXECUTION_POLICY_FILE="${CODEX_AUDIT_SERVICE_EXECUTION_POLICY_PATH:-/etc/codex-audit-bridge-policy/execution_policy.json}"
 AUDIT_MODEL="${CODEX_AUDIT_SERVICE_MODEL:-}"
 AUDIT_REASONING_EFFORT="${CODEX_AUDIT_SERVICE_REASONING_EFFORT:-}"
@@ -385,6 +386,7 @@ Environment=CODEX_AUDIT_SERVICE_OPENAI_USAGE_WINDOW_DAYS=${OPENAI_USAGE_WINDOW_D
 Environment=CODEX_AUDIT_SERVICE_ANTHROPIC_USAGE_WINDOW_DAYS=${ANTHROPIC_USAGE_WINDOW_DAYS}
 Environment=CODEX_AUDIT_SERVICE_SANDBOX=read-only
 EnvironmentFile=-${ADMIN_ENV_FILE}
+EnvironmentFile=-${TELEGRAM_ENV_FILE}
 ${audit_model_line}
 ${audit_reasoning_effort_line}
 ${audit_token_line}
