@@ -62,6 +62,18 @@ class GateCodexAppReviewTest(unittest.TestCase):
         self.assertEqual(current, reviews[1])
         self.assertIsNone(missing)
 
+    def test_review_event_is_ignored_when_commit_is_not_current_head(self) -> None:
+        self.assertFalse(
+            gate_codex_app_review.review_matches_head(
+                {"commit_id": "old-head"}, "current-head"
+            )
+        )
+        self.assertTrue(
+            gate_codex_app_review.review_matches_head(
+                {"commit_id": "current-head"}, "current-head"
+            )
+        )
+
     def test_wrapper_exports_shared_static_functions(self) -> None:
         sample = "diff --git a/example.py b/example.py\n+++ b/example.py\n+api_key= \"x\""
         files = [{"filename": "example.py", "status": "modified", "additions": 0, "deletions": 0}]

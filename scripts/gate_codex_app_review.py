@@ -142,6 +142,10 @@ def run_static_guard(token: str, repo: str, pr_number: int) -> int:
 
 # ─── app review ──────────────────────────────────────────────────────────────
 
+def review_matches_head(review: dict[str, Any], head_sha: str) -> bool:
+    return type(review.get("commit_id")) is str and review["commit_id"] == head_sha
+
+
 def get_codex_review(
     token: str,
     repo: str,
@@ -155,7 +159,7 @@ def get_codex_review(
         if (
             isinstance(r, dict)
             and (r.get("user") or {}).get("login") == BOT_LOGIN
-            and r.get("commit_id") == head_sha
+            and review_matches_head(r, head_sha)
         ):
             return r
     return None
@@ -227,7 +231,17 @@ def main() -> int:
     # ── Phase 2: advisory App review ──────────────────────────────────
     # REACT: Codex just submitted a review
     review_event = event.get("review") or {}
-    if event_name == "pull_request_review" and (review_event.get("user") or {}).get("login") == BOT_LOGIN:
+    if (
+        event_name == "pull_request_review"
+        and (review_event.get("user") or {}).get("login") == BOT_LOGIN
+    ):
+        if not review_matches_head(review_event, head_sha):
+            print("REACT → stale connector review ignored")
+            step_summary(
+                "## Codex advisory ignored\n\n"
+                "The submitted connector review does not match the current PR head."
+            )
+            return 0
         rc, title, summary = app_decision(review_event)
         print(f"REACT → exit={rc}: {title}")
         step_summary(f"## {title}\n\n{summary}")

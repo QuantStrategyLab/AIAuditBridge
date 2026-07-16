@@ -47,6 +47,8 @@ class RunCodexPrReviewTests(unittest.TestCase):
         self.assertIn("Do not stop after the first blocking issue", prompt)
         self.assertIn("clean-slate", prompt)
         self.assertIn("repository-backed caller or a declared public untrusted boundary", prompt)
+        self.assertIn("kind|path|line|symbol", prompt)
+        self.assertIn("Free-form evidence is advisory only", prompt)
         self.assertIn("Do not invent a raw JSON/parser boundary", prompt)
         self.assertIn('"evidence"', prompt)
         self.assertNotIn("systematically check optional-key presence", prompt)
@@ -63,25 +65,62 @@ class RunCodexPrReviewTests(unittest.TestCase):
             "suggestion": "Add another public parser.",
         }
 
-        unproven = run_codex_pr_review.evaluate_findings([finding], changed_files, policy)
-        proven = run_codex_pr_review.evaluate_findings(
-            [
-                {
-                    **finding,
-                    "evidence": (
-                        "service/handler.py calls review() with request.body from the public "
-                        "POST /review boundary."
-                    ),
-                }
-            ],
-            changed_files,
-            policy,
-        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            caller = Path(tmpdir) / "service" / "handler.py"
+            caller.parent.mkdir(parents=True)
+            caller.write_text("result = review(request.body)\n", encoding="utf-8")
+            unproven = run_codex_pr_review.evaluate_findings(
+                [{**finding, "evidence": "A public handler calls review()."}],
+                changed_files,
+                policy,
+                repo_root=Path(tmpdir),
+            )
+            proven = run_codex_pr_review.evaluate_findings(
+                [
+                    {
+                        **finding,
+                        "evidence": "repository_call|service/handler.py|1|review(request.body)",
+                    }
+                ],
+                changed_files,
+                policy,
+                repo_root=Path(tmpdir),
+            )
 
         self.assertFalse(unproven["blocked"])
         self.assertEqual(unproven["non_blocking_findings"][0]["blocking_evidence"], False)
         self.assertTrue(proven["blocked"])
         self.assertEqual(proven["blocking_findings"][0]["blocking_evidence"], True)
+
+    def test_blocking_evidence_must_match_repository_line(self) -> None:
+        policy = run_codex_pr_review.load_policy()
+        changed_files = [{"filename": "service/review.py", "status": "modified"}]
+        finding = {
+            "severity": "high",
+            "category": "logic",
+            "file": "service/review.py",
+            "line": 11,
+            "description": "Wrong result.",
+            "suggestion": "Fix it.",
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            caller = Path(tmpdir) / "service" / "handler.py"
+            caller.parent.mkdir(parents=True)
+            caller.write_text("result = review(request.body)\n", encoding="utf-8")
+            decision = run_codex_pr_review.evaluate_findings(
+                [
+                    {
+                        **finding,
+                        "evidence": "repository_call|service/handler.py|1|submit(request.body)",
+                    }
+                ],
+                changed_files,
+                policy,
+                repo_root=Path(tmpdir),
+            )
+
+        self.assertFalse(decision["blocked"])
+        self.assertFalse(decision["non_blocking_findings"][0]["blocking_evidence"])
 
     def test_review_script_never_imports_from_the_pr_checkout(self) -> None:
         source = Path(run_codex_pr_review.__file__).read_text(encoding="utf-8")
@@ -1160,7 +1199,7 @@ class RunCodexPrReviewTests(unittest.TestCase):
                             "category": "security",
                             "file": "scripts/run_codex_pr_review.py",
                             "line": 1,
-                            "evidence": "main() executes the changed blocking decision path.",
+                            "evidence": "public_boundary|scripts/run_codex_pr_review.py|1|#!/usr/bin/env python3",
                             "description": "example blocking finding",
                             "suggestion": "fix it",
                         }
@@ -1381,7 +1420,7 @@ class RunCodexPrReviewTests(unittest.TestCase):
                             "category": "security",
                             "file": "scripts/run_codex_pr_review.py",
                             "line": 1,
-                            "evidence": "main() executes the changed blocking decision path.",
+                            "evidence": "public_boundary|scripts/run_codex_pr_review.py|1|#!/usr/bin/env python3",
                             "description": "example blocking finding",
                             "suggestion": "fix it",
                         }

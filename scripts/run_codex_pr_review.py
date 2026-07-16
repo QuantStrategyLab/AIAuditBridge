@@ -327,7 +327,7 @@ ${BODY}
 3. Do not emit a finding that concludes no code change is needed. For OIDC, `job_workflow_ref` is absent for explicit direct callers; flag a bypass only when a non-direct repository can reach the direct-caller path despite the allowlists.
 4. Review the entire diff holistically and report all independent reachable findings in one response. Do not stop after the first blocking issue.
 5. Do not invent backward-compatibility requirements that are absent from the repository and PR contract. When the repository and PR explicitly define a clean-slate namespace with legacy compatibility out of scope, review that boundary for accidental fallback instead of requesting dual-read or migration. This never overrides security or data-integrity findings.
-6. Emit a finding only when the current diff causes or exposes a defect on a supported input through a repository-backed caller or a declared public untrusted boundary. Cite that concrete path in `evidence`.
+6. Emit a finding only when the current diff causes or exposes a defect on a supported input through a repository-backed caller or a declared public untrusted boundary. Encode machine-checkable evidence as `kind|path|line|symbol`, where `kind` is `repository_call` or `public_boundary`, `path` is repository-relative, and `symbol` appears on that exact line in the current checkout. Free-form evidence is advisory only.
 7. Do not invent a raw JSON/parser boundary for private typed values. Do not treat `object.__new__`, `object.__setattr__`, `dataclasses.replace`, custom stateful mappings, corrupted private files, or similar escape hatches as reachable unless the repository or PR contract explicitly exposes them.
 8. For JSON/wire code, check only requirements evidenced by the changed public boundary and its real callers. Do not expand the task into a generic canonicalization or adversarial-parser checklist.
 9. Do not flag hypothetical future consumers, general defense-in-depth, or robustness outside the PR goal. If reachability cannot be proven from repository or PR evidence, omit the finding.
@@ -350,7 +350,7 @@ Return exactly one JSON object and no surrounding prose:
       "category": "security|bug|performance|logic|reliability",
       "file": "relative/path/to/file.py",
       "line": 42,
-      "evidence": "Concrete changed call path or declared public boundary proving reachability",
+      "evidence": "repository_call|service/handler.py|42|review(request.body)",
       "description": "What the problem is",
       "suggestion": "How to fix it"
     }
@@ -950,10 +950,41 @@ def apply_arbitration_failure(
 # ---------------------------------------------------------------------------
 
 
+def _blocking_evidence_matches_repository(value: Any, *, repo_root: Path) -> bool:
+    """Accept only evidence that resolves to an exact line in this checkout."""
+    if type(value) is not str or len(value) > FINDING_HISTORY_TEXT_LIMIT:
+        return False
+    parts = value.split("|", 3)
+    if len(parts) != 4:
+        return False
+    kind, raw_path, raw_line, symbol = (part.strip() for part in parts)
+    if kind not in {"repository_call", "public_boundary"}:
+        return False
+    if not raw_path or Path(raw_path).is_absolute() or ".." in Path(raw_path).parts:
+        return False
+    if not raw_line.isascii() or not raw_line.isdecimal() or raw_line.startswith("0"):
+        return False
+    line_number = int(raw_line)
+    if line_number < 1 or not symbol or any(ord(char) < 32 for char in symbol):
+        return False
+    try:
+        root = repo_root.resolve(strict=True)
+        candidate = (root / raw_path).resolve(strict=True)
+        candidate.relative_to(root)
+        if not candidate.is_file():
+            return False
+        lines = candidate.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError, ValueError):
+        return False
+    return line_number <= len(lines) and symbol in lines[line_number - 1]
+
+
 def evaluate_findings(
     findings: list[dict[str, Any]],
     changed_files: list[dict[str, Any]],
     policy: dict[str, Any],
+    *,
+    repo_root: Path | None = None,
 ) -> dict[str, Any]:
     """Evaluate Codex findings against the risk policy.
 
@@ -983,7 +1014,10 @@ def evaluate_findings(
         severity = str(finding.get("severity", "")).strip().lower()
         file_path = str(finding.get("file", "")).strip()
         evidence = finding.get("evidence")
-        has_blocking_evidence = type(evidence) is str and bool(evidence.strip())
+        has_blocking_evidence = _blocking_evidence_matches_repository(
+            evidence,
+            repo_root=repo_root or ROOT,
+        )
 
         # Classify the file's risk level
         if file_path not in file_risk_cache:

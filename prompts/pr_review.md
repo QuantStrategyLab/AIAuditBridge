@@ -24,7 +24,7 @@ You are reviewing a pull request for a **production quantitative trading and dat
 
 - Review the entire diff holistically and report all independent reachable findings in one response. Do not stop after the first blocking issue.
 - Do not invent backward-compatibility requirements that are absent from the repository and PR contract. If both explicitly define a clean-slate namespace, check for accidental legacy fallback instead of requesting dual-read or migration. This never overrides security or data-integrity findings.
-- Emit a finding only when the current diff causes or exposes a defect on a supported input through a repository-backed caller or a declared public untrusted boundary. Cite that path in `evidence`.
+- Emit a finding only when the current diff causes or exposes a defect on a supported input through a repository-backed caller or a declared public untrusted boundary. Encode evidence as `kind|path|line|symbol`, where `kind` is `repository_call` or `public_boundary`, `path` is repository-relative, and `symbol` appears on that exact line in the current checkout. Free-form evidence is advisory only.
 - Do not invent a raw JSON/parser boundary for private typed values. Do not treat `object.__new__`, `object.__setattr__`, `dataclasses.replace`, custom stateful mappings, corrupted private files, or similar escape hatches as reachable unless the repository or PR contract explicitly exposes them.
 - For JSON/wire code, check only requirements evidenced by the changed public boundary and its real callers. Do not expand the task into a generic canonicalization or adversarial-parser checklist.
 
@@ -50,7 +50,7 @@ Return exactly one JSON object (do not wrap in markdown fences):
       "category": "security",
       "file": "path/to/file.py",
       "line": 42,
-      "evidence": "Concrete changed call path or declared public boundary proving reachability",
+      "evidence": "repository_call|service/handler.py|42|review(request.body)",
       "description": "What's wrong",
       "suggestion": "How to fix it"
     }
