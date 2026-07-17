@@ -827,7 +827,6 @@ def validate_review_findings(
         if not isinstance(finding, dict):
             errors.append(f"finding[{index}] must be an object")
             continue
-        item = dict(finding)
         item_errors: list[str] = []
         for field, limit in string_limits.items():
             value = finding.get(field)
@@ -861,19 +860,18 @@ def validate_review_findings(
         if item_errors:
             errors.extend(item_errors)
             continue
-        item.update(
-            {
-                "severity": severity,
-                "category": _sanitize_model_prose(finding["category"], 80).lower(),
-                "file": _sanitize_history_path(finding["file"]),
-                "description": _sanitize_model_prose(
-                    finding["description"], REVIEW_FINDING_TEXT_LIMIT
-                ),
-                "suggestion": _sanitize_model_prose(
-                    finding["suggestion"], REVIEW_FINDING_TEXT_LIMIT
-                ),
-            }
-        )
+        item = {
+            "severity": severity,
+            "category": _sanitize_model_prose(finding["category"], 80).lower(),
+            "file": _sanitize_history_path(finding["file"]),
+            "line": line,
+            "description": _sanitize_model_prose(
+                finding["description"], REVIEW_FINDING_TEXT_LIMIT
+            ),
+            "suggestion": _sanitize_model_prose(
+                finding["suggestion"], REVIEW_FINDING_TEXT_LIMIT
+            ),
+        }
         validated.append(item)
     if errors:
         return [], errors[:16]
@@ -1957,9 +1955,14 @@ def _parse_legacy_review_state(body: str) -> dict[str, Any]:
         or state["finding_fingerprints"]
         or has_active_blocking_history(history)
     )
-    if not legacy_blocker and re.search(
+    blocking_section = re.search(
+        r"^### 🚫 Blocking Issues[ \t]*\n(.*?)(?=^### |^---[ \t]*$|\Z)",
+        prose,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    if not legacy_blocker and blocking_section and re.search(
         r"^#### \d+\. .*?\[(?:CRITICAL|HIGH)\] .+? in `[^`]+`$",
-        body or "",
+        blocking_section.group(1),
         flags=re.MULTILINE,
     ):
         state.update(valid=False, error="legacy_review_state_unanchored_blocker")

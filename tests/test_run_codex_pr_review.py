@@ -453,6 +453,32 @@ class RunCodexPrReviewTests(unittest.TestCase):
         self.assertNotIn("codex-pr-review-streak:999", body)
         self.assertIn("validation_error_count=1", outputs)
 
+    def test_validated_findings_drop_unknown_model_fields(self) -> None:
+        finding = {
+            "severity": "high",
+            "category": "logic",
+            "file": "scripts/run_codex_pr_review.py",
+            "line": 1,
+            "description": "The reachable review path is unsafe.",
+            "suggestion": "Constrain the validated payload.",
+            "model_metadata": {"decision": "allow"},
+        }
+
+        validated, errors = run_codex_pr_review.validate_review_findings([finding])
+        self.assertEqual(errors, [])
+        self.assertEqual(
+            set(validated[0]),
+            {"severity", "category", "file", "line", "description", "suggestion"},
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result, decision, _outputs, _body, _calls = self._run_main_case(
+                tmpdir,
+                review_output=json.dumps({"summary": "blocked", "findings": [finding]}),
+            )
+        self.assertEqual(result, 1)
+        self.assertNotIn("model_metadata", decision["blocking_findings"][0])
+
     def test_transient_review_failures_allow_same_head_backend_retry(self) -> None:
         cases: dict[str, str | Exception] = {
             "backend": ReviewError("temporary backend failure"),
@@ -572,6 +598,28 @@ class RunCodexPrReviewTests(unittest.TestCase):
         self.assertIn("Review State Validation Failed", body)
         self.assertIn("review_state_valid=false", outputs)
 
+    def test_legacy_unanchored_blocker_detection_is_section_scoped(self) -> None:
+        finding = "#### 1. 🟠 [HIGH] Logic in `docs/guide.md`"
+        prefix = (
+            "<!-- codex-pr-review -->\n"
+            "<!-- codex-pr-review-head-sha:deadbeef -->\n"
+            "## 🤖 Codex PR Review\n\n"
+        )
+
+        other_state = run_codex_pr_review.parse_review_state(
+            prefix + "### ℹ️ Other Findings\n\n" + finding
+        )
+        self.assertTrue(other_state["valid"])
+        self.assertFalse(other_state["blocked"])
+
+        blocking_state = run_codex_pr_review.parse_review_state(
+            prefix + "### 🚫 Blocking Issues\n\n" + finding
+        )
+        self.assertFalse(blocking_state["valid"])
+        self.assertEqual(
+            blocking_state["error"], "legacy_review_state_unanchored_blocker"
+        )
+
     def test_legacy_comment_fingerprints_are_recovered_per_finding(self) -> None:
         body = "#### 1. 🟠 [HIGH] Security in `service/auth.py`\n"
         expected = run_codex_pr_review.blocking_finding_fingerprints(
@@ -598,6 +646,29 @@ class RunCodexPrReviewTests(unittest.TestCase):
         self.assertEqual(history[0]["findings"][0]["file"], "service/review.py")
         self.assertIn("[REDACTED]", history[0]["findings"][0]["description"])
         self.assertNotIn("secret-value", marker)
+
+    def test_empty_history_update_preserves_existing_blocking_round(self) -> None:
+        finding = {
+            "severity": "high",
+            "category": "contract",
+            "file": "service/review.py",
+            "description": "The blocking contract is still active.",
+            "suggestion": "Preserve it until explicit clearance.",
+        }
+        marker = run_codex_pr_review.build_finding_history_marker(
+            [], [finding], "deadbeef"
+        )
+        history, valid = run_codex_pr_review.parse_finding_history(marker)
+
+        republished = run_codex_pr_review.build_finding_history_marker(
+            history, [], "feedface"
+        )
+        preserved, republished_valid = run_codex_pr_review.parse_finding_history(
+            republished
+        )
+        self.assertTrue(valid and republished_valid)
+        self.assertEqual(preserved, history)
+        self.assertTrue(run_codex_pr_review.has_active_blocking_history(preserved))
 
     def test_finding_history_is_bounded_and_legacy_comments_remain_compatible(self) -> None:
         history: list[dict[str, object]] = []
