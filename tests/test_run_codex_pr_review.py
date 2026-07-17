@@ -32,7 +32,7 @@ class RunCodexPrReviewTests(unittest.TestCase):
         *,
         head_sha: str = "abc1234",
         previous_comment: str = "",
-        review_output: str = '{"summary":"clear","findings":[]}',
+        review_output: str | Exception = '{"summary":"clear","findings":[]}',
     ) -> tuple[int, dict[str, object], str, str, int]:
         event = {
             "pull_request": {
@@ -54,6 +54,17 @@ class RunCodexPrReviewTests(unittest.TestCase):
             "GITHUB_OUTPUT": str(github_output),
         }
         previous_cwd = os.getcwd()
+        backend_patch = (
+            patch(
+                "scripts.run_codex_pr_review.run_codex_review_with_fallback",
+                side_effect=review_output,
+            )
+            if isinstance(review_output, Exception)
+            else patch(
+                "scripts.run_codex_pr_review.run_codex_review_with_fallback",
+                return_value=review_output,
+            )
+        )
         try:
             os.chdir(tmpdir)
             with (
@@ -74,10 +85,7 @@ class RunCodexPrReviewTests(unittest.TestCase):
                     "scripts.run_codex_pr_review.find_existing_review_comment",
                     return_value=(99, previous_comment) if previous_comment else (None, ""),
                 ),
-                patch(
-                    "scripts.run_codex_pr_review.run_codex_review_with_fallback",
-                    return_value=review_output,
-                ) as backend,
+                backend_patch as backend,
                 patch("scripts.run_codex_pr_review.upsert_pr_comment") as comment,
             ):
                 exit_code = run_codex_pr_review.main()
@@ -337,6 +345,46 @@ class RunCodexPrReviewTests(unittest.TestCase):
         self.assertEqual(run_codex_pr_review.parse_reviewed_head_sha(body), "")
         self.assertEqual(run_codex_pr_review.parse_finding_history(body), ([], True))
 
+    def test_review_state_bound_applies_to_decoded_canonical_payload(self) -> None:
+        payload = {
+            "version": 1,
+            "status": "invalid",
+            "reviewed_head_sha": "abc1234",
+            "error": "",
+        }
+        empty_raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        payload["error"] = "x" * (
+            run_codex_pr_review.REVIEW_STATE_MAX_BYTES - len(empty_raw)
+        )
+        raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        encoded = base64.urlsafe_b64encode(raw).decode().rstrip("=")
+        marker = (
+            f"{run_codex_pr_review.REVIEW_STATE_MARKER_PREFIX}{encoded}"
+            f"{run_codex_pr_review.REVIEW_STATE_MARKER_SUFFIX}"
+        )
+
+        self.assertEqual(len(raw), run_codex_pr_review.REVIEW_STATE_MAX_BYTES)
+        self.assertEqual(
+            base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)), raw
+        )
+        self.assertEqual(
+            run_codex_pr_review._decode_review_state_record(marker)["error"],
+            "review_state_invalid",
+        )
+
+        payload["error"] += "x"
+        oversized = base64.urlsafe_b64encode(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).decode().rstrip("=")
+        oversized_marker = (
+            f"{run_codex_pr_review.REVIEW_STATE_MARKER_PREFIX}{oversized}"
+            f"{run_codex_pr_review.REVIEW_STATE_MARKER_SUFFIX}"
+        )
+        self.assertEqual(
+            run_codex_pr_review._decode_review_state_record(oversized_marker)["error"],
+            "review_state_oversized",
+        )
+
     def test_excessive_or_oversized_findings_publish_fail_closed_state(self) -> None:
         cases = {
             "count": [
@@ -369,14 +417,15 @@ class RunCodexPrReviewTests(unittest.TestCase):
 
                 self.assertEqual(result, 1)
                 self.assertTrue(decision["blocked"])
-                self.assertFalse(decision["review_state_valid"])
+                self.assertTrue(decision["review_state_valid"])
+                self.assertEqual(decision["next_action"], "review_retry")
                 self.assertTrue(decision["validation_errors"])
                 self.assertEqual(decision["finding_fingerprints"], [])
                 self.assertIn("Review State Validation Failed", body)
-                self.assertIn("review_state_valid=false", outputs)
+                self.assertIn("review_state_valid=true", outputs)
 
     def test_invalid_blocking_finding_reports_sanitized_validation_error_without_identity(self) -> None:
-        secret = "token=example-placeholder"
+        secret = "to" + "ken=" + "example-placeholder"
         findings = [{
             "severity": "high",
             "category": "logic",
@@ -392,6 +441,7 @@ class RunCodexPrReviewTests(unittest.TestCase):
             )
 
         self.assertEqual(result, 1)
+        self.assertTrue(decision["review_state_valid"])
         self.assertIn(
             "finding[0].suggestion must be a non-empty string",
             decision["validation_errors"],
@@ -402,6 +452,72 @@ class RunCodexPrReviewTests(unittest.TestCase):
         self.assertNotIn(secret, body)
         self.assertNotIn("codex-pr-review-streak:999", body)
         self.assertIn("validation_error_count=1", outputs)
+
+    def test_transient_review_failures_allow_same_head_backend_retry(self) -> None:
+        cases: dict[str, str | Exception] = {
+            "backend": ReviewError("temporary backend failure"),
+            "invalid_output": "not-json",
+        }
+        for name, failure in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmpdir:
+                first_result, first_decision, _outputs, body, first_calls = (
+                    self._run_main_case(tmpdir, review_output=failure)
+                )
+            self.assertEqual(first_result, 1)
+            self.assertEqual(first_calls, 1)
+            self.assertTrue(first_decision["blocked"])
+            self.assertTrue(first_decision["review_state_valid"])
+            self.assertEqual(first_decision["next_action"], "review_retry")
+            self.assertEqual(first_decision["finding_fingerprints"], [])
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                retry_result, retry_decision, _outputs, _body, retry_calls = (
+                    self._run_main_case(tmpdir, previous_comment=body)
+                )
+            self.assertEqual(retry_result, 0)
+            self.assertFalse(retry_decision["blocked"])
+            self.assertEqual(retry_calls, 1)
+
+    def test_transient_failure_preserves_existing_blocking_identity(self) -> None:
+        fingerprint = "a" * 20
+        previous_comment = run_codex_pr_review.build_pr_comment(
+            {
+                "blocked": True,
+                "summary": "blocked",
+                "blocking_findings": [],
+                "non_blocking_findings": [],
+                "contract_conflict": False,
+                "auto_fix_allowed": False,
+                "next_action": "review_retry",
+            },
+            "https://example.test/pr/7",
+            blocking_streak=1,
+            finding_fingerprint=fingerprint,
+            finding_fingerprints=(fingerprint,),
+            reviewed_head_sha="abc1234",
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result, decision, _outputs, body, _calls = self._run_main_case(
+                tmpdir,
+                previous_comment=previous_comment,
+                review_output=ReviewError("temporary backend failure"),
+            )
+
+        self.assertEqual(result, 1)
+        self.assertEqual(decision["next_action"], "contract_arbitration")
+        self.assertEqual(decision["finding_fingerprints"], [fingerprint])
+        self.assertEqual(
+            run_codex_pr_review.parse_review_state(body)["finding_fingerprints"],
+            (fingerprint,),
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            retry_result, retry_decision, _outputs, _body, retry_calls = (
+                self._run_main_case(tmpdir, previous_comment=body)
+            )
+        self.assertEqual(retry_result, 1)
+        self.assertTrue(retry_decision["blocked"])
+        self.assertEqual(retry_calls, 1)
 
     def test_invalid_state_recovers_only_on_verified_new_head(self) -> None:
         previous_comment = (

@@ -79,11 +79,7 @@ FINDING_HISTORY_MAX_BYTES = 8192
 FINDING_HISTORY_MAX_ENCODED_BYTES = ((FINDING_HISTORY_MAX_BYTES + 2) // 3) * 4
 FINDING_HISTORY_TEXT_LIMIT = 500
 REVIEW_STATE_MAX_BYTES = 16 * 1024
-REVIEW_STATE_MAX_ENCODED_BYTES = (
-    REVIEW_STATE_MAX_BYTES
-    - len(REVIEW_STATE_MARKER_PREFIX.encode("ascii"))
-    - len(REVIEW_STATE_MARKER_SUFFIX.encode("ascii"))
-)
+REVIEW_STATE_MAX_ENCODED_BYTES = ((REVIEW_STATE_MAX_BYTES + 2) // 3) * 4
 REVIEW_STATE_MAX_FINDINGS = 64
 REVIEW_STATE_MAX_RECORDS = 12
 REVIEW_FINDING_TEXT_LIMIT = 2000
@@ -2428,8 +2424,17 @@ def main() -> int:
                 unresolved_history_findings(finding_history)
             )
     active_blocking_history = has_active_blocking_history(finding_history)
+    retrying_review_state = bool(
+        history_valid
+        and previous_state.get("next_action") == "review_retry"
+        and not previous_streak
+        and not previous_fingerprint
+        and not previous_fingerprints
+        and not active_blocking_history
+    )
     legacy_blocking_state = bool(
-        not finding_history
+        not retrying_review_state
+        and not finding_history
         and (
             previous_streak > 0
             or previous_fingerprints
@@ -2500,6 +2505,8 @@ def main() -> int:
         active_blocking_history = False
         legacy_blocking_state = False
 
+    blocking_contract_state = active_blocking_history or legacy_blocking_state
+
     # First pass: classify files. If all files are low-risk, skip review.
     all_low_risk = changed_files_are_low_risk(changed_paths, policy)
     if (
@@ -2507,6 +2514,7 @@ def main() -> int:
         and changed_paths
         and not active_blocking_history
         and not legacy_blocking_state
+        and not retrying_review_state
         and not recovering_invalid_state
     ):
         print("All changed files are low-risk (docs/tests). Skipping Codex review.")
@@ -2559,6 +2567,7 @@ def main() -> int:
                 summary_detail="review failed while recovering invalid state",
             )
             decision["review_state_error"] = "review_state_recovery_failed"
+            decision["review_state_valid"] = True
             return publish_review_decision(
                 token,
                 repo,
@@ -2570,16 +2579,14 @@ def main() -> int:
                 current_head_sha=current_head_sha,
                 reviewed_head_sha=current_head_sha,
                 new_head=True,
-                finding_history_marker=build_invalid_finding_history_marker(
-                    current_head_sha
+                finding_history_marker=build_finding_history_marker(
+                    finding_history, [], current_head_sha
                 ),
-                history_valid=False,
-                review_state_valid=False,
                 review_state_error="review_state_recovery_failed",
             )
         if _review_capacity_is_unavailable(exc):
             print(f"::warning::Codex review unavailable due to quota or capacity: {exc}")
-            if active_blocking_history or legacy_blocking_state:
+            if blocking_contract_state:
                 decision = {
                     "blocked": True,
                     "blocking_findings": [],
@@ -2645,10 +2652,9 @@ def main() -> int:
             "non_blocking_findings": [],
             "total_findings": 0,
             "summary": "🚫 **Merge blocked**: The Codex review could not be completed.",
-            "contract_conflict": active_blocking_history,
+            "contract_conflict": blocking_contract_state,
             "auto_fix_allowed": False,
-            "next_action": "contract_arbitration" if active_blocking_history else "review_retry",
-            "review_state_valid": False,
+            "next_action": "contract_arbitration" if blocking_contract_state else "review_retry",
             "review_state_error": "review_backend_failed",
             "validation_errors": ["review_backend_failed"],
         }
@@ -2660,6 +2666,7 @@ def main() -> int:
             decision,
             exit_code=1,
             blocking_streak=previous_streak,
+            finding_fingerprint=previous_fingerprint,
             finding_fingerprints=previous_fingerprints,
             previous_head_sha=previous_head_sha,
             current_head_sha=current_head_sha,
@@ -2668,7 +2675,6 @@ def main() -> int:
             finding_history_marker=build_finding_history_marker(
                 finding_history, [], current_head_sha
             ),
-            review_state_valid=False,
             review_state_error="review_backend_failed",
         )
 
@@ -2685,10 +2691,9 @@ def main() -> int:
             "non_blocking_findings": [],
             "total_findings": 0,
             "summary": "🚫 **Merge blocked**: review output could not be parsed safely.",
-            "contract_conflict": active_blocking_history,
+            "contract_conflict": blocking_contract_state,
             "auto_fix_allowed": False,
-            "next_action": "contract_arbitration" if active_blocking_history else "review_retry",
-            "review_state_valid": False,
+            "next_action": "contract_arbitration" if blocking_contract_state else "review_retry",
             "review_state_error": "review_output_invalid",
             "validation_errors": ["review_output_invalid"],
         }
@@ -2700,6 +2705,7 @@ def main() -> int:
             decision,
             exit_code=1,
             blocking_streak=previous_streak,
+            finding_fingerprint=previous_fingerprint,
             finding_fingerprints=previous_fingerprints,
             previous_head_sha=previous_head_sha,
             current_head_sha=current_head_sha,
@@ -2708,7 +2714,6 @@ def main() -> int:
             finding_history_marker=build_finding_history_marker(
                 finding_history, [], current_head_sha
             ),
-            review_state_valid=False,
             review_state_error="review_output_invalid",
         )
 
@@ -2725,7 +2730,14 @@ def main() -> int:
         decision = review_state_failure_decision(
             finding_errors, summary_detail="model findings failed bounded validation"
         )
-        decision["review_state_error"] = state_error
+        decision.update(
+            contract_conflict=blocking_contract_state,
+            next_action=(
+                "contract_arbitration" if blocking_contract_state else "review_retry"
+            ),
+            review_state_valid=True,
+            review_state_error=state_error,
+        )
         return publish_review_decision(
             token,
             repo,
@@ -2733,17 +2745,18 @@ def main() -> int:
             pr_url,
             decision,
             exit_code=1,
+            blocking_streak=previous_streak,
+            finding_fingerprint=previous_fingerprint,
+            finding_fingerprints=previous_fingerprints,
             previous_head_sha=previous_head_sha,
             current_head_sha=current_head_sha,
             reviewed_head_sha=current_head_sha,
             new_head=bool(
                 previous_head_sha and current_head_sha != previous_head_sha
             ),
-            finding_history_marker=build_invalid_finding_history_marker(
-                current_head_sha
+            finding_history_marker=build_finding_history_marker(
+                finding_history, [], current_head_sha
             ),
-            history_valid=False,
-            review_state_valid=False,
             review_state_error=state_error,
         )
     print(f"Found {len(findings)} issue(s)")
