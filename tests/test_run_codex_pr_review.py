@@ -39,6 +39,130 @@ class RunCodexPrReviewTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
+    def _matching_advisory_history_finding(self) -> dict[str, object]:
+        return {
+            "severity": "high",
+            "category": "logic",
+            "file": "scripts/run_codex_pr_review.py",
+            "description": "The exact trusted advisory issue repeats.",
+            "suggestion": "Keep the authenticated advisory disposition.",
+        }
+
+    def _run_main_with_advisory_history(
+        self,
+        history_findings: list[dict[str, object]],
+        *,
+        prior_contract_conflict: bool = False,
+        arbitration_verdict: str = "clear",
+    ) -> tuple[int, str, list[str]]:
+        current_finding = {
+            **self._matching_advisory_history_finding(),
+            "line": 1,
+            "evidence": (
+                "current_caller|scripts/run_codex_pr_review.py|1|#!/usr/bin/env python3"
+            ),
+            "reachability": "The current review workflow invokes this exact script.",
+            "impact": "The repeated concern would affect the review decision.",
+            "advisory_provenance": "trusted-advisory-provenance",
+            "new_reachability_evidence": "",
+        }
+        trusted_advisory = {
+            "thread_id": "PRRT_trusted_advisory",
+            "path": "scripts/run_codex_pr_review.py",
+            "line": 1,
+            "start_line": 1,
+            "original_line": 1,
+            "original_start_line": 1,
+            "classification": "ADVISORY_AUTHENTICATED_DISPOSITION",
+            "disposition": "Authenticated advisory disposition.",
+            "provenance": "trusted-advisory-provenance",
+        }
+        head_sha = "abc1234"
+        prior_comment = (
+            "<!-- codex-pr-review -->\n"
+            f"<!-- codex-pr-review-head-sha:{head_sha} -->\n"
+            "<!-- codex-pr-review-contract-conflict:"
+            f"{str(prior_contract_conflict).lower()} -->\n"
+            + run_codex_pr_review.build_finding_history_marker(
+                [], history_findings, head_sha
+            )
+        )
+        arbitration = json.dumps(
+            {
+                "verdict": arbitration_verdict,
+                "contract_conflict": arbitration_verdict != "clear",
+                "reason": "Only the supplied active history remains authoritative.",
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            event = {
+                "pull_request": {
+                    "number": 7,
+                    "title": "review advisory history",
+                    "body": "",
+                    "html_url": "https://example.test/pr/7",
+                    "head": {"sha": head_sha},
+                    "base": {
+                        "sha": "base123",
+                        "repo": {"full_name": "org/repo"},
+                    },
+                }
+            }
+            event_path = Path(tmpdir) / "event.json"
+            event_path.write_text(json.dumps(event), encoding="utf-8")
+            env = {
+                "GH_TOKEN": "token",
+                "GITHUB_REPOSITORY": "org/repo",
+                "GITHUB_EVENT_PATH": str(event_path),
+            }
+            previous_cwd = os.getcwd()
+            try:
+                os.chdir(tmpdir)
+                with (
+                    patch.dict(os.environ, env, clear=True),
+                    patch(
+                        "scripts.run_codex_pr_review.fetch_pr_files",
+                        return_value=[{"filename": "scripts/run_codex_pr_review.py"}],
+                    ),
+                    patch(
+                        "scripts.run_codex_pr_review.fetch_pr_diff",
+                        return_value=(
+                            "diff --git a/scripts/run_codex_pr_review.py "
+                            "b/scripts/run_codex_pr_review.py"
+                        ),
+                    ),
+                    patch(
+                        "scripts.run_codex_pr_review.load_policy",
+                        return_value=run_codex_pr_review._default_policy(),
+                    ),
+                    patch(
+                        "scripts.run_codex_pr_review.find_existing_review_comment",
+                        return_value=(99, prior_comment),
+                    ),
+                    patch(
+                        "scripts.run_codex_pr_review.fetch_trusted_resolved_advisories",
+                        return_value=[trusted_advisory],
+                    ),
+                    patch(
+                        "scripts.run_codex_pr_review.run_codex_review_with_fallback",
+                        side_effect=[
+                            json.dumps(
+                                {"summary": "repeat", "findings": [current_finding]}
+                            ),
+                            arbitration,
+                        ],
+                    ) as backend,
+                    patch("scripts.run_codex_pr_review.upsert_pr_comment") as comment,
+                ):
+                    return_code = run_codex_pr_review.main()
+            finally:
+                os.chdir(previous_cwd)
+
+            comment.assert_called_once()
+            body = str(comment.call_args.args[3])
+            prompts = [str(call.args[0]) for call in backend.call_args_list]
+        return return_code, body, prompts
+
     def test_changed_files_are_low_risk_only_for_docs_and_tests(self) -> None:
         policy = run_codex_pr_review.load_policy()
         self.assertTrue(run_codex_pr_review.changed_files_are_low_risk(["docs/guide.md", "tests/test_x.py"], policy))
@@ -77,6 +201,7 @@ class RunCodexPrReviewTests(unittest.TestCase):
         self.assertIn("current configuration and inputs", prompt)
         self.assertIn("downgrade it to medium or low", prompt)
         self.assertIn("hypothetical future consumer", prompt)
+        self.assertIn("advisory_provenance", prompt)
         self.assertIn("Do not request a new parser, store, registry, or event-persistence layer", prompt)
 
     def test_repository_review_template_uses_the_same_reachability_gate(self) -> None:
@@ -87,6 +212,7 @@ class RunCodexPrReviewTests(unittest.TestCase):
         self.assertIn("explicitly declared public untrusted boundary", template)
         self.assertIn("downgrade it to medium or low", template)
         self.assertIn("hypothetical future consumer", template)
+        self.assertIn("advisory_provenance", template)
 
     def test_pr271_future_linux_cloud_portability_is_advisory_for_locked_local_runner(self) -> None:
         fixture = self._load_pr271_fixture()
@@ -128,6 +254,42 @@ class RunCodexPrReviewTests(unittest.TestCase):
         self.assertEqual(
             decision["non_blocking_findings"][0]["trusted_advisory_matches"],
             ["PRRT_source_revision"],
+        )
+
+    def test_unrelated_same_line_bug_without_exact_advisory_identity_blocks(self) -> None:
+        fixture = self._load_pr271_fixture()
+        advisories = run_codex_pr_review.extract_trusted_resolved_advisories(
+            fixture["review_threads_response"], str(fixture["head_sha"])
+        )
+        unrelated = {
+            "severity": "critical",
+            "category": "security",
+            "file": "src/us_equity_strategies/research/r3_joint_evidence.py",
+            "line": 1,
+            "evidence": (
+                "current_caller|src/us_equity_strategies/research/"
+                "r3_joint_evidence.py|2|run_private_r3"
+            ),
+            "reachability": "The current private runner reads this changed value.",
+            "impact": "The unrelated defect exposes current private evidence.",
+            "new_reachability_evidence": "",
+            "description": "An unrelated current security defect shares this line.",
+            "suggestion": "Fix the current disclosure without changing portability.",
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._write_pr271_fixture_repo(root, fixture)
+            decision = run_codex_pr_review.evaluate_findings(
+                [unrelated],
+                [{"filename": "src/us_equity_strategies/research/r3_joint_evidence.py"}],
+                run_codex_pr_review._default_policy(),
+                repo_root=root,
+                trusted_advisories=advisories,
+            )
+
+        self.assertTrue(decision["blocked"])
+        self.assertFalse(
+            decision["blocking_findings"][0]["trusted_advisory_suppressed"]
         )
 
     def test_real_current_entrypoint_with_reachable_impact_still_blocks(self) -> None:
@@ -187,6 +349,115 @@ class RunCodexPrReviewTests(unittest.TestCase):
         )
         self.assertIn("Untrusted PR Description", prompt)
         self.assertIn("Authenticated Resolved Advisory Context", prompt)
+
+        forged = {
+            **fixture["findings"]["current_entrypoint"],
+            "advisory_provenance": "untrusted-comment-provenance",
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._write_pr271_fixture_repo(root, fixture)
+            decision = run_codex_pr_review.evaluate_findings(
+                [forged],
+                [{"filename": "service/current_entrypoint.py"}],
+                run_codex_pr_review._default_policy(),
+                repo_root=root,
+                trusted_advisories=advisories,
+            )
+        self.assertTrue(decision["blocked"])
+
+    def test_matching_active_history_clears_after_authenticated_suppression(self) -> None:
+        matching = self._matching_advisory_history_finding()
+        return_code, body, prompts = self._run_main_with_advisory_history([matching])
+
+        self.assertEqual(return_code, 0)
+        self.assertEqual(len(prompts), 1)
+        history, valid = run_codex_pr_review.parse_finding_history(body)
+        self.assertTrue(valid)
+        self.assertEqual(history[-1]["status"], "clear")
+
+        conflict_code, _conflict_body, conflict_prompts = (
+            self._run_main_with_advisory_history(
+                [matching],
+                prior_contract_conflict=True,
+                arbitration_verdict="block",
+            )
+        )
+        self.assertEqual(conflict_code, 1)
+        self.assertEqual(len(conflict_prompts), 2)
+
+    def test_unrelated_active_history_remains_after_matching_suppression(self) -> None:
+        matching = self._matching_advisory_history_finding()
+        unrelated = {
+            "severity": "high",
+            "category": "security",
+            "file": "service/ai_gateway_service.py",
+            "description": "An unrelated active authentication defect remains.",
+            "suggestion": "Keep the unrelated active blocker.",
+        }
+        return_code, _body, prompts = self._run_main_with_advisory_history(
+            [matching, unrelated], arbitration_verdict="block"
+        )
+
+        self.assertEqual(return_code, 1)
+        self.assertEqual(len(prompts), 2)
+        self.assertNotIn(str(matching["description"]), prompts[1])
+        self.assertIn(str(unrelated["description"]), prompts[1])
+
+    def test_equivalent_reachability_format_is_not_materially_new(self) -> None:
+        fixture = self._load_pr271_fixture()
+        advisories = run_codex_pr_review.extract_trusted_resolved_advisories(
+            fixture["review_threads_response"], str(fixture["head_sha"])
+        )
+        repeated = {
+            **fixture["findings"]["semantic_repeat"],
+            "new_reachability_evidence": (
+                "current_caller|./src/us_equity_strategies/research/"
+                "r3_joint_evidence.py|2|run_private"
+            ),
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._write_pr271_fixture_repo(root, fixture)
+            decision = run_codex_pr_review.evaluate_findings(
+                [repeated],
+                [{"filename": "src/us_equity_strategies/research/r3_joint_evidence.py"}],
+                run_codex_pr_review._default_policy(),
+                repo_root=root,
+                trusted_advisories=advisories,
+            )
+
+        self.assertFalse(decision["blocked"])
+        self.assertFalse(
+            decision["non_blocking_findings"][0]["new_reachability_evidence_valid"]
+        )
+
+    def test_genuinely_different_reachability_identity_is_new(self) -> None:
+        fixture = self._load_pr271_fixture()
+        advisories = run_codex_pr_review.extract_trusted_resolved_advisories(
+            fixture["review_threads_response"], str(fixture["head_sha"])
+        )
+        repeated = {
+            **fixture["findings"]["semantic_repeat"],
+            "new_reachability_evidence": (
+                "public_untrusted_boundary|service/current_entrypoint.py|1|submit(request)"
+            ),
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._write_pr271_fixture_repo(root, fixture)
+            decision = run_codex_pr_review.evaluate_findings(
+                [repeated],
+                [{"filename": "src/us_equity_strategies/research/r3_joint_evidence.py"}],
+                run_codex_pr_review._default_policy(),
+                repo_root=root,
+                trusted_advisories=advisories,
+            )
+
+        self.assertTrue(decision["blocked"])
+        self.assertTrue(
+            decision["blocking_findings"][0]["new_reachability_evidence_valid"]
+        )
 
     def test_unchanged_head_semantic_repeat_needs_new_reachability_evidence_to_block(self) -> None:
         fixture = self._load_pr271_fixture()

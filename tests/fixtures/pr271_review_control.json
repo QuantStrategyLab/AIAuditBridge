@@ -167,6 +167,7 @@
       "evidence": "current_caller|src/us_equity_strategies/research/r3_joint_evidence.py|2|run_private_r3",
       "reachability": "The current locked local runner reaches this constant; Linux/cloud deployment is future-only.",
       "impact": "A future Linux/cloud process would not find the workstation path.",
+      "advisory_provenance": "3a17c54cb5caaccb54ee2d41",
       "new_reachability_evidence": "",
       "description": "PRIVATE_ROOT is not portable to a future Linux/cloud deployment.",
       "suggestion": "Add generic path configurability."
@@ -179,6 +180,7 @@
       "evidence": "current_caller|src/us_equity_strategies/research/r3_joint_evidence.py|2|run_private_r3",
       "reachability": "The normal runner checks the same clean revision before and after bundle construction.",
       "impact": "Only a hypothetical edit-and-revert race could evade the two checks.",
+      "advisory_provenance": "a0d9f90966ab2d96ed5a7521",
       "new_reachability_evidence": "",
       "description": "A runner edit followed by a revert during bundle construction is not observed.",
       "suggestion": "Add continuous source monitoring."
@@ -204,6 +206,7 @@
       "evidence": "current_caller|src/us_equity_strategies/research/r3_joint_evidence.py|2|run_private_r3",
       "reachability": "The local private runner is the only current caller.",
       "impact": "A hypothetical cloud process would need a different root.",
+      "advisory_provenance": "3a17c54cb5caaccb54ee2d41",
       "new_reachability_evidence": "",
       "description": "The fixed private root prevents a future cloud worker from starting.",
       "suggestion": "Make every private path configurable."
