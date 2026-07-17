@@ -66,6 +66,8 @@ HEAD_SHA_MARKER_PREFIX = "<!-- codex-pr-review-head-sha:"
 HEAD_SHA_MARKER_SUFFIX = " -->"
 FINDING_HISTORY_MARKER_PREFIX = "<!-- codex-pr-review-history:v1:"
 FINDING_HISTORY_MARKER_SUFFIX = " -->"
+REVIEW_STATE_MARKER_PREFIX = "<!-- codex-pr-review-state:v1:"
+REVIEW_STATE_MARKER_SUFFIX = " -->"
 CONTRACT_CONFLICT_MARKER_PREFIX = "<!-- codex-pr-review-contract-conflict:"
 AUTO_FIX_ALLOWED_MARKER_PREFIX = "<!-- codex-pr-review-auto-fix-allowed:"
 NEXT_ACTION_MARKER_PREFIX = "<!-- codex-pr-review-next-action:"
@@ -76,6 +78,15 @@ FINDING_HISTORY_MAX_ROUNDS = 4
 FINDING_HISTORY_MAX_BYTES = 8192
 FINDING_HISTORY_MAX_ENCODED_BYTES = ((FINDING_HISTORY_MAX_BYTES + 2) // 3) * 4
 FINDING_HISTORY_TEXT_LIMIT = 500
+REVIEW_STATE_MAX_BYTES = 16 * 1024
+REVIEW_STATE_MAX_ENCODED_BYTES = (
+    REVIEW_STATE_MAX_BYTES
+    - len(REVIEW_STATE_MARKER_PREFIX.encode("ascii"))
+    - len(REVIEW_STATE_MARKER_SUFFIX.encode("ascii"))
+)
+REVIEW_STATE_MAX_FINDINGS = 64
+REVIEW_STATE_MAX_RECORDS = 12
+REVIEW_FINDING_TEXT_LIMIT = 2000
 ARBITRATION_REPEAT_THRESHOLD = 2
 
 
@@ -778,10 +789,123 @@ def parse_review_output(
         return payload
 
     if require_findings:
-        raise ReviewError(f"Failed to parse Codex review output with a findings array: {stripped[:500]}")
+        raise ReviewError("Failed to parse Codex review output with a findings array")
     if required_keys:
-        raise ReviewError(f"Failed to parse Codex review output with required keys: {stripped[:500]}")
-    raise ReviewError(f"Failed to parse Codex review output as JSON: {stripped[:500]}")
+        raise ReviewError(
+            f"Failed to parse Codex review output with required keys: {', '.join(required_keys)}"
+        )
+    raise ReviewError("Failed to parse Codex review output as JSON")
+
+
+def validate_review_findings(
+    findings: Any,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Validate and sanitize model findings before assigning review identity."""
+    if not isinstance(findings, list):
+        return [], ["findings must be a list"]
+    if len(findings) > REVIEW_STATE_MAX_FINDINGS:
+        return [], [
+            f"findings count {len(findings)} exceeds maximum {REVIEW_STATE_MAX_FINDINGS}"
+        ]
+    try:
+        serialized = json.dumps(
+            findings, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError):
+        return [], ["findings payload is not safely serializable"]
+    if len(serialized) > REVIEW_STATE_MAX_BYTES:
+        return [], [
+            f"findings payload exceeds {REVIEW_STATE_MAX_BYTES}-byte limit"
+        ]
+
+    validated: list[dict[str, Any]] = []
+    errors: list[str] = []
+    string_limits = {
+        "severity": 20,
+        "category": 80,
+        "file": 300,
+        "description": REVIEW_FINDING_TEXT_LIMIT,
+        "suggestion": REVIEW_FINDING_TEXT_LIMIT,
+    }
+    for index, finding in enumerate(findings):
+        if not isinstance(finding, dict):
+            errors.append(f"finding[{index}] must be an object")
+            continue
+        item = dict(finding)
+        item_errors: list[str] = []
+        for field, limit in string_limits.items():
+            value = finding.get(field)
+            if not isinstance(value, str) or not value.strip():
+                item_errors.append(
+                    f"finding[{index}].{field} must be a non-empty string"
+                )
+            elif len(value) > limit:
+                item_errors.append(
+                    f"finding[{index}].{field} exceeds {limit}-character limit"
+                )
+        severity = str(finding.get("severity") or "").strip().lower()
+        if severity and severity not in COMMENT_SEVERITIES:
+            item_errors.append(
+                f"finding[{index}].severity must be critical, high, medium, or low"
+            )
+        line = finding.get("line")
+        if line is not None and (
+            isinstance(line, bool) or not isinstance(line, int) or line <= 0
+        ):
+            item_errors.append(f"finding[{index}].line must be a positive integer or null")
+        file_value = finding.get("file")
+        if isinstance(file_value, str) and (
+            re.search(r"[\x00-\x1f\x7f]", file_value)
+            or file_value.startswith(("/", "\\"))
+            or any(part in {"", ".", ".."} for part in file_value.split("/"))
+        ):
+            item_errors.append(
+                f"finding[{index}].file must be a repository-relative path"
+            )
+        if item_errors:
+            errors.extend(item_errors)
+            continue
+        item.update(
+            {
+                "severity": severity,
+                "category": _sanitize_model_prose(finding["category"], 80).lower(),
+                "file": _sanitize_history_path(finding["file"]),
+                "description": _sanitize_model_prose(
+                    finding["description"], REVIEW_FINDING_TEXT_LIMIT
+                ),
+                "suggestion": _sanitize_model_prose(
+                    finding["suggestion"], REVIEW_FINDING_TEXT_LIMIT
+                ),
+            }
+        )
+        validated.append(item)
+    if errors:
+        return [], errors[:16]
+    return validated, []
+
+
+def review_state_failure_decision(
+    errors: list[str], *, summary_detail: str = "review state is invalid"
+) -> dict[str, Any]:
+    """Return a bounded decision that cannot assign identity to invalid findings."""
+    validation_errors = [
+        _sanitize_validation_error(error) for error in errors[:16] if error
+    ] or ["review_state_invalid"]
+    return {
+        "blocked": True,
+        "blocking_findings": [],
+        "non_blocking_findings": [],
+        "total_findings": 0,
+        "summary": (
+            "🚫 **Merge blocked — Review State Validation Failed**: "
+            f"{summary_detail}; automatic remediation is disabled"
+        ),
+        "contract_conflict": False,
+        "auto_fix_allowed": False,
+        "next_action": "review_retry",
+        "validation_errors": validation_errors,
+        "review_state_valid": False,
+    }
 
 
 def parse_arbitration_output(
@@ -1066,6 +1190,29 @@ def _sanitize_history_text(value: Any, limit: int = FINDING_HISTORY_TEXT_LIMIT) 
     return text[:limit]
 
 
+def _sanitize_model_prose(value: Any, limit: int = FINDING_HISTORY_TEXT_LIMIT) -> str:
+    """Sanitize model-controlled prose and remove review-state marker syntax."""
+    text = _sanitize_history_text(value, limit)
+    return re.sub(
+        r"<!--\s*codex-pr-review[^>]*-->",
+        "[REDACTED_REVIEW_MARKER]",
+        text,
+        flags=re.IGNORECASE,
+    )[:limit]
+
+
+def _sanitize_validation_error(value: Any, limit: int = 300) -> str:
+    """Sanitize internal validation messages without redacting field paths."""
+    text = re.sub(r"[\x00-\x1f\x7f]+", " ", str(value or "")).strip()
+    text = re.sub(
+        r"<!--\s*codex-pr-review[^>]*-->",
+        "[REDACTED_REVIEW_MARKER]",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return text[:limit]
+
+
 def _history_finding(finding: dict[str, Any]) -> dict[str, str]:
     return {
         "severity": _sanitize_history_text(finding.get("severity"), 20).lower(),
@@ -1149,7 +1296,7 @@ def build_invalid_finding_history_marker(head_sha: str = "") -> str:
     return f"{FINDING_HISTORY_MARKER_PREFIX}{encoded}{FINDING_HISTORY_MARKER_SUFFIX}"
 
 
-def parse_finding_history(body: str) -> tuple[list[dict[str, Any]], bool]:
+def _parse_finding_history_marker(body: str) -> tuple[list[dict[str, Any]], bool]:
     """Recover trusted history; legacy absence is valid, malformed state fails closed."""
     if FINDING_HISTORY_MARKER_PREFIX not in (body or ""):
         return [], True
@@ -1211,6 +1358,19 @@ def parse_finding_history(body: str) -> tuple[list[dict[str, Any]], bool]:
             {"head_sha": head_sha, "findings": checked_findings, "status": status}
         )
     return validated, True
+
+
+def parse_finding_history(body: str) -> tuple[list[dict[str, Any]], bool]:
+    """Read history from the versioned state domain, then bounded legacy state."""
+    state = _parse_review_state_v1(body)
+    if state["present"]:
+        if state["valid"]:
+            return list(state.get("finding_history") or []), True
+        machine_body = "\n".join(
+            ["<!-- codex-pr-review -->", *_review_state_records(body)]
+        )
+        return _parse_finding_history_marker(machine_body)
+    return _parse_finding_history_marker(body)
 
 
 def previous_matching_findings(
@@ -1294,10 +1454,23 @@ def build_pr_comment(
     reviewed_head_sha: str = "",
     arbitration: dict[str, Any] | None = None,
     finding_history_marker: str = "",
+    review_state_marker: str = "",
 ) -> str:
     """Build a markdown comment to post on the PR."""
+    if not review_state_marker:
+        review_state_marker = build_review_state_marker(
+            decision,
+            blocking_streak=blocking_streak,
+            finding_fingerprint=finding_fingerprint,
+            finding_fingerprints=finding_fingerprints,
+            reviewed_head_sha=reviewed_head_sha,
+            finding_history_marker=finding_history_marker,
+            state_valid=bool(decision.get("review_state_valid", True)),
+            state_error=str(decision.get("review_state_error") or ""),
+        )
     lines = [
         "<!-- codex-pr-review -->",
+        review_state_marker,
         f"{STREAK_MARKER_PREFIX}{int(blocking_streak)}{STREAK_MARKER_SUFFIX}",
         f"{FINGERPRINT_MARKER_PREFIX}{finding_fingerprint}{FINGERPRINT_MARKER_SUFFIX}",
         f"{FINGERPRINTS_MARKER_PREFIX}{','.join(finding_fingerprints)}{FINGERPRINTS_MARKER_SUFFIX}",
@@ -1315,7 +1488,7 @@ def build_pr_comment(
 
     if arbitration:
         verdict = arbitration.get("verdict", "")
-        reason = arbitration.get("reason", "")
+        reason = _sanitize_model_prose(arbitration.get("reason", ""), 1000)
         emoji = "✅" if verdict == "clear" else "🚫" if verdict == "block" else "⚠️"
         lines.extend(
             [
@@ -1325,6 +1498,12 @@ def build_pr_comment(
                 "",
             ]
         )
+    validation_errors = decision.get("validation_errors")
+    if isinstance(validation_errors, list) and validation_errors:
+        lines.extend(["### ⚠️ Validation Errors", ""])
+        for error in validation_errors[:16]:
+            lines.append(f"- {_sanitize_validation_error(error)}")
+        lines.append("")
     blocking = decision["blocking_findings"]
     if blocking:
         lines.extend([
@@ -1358,12 +1537,16 @@ def build_pr_comment(
 
 
 def _format_finding(index: int, finding: dict[str, Any]) -> list[str]:
-    severity = finding.get("severity", "unknown")
-    category = finding.get("category", "general")
-    file_path = finding.get("file", "?")
+    severity = _sanitize_model_prose(finding.get("severity", "unknown"), 20).lower()
+    category = _sanitize_model_prose(finding.get("category", "general"), 80)
+    file_path = _sanitize_history_path(finding.get("file", "?"))
     line = finding.get("line")
-    description = finding.get("description", "No description")
-    suggestion = finding.get("suggestion", "")
+    description = _sanitize_model_prose(
+        finding.get("description", "No description"), REVIEW_FINDING_TEXT_LIMIT
+    )
+    suggestion = _sanitize_model_prose(
+        finding.get("suggestion", ""), REVIEW_FINDING_TEXT_LIMIT
+    )
 
     emoji = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🔵"}.get(severity, "⚪")
 
@@ -1453,7 +1636,440 @@ def trusted_review_comment_provenance(comment: Any) -> str:
     return hashlib.sha256(raw).hexdigest()[:24]
 
 
+def _empty_review_state() -> dict[str, Any]:
+    return {
+        "present": False,
+        "valid": True,
+        "legacy": False,
+        "error": "",
+        "reviewed_head_sha": "",
+        "blocking_streak": 0,
+        "finding_fingerprint": "",
+        "finding_fingerprints": (),
+        "finding_history": [],
+        "blocked": False,
+        "contract_conflict": False,
+        "auto_fix_allowed": True,
+        "next_action": "none",
+        "implementation": "",
+    }
+
+
+def _safe_head_sha(value: Any) -> str:
+    try:
+        normalized = str(value or "").strip().lower()
+    except Exception:
+        return ""
+    return normalized if not normalized or re.fullmatch(r"[0-9a-f]{7,64}", normalized) else ""
+
+
+def _review_state_records(body: str) -> list[str]:
+    lines = (body or "").splitlines()
+    if not lines or lines[0] != "<!-- codex-pr-review -->":
+        return []
+    records: list[str] = []
+    for line in lines[1:]:
+        if not line.startswith("<!-- codex-pr-review-"):
+            break
+        records.append(line)
+    return records
+
+
+def _anchored_legacy_head(records: list[str]) -> str:
+    pattern = re.compile(
+        rf"{re.escape(HEAD_SHA_MARKER_PREFIX)}([0-9a-f]{{7,64}}){re.escape(HEAD_SHA_MARKER_SUFFIX)}"
+    )
+    for record in records:
+        match = pattern.fullmatch(record)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def _decode_review_state_record(record: str) -> dict[str, Any]:
+    state = _empty_review_state()
+    state["present"] = True
+    match = re.fullmatch(
+        rf"{re.escape(REVIEW_STATE_MARKER_PREFIX)}([A-Za-z0-9_-]+){re.escape(REVIEW_STATE_MARKER_SUFFIX)}",
+        record,
+    )
+    if not match:
+        state.update(valid=False, error="review_state_record_malformed")
+        return state
+    encoded = match.group(1)
+    if len(encoded) > REVIEW_STATE_MAX_ENCODED_BYTES:
+        state.update(valid=False, error="review_state_oversized")
+        return state
+    try:
+        padding = "=" * (-len(encoded) % 4)
+        raw = base64.b64decode(encoded + padding, altchars=b"-_", validate=True)
+        if len(raw) > REVIEW_STATE_MAX_BYTES:
+            state.update(valid=False, error="review_state_oversized")
+            return state
+        if base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=") != encoded:
+            state.update(valid=False, error="review_state_payload_noncanonical")
+            return state
+        payload = json.loads(raw)
+    except (ValueError, json.JSONDecodeError, UnicodeError):
+        state.update(valid=False, error="review_state_payload_malformed")
+        return state
+    if not isinstance(payload, dict) or payload.get("version") != 1:
+        state.update(valid=False, error="review_state_version_invalid")
+        return state
+    canonical_raw = json.dumps(
+        payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    if canonical_raw != raw:
+        state.update(valid=False, error="review_state_payload_noncanonical")
+        return state
+
+    reviewed_head_sha = _safe_head_sha(payload.get("reviewed_head_sha"))
+    if payload.get("reviewed_head_sha") and not reviewed_head_sha:
+        state.update(valid=False, error="review_state_head_invalid")
+        return state
+    if payload.get("status") == "invalid":
+        if set(payload) != {"version", "status", "reviewed_head_sha", "error"}:
+            state.update(valid=False, error="review_state_invalid_record_malformed")
+            return state
+        error = payload.get("error")
+        if not isinstance(error, str) or not re.fullmatch(r"[a-z0-9_]{1,80}", error):
+            error = "review_state_invalid"
+        state.update(
+            valid=False,
+            error=error,
+            reviewed_head_sha=reviewed_head_sha,
+        )
+        return state
+
+    required = {
+        "version",
+        "status",
+        "reviewed_head_sha",
+        "blocking_streak",
+        "finding_fingerprint",
+        "finding_fingerprints",
+        "finding_history",
+        "blocked",
+        "contract_conflict",
+        "auto_fix_allowed",
+        "next_action",
+        "implementation",
+    }
+    if set(payload) != required or payload.get("status") != "valid":
+        state.update(valid=False, error="review_state_schema_invalid")
+        return state
+    blocking_streak = payload.get("blocking_streak")
+    fingerprint = payload.get("finding_fingerprint")
+    fingerprints = payload.get("finding_fingerprints")
+    history = payload.get("finding_history")
+    next_action = payload.get("next_action")
+    implementation = payload.get("implementation")
+    if (
+        isinstance(blocking_streak, bool)
+        or not isinstance(blocking_streak, int)
+        or not 0 <= blocking_streak <= 1_000_000
+    ):
+        state.update(valid=False, error="review_state_streak_invalid")
+        return state
+    if not isinstance(fingerprint, str) or (
+        fingerprint and not re.fullmatch(r"[0-9a-f]{20}", fingerprint)
+    ):
+        state.update(valid=False, error="review_state_fingerprint_invalid")
+        return state
+    if not isinstance(fingerprints, list) or len(fingerprints) > REVIEW_STATE_MAX_FINDINGS:
+        state.update(valid=False, error="review_state_fingerprint_count_invalid")
+        return state
+    if any(
+        not isinstance(item, str) or not re.fullmatch(r"[0-9a-f]{20}", item)
+        for item in fingerprints
+    ) or fingerprints != sorted(set(fingerprints)):
+        state.update(valid=False, error="review_state_fingerprints_invalid")
+        return state
+    if not isinstance(history, list):
+        state.update(valid=False, error="review_state_history_invalid")
+        return state
+    history_count = sum(
+        len(round_state.get("findings") or [])
+        for round_state in history
+        if isinstance(round_state, dict)
+    )
+    if history_count > REVIEW_STATE_MAX_FINDINGS:
+        state.update(valid=False, error="review_state_finding_count_invalid")
+        return state
+    history_raw = json.dumps(
+        {"version": 1, "rounds": history}, ensure_ascii=True, separators=(",", ":")
+    ).encode("utf-8")
+    history_record = (
+        f"{FINDING_HISTORY_MARKER_PREFIX}"
+        f"{base64.urlsafe_b64encode(history_raw).decode('ascii').rstrip('=')}"
+        f"{FINDING_HISTORY_MARKER_SUFFIX}"
+    )
+    checked_history, history_valid = _parse_finding_history_marker(history_record)
+    if not history_valid or checked_history != history:
+        state.update(valid=False, error="review_state_history_invalid")
+        return state
+    if not isinstance(payload.get("blocked"), bool) or not isinstance(
+        payload.get("contract_conflict"), bool
+    ) or not isinstance(payload.get("auto_fix_allowed"), bool):
+        state.update(valid=False, error="review_state_decision_invalid")
+        return state
+    if next_action not in {"none", "auto_remediation", "contract_arbitration", "review_retry"}:
+        state.update(valid=False, error="review_state_next_action_invalid")
+        return state
+    if not isinstance(implementation, str) or not re.fullmatch(
+        r"[0-9a-f]{24}", implementation
+    ):
+        state.update(valid=False, error="review_state_implementation_invalid")
+        return state
+    state.update(
+        reviewed_head_sha=reviewed_head_sha,
+        blocking_streak=blocking_streak,
+        finding_fingerprint=fingerprint,
+        finding_fingerprints=tuple(fingerprints),
+        finding_history=checked_history,
+        blocked=payload["blocked"],
+        contract_conflict=payload["contract_conflict"],
+        auto_fix_allowed=payload["auto_fix_allowed"],
+        next_action=next_action,
+        implementation=implementation,
+    )
+    return state
+
+
+def _parse_review_state_v1(body: str) -> dict[str, Any]:
+    records = _review_state_records(body)
+    candidates = [
+        record for record in records if record.startswith(REVIEW_STATE_MARKER_PREFIX)
+    ]
+    if not candidates:
+        return _empty_review_state()
+    if len(records) > REVIEW_STATE_MAX_RECORDS:
+        state = _empty_review_state()
+        state.update(
+            present=True,
+            valid=False,
+            error="review_state_record_count_invalid",
+            reviewed_head_sha=_anchored_legacy_head(records),
+        )
+        return state
+    if len(candidates) != 1:
+        state = _empty_review_state()
+        state.update(
+            present=True,
+            valid=False,
+            error="review_state_record_count_invalid",
+            reviewed_head_sha=_anchored_legacy_head(records),
+        )
+        return state
+    state = _decode_review_state_record(candidates[0])
+    if not state.get("reviewed_head_sha"):
+        state["reviewed_head_sha"] = _anchored_legacy_head(records)
+    return state
+
+
+def _parse_legacy_review_state(body: str) -> dict[str, Any]:
+    state = _empty_review_state()
+    records = _review_state_records(body)
+    lines = (body or "").splitlines()
+    if not records and (not lines or lines[0] != "<!-- codex-pr-review -->"):
+        if "<!-- codex-pr-review -->" in (body or ""):
+            state.update(
+                present=True,
+                legacy=True,
+                valid=False,
+                error="legacy_review_state_root_malformed",
+            )
+        return state
+    state.update(present=True, legacy=True)
+    state["reviewed_head_sha"] = _anchored_legacy_head(records)
+    try:
+        body_size = len((body or "").encode("utf-8"))
+    except UnicodeError:
+        body_size = REVIEW_STATE_MAX_BYTES + 1
+    if body_size > REVIEW_STATE_MAX_BYTES:
+        state.update(valid=False, error="legacy_review_state_oversized")
+        return state
+    if len(records) > REVIEW_STATE_MAX_RECORDS:
+        state.update(valid=False, error="legacy_review_state_record_count_invalid")
+        return state
+    prose = "\n".join(lines[len(records) + 1 :])
+    if "<!-- codex-pr-review-" in prose:
+        state.update(valid=False, error="legacy_review_state_unanchored_record")
+        return state
+
+    seen_kinds: set[str] = set()
+    for record in records:
+        patterns = {
+            "streak": rf"{re.escape(STREAK_MARKER_PREFIX)}(\d+){re.escape(STREAK_MARKER_SUFFIX)}",
+            "fingerprint": rf"{re.escape(FINGERPRINT_MARKER_PREFIX)}([0-9a-f]*){re.escape(FINGERPRINT_MARKER_SUFFIX)}",
+            "fingerprints": rf"{re.escape(FINGERPRINTS_MARKER_PREFIX)}([0-9a-f,]*){re.escape(FINGERPRINTS_MARKER_SUFFIX)}",
+            "head": rf"{re.escape(HEAD_SHA_MARKER_PREFIX)}([0-9a-f]{{7,64}}){re.escape(HEAD_SHA_MARKER_SUFFIX)}",
+            "history": rf"{re.escape(FINDING_HISTORY_MARKER_PREFIX)}([A-Za-z0-9_-]+){re.escape(FINDING_HISTORY_MARKER_SUFFIX)}",
+            "contract_conflict": rf"{re.escape(CONTRACT_CONFLICT_MARKER_PREFIX)}(true|false){re.escape(DECISION_MARKER_SUFFIX)}",
+            "auto_fix_allowed": rf"{re.escape(AUTO_FIX_ALLOWED_MARKER_PREFIX)}(true|false){re.escape(DECISION_MARKER_SUFFIX)}",
+            "next_action": rf"{re.escape(NEXT_ACTION_MARKER_PREFIX)}(none|auto_remediation|contract_arbitration|review_retry){re.escape(DECISION_MARKER_SUFFIX)}",
+            "implementation": rf"{re.escape(IMPLEMENTATION_MARKER_PREFIX)}([0-9a-f]{{24}}){re.escape(IMPLEMENTATION_MARKER_SUFFIX)}",
+        }
+        matched = [
+            (kind, match)
+            for kind, pattern in patterns.items()
+            if (match := re.fullmatch(pattern, record))
+        ]
+        if len(matched) != 1 or matched[0][0] in seen_kinds:
+            state.update(valid=False, error="legacy_review_state_malformed")
+            return state
+        kind, match = matched[0]
+        seen_kinds.add(kind)
+        value = match.group(1)
+        if kind == "streak":
+            if int(value) > 1_000_000:
+                state.update(valid=False, error="legacy_review_state_malformed")
+                return state
+            state["blocking_streak"] = int(value)
+        elif kind == "fingerprint":
+            if value and len(value) != 20:
+                state.update(valid=False, error="legacy_review_state_malformed")
+                return state
+            state["finding_fingerprint"] = value
+        elif kind == "fingerprints":
+            items = value.split(",") if value else []
+            if any(len(item) != 20 for item in items) or items != sorted(set(items)):
+                state.update(valid=False, error="legacy_review_state_malformed")
+                return state
+            state["finding_fingerprints"] = tuple(items)
+        elif kind == "contract_conflict":
+            state["contract_conflict"] = value == "true"
+        elif kind == "auto_fix_allowed":
+            state["auto_fix_allowed"] = value == "true"
+        elif kind == "next_action":
+            state["next_action"] = value
+        elif kind == "implementation":
+            state["implementation"] = value
+
+    machine_body = "\n".join(["<!-- codex-pr-review -->", *records])
+    history, history_valid = _parse_finding_history_marker(machine_body)
+    if not history_valid:
+        state.update(valid=False, error="legacy_review_state_malformed")
+        return state
+    state["finding_history"] = history
+    if finding_history_requires_confirmation(history):
+        state.update(valid=False, error="legacy_review_state_invalid_history")
+        return state
+    legacy_blocker = bool(
+        state["blocking_streak"]
+        or state["finding_fingerprint"]
+        or state["finding_fingerprints"]
+        or has_active_blocking_history(history)
+    )
+    if not legacy_blocker and re.search(
+        r"^#### \d+\. .*?\[(?:CRITICAL|HIGH)\] .+? in `[^`]+`$",
+        body or "",
+        flags=re.MULTILINE,
+    ):
+        state.update(valid=False, error="legacy_review_state_unanchored_blocker")
+        return state
+    state["blocked"] = legacy_blocker
+    return state
+
+
+def parse_review_state(body: str) -> dict[str, Any]:
+    """Parse only fully anchored machine state; model prose is never state."""
+    versioned = _parse_review_state_v1(body)
+    return versioned if versioned["present"] else _parse_legacy_review_state(body)
+
+
+def build_invalid_review_state_marker(
+    reviewed_head_sha: Any = "", error: str = "review_state_invalid"
+) -> str:
+    head_sha = _safe_head_sha(reviewed_head_sha)
+    try:
+        error_text = str(error or "")
+    except Exception:
+        error_text = ""
+    safe_error = (
+        error_text
+        if re.fullmatch(r"[a-z0-9_]{1,80}", error_text)
+        else "review_state_invalid"
+    )
+    payload = {
+        "version": 1,
+        "status": "invalid",
+        "reviewed_head_sha": head_sha,
+        "error": safe_error,
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    encoded = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+    return f"{REVIEW_STATE_MARKER_PREFIX}{encoded}{REVIEW_STATE_MARKER_SUFFIX}"
+
+
+def build_review_state_marker(
+    decision: dict[str, Any],
+    *,
+    blocking_streak: int = 0,
+    finding_fingerprint: str = "",
+    finding_fingerprints: tuple[str, ...] = (),
+    reviewed_head_sha: str = "",
+    finding_history_marker: str = "",
+    state_valid: bool = True,
+    state_error: str = "",
+) -> str:
+    """Serialize deterministic bounded state, falling back to an invalid sentinel."""
+    if not state_valid:
+        return build_invalid_review_state_marker(
+            reviewed_head_sha, state_error or "review_state_invalid"
+        )
+    try:
+        head_sha = _safe_head_sha(reviewed_head_sha)
+        if reviewed_head_sha and not head_sha:
+            return build_invalid_review_state_marker("", "review_state_head_invalid")
+        history, history_valid = _parse_finding_history_marker(finding_history_marker)
+        if not history_valid or finding_history_requires_confirmation(history):
+            return build_invalid_review_state_marker(
+                head_sha, "review_state_history_invalid"
+            )
+        history_count = sum(len(round_state.get("findings") or []) for round_state in history)
+        if history_count > REVIEW_STATE_MAX_FINDINGS:
+            return build_invalid_review_state_marker(
+                head_sha, "review_state_finding_count_invalid"
+            )
+        payload = {
+            "version": 1,
+            "status": "valid",
+            "reviewed_head_sha": head_sha,
+            "blocking_streak": max(0, int(blocking_streak)),
+            "finding_fingerprint": str(finding_fingerprint or ""),
+            "finding_fingerprints": sorted(set(finding_fingerprints)),
+            "finding_history": history,
+            "blocked": bool(decision.get("blocked")),
+            "contract_conflict": bool(decision.get("contract_conflict")),
+            "auto_fix_allowed": bool(decision.get("auto_fix_allowed", True)),
+            "next_action": str(decision.get("next_action") or "none"),
+            "implementation": review_implementation_digest(),
+        }
+        raw = json.dumps(
+            payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        if len(raw) > REVIEW_STATE_MAX_BYTES:
+            return build_invalid_review_state_marker(head_sha, "review_state_oversized")
+        encoded = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+        if len(encoded) > REVIEW_STATE_MAX_ENCODED_BYTES:
+            return build_invalid_review_state_marker(head_sha, "review_state_oversized")
+        marker = f"{REVIEW_STATE_MARKER_PREFIX}{encoded}{REVIEW_STATE_MARKER_SUFFIX}"
+        if not _decode_review_state_record(marker)["valid"]:
+            return build_invalid_review_state_marker(
+                head_sha, "review_state_serialization_failed"
+            )
+        return marker
+    except Exception:
+        return build_invalid_review_state_marker(
+            reviewed_head_sha, "review_state_serialization_failed"
+        )
+
+
 def parse_review_implementation_digest(body: str) -> str:
+    state = _parse_review_state_v1(body)
+    if state["present"]:
+        return str(state.get("implementation") or "")
     match = re.search(
         rf"{re.escape(IMPLEMENTATION_MARKER_PREFIX)}([0-9a-f]{{24}}){re.escape(IMPLEMENTATION_MARKER_SUFFIX)}",
         body or "",
@@ -1463,6 +2079,9 @@ def parse_review_implementation_digest(body: str) -> str:
 
 def parse_blocking_streak(body: str) -> int:
     """Read consecutive blocking-round counter from a prior review comment."""
+    state = _parse_review_state_v1(body)
+    if state["present"]:
+        return int(state.get("blocking_streak") or 0)
     match = re.search(
         rf"{re.escape(STREAK_MARKER_PREFIX)}(\d+){re.escape(STREAK_MARKER_SUFFIX)}",
         body or "",
@@ -1477,6 +2096,9 @@ def parse_blocking_streak(body: str) -> int:
 
 def parse_blocking_fingerprint(body: str) -> str:
     """Read the primary finding fingerprint from a prior review comment."""
+    state = _parse_review_state_v1(body)
+    if state["present"]:
+        return str(state.get("finding_fingerprint") or "")
     match = re.search(
         rf"{re.escape(FINGERPRINT_MARKER_PREFIX)}([0-9a-f]*){re.escape(FINGERPRINT_MARKER_SUFFIX)}",
         body or "",
@@ -1486,6 +2108,9 @@ def parse_blocking_fingerprint(body: str) -> str:
 
 def parse_blocking_fingerprints(body: str) -> tuple[str, ...]:
     """Read per-finding keys, including comments written before the new marker."""
+    state = _parse_review_state_v1(body)
+    if state["present"]:
+        return tuple(state.get("finding_fingerprints") or ())
     match = re.search(
         rf"{re.escape(FINGERPRINTS_MARKER_PREFIX)}([0-9a-f,]*){re.escape(FINGERPRINTS_MARKER_SUFFIX)}",
         body or "",
@@ -1507,6 +2132,9 @@ def parse_blocking_fingerprints(body: str) -> tuple[str, ...]:
 
 def parse_reviewed_head_sha(body: str) -> str:
     """Read the reviewed pull-request head SHA from a prior trusted comment."""
+    state = _parse_review_state_v1(body)
+    if state["present"]:
+        return str(state.get("reviewed_head_sha") or "")
     match = re.search(
         rf"{re.escape(HEAD_SHA_MARKER_PREFIX)}([0-9a-f]{{7,64}}){re.escape(HEAD_SHA_MARKER_SUFFIX)}",
         body or "",
@@ -1584,6 +2212,15 @@ def write_decision_outputs(decision_payload: dict[str, Any]) -> None:
             f.write(f"contract_conflict={'true' if decision_payload.get('contract_conflict') else 'false'}\n")
             f.write(f"auto_fix_allowed={'true' if decision_payload.get('auto_fix_allowed') else 'false'}\n")
             f.write(f"next_action={decision_payload.get('next_action', 'none')}\n")
+            f.write(
+                f"review_state_valid={'true' if decision_payload.get('review_state_valid') else 'false'}\n"
+            )
+            f.write(
+                f"review_state_error={decision_payload.get('review_state_error', '')}\n"
+            )
+            f.write(
+                f"validation_error_count={len(decision_payload.get('validation_errors') or [])}\n"
+            )
 
 
 def publish_review_decision(
@@ -1606,14 +2243,63 @@ def publish_review_decision(
     arbitration: dict[str, Any] | None = None,
     finding_history_marker: str = "",
     history_valid: bool = True,
+    review_state_valid: bool | None = None,
+    review_state_error: str = "",
 ) -> int:
-    """Publish one consistent comment, artifact, and GitHub step-output decision."""
-    upsert_pr_comment(
-        token,
-        repo,
-        pr_number,
-        build_pr_comment(
-            decision,
+    """Publish bounded state, comment, artifact, and outputs without transport throws."""
+    requested_state_valid = (
+        bool(decision.get("review_state_valid", True))
+        if review_state_valid is None
+        else review_state_valid
+    )
+    requested_state_error = (
+        review_state_error
+        or str(decision.get("review_state_error") or "")
+        or ("review_state_invalid" if not requested_state_valid else "")
+    )
+    review_state_marker = build_review_state_marker(
+        decision,
+        blocking_streak=blocking_streak,
+        finding_fingerprint=finding_fingerprint,
+        finding_fingerprints=finding_fingerprints,
+        reviewed_head_sha=reviewed_head_sha,
+        finding_history_marker=finding_history_marker,
+        state_valid=requested_state_valid,
+        state_error=requested_state_error,
+    )
+    parsed_state = _decode_review_state_record(review_state_marker)
+    actual_state_valid = bool(parsed_state["valid"])
+    actual_state_error = str(parsed_state.get("error") or "")
+    published_decision = dict(decision)
+    if not actual_state_valid:
+        published_decision["blocked"] = True
+        published_decision["auto_fix_allowed"] = False
+        published_decision.setdefault("next_action", "review_retry")
+        published_decision.setdefault("validation_errors", [actual_state_error])
+        finding_fingerprint = ""
+        finding_fingerprints = ()
+        repeated_fingerprints = ()
+        repeated_finding = False
+        exit_code = 1
+    decision_payload = {
+        **published_decision,
+        "blocking_streak": blocking_streak,
+        "finding_fingerprint": finding_fingerprint,
+        "finding_fingerprints": finding_fingerprints,
+        "repeated_fingerprints": repeated_fingerprints,
+        "repeated_finding": repeated_finding,
+        "previous_head_sha": previous_head_sha,
+        "current_head_sha": current_head_sha,
+        "new_head": new_head,
+        "arbitration": arbitration,
+        "history_valid": history_valid,
+        "review_state_valid": actual_state_valid,
+        "review_state_error": actual_state_error,
+        "validation_errors": list(published_decision.get("validation_errors") or []),
+    }
+    try:
+        comment_body = build_pr_comment(
+            published_decision,
             pr_url,
             blocking_streak=blocking_streak,
             finding_fingerprint=finding_fingerprint,
@@ -1621,24 +2307,45 @@ def publish_review_decision(
             reviewed_head_sha=reviewed_head_sha,
             arbitration=arbitration,
             finding_history_marker=finding_history_marker,
-        ),
-    )
-    write_decision_outputs(
-        {
-            **decision,
-            "blocking_streak": blocking_streak,
-            "finding_fingerprint": finding_fingerprint,
-            "finding_fingerprints": finding_fingerprints,
-            "repeated_fingerprints": repeated_fingerprints,
-            "repeated_finding": repeated_finding,
-            "previous_head_sha": previous_head_sha,
-            "current_head_sha": current_head_sha,
-            "new_head": new_head,
-            "arbitration": arbitration,
-            "history_valid": history_valid,
-        }
-    )
-    return exit_code
+            review_state_marker=review_state_marker,
+        )
+    except Exception:
+        actual_state_valid = False
+        actual_state_error = "review_comment_serialization_failed"
+        decision_payload.update(
+            blocked=True,
+            auto_fix_allowed=False,
+            review_state_valid=False,
+            review_state_error=actual_state_error,
+            validation_errors=[actual_state_error],
+        )
+        review_state_marker = build_invalid_review_state_marker(
+            reviewed_head_sha, actual_state_error
+        )
+        comment_body = "\n".join(
+            [
+                "<!-- codex-pr-review -->",
+                review_state_marker,
+                "## 🤖 Codex PR Review",
+                "",
+                "🚫 **Merge blocked — Review State Validation Failed**: comment serialization failed; automatic remediation is disabled",
+            ]
+        )
+        exit_code = 1
+
+    output_failed = False
+    try:
+        write_decision_outputs(decision_payload)
+    except Exception as exc:
+        output_failed = True
+        print(f"::error::Failed to publish review outputs: {type(exc).__name__}", file=sys.stderr)
+    comment_failed = False
+    try:
+        upsert_pr_comment(token, repo, pr_number, comment_body)
+    except Exception as exc:
+        comment_failed = True
+        print(f"::error::Failed to publish review comment: {type(exc).__name__}", file=sys.stderr)
+    return 1 if output_failed or comment_failed or decision_payload["blocked"] else exit_code
 
 
 # ---------------------------------------------------------------------------
@@ -1704,12 +2411,14 @@ def main() -> int:
         print(f"::warning::Failed to fetch prior review comment: {exc}")
         previous_comment = ""
         history_source_valid = False
-    previous_streak = parse_blocking_streak(previous_comment)
-    previous_fingerprint = parse_blocking_fingerprint(previous_comment)
-    previous_fingerprints = parse_blocking_fingerprints(previous_comment)
-    previous_head_sha = parse_reviewed_head_sha(previous_comment)
-    finding_history, history_valid = parse_finding_history(previous_comment)
-    history_valid = history_source_valid and history_valid
+    previous_state = parse_review_state(previous_comment)
+    previous_streak = int(previous_state["blocking_streak"])
+    previous_fingerprint = str(previous_state["finding_fingerprint"])
+    previous_fingerprints = tuple(previous_state["finding_fingerprints"])
+    previous_head_sha = str(previous_state["reviewed_head_sha"])
+    finding_history = list(previous_state["finding_history"])
+    history_valid = history_source_valid and bool(previous_state["valid"])
+    recovering_invalid_state = False
     if history_valid and finding_history:
         latest_history = finding_history[-1]
         if not previous_head_sha:
@@ -1720,24 +2429,20 @@ def main() -> int:
             )
     active_blocking_history = has_active_blocking_history(finding_history)
     legacy_blocking_state = bool(
-        not finding_history and (previous_streak > 0 or previous_fingerprints)
+        not finding_history
+        and (
+            previous_streak > 0
+            or previous_fingerprints
+            or bool(previous_state.get("blocked"))
+        )
     )
 
     if not history_valid:
-        decision = {
-            "blocked": True,
-            "blocking_findings": [],
-            "non_blocking_findings": [],
-            "total_findings": 0,
-            "summary": (
-                "🚫 **Merge blocked**: trusted review history is malformed or oversized; "
-                "automatic remediation is disabled pending contract arbitration"
-            ),
-            "contract_conflict": True,
-            "auto_fix_allowed": False,
-            "next_action": "contract_arbitration",
-        }
         if not history_source_valid:
+            decision = review_state_failure_decision(
+                ["review_state_source_unavailable"],
+                summary_detail="trusted review state could not be fetched",
+            )
             write_decision_outputs(
                 {
                     **decision,
@@ -1747,26 +2452,53 @@ def main() -> int:
                     "new_head": False,
                     "history_valid": False,
                     "history_source_valid": False,
+                    "review_state_valid": False,
+                    "review_state_error": "review_state_source_unavailable",
                 }
             )
             return 1
-        return publish_review_decision(
-            token,
-            repo,
-            pr_number,
-            pr_url,
-            decision,
-            exit_code=1,
-            blocking_streak=previous_streak,
-            previous_head_sha=previous_head_sha,
-            current_head_sha=current_head_sha,
-            reviewed_head_sha=current_head_sha,
-            new_head=bool(previous_head_sha and current_head_sha != previous_head_sha),
-            finding_history_marker=build_invalid_finding_history_marker(
-                current_head_sha
-            ),
-            history_valid=False,
+        verified_new_head = bool(
+            previous_head_sha
+            and re.fullmatch(r"[0-9a-f]{7,64}", previous_head_sha)
+            and re.fullmatch(r"[0-9a-f]{7,64}", current_head_sha)
+            and previous_head_sha != current_head_sha
         )
+        if not verified_new_head:
+            detail = (
+                "invalid trusted review state remains fail-closed on unchanged PR head"
+                if previous_head_sha == current_head_sha and current_head_sha
+                else "invalid trusted review state requires a verified new PR head"
+            )
+            state_error = str(previous_state.get("error") or "review_state_invalid")
+            decision = review_state_failure_decision([state_error], summary_detail=detail)
+            decision["review_state_error"] = state_error
+            return publish_review_decision(
+                token,
+                repo,
+                pr_number,
+                pr_url,
+                decision,
+                exit_code=1,
+                blocking_streak=previous_streak,
+                previous_head_sha=previous_head_sha,
+                current_head_sha=current_head_sha,
+                reviewed_head_sha=current_head_sha,
+                new_head=False,
+                finding_history_marker=build_invalid_finding_history_marker(
+                    current_head_sha
+                ),
+                history_valid=False,
+                review_state_valid=False,
+                review_state_error=state_error,
+            )
+        print("::warning::Recovering invalid review state on verified new PR head")
+        recovering_invalid_state = True
+        previous_streak = 0
+        previous_fingerprint = ""
+        previous_fingerprints = ()
+        finding_history = []
+        active_blocking_history = False
+        legacy_blocking_state = False
 
     # First pass: classify files. If all files are low-risk, skip review.
     all_low_risk = changed_files_are_low_risk(changed_paths, policy)
@@ -1775,6 +2507,7 @@ def main() -> int:
         and changed_paths
         and not active_blocking_history
         and not legacy_blocking_state
+        and not recovering_invalid_state
     ):
         print("All changed files are low-risk (docs/tests). Skipping Codex review.")
         decision = {
@@ -1820,6 +2553,30 @@ def main() -> int:
             changed_line_count=len(diff.splitlines()),
         )
     except ReviewError as exc:
+        if recovering_invalid_state:
+            decision = review_state_failure_decision(
+                ["review_state_recovery_failed"],
+                summary_detail="review failed while recovering invalid state",
+            )
+            decision["review_state_error"] = "review_state_recovery_failed"
+            return publish_review_decision(
+                token,
+                repo,
+                pr_number,
+                pr_url,
+                decision,
+                exit_code=1,
+                previous_head_sha=previous_head_sha,
+                current_head_sha=current_head_sha,
+                reviewed_head_sha=current_head_sha,
+                new_head=True,
+                finding_history_marker=build_invalid_finding_history_marker(
+                    current_head_sha
+                ),
+                history_valid=False,
+                review_state_valid=False,
+                review_state_error="review_state_recovery_failed",
+            )
         if _review_capacity_is_unavailable(exc):
             print(f"::warning::Codex review unavailable due to quota or capacity: {exc}")
             if active_blocking_history or legacy_blocking_state:
@@ -1891,6 +2648,9 @@ def main() -> int:
             "contract_conflict": active_blocking_history,
             "auto_fix_allowed": False,
             "next_action": "contract_arbitration" if active_blocking_history else "review_retry",
+            "review_state_valid": False,
+            "review_state_error": "review_backend_failed",
+            "validation_errors": ["review_backend_failed"],
         }
         return publish_review_decision(
             token,
@@ -1903,11 +2663,13 @@ def main() -> int:
             finding_fingerprints=previous_fingerprints,
             previous_head_sha=previous_head_sha,
             current_head_sha=current_head_sha,
-            reviewed_head_sha=previous_head_sha,
+            reviewed_head_sha=current_head_sha,
             new_head=bool(previous_head_sha and current_head_sha != previous_head_sha),
             finding_history_marker=build_finding_history_marker(
                 finding_history, [], current_head_sha
             ),
+            review_state_valid=False,
+            review_state_error="review_backend_failed",
         )
 
     print(f"Codex output: {len(output)} chars")
@@ -1926,6 +2688,9 @@ def main() -> int:
             "contract_conflict": active_blocking_history,
             "auto_fix_allowed": False,
             "next_action": "contract_arbitration" if active_blocking_history else "review_retry",
+            "review_state_valid": False,
+            "review_state_error": "review_output_invalid",
+            "validation_errors": ["review_output_invalid"],
         }
         return publish_review_decision(
             token,
@@ -1938,16 +2703,49 @@ def main() -> int:
             finding_fingerprints=previous_fingerprints,
             previous_head_sha=previous_head_sha,
             current_head_sha=current_head_sha,
-            reviewed_head_sha=previous_head_sha,
+            reviewed_head_sha=current_head_sha,
             new_head=bool(previous_head_sha and current_head_sha != previous_head_sha),
             finding_history_marker=build_finding_history_marker(
                 finding_history, [], current_head_sha
             ),
+            review_state_valid=False,
+            review_state_error="review_output_invalid",
         )
 
-    findings = review.get("findings", [])
-    if not isinstance(findings, list):
-        findings = []
+    findings, finding_errors = validate_review_findings(review.get("findings"))
+    if finding_errors:
+        first_error = finding_errors[0]
+        state_error = (
+            "review_findings_excessive"
+            if first_error.startswith("findings count")
+            else "review_findings_oversized"
+            if first_error.startswith("findings payload exceeds")
+            else "review_findings_invalid"
+        )
+        decision = review_state_failure_decision(
+            finding_errors, summary_detail="model findings failed bounded validation"
+        )
+        decision["review_state_error"] = state_error
+        return publish_review_decision(
+            token,
+            repo,
+            pr_number,
+            pr_url,
+            decision,
+            exit_code=1,
+            previous_head_sha=previous_head_sha,
+            current_head_sha=current_head_sha,
+            reviewed_head_sha=current_head_sha,
+            new_head=bool(
+                previous_head_sha and current_head_sha != previous_head_sha
+            ),
+            finding_history_marker=build_invalid_finding_history_marker(
+                current_head_sha
+            ),
+            history_valid=False,
+            review_state_valid=False,
+            review_state_error=state_error,
+        )
     print(f"Found {len(findings)} issue(s)")
 
     # Evaluate findings
