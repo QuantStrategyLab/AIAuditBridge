@@ -2511,6 +2511,27 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
             workflow_value = workflow_line.removeprefix(f"{workflow_name}: ")
             self.assertEqual(script_value, workflow_value)
 
+    def test_vps_deploy_persists_exact_audit_bridge_pr_review_sha(self) -> None:
+        exact_job_ref = (
+            "QuantStrategyLab/AIAuditBridge/.github/workflows/"
+            "codex_pr_review.yml@86458c44b06593b6d7a1602b3c38e7a1c143ef17"
+        )
+        deploy_script = Path("scripts/deploy_codex_audit_service.sh").read_text(encoding="utf-8")
+        workflow = Path(".github/workflows/vps_codex_service_ops.yml").read_text(encoding="utf-8")
+        script_line = next(
+            line for line in deploy_script.splitlines() if line.startswith('ALLOWED_JOB_WORKFLOW_REFS="')
+        )
+        workflow_line = next(
+            line.strip()
+            for line in workflow.splitlines()
+            if line.strip().startswith("CODEX_AUDIT_SERVICE_ALLOWED_JOB_WORKFLOW_REFS: ")
+        )
+        script_value = script_line.split(":-", 1)[1][:-2]
+        workflow_value = workflow_line.removeprefix("CODEX_AUDIT_SERVICE_ALLOWED_JOB_WORKFLOW_REFS: ")
+
+        self.assertIn(exact_job_ref, script_value.split(","))
+        self.assertIn(exact_job_ref, workflow_value.split(","))
+
 
 if __name__ == "__main__":
     unittest.main()
