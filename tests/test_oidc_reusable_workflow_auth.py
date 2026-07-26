@@ -44,6 +44,36 @@ class ReusableWorkflowOidcAuthTests(unittest.TestCase):
         payload["job_workflow_ref"] = "QuantStrategyLab/AIAuditBridge/.github/workflows/codex_pr_review.yml@refs/heads/main"
         self.assertEqual(self._verify(payload, env)["repository"], "QuantStrategyLab/QuantRuntimeSettings")
 
+    def test_exact_audit_bridge_sha_is_allowlisted_without_broadening_job_ref(self) -> None:
+        exact_job_ref = (
+            "QuantStrategyLab/AIAuditBridge/.github/workflows/"
+            "codex_pr_review.yml@86458c44b06593b6d7a1602b3c38e7a1c143ef17"
+        )
+        payload: dict[str, object] = {
+            "aud": "quant-codex-audit",
+            "iss": auth.GITHUB_OIDC_ISSUER,
+            "exp": int(time.time()) + 300,
+            "repository": "QuantStrategyLab/QuantRuntimeSettings",
+            "workflow_ref": "QuantStrategyLab/QuantRuntimeSettings/.github/workflows/codex_pr_review.yml@refs/heads/main",
+            "job_workflow_ref": exact_job_ref,
+            "ref": "refs/heads/main",
+            "repository_visibility": "public",
+        }
+        env = {
+            "CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES": "QuantStrategyLab/QuantRuntimeSettings",
+            "CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS": "QuantStrategyLab/QuantRuntimeSettings/.github/workflows/codex_pr_review.yml@refs/heads/main",
+            "CODEX_AUDIT_SERVICE_ALLOWED_REFS": "refs/heads/main",
+            "CODEX_AUDIT_SERVICE_ALLOWED_DIRECT_REPOSITORIES": "QuantStrategyLab/AIAuditBridge",
+            "CODEX_AUDIT_SERVICE_ALLOWED_JOB_WORKFLOW_REFS": exact_job_ref,
+            "CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORY_VISIBILITIES": "public",
+        }
+
+        self.assertEqual(self._verify(payload, env)["repository"], "QuantStrategyLab/QuantRuntimeSettings")
+
+        payload["job_workflow_ref"] = f"{exact_job_ref}0"
+        with self.assertRaisesRegex(PermissionError, "job workflow ref is not allowed"):
+            self._verify(payload, env)
+
     def test_direct_audit_bridge_caller_does_not_require_reusable_workflow(self) -> None:
         payload: dict[str, object] = {
             "aud": "quant-codex-audit",
