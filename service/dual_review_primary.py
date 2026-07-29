@@ -97,6 +97,9 @@ def run_codex_primary_review(
     )
     if not result.success:
         message = result.error or result.note or "Codex service review unavailable"
+        failure_category = ""
+        if isinstance(result.raw, dict):
+            failure_category = str(result.raw.get("failure_category") or "").strip().lower()
         unavailable_markers = (
             "daily budget exceeded",
             "quota",
@@ -107,7 +110,10 @@ def run_codex_primary_review(
             "request timed out",
             "too many active jobs",
         )
-        verdict = VERDICT_UNAVAILABLE if any(marker in message.lower() for marker in unavailable_markers) else VERDICT_INVALID
+        unavailable = failure_category == "quota_or_capacity_failure" or any(
+            marker in message.lower() for marker in unavailable_markers
+        )
+        verdict = VERDICT_UNAVAILABLE if unavailable else VERDICT_INVALID
         return {
             "source": "codex_primary",
             "verdict": verdict,

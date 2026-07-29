@@ -103,6 +103,21 @@ class DualReviewPrimaryTests(unittest.TestCase):
 
     @patch.dict("os.environ", {"CODEX_AUDIT_SERVICE_URL": "https://service.invalid"})
     @patch("service.dual_review_primary.AiGatewayClient.execute")
+    def test_structured_capacity_failure_is_unavailable(self, review) -> None:
+        review.return_value = AiResult(
+            provider="codex",
+            model="codex-cli",
+            success=False,
+            error="rate limit exceeded",
+            raw={"failure_category": "quota_or_capacity_failure"},
+        )
+
+        result = run_codex_primary_review(prompt="review")
+
+        self.assertEqual(result["verdict"], VERDICT_UNAVAILABLE)
+
+    @patch.dict("os.environ", {"CODEX_AUDIT_SERVICE_URL": "https://service.invalid"})
+    @patch("service.dual_review_primary.AiGatewayClient.execute")
     def test_protocol_error_is_invalid(self, review) -> None:
         review.return_value = AiResult.unavailable(
             "codex",
