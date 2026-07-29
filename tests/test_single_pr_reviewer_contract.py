@@ -8,16 +8,22 @@ from service.org_health import DEFAULT_WORKFLOW_ALLOWLIST
 
 ROOT = Path(__file__).resolve().parents[1]
 RETIRED_PATHS = (
-    ".github/workflows/codex_pr_review.yml",
     "prompts/pr_review.md",
     "scripts/run_codex_pr_review.py",
     "tests/test_run_codex_pr_review.py",
 )
+COMPATIBILITY_WORKFLOW = ROOT / ".github/workflows/codex_pr_review.yml"
 
 
 def test_github_codex_app_is_the_only_ai_pr_reviewer() -> None:
     for relative_path in RETIRED_PATHS:
         assert not (ROOT / relative_path).exists(), relative_path
+
+    compatibility_workflow = COMPATIBILITY_WORKFLOW.read_text(encoding="utf-8")
+    assert "workflow_call:" in compatibility_workflow
+    assert "pull_request_target:" not in compatibility_workflow
+    assert "run_codex_pr_review.py" not in compatibility_workflow
+    assert "exit 1" in compatibility_workflow
 
     actionlint_config = (ROOT / ".github/actionlint.yaml").read_text(encoding="utf-8")
     assert "codex_pr_review" not in actionlint_config
