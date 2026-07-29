@@ -43,6 +43,8 @@ def test_retired_pr_reviewer_is_not_advertised_as_active() -> None:
         (ROOT / ".github/codex_auto_merge_policy.json").read_text(encoding="utf-8")
     )
     assert "pr_review" not in policy
+    assert "approved_change_bundles" not in policy
+    assert policy["max_changed_lines"] == 2_000
     assert "Codex PR Review" not in DEFAULT_WORKFLOW_ALLOWLIST
 
     for relative_path in (
