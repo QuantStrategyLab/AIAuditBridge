@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 DEFAULT_POLICY_PATH = Path(".github/codex_auto_merge_policy.json")
@@ -70,16 +70,72 @@ def scan_diff(diff_text: str, path_patterns: list[re.Pattern[str]]) -> list[str]
     return list(dict.fromkeys(violations))
 
 
+def _safe_exact_paths(values: Any) -> set[str] | None:
+    if not isinstance(values, list) or not values:
+        return None
+    paths: set[str] = set()
+    for value in values:
+        if not isinstance(value, str) or value != value.strip():
+            return None
+        path = PurePosixPath(value)
+        if (
+            not value
+            or path.is_absolute()
+            or path.as_posix() != value
+            or ".." in path.parts
+            or "\\" in value
+            or any(character in value for character in "*?[]")
+            or value in paths
+        ):
+            return None
+        paths.add(value)
+    return paths
+
+
 def check_metadata(files: list[dict[str, Any]], policy: dict[str, Any]) -> list[str]:
     issues: list[str] = []
+    approved_deleted_paths: set[str] = set()
     max_files = policy.get("max_changed_files", 50)
     max_lines = policy.get("max_changed_lines", 5000)
+    changed_paths = {
+        filename
+        for f in files
+        if isinstance((filename := f.get("filename")), str)
+    }
+    removed_paths = {
+        f["filename"]
+        for f in files
+        if isinstance(f.get("filename"), str)
+        and (f.get("status") or "").lower().strip() == "removed"
+    }
+    configured_bundles = policy.get("approved_change_bundles", [])
+    if isinstance(configured_bundles, list):
+        for bundle in configured_bundles:
+            if not isinstance(bundle, dict):
+                continue
+            exact_changed_paths = _safe_exact_paths(bundle.get("exact_changed_paths"))
+            exact_deleted_paths = _safe_exact_paths(bundle.get("exact_deleted_paths"))
+            bundle_max_lines = bundle.get("max_changed_lines")
+            if (
+                exact_changed_paths is None
+                or exact_deleted_paths is None
+                or not exact_deleted_paths.issubset(exact_changed_paths)
+                or type(bundle_max_lines) is not int
+                or bundle_max_lines < max_lines
+                or changed_paths != exact_changed_paths
+                or removed_paths != exact_deleted_paths
+            ):
+                continue
+            approved_deleted_paths = exact_deleted_paths
+            max_lines = bundle_max_lines
+            break
+
     total_added = sum(f.get("additions", 0) or 0 for f in files)
     total_deleted = sum(f.get("deletions", 0) or 0 for f in files)
     for f in files:
         filename = f.get("filename", "?")
         status = (f.get("status") or "").lower().strip()
-        if status == "removed":
+        if status == "removed" and filename not in approved_deleted_paths:
             issues.append(f"**File deleted**: `{filename}` — verify intentional")
         elif status == "renamed":
             issues.append(f"**File renamed**: `{f.get('previous_filename', '?')}` → `{filename}`")

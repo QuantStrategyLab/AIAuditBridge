@@ -24,6 +24,35 @@
   },
   "max_changed_files": 30,
   "max_changed_lines": 2000,
+  "approved_change_bundles": [
+    {
+      "name": "retire-duplicate-aiaudit-pr-reviewer",
+      "exact_changed_paths": [
+        ".github/actionlint.yaml",
+        ".github/codex_auto_merge_policy.json",
+        ".github/workflows/codex_pr_review.yml",
+        "README.md",
+        "README.zh-CN.md",
+        "client/gateway_client.py",
+        "docs/ai_autonomy_architecture.md",
+        "prompts/pr_review.md",
+        "scripts/run_codex_pr_review.py",
+        "service/dual_review_primary.py",
+        "service/org_health.py",
+        "tests/test_codex_audit_service_complexity.py",
+        "tests/test_dual_review_primary.py",
+        "tests/test_org_health.py",
+        "tests/test_run_codex_pr_review.py",
+        "tests/test_single_pr_reviewer_contract.py"
+      ],
+      "exact_deleted_paths": [
+        "prompts/pr_review.md",
+        "scripts/run_codex_pr_review.py",
+        "tests/test_run_codex_pr_review.py"
+      ],
+      "max_changed_lines": 3000
+    }
+  ],
   "pr_review": {
     "enabled": true,
     "block_severities": [
