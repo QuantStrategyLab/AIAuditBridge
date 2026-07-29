@@ -23,26 +23,5 @@
     }
   },
   "max_changed_files": 30,
-  "max_changed_lines": 2000,
-  "pr_review": {
-    "enabled": true,
-    "block_severities": [
-      "critical",
-      "high"
-    ],
-    "skip_paths": [
-      "docs/**",
-      "**.md",
-      "**.txt",
-      "**.json",
-      "**.csv",
-      "LICENSE",
-      ".github/dependabot*"
-    ],
-    "skip_risk_levels": [
-      "low"
-    ],
-    "timeout_minutes": 20,
-    "max_diff_lines": 2400
-  }
+  "max_changed_lines": 2000
 }

@@ -1,13 +1,49 @@
 from __future__ import annotations
 
+import json
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+from client.config import GatewayConfig
+from client.gateway_client import AiGatewayClient, AiResult
 from service.dual_review import VERDICT_INVALID, VERDICT_UNAVAILABLE
 from service.dual_review_primary import build_primary_prompt, parse_primary_review_output, run_codex_primary_review
 
 
 class DualReviewPrimaryTests(unittest.TestCase):
+    def test_gateway_execute_preserves_task_and_complexity(self) -> None:
+        submit_response = MagicMock()
+        submit_response.__enter__.return_value.read.return_value = b'{"job_id":"job-1"}'
+        poll_response = MagicMock()
+        poll_response.__enter__.return_value.read.return_value = (
+            b'{"status":"succeeded","output":"ok"}'
+        )
+        config = GatewayConfig(
+            service_url="https://service.invalid",
+            source_repository="QuantStrategyLab/AIAuditBridge",
+        )
+
+        with (
+            patch("client.gateway_client._fetch_oidc_token", return_value="oidc"),
+            patch(
+                "client.gateway_client.urllib.request.urlopen",
+                side_effect=[submit_response, poll_response],
+            ) as urlopen,
+            patch("client.gateway_client.time.sleep"),
+        ):
+            result = AiGatewayClient(config).execute(
+                "review",
+                task="promotion_review",
+                complexity="high",
+                timeout=1,
+            )
+
+        self.assertTrue(result.success)
+        request = urlopen.call_args_list[0].args[0]
+        payload = json.loads(request.data)
+        self.assertEqual(payload["task"], "promotion_review")
+        self.assertEqual(payload["complexity"], "high")
+
     def test_build_primary_prompt_includes_evidence_summary(self) -> None:
         from pathlib import Path
         import json
@@ -34,29 +70,37 @@ class DualReviewPrimaryTests(unittest.TestCase):
         self.assertEqual(review["source"], "codex_primary")
 
     @patch.dict("os.environ", {"CODEX_AUDIT_SERVICE_URL": "https://service.invalid"})
-    @patch("scripts.run_codex_pr_review.run_codex_service_review")
+    @patch("service.dual_review_primary.AiGatewayClient.execute")
     def test_budget_error_is_unavailable(self, review) -> None:
-        from scripts.run_codex_pr_review import ReviewError
-
-        review.side_effect = ReviewError("Daily budget exceeded")
+        review.return_value = AiResult.unavailable("codex", "Daily budget exceeded")
         result = run_codex_primary_review(prompt="review")
         self.assertEqual(result["verdict"], VERDICT_UNAVAILABLE)
+        review.assert_called_once_with(
+            "review",
+            task="promotion_review",
+            mode="review_only",
+            complexity="high",
+            source_repository=None,
+            timeout=900,
+        )
 
     @patch.dict("os.environ", {"CODEX_AUDIT_SERVICE_URL": "https://service.invalid"})
-    @patch("scripts.run_codex_pr_review.run_codex_service_review")
+    @patch("service.dual_review_primary.AiGatewayClient.execute")
     def test_capacity_error_is_unavailable(self, review) -> None:
-        from scripts.run_codex_pr_review import ReviewError
-
-        review.side_effect = ReviewError("Codex service request failed: 401 too many active jobs: max 10")
+        review.return_value = AiResult.unavailable(
+            "codex",
+            "Codex service request failed: 401 too many active jobs: max 10",
+        )
         result = run_codex_primary_review(prompt="review")
         self.assertEqual(result["verdict"], VERDICT_UNAVAILABLE)
 
     @patch.dict("os.environ", {"CODEX_AUDIT_SERVICE_URL": "https://service.invalid"})
-    @patch("scripts.run_codex_pr_review.run_codex_service_review")
+    @patch("service.dual_review_primary.AiGatewayClient.execute")
     def test_protocol_error_is_invalid(self, review) -> None:
-        from scripts.run_codex_pr_review import ReviewError
-
-        review.side_effect = ReviewError("response did not contain review JSON")
+        review.return_value = AiResult.unavailable(
+            "codex",
+            "response did not contain review JSON",
+        )
         result = run_codex_primary_review(prompt="review")
         self.assertEqual(result["verdict"], VERDICT_INVALID)
 

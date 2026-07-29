@@ -13,13 +13,6 @@ if spec is None or spec.loader is None:  # pragma: no cover - defensive guard fo
 _service = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(_service)  # type: ignore[arg-type]
 
-PR_REVIEW_SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "run_codex_pr_review.py"
-pr_spec = importlib.util.spec_from_file_location("run_codex_pr_review_test", PR_REVIEW_SCRIPT_PATH)
-if pr_spec is None or pr_spec.loader is None:  # pragma: no cover - defensive guard for env issues
-    raise RuntimeError(f"Failed to load module spec from {PR_REVIEW_SCRIPT_PATH}")
-_pr_review = importlib.util.module_from_spec(pr_spec)
-pr_spec.loader.exec_module(_pr_review)  # type: ignore[arg-type]
-
 
 class TestComplexityModelRouting(unittest.TestCase):
     """Validate complexity-to-model adaptation behavior used in codex-audit service."""
@@ -136,18 +129,6 @@ class TestComplexityModelRouting(unittest.TestCase):
                     timeout_seconds=1,
                     repo_dir=Path(__file__).resolve().parents[1],
                 )
-
-    def test_direct_api_model_for_complexity_reads_provider_specific_env(self) -> None:
-        with mock.patch.dict(
-            "os.environ",
-            {"CODEX_AUDIT_OPENAI_LOW_COMPLEXITY_MODEL": "gpt-low"},
-            clear=True,
-        ):
-            self.assertEqual(
-                _pr_review._direct_api_model_for_complexity("openai", "low"),
-                "gpt-low",
-            )
-
 
 if __name__ == "__main__":
     unittest.main()

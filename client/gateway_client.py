@@ -141,8 +141,10 @@ class AiGatewayClient:
         self,
         prompt: str,
         *,
+        task: str = "execute",
         mode: str = "review_only",
         model: str | None = None,
+        complexity: str = "",
         source_repository: str | None = None,
         source_ref: str = "main",
         timeout: float | None = None,
@@ -157,10 +159,11 @@ class AiGatewayClient:
         try:
             token = _fetch_oidc_token(self.config.audience)
             payload = json.dumps({
-                "task": "execute",
+                "task": task,
                 "prompt": prompt,
                 "mode": mode,
                 "model": model or self.config.default_execute_model,
+                "complexity": complexity,
                 "source_repository": source_repository or self.config.source_repository,
                 "source_ref": source_ref,
                 "timeout_seconds": int(timeout),

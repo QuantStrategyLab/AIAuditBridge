@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 import os
-import urllib.error
 from pathlib import Path
 from typing import Any
 
+from client.config import GatewayConfig
+from client.gateway_client import AiGatewayClient
 from service.dual_review import VERDICT_INVALID, VERDICT_UNAVAILABLE
 from service.dual_review_secondary import parse_llm_review_output
 
@@ -86,23 +87,16 @@ def run_codex_primary_review(
         raise RuntimeError("CODEX_AUDIT_SERVICE_URL is not configured")
 
     timeout = int(timeout_minutes or os.environ.get("DUAL_REVIEW_PRIMARY_TIMEOUT_MINUTES", "15"))
-    from scripts.run_codex_pr_review import ReviewError, run_codex_service_review
-
-    try:
-        output = run_codex_service_review(
-            prompt,
-            timeout_minutes=timeout,
-            complexity="high",
-        )
-    except json.JSONDecodeError as exc:
-        return {
-            "source": "codex_primary",
-            "verdict": VERDICT_INVALID,
-            "confidence": 0.0,
-            "error": str(exc),
-        }
-    except ReviewError as exc:
-        message = str(exc)
+    result = AiGatewayClient(GatewayConfig.from_env()).execute(
+        prompt,
+        task="promotion_review",
+        mode="review_only",
+        complexity="high",
+        source_repository=os.environ.get("GITHUB_REPOSITORY") or None,
+        timeout=timeout * 60,
+    )
+    if not result.success:
+        message = result.error or result.note or "Codex service review unavailable"
         unavailable_markers = (
             "daily budget exceeded",
             "quota",
@@ -120,14 +114,7 @@ def run_codex_primary_review(
             "confidence": 0.0,
             "error": message,
         }
-    except (urllib.error.URLError, OSError) as exc:
-        return {
-            "source": "codex_primary",
-            "verdict": VERDICT_UNAVAILABLE,
-            "confidence": 0.0,
-            "error": str(exc),
-        }
-    return parse_primary_review_output(output)
+    return parse_primary_review_output(result.output)
 
 
 def primary_review_available() -> bool:

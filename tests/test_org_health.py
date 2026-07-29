@@ -439,9 +439,10 @@ class OrgHealthTest(unittest.TestCase):
             {"id": 1, "name": "CI", "state": "active"},
             {"id": 2, "name": "Docs", "state": "active"},
             {"id": 3, "name": "Codex PR Review", "state": "active"},
+            {"id": 4, "name": "Codex Review Gate", "state": "active"},
         ]
         selected = org_health._monitored_workflows(workflows)
-        self.assertEqual([item["name"] for item in selected], ["CI", "Codex PR Review"])
+        self.assertEqual([item["name"] for item in selected], ["CI", "Codex Review Gate"])
 
     def test_read_org_health_serves_expired_stale_cache_and_refreshes_in_background(self) -> None:
         cache_key = (("QuantStrategyLab/cached",), "CODEX_AUDIT_SERVICE_GITHUB_TOKEN", "token", "all")
