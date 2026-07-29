@@ -32,7 +32,7 @@
 
 AIAuditBridge 是 QuantStrategyLab 的 AI 审计控制面，负责：
 
-- 接收源仓库的月度审计 / PR review 请求；
+- 接收源仓库的月度审计请求；
 - 通过 GitHub Actions OIDC 认证来源；
 - 克隆源仓库并构造上下文；
 - 调用 Codex service，必要时回退到 OpenAI / Anthropic API；
@@ -48,18 +48,12 @@ AIAuditBridge 是 QuantStrategyLab 的 AI 审计控制面，负责：
   - 使用 `CODEX_AUDIT_SERVICE_URL` 指向服务端。
   - 支持 guarded auto-merge。
 
-- `codex_pr_review.yml`
-  - 处理 PR review。
-  - 支持 Codex service + 直接 API fallback。
-  - 通过中央 Contract Oscillation Guard 保存受限的 blocking finding 历史并仲裁契约冲突。
-  - 上传诊断 artifact。
-
 - `codex_review_gate.yml`
   - 只执行确定性的 secret / path / metadata 静态门禁。
   - 使用受信任 base 代码检查 PR diff，并通过 Checks API 把 `Codex Review Gate`
     明确发布到 current head SHA；API 失败时 fail closed。
-  - Codex connector 的原生 GitHub review 与 unresolved threads 仅作为非 required
-    advisory evidence，不再镜像成仓库自建 check。
+  - GitHub Codex App 是唯一 AI PR reviewer；AIAuditBridge 不再运行第二套 reviewer。
+  - Codex App review 与 unresolved threads 不再镜像成仓库自建 AI check。
 
 - `monthly-orchestrator.yml`
   - 生成月度审计 issue。
@@ -99,10 +93,6 @@ AIAuditBridge 是 QuantStrategyLab 的 AI 审计控制面，负责：
 - `scripts/run_monthly_codex_audit.py`
   - 月审主流程。
   - 包括 repo/task 校验、service patch contract、path guard、PR 创建、label 管理、auto-merge 请求、stale label cleanup。
-
-- `scripts/run_codex_pr_review.py`
-  - PR review 主流程。
-  - service 失败时可按条件回退到 API review。
 
 - `scripts/gate_codex_app_review.py`
   - 以 current-head 静态 check 的形式保护合并；不处理 AI review verdict。
@@ -203,37 +193,17 @@ AIAuditBridge 是 QuantStrategyLab 的 AI 审计控制面，负责：
 - merge queue / required checks；
 - 失败后的 retrigger 逻辑。
 
-#### 3.3.1 Contract Oscillation Guard
+#### 3.3.1 单一 PR reviewer 边界
 
-Contract Oscillation Guard 是 `AIAuditBridge` 的中央 PR review gate 语义，不是要求每个消费者仓库新增一套 branch rule。消费者仍使用原有 required check、branch protection 和 merge queue；guard 不提供 label、admin 或人工确认绕过。
+GitHub Codex App 是唯一 AI PR reviewer。AIAuditBridge 只保留月度审计和低风险修复职责，不维护第二套 review verdict、finding 历史、重试或仲裁状态。
 
-trusted review comment 只保存最近固定轮数、固定字节上限且脱敏后的 blocking finding 摘要，包括 head SHA、file、category、severity、description 和 suggestion。历史只能由已验证的 review bot comment 恢复；legacy comment 没有 history marker 时保持兼容，但既有 blocker 会被迁移为 `invalid_history` 并继续 fail closed，不能因一次 clean review 自动清除。畸形或超限 history 同样 fail closed。
-
-若 `overflow` / `invalid_history` 状态中没有可供仲裁的 trusted prior finding，系统不得用空上下文自动 `clear`。此时需要人工确认 source-of-truth 后修复或删除损坏的 trusted bot state，再重新运行普通 required review check；这只恢复可审计状态，不直接放行 merge，也不绕过 branch protection。
-
-当同一 file/category/severity 的前后 finding 可能要求相反行为时，独立仲裁必须同时读取上一轮 finding、当前 finding 和累计 PR diff，并优先以公共接口、schema、tests、docs 等 source-of-truth 判断：
-
-- source-of-truth 足以证明当前 finding 为 false positive 时，仲裁可 `clear`；
-- 当前 finding 有明确契约依据时保持 `block`；
-- 证据不足、结果 ambiguous 或仲裁失败时继续 blocked。
-
-一旦确认或无法排除 contract conflict，结构化结果固定为 `contract_conflict=true`、`auto_fix_allowed=false`、`next_action=contract_arbitration`，禁止自动 remediation 继续反向修改代码。系统只要求一次人工契约确认；确认应落到公共接口、schema、tests 或 docs 的明确变更后，再由普通 review/check 链路重新验证，而不是绕过 gate。
-
-`verdict=clear` 表示 source-of-truth 已证明当前 finding 为 false positive，因此 required review check 可以通过；即使历史上检测到 `contract_conflict=true`，仍保持 `auto_fix_allowed=false`，防止执行线程继续改代码。这是对错误 finding 的独立仲裁结论，不是绕过 branch protection。`block`、`ambiguous` 或仲裁失败才必须继续 blocked。
-
-已 `cleared` 的 finding key 是历史匹配边界，不得继续回溯并复活更旧的同 key blocker；未被 clear 的多个 current finding key 则必须从最近历史轮分别聚合后统一交给仲裁，不能只取第一个命中的 round。
-
-#### 3.3.2 Blocking finding 的可达性证据
-
-repository Review 只有在 PR 上下文能够同时证明 exact changed path/line、当前 caller/entry point（可为既有路径或本 PR 新增路径）或明确声明的 public untrusted boundary、当前配置和输入下可达，以及具体 correctness/security/data-integrity 影响时，才能给出 `critical` 或 `high`。证据不足的 finding 必须降为 `medium/low` 或省略，不能依靠 future consumer、伪造内部对象或通用 defense-in-depth 推测阻塞当前 PR。
-
-Review 不得为了 hypothetical 风险要求新增 parser、store、registry 或 event-persistence 层。只有当前变更已经暴露对应真实边界，而且缺陷能从该边界到达时，才允许提出此类修改建议。
+合并仍必须同时满足源仓 CI、确定性 `Codex Review Gate`、未解决会话保护和 branch protection。任何自动化都不得用 label、admin 或自建 AI check 绕过这些控制。
 
 ### P1：强烈建议补的缺口
 
 #### 3.4 缺少统一的任务状态机
 
-月度审计、PR review、修复、重试、回退、人工升级，这些状态现在是靠脚本和 GitHub 流程串起来的。
+月度审计、修复、重试、回退、人工升级，这些状态现在是靠脚本和 GitHub 流程串起来的。
 
 建议显式建模：
 
@@ -335,7 +305,7 @@ Review 不得为了 hypothetical 风险要求新增 parser、store、registry �
 
 建议动作：
 
-- 把每次月审 / PR review / auto-fix 的结果持久化；
+- 把每次月审 / auto-fix 的结果持久化；
 - 记录：问题类型、provider、模型、风险级别、是否需要人工、是否 merge 成功、是否复发；
 - 在 dashboard 上展示：
   - 自动处理成功率；
@@ -399,7 +369,7 @@ Review 不得为了 hypothetical 风险要求新增 parser、store、registry �
 ### 可以放心推进的部分
 
 - 月度审计 issue 的生成与调度；
-- 低风险 review / 修复；
+- 低风险审计 / 修复；
 - 受控 auto-merge 请求；
 - 服务健康与 quota 监控；
 - 失败后 fallback 和 retry。

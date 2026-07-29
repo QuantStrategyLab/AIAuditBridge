@@ -15,7 +15,7 @@
 
 ## What this repository is
 
-AIAuditBridge is the QuantStrategyLab AI audit automation bridge. It runs Codex VPS/service-backed audit workflows first, with OpenAI/Anthropic API fallback for approved reviews and low-risk fix pull requests.
+AIAuditBridge is the QuantStrategyLab AI audit automation bridge. It runs Codex VPS/service-backed monthly audit workflows first, with OpenAI/Anthropic API fallback for approved audits and low-risk remediation pull requests.
 
 It produces research, audit, or orchestration artifacts. It should not submit broker orders or mutate live allocations by itself.
 
@@ -24,7 +24,7 @@ The service also exposes a structured automation triage endpoint for failure dia
 
 ## Architecture boundary
 
-AIAuditBridge is the organization-local AI audit boundary for QuantStrategyLab. Source repositories dispatch review requests to this repository; they should not embed raw `codex exec` commands, direct provider API calls, model routing, or fallback policy themselves.
+AIAuditBridge is the organization-local AI audit boundary for QuantStrategyLab. Source repositories dispatch monthly audit requests to this repository; they should not embed raw `codex exec` commands, direct provider API calls, model routing, or fallback policy themselves.
 
 Current execution model:
 
@@ -37,7 +37,7 @@ Keep this boundary inside the `QuantStrategyLab` organization. Do not move Quant
 
 Codex execution is service-only: the workflow calls a QuantStrategyLab-owned HTTPS/443 Codex audit service from a standard GitHub-hosted runner. The service returns review text or structured patch suggestions only. AIAuditBridge still owns clone, path validation, patch application, commit, push, PR creation, and issue comments.
 
-PR review is fail-closed: a blocking finding cannot be bypassed by a label or by retry count. Only when the same normalized finding survives a new PR head does a separate Codex arbitration pass return `clear`, `block`, or `ambiguous`. Only `clear` allows merge; `block`, `ambiguous`, and arbitration failures keep the `review` check failing. Repositories that call `AIAuditBridge` `codex_pr_review.yml@main` inherit this behavior.
+GitHub PR review has one AI owner: the GitHub Codex App. AIAuditBridge does not run a second PR reviewer or publish a parallel AI-review check. The deterministic `Codex Review Gate`, source CI, unresolved-conversation protection, and branch protection remain independent fail-closed merge controls.
 
 When `CODEX_AUDIT_AUTO_MERGE=true`, the bridge requests guarded auto-merge by adding the `auto-merge-ok` label to the generated PR only after the changed-file surface is low or medium risk and the file / total changed-line caps stay within policy. The bridge ensures the configured label exists before applying it; if the source token cannot create labels, create the label manually before enabling guarded auto-merge. If a source checkout contains `.github/codex_auto_merge_policy.json`, the bridge reads the baseline policy before Codex edits run, then uses that baseline policy before falling back to its built-in defaults. High-risk, unknown, policy-changing, file-removal/rename/copy, or invalid-policy surfaces are labeled with the configured human-review label (`human-review-required` by default) instead of `auto-merge-ok`, and the source issue comment includes the risk reasons and files for operator review. The bridge does not call GitHub native auto-merge directly; source repositories must keep their own CI and merge-guard workflow in control of the final merge decision.
 
@@ -91,17 +91,6 @@ Configure these values in `QuantStrategyLab/AIAuditBridge`:
   uses `task_default` to defer provider selection to the task policy.
 - Monthly audits with `CODEX_AUDIT_PROVIDER=auto` fall back to the configured
   API reviewers when the Codex service hits quota/capacity failures.
-- PR review workflows can fall back to direct API review on recoverable Codex
-  service failures through `CODEX_PR_REVIEW_API_FALLBACK_ENABLED=true` or the
-  reusable workflow input `api_fallback_enabled`. The reusable workflow input
-  accepts string values `true`/`false`; when omitted it defers to repository
-  variables and then defaults to `true` for compatibility. Codex-only callers
-  should pass `api_fallback_enabled: "false"`. API-only PR review when no
-  service URL is configured is controlled separately by
-  `CODEX_PR_REVIEW_DIRECT_API_PRIMARY_ENABLED` or reusable workflow input
-  `direct_api_primary_enabled`; this uses the same `true`/`false`, variable,
-  and compatibility default rules and should be set to `"false"` for Codex-only
-  callers.
 - Repository variable `CODEX_AUDIT_SERVICE_MODEL` for the VPS Codex service primary
   path; `VPS Codex Service Ops` deploy writes it into the systemd unit.
 - Optional repository variable `CODEX_AUDIT_SERVICE_REASONING_EFFORT` for a
@@ -110,9 +99,9 @@ Configure these values in `QuantStrategyLab/AIAuditBridge`:
 - Optional service-side model routing variables:
   `AI_GATEWAY_LLM_LOW_COMPLEXITY_MODEL`,
   `AI_GATEWAY_LLM_MEDIUM_COMPLEXITY_MODEL`, and
-  `AI_GATEWAY_LLM_HIGH_COMPLEXITY_MODEL`. PR review callers submit
-  `task=pr_review` with low/medium/high complexity hints; the VPS service keeps
-  Codex auth local and chooses the final Codex model.
+  `AI_GATEWAY_LLM_HIGH_COMPLEXITY_MODEL`. Audit callers submit task-specific
+  low/medium/high complexity hints; the VPS service keeps Codex auth local and
+  chooses the final Codex model.
 - Optional service-side reasoning routing variables:
   `CODEX_AUDIT_SERVICE_<TASK>_<LOW|MEDIUM|HIGH>_REASONING_EFFORT`,
   `CODEX_AUDIT_SERVICE_<LOW|MEDIUM|HIGH>_COMPLEXITY_REASONING_EFFORT`, and

@@ -330,7 +330,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         ):
             codex_audit_service._verify_github_oidc("header.payload.signature")
 
-    def test_codex_audit_service_oidc_rejects_pilot_pr_workflow_ref(self) -> None:
+    def test_codex_audit_service_oidc_rejects_retired_pr_workflow_ref(self) -> None:
         payload = {
             "aud": "quant-codex-audit",
             "iss": codex_audit_service.GITHUB_OIDC_ISSUER,
@@ -343,8 +343,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         env = {
             "CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES": "QuantStrategyLab/AIAuditBridge,QuantStrategyLab/QuantRuntimeSettings",
             "CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS": (
-                "QuantStrategyLab/AIAuditBridge/.github/workflows/codex_pr_review.yml@refs/heads/main,"
-                "QuantStrategyLab/QuantRuntimeSettings/.github/workflows/codex_pr_review.yml@refs/heads/main"
+                "QuantStrategyLab/AIAuditBridge/.github/workflows/codex_audit.yml@refs/heads/main"
             ),
             "CODEX_AUDIT_SERVICE_ALLOWED_REFS": "refs/heads/main,refs/pull/*/merge",
             "CODEX_AUDIT_SERVICE_ALLOWED_DIRECT_REPOSITORIES": "QuantStrategyLab/AIAuditBridge",
@@ -2424,8 +2423,8 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertIn("os.open(component, flags_dir, dir_fd=fd)", deploy_script)
         self.assertIn('"max_consecutive_failures": 3', deploy_script)
         self.assertIn("workflow_ref with the dispatch branch", deploy_script)
-        self.assertIn('ALLOWED_REFS="${CODEX_AUDIT_SERVICE_ALLOWED_REFS:-refs/heads/main,refs/pull/*/merge}"', deploy_script)
-        self.assertNotIn("codex_pr_review.yml@refs/pull/*/merge", deploy_script)
+        self.assertIn('ALLOWED_REFS="${CODEX_AUDIT_SERVICE_ALLOWED_REFS:-refs/heads/main}"', deploy_script)
+        self.assertNotIn("codex_pr_review.yml@", deploy_script)
         self.assertIn("QuantStrategyLab/AIAuditBridge", deploy_script)
         self.assertIn("QuantStrategyLab/QuantRuntimeSettings", deploy_script)
         self.assertIn("QuantStrategyLab/QuantPlatformKit", deploy_script)
@@ -2462,7 +2461,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertIn("protected `main`", rotation)
         self.assertIn("both the current and next exact QPK SHAs", rotation)
         self.assertIn("Never use a wildcard", rotation)
-        self.assertIn("PR-review entry remains on protected `main`", rotation)
+        self.assertIn("PR-review OIDC entries are retired", rotation)
         self.assertIn("different allowlisted reusable workflow cannot be substituted", rotation)
         self.assertIn("issue #64", rotation)
         self.assertIn("resolves to `reusable-drift-check.yml`", rotation)
@@ -2511,11 +2510,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
             workflow_value = workflow_line.removeprefix(f"{workflow_name}: ")
             self.assertEqual(script_value, workflow_value)
 
-    def test_vps_deploy_persists_exact_audit_bridge_pr_review_sha(self) -> None:
-        exact_job_ref = (
-            "QuantStrategyLab/AIAuditBridge/.github/workflows/"
-            "codex_pr_review.yml@86458c44b06593b6d7a1602b3c38e7a1c143ef17"
-        )
+    def test_vps_deploy_excludes_retired_audit_bridge_pr_review_refs(self) -> None:
         deploy_script = Path("scripts/deploy_codex_audit_service.sh").read_text(encoding="utf-8")
         workflow = Path(".github/workflows/vps_codex_service_ops.yml").read_text(encoding="utf-8")
         script_line = next(
@@ -2526,11 +2521,8 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
             for line in workflow.splitlines()
             if line.strip().startswith("CODEX_AUDIT_SERVICE_ALLOWED_JOB_WORKFLOW_REFS: ")
         )
-        script_value = script_line.split(":-", 1)[1][:-2]
-        workflow_value = workflow_line.removeprefix("CODEX_AUDIT_SERVICE_ALLOWED_JOB_WORKFLOW_REFS: ")
-
-        self.assertIn(exact_job_ref, script_value.split(","))
-        self.assertIn(exact_job_ref, workflow_value.split(","))
+        self.assertNotIn("codex_pr_review.yml@", script_line)
+        self.assertNotIn("codex_pr_review.yml@", workflow_line)
 
 
 if __name__ == "__main__":
