@@ -107,33 +107,69 @@ class GateCodexAppReviewTest(unittest.TestCase):
         self.assertTrue(any("Hardcoded secret" in issue for issue in issues))
         self.assertTrue(any("Too many lines" in issue for issue in issues))
 
-    def test_check_metadata_allows_only_exact_base_approved_deletions(self) -> None:
+    def test_check_metadata_allows_only_an_exact_base_approved_change_bundle(self) -> None:
         files = [
             {
                 "filename": "scripts/retired.py",
                 "status": "removed",
                 "additions": 0,
-                "deletions": 10,
+                "deletions": 150,
             },
             {
-                "filename": "scripts/unapproved.py",
-                "status": "removed",
-                "additions": 0,
-                "deletions": 10,
+                "filename": "service/caller.py",
+                "status": "modified",
+                "additions": 2_400,
+                "deletions": 0,
             },
         ]
         policy = {
-            "approved_deleted_paths": ["scripts/retired.py"],
             "max_changed_files": 10,
-            "max_changed_lines": 100,
+            "max_changed_lines": 2_000,
+            "approved_change_bundles": [
+                {
+                    "exact_changed_paths": [
+                        "scripts/retired.py",
+                        "service/caller.py",
+                    ],
+                    "exact_deleted_paths": ["scripts/retired.py"],
+                    "max_changed_lines": 3_000,
+                }
+            ],
         }
 
         issues = gate_codex_app_review_static.check_metadata(files, policy)
 
-        self.assertFalse(any("scripts/retired.py" in issue for issue in issues))
-        self.assertTrue(any("scripts/unapproved.py" in issue for issue in issues))
+        self.assertEqual(issues, [])
 
-    def test_check_metadata_rejects_unsafe_delete_approvals(self) -> None:
+    def test_check_metadata_does_not_expand_line_budget_for_an_unrelated_change(self) -> None:
+        files = [
+            {
+                "filename": "service/unrelated.py",
+                "status": "modified",
+                "additions": 2_500,
+                "deletions": 0,
+            },
+        ]
+        policy = {
+            "max_changed_files": 10,
+            "max_changed_lines": 2_000,
+            "approved_change_bundles": [
+                {
+                    "exact_changed_paths": [
+                        "scripts/retired.py",
+                        "service/caller.py",
+                    ],
+                    "exact_deleted_paths": ["scripts/retired.py"],
+                    "max_changed_lines": 3_000,
+                }
+            ],
+        }
+
+        issues = gate_codex_app_review_static.check_metadata(files, policy)
+
+        self.assertTrue(any("Too many lines" in issue for issue in issues))
+
+    def test_check_metadata_rejects_partial_or_unsafe_change_bundles(self) -> None:
         files = [
             {
                 "filename": "scripts/retired.py",
@@ -142,17 +178,24 @@ class GateCodexAppReviewTest(unittest.TestCase):
                 "deletions": 10,
             },
         ]
-        for approval in (
-            "scripts/*.py",
-            "../scripts/retired.py",
-            "/scripts/retired.py",
-            "scripts\\retired.py",
+        for exact_changed_paths in (
+            ["scripts/retired.py", "service/caller.py"],
+            ["scripts/*.py"],
+            ["../scripts/retired.py"],
+            ["/scripts/retired.py"],
+            ["scripts\\retired.py"],
         ):
-            with self.subTest(approval=approval):
+            with self.subTest(exact_changed_paths=exact_changed_paths):
                 policy = {
-                    "approved_deleted_paths": [approval],
                     "max_changed_files": 10,
                     "max_changed_lines": 100,
+                    "approved_change_bundles": [
+                        {
+                            "exact_changed_paths": exact_changed_paths,
+                            "exact_deleted_paths": ["scripts/retired.py"],
+                            "max_changed_lines": 200,
+                        }
+                    ],
                 }
                 issues = gate_codex_app_review_static.check_metadata(files, policy)
                 self.assertTrue(any("scripts/retired.py" in issue for issue in issues))
