@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import unittest
+import urllib.error
 from unittest.mock import MagicMock, patch
 
 from client.config import GatewayConfig
+from client.errors import CircuitBreakerOpenError
 from client.gateway_client import AiGatewayClient, AiResult
 from service.dual_review import VERDICT_INVALID, VERDICT_UNAVAILABLE
 from service.dual_review_primary import build_primary_prompt, parse_primary_review_output, run_codex_primary_review
@@ -51,6 +53,40 @@ class DualReviewPrimaryTests(unittest.TestCase):
         poll_request = urlopen.call_args_list[1].args[0]
         self.assertEqual(poll_request.get_header("Authorization"), "Bearer poll-oidc")
 
+    def test_gateway_execute_labels_network_failure(self) -> None:
+        config = GatewayConfig(
+            service_url="https://service.invalid",
+            source_repository="QuantStrategyLab/AIAuditBridge",
+        )
+        with (
+            patch("client.gateway_client._fetch_oidc_token", return_value="oidc"),
+            patch(
+                "client.gateway_client.urllib.request.urlopen",
+                side_effect=urllib.error.URLError("temporary DNS failure"),
+            ),
+        ):
+            result = AiGatewayClient(config).execute("review")
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.raw, {"failure_category": "transient_service_failure"})
+
+    def test_gateway_execute_labels_open_circuit(self) -> None:
+        client = AiGatewayClient(
+            GatewayConfig(
+                service_url="https://service.invalid",
+                source_repository="QuantStrategyLab/AIAuditBridge",
+            )
+        )
+        with patch.object(
+            client._breaker,
+            "before_call",
+            side_effect=CircuitBreakerOpenError("circuit open"),
+        ):
+            result = client.execute("review")
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.raw, {"failure_category": "transient_service_failure"})
+
     def test_build_primary_prompt_includes_evidence_summary(self) -> None:
         from pathlib import Path
         import json
@@ -90,7 +126,7 @@ class DualReviewPrimaryTests(unittest.TestCase):
         self.assertEqual(result["verdict"], VERDICT_UNAVAILABLE)
         review.assert_called_once_with(
             "review",
-            task="promotion_review",
+            task="dual_review",
             mode="review_only",
             complexity="high",
             source_repository=None,
@@ -121,6 +157,42 @@ class DualReviewPrimaryTests(unittest.TestCase):
         result = run_codex_primary_review(prompt="review")
 
         self.assertEqual(result["verdict"], VERDICT_UNAVAILABLE)
+
+    @patch.dict("os.environ", {"CODEX_AUDIT_SERVICE_URL": "https://service.invalid"})
+    @patch("service.dual_review_primary.AiGatewayClient.execute")
+    def test_structured_network_failure_is_unavailable(self, review) -> None:
+        review.return_value = AiResult(
+            provider="codex",
+            model="codex-cli",
+            success=False,
+            error="temporary DNS failure",
+            raw={"failure_category": "transient_service_failure"},
+        )
+
+        result = run_codex_primary_review(prompt="review")
+
+        self.assertEqual(result["verdict"], VERDICT_UNAVAILABLE)
+
+    @patch.dict("os.environ", {"CODEX_AUDIT_SERVICE_URL": "https://service.invalid"})
+    @patch("service.dual_review_primary.AiGatewayClient.execute")
+    def test_structured_service_outages_are_unavailable(self, review) -> None:
+        for category in (
+            "auth_or_config_failure",
+            "service_restart",
+            "stale_job_timeout",
+        ):
+            with self.subTest(category=category):
+                review.return_value = AiResult(
+                    provider="codex",
+                    model="codex-cli",
+                    success=False,
+                    error=category,
+                    raw={"failure_category": category},
+                )
+
+                result = run_codex_primary_review(prompt="review")
+
+                self.assertEqual(result["verdict"], VERDICT_UNAVAILABLE)
 
     @patch.dict("os.environ", {"CODEX_AUDIT_SERVICE_URL": "https://service.invalid"})
     @patch("service.dual_review_primary.AiGatewayClient.execute")

@@ -89,7 +89,7 @@ def run_codex_primary_review(
     timeout = int(timeout_minutes or os.environ.get("DUAL_REVIEW_PRIMARY_TIMEOUT_MINUTES", "15"))
     result = AiGatewayClient(GatewayConfig.from_env()).execute(
         prompt,
-        task="promotion_review",
+        task="dual_review",
         mode="review_only",
         complexity="high",
         source_repository=os.environ.get("GITHUB_REPOSITORY") or None,
@@ -110,7 +110,13 @@ def run_codex_primary_review(
             "request timed out",
             "too many active jobs",
         )
-        unavailable = failure_category == "quota_or_capacity_failure" or any(
+        unavailable = failure_category in {
+            "auth_or_config_failure",
+            "quota_or_capacity_failure",
+            "service_restart",
+            "stale_job_timeout",
+            "transient_service_failure",
+        } or any(
             marker in message.lower() for marker in unavailable_markers
         )
         verdict = VERDICT_UNAVAILABLE if unavailable else VERDICT_INVALID

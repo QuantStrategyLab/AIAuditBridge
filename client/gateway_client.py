@@ -34,8 +34,22 @@ class AiResult:
     raw: Any = None
 
     @classmethod
-    def unavailable(cls, provider: str, reason: str) -> "AiResult":
-        return cls(provider=provider, model="", success=False, error=reason, note=reason)
+    def unavailable(
+        cls,
+        provider: str,
+        reason: str,
+        *,
+        failure_category: str = "",
+    ) -> "AiResult":
+        raw = {"failure_category": failure_category} if failure_category else None
+        return cls(
+            provider=provider,
+            model="",
+            success=False,
+            error=reason,
+            note=reason,
+            raw=raw,
+        )
 
 
 @dataclass(frozen=True)
@@ -151,12 +165,12 @@ class AiGatewayClient:
         poll_interval: float | None = None,
     ) -> AiResult:
         """Async Codex execution via ``POST /v1/ai/execute/jobs`` + polling."""
-        self._breaker.before_call()
         timeout = timeout or self.config.timeout_execute
         poll_interval = poll_interval or self.config.poll_interval
         started = time.time()
 
         try:
+            self._breaker.before_call()
             submit_token = _fetch_oidc_token(self.config.audience)
             payload = json.dumps({
                 "task": task,
@@ -181,7 +195,11 @@ class AiGatewayClient:
 
             job_id = job.get("job_id")
             if not isinstance(job_id, str) or not job_id:
-                return AiResult.unavailable("codex", "No job_id from gateway")
+                return AiResult.unavailable(
+                    "codex",
+                    "No job_id from gateway",
+                    failure_category="patch_contract_failure",
+                )
 
             # Poll until completion
             deadline = time.time() + timeout + 60
@@ -216,14 +234,41 @@ class AiGatewayClient:
                     )
 
             self._breaker.on_failure()
-            return AiResult.unavailable("codex", "Job polling timed out")
+            return AiResult.unavailable(
+                "codex",
+                "Job polling timed out",
+                failure_category="transient_service_failure",
+            )
 
         except CircuitBreakerOpenError:
-            return AiResult.unavailable("codex", "Circuit breaker open — service unavailable")
+            return AiResult.unavailable(
+                "codex",
+                "Circuit breaker open — service unavailable",
+                failure_category="transient_service_failure",
+            )
         except urllib.error.HTTPError as exc:
             self._breaker.on_failure()
             body = exc.read().decode("utf-8", errors="replace")[:500]
-            return AiResult.unavailable("codex", f"HTTP {exc.code}: {body}")
+            if exc.code == 429:
+                category = "quota_or_capacity_failure"
+            elif exc.code >= 500:
+                category = "transient_service_failure"
+            elif exc.code in {401, 403}:
+                category = "auth_or_config_failure"
+            else:
+                category = "unknown_failure"
+            return AiResult.unavailable(
+                "codex",
+                f"HTTP {exc.code}: {body}",
+                failure_category=category,
+            )
+        except (urllib.error.URLError, OSError) as exc:
+            self._breaker.on_failure()
+            return AiResult.unavailable(
+                "codex",
+                str(exc),
+                failure_category="transient_service_failure",
+            )
         except Exception as exc:
             self._breaker.on_failure()
             return AiResult.unavailable("codex", str(exc))
