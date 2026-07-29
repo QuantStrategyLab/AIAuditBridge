@@ -107,6 +107,56 @@ class GateCodexAppReviewTest(unittest.TestCase):
         self.assertTrue(any("Hardcoded secret" in issue for issue in issues))
         self.assertTrue(any("Too many lines" in issue for issue in issues))
 
+    def test_check_metadata_allows_only_exact_base_approved_deletions(self) -> None:
+        files = [
+            {
+                "filename": "scripts/retired.py",
+                "status": "removed",
+                "additions": 0,
+                "deletions": 10,
+            },
+            {
+                "filename": "scripts/unapproved.py",
+                "status": "removed",
+                "additions": 0,
+                "deletions": 10,
+            },
+        ]
+        policy = {
+            "approved_deleted_paths": ["scripts/retired.py"],
+            "max_changed_files": 10,
+            "max_changed_lines": 100,
+        }
+
+        issues = gate_codex_app_review_static.check_metadata(files, policy)
+
+        self.assertFalse(any("scripts/retired.py" in issue for issue in issues))
+        self.assertTrue(any("scripts/unapproved.py" in issue for issue in issues))
+
+    def test_check_metadata_rejects_unsafe_delete_approvals(self) -> None:
+        files = [
+            {
+                "filename": "scripts/retired.py",
+                "status": "removed",
+                "additions": 0,
+                "deletions": 10,
+            },
+        ]
+        for approval in (
+            "scripts/*.py",
+            "../scripts/retired.py",
+            "/scripts/retired.py",
+            "scripts\\retired.py",
+        ):
+            with self.subTest(approval=approval):
+                policy = {
+                    "approved_deleted_paths": [approval],
+                    "max_changed_files": 10,
+                    "max_changed_lines": 100,
+                }
+                issues = gate_codex_app_review_static.check_metadata(files, policy)
+                self.assertTrue(any("scripts/retired.py" in issue for issue in issues))
+
 
 if __name__ == "__main__":
     unittest.main()

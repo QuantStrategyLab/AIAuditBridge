@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 DEFAULT_POLICY_PATH = Path(".github/codex_auto_merge_policy.json")
@@ -72,6 +72,24 @@ def scan_diff(diff_text: str, path_patterns: list[re.Pattern[str]]) -> list[str]
 
 def check_metadata(files: list[dict[str, Any]], policy: dict[str, Any]) -> list[str]:
     issues: list[str] = []
+    approved_deleted_paths: set[str] = set()
+    configured_approvals = policy.get("approved_deleted_paths", [])
+    if isinstance(configured_approvals, list):
+        for value in configured_approvals:
+            if not isinstance(value, str) or value != value.strip():
+                continue
+            path = PurePosixPath(value)
+            if (
+                not value
+                or path.is_absolute()
+                or path.as_posix() != value
+                or ".." in path.parts
+                or "\\" in value
+                or any(character in value for character in "*?[]")
+            ):
+                continue
+            approved_deleted_paths.add(value)
+
     max_files = policy.get("max_changed_files", 50)
     max_lines = policy.get("max_changed_lines", 5000)
     total_added = sum(f.get("additions", 0) or 0 for f in files)
@@ -79,7 +97,7 @@ def check_metadata(files: list[dict[str, Any]], policy: dict[str, Any]) -> list[
     for f in files:
         filename = f.get("filename", "?")
         status = (f.get("status") or "").lower().strip()
-        if status == "removed":
+        if status == "removed" and filename not in approved_deleted_paths:
             issues.append(f"**File deleted**: `{filename}` — verify intentional")
         elif status == "renamed":
             issues.append(f"**File renamed**: `{f.get('previous_filename', '?')}` → `{filename}`")

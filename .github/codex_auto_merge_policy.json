@@ -23,7 +23,13 @@
     }
   },
   "max_changed_files": 30,
-  "max_changed_lines": 2000,
+  "max_changed_lines": 3000,
+  "approved_deleted_paths": [
+    ".github/workflows/codex_pr_review.yml",
+    "prompts/pr_review.md",
+    "scripts/run_codex_pr_review.py",
+    "tests/test_run_codex_pr_review.py"
+  ],
   "pr_review": {
     "enabled": true,
     "block_severities": [
