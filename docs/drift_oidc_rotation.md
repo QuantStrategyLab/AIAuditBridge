@@ -12,6 +12,6 @@ To rotate the QPK reusable workflow without an untrusted or unavailable window:
 
 Current rotation: retain `644cd9002ae92f2aaca6f7efb4afa4986fae05ea`, `d0a081ca5868faaf1a6dd870cf4b93643978cd11`, `fcddef20eea5deb876e739263042acdcb3e9cd1b`, and `4f8465b28a6787d39d21e50f9d95a77841d6ad56` only until CN, US, and crypto are verified on `651c9ac4f37ce6e7fe1bac84dc7646cd5abc9e6e`; [issue #64](https://github.com/QuantStrategyLab/AIAuditBridge/issues/64) tracks removal by 2026-07-18. The deploy workflow verifies that every allowlisted QPK SHA resolves to `reusable-drift-check.yml` before changing the service.
 
-Never use a wildcard for `job_workflow_ref`. Strategy drift delegation must use an exact QPK SHA. The existing AIAuditBridge PR-review entry remains on protected `main` only while organization consumers still call `codex_pr_review.yml@main`; migrate that entry to a SHA only together with all consumer workflow pins.
+Never use a wildcard for `job_workflow_ref`. Strategy drift delegation must use an exact QPK SHA. AIAuditBridge PR-review OIDC entries are retired and must not be restored; GitHub Codex App is the sole AI PR reviewer.
 
 The service also enforces that any allowed strategy `drift-check.yml` caller presents a `job_workflow_ref` for QuantPlatformKit's `reusable-drift-check.yml`. A different allowlisted reusable workflow cannot be substituted.

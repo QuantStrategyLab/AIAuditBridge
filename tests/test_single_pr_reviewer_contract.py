@@ -57,3 +57,13 @@ def test_retired_pr_reviewer_is_not_advertised_as_active() -> None:
         assert "run_codex_pr_review.py" not in content
         assert "CODEX_PR_REVIEW_API_FALLBACK_ENABLED" not in content
         assert "CODEX_PR_REVIEW_DIRECT_API_PRIMARY_ENABLED" not in content
+
+
+def test_retired_pr_reviewer_is_not_authorized_by_deployment_defaults() -> None:
+    for relative_path in (
+        ".github/workflows/vps_codex_service_ops.yml",
+        "scripts/deploy_codex_audit_service.sh",
+    ):
+        content = (ROOT / relative_path).read_text(encoding="utf-8")
+        assert "codex_pr_review.yml@" not in content
+        assert "86458c44b06593b6d7a1602b3c38e7a1c143ef17" not in content

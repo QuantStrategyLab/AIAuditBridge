@@ -157,7 +157,7 @@ class AiGatewayClient:
         started = time.time()
 
         try:
-            token = _fetch_oidc_token(self.config.audience)
+            submit_token = _fetch_oidc_token(self.config.audience)
             payload = json.dumps({
                 "task": task,
                 "prompt": prompt,
@@ -174,7 +174,7 @@ class AiGatewayClient:
                 f"{self.config.service_url}/v1/ai/execute/jobs",
                 data=payload,
                 method="POST",
-                headers=_headers(token),
+                headers=_headers(submit_token),
             )
             with urllib.request.urlopen(req, timeout=30) as resp:
                 job = json.loads(resp.read().decode("utf-8"))
@@ -187,10 +187,11 @@ class AiGatewayClient:
             deadline = time.time() + timeout + 60
             while time.time() < deadline:
                 time.sleep(poll_interval)
+                poll_token = _fetch_oidc_token(self.config.audience)
                 req2 = urllib.request.Request(
                     f"{self.config.service_url}/v1/ai/execute/jobs/{job_id}",
                     method="GET",
-                    headers=_headers(token),
+                    headers=_headers(poll_token),
                 )
                 try:
                     with urllib.request.urlopen(req2, timeout=30) as resp2:

@@ -52,6 +52,8 @@ DEFAULT_WORKFLOW_ALLOWLIST = (
     "VPS Codex Service Ops",
     "ci",
 )
+_RETIRED_WORKFLOW_NAMES = {"codex pr review"}
+_RETIRED_WORKFLOW_FILENAMES = {"codex_pr_review.yml"}
 
 
 def _split_repo_env(name: str) -> list[str]:
@@ -359,11 +361,20 @@ def _workflow_matches_allowlist(workflow: dict[str, Any], allowlist: set[str]) -
     return name in allowlist or path in allowlist or filename in allowlist
 
 
+def _is_retired_workflow(workflow: dict[str, Any]) -> bool:
+    name = str(workflow.get("name") or "").strip().lower()
+    path = str(workflow.get("path") or "").strip().lower()
+    filename = path.rsplit("/", 1)[-1]
+    return name in _RETIRED_WORKFLOW_NAMES or filename in _RETIRED_WORKFLOW_FILENAMES
+
+
 def _monitored_workflows(workflows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     active = [
         workflow
         for workflow in workflows
-        if isinstance(workflow, dict) and not str(workflow.get("state") or "").startswith("disabled")
+        if isinstance(workflow, dict)
+        and not str(workflow.get("state") or "").startswith("disabled")
+        and not _is_retired_workflow(workflow)
     ]
     allowlist = _workflow_allowlist()
     selected = [workflow for workflow in active if _workflow_matches_allowlist(workflow, allowlist)]

@@ -24,7 +24,10 @@ class DualReviewPrimaryTests(unittest.TestCase):
         )
 
         with (
-            patch("client.gateway_client._fetch_oidc_token", return_value="oidc"),
+            patch(
+                "client.gateway_client._fetch_oidc_token",
+                side_effect=["submit-oidc", "poll-oidc"],
+            ) as fetch_oidc_token,
             patch(
                 "client.gateway_client.urllib.request.urlopen",
                 side_effect=[submit_response, poll_response],
@@ -43,6 +46,10 @@ class DualReviewPrimaryTests(unittest.TestCase):
         payload = json.loads(request.data)
         self.assertEqual(payload["task"], "promotion_review")
         self.assertEqual(payload["complexity"], "high")
+        self.assertEqual(fetch_oidc_token.call_count, 2)
+        self.assertEqual(request.get_header("Authorization"), "Bearer submit-oidc")
+        poll_request = urlopen.call_args_list[1].args[0]
+        self.assertEqual(poll_request.get_header("Authorization"), "Bearer poll-oidc")
 
     def test_build_primary_prompt_includes_evidence_summary(self) -> None:
         from pathlib import Path

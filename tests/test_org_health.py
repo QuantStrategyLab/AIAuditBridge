@@ -444,6 +444,21 @@ class OrgHealthTest(unittest.TestCase):
         selected = org_health._monitored_workflows(workflows)
         self.assertEqual([item["name"] for item in selected], ["CI", "Codex Review Gate"])
 
+    def test_read_org_health_fallback_excludes_retired_pr_reviewer(self) -> None:
+        workflows = [
+            {
+                "id": 1,
+                "name": "Codex PR Review",
+                "path": ".github/workflows/codex_pr_review.yml",
+                "state": "active",
+            },
+            {"id": 2, "name": "Custom Health", "state": "active"},
+        ]
+
+        selected = org_health._monitored_workflows(workflows)
+
+        self.assertEqual([item["name"] for item in selected], ["Custom Health"])
+
     def test_read_org_health_serves_expired_stale_cache_and_refreshes_in_background(self) -> None:
         cache_key = (("QuantStrategyLab/cached",), "CODEX_AUDIT_SERVICE_GITHUB_TOKEN", "token", "all")
         cached_result = {
