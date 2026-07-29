@@ -76,7 +76,13 @@ class DualReviewPrimaryTests(unittest.TestCase):
         self.assertEqual(review["verdict"], "approve")
         self.assertEqual(review["source"], "codex_primary")
 
-    @patch.dict("os.environ", {"CODEX_AUDIT_SERVICE_URL": "https://service.invalid"})
+    @patch.dict(
+        "os.environ",
+        {
+            "CODEX_AUDIT_SERVICE_URL": "https://service.invalid",
+            "GITHUB_REPOSITORY": "",
+        },
+    )
     @patch("service.dual_review_primary.AiGatewayClient.execute")
     def test_budget_error_is_unavailable(self, review) -> None:
         review.return_value = AiResult.unavailable("codex", "Daily budget exceeded")
