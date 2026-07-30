@@ -42,6 +42,21 @@ def _alert_fingerprint(lines: list[str]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _strategy_health_alert(row: dict[str, Any]) -> tuple[str, str] | None:
+    try:
+        score = float(row.get("overall_score"))
+    except (TypeError, ValueError):
+        return None
+    if score >= SCORE_ALERT:
+        return None
+    profile = str(row.get("strategy_profile") or "?")
+    domain = str(row.get("domain") or "?")
+    return (
+        f"[{domain}] {profile}: health_score={score:.1f}",
+        f"strategy_health_below_{SCORE_ALERT:g}:{domain}:{profile}",
+    )
+
+
 def _alert_state_path(root: Path) -> Path:
     return root / _ALERT_STATE_RELATIVE_PATH
 
@@ -201,17 +216,14 @@ def main() -> int:
 
     telegram_lines: list[str] = []
     critical_lines: list[str] = []
+    alert_identities: list[str] = []
 
     for row in strategies:
-        try:
-            score = float(row.get("overall_score"))
-        except (TypeError, ValueError):
-            continue
-        if score >= SCORE_ALERT:
-            continue
-        profile = str(row.get("strategy_profile") or "?")
-        domain = str(row.get("domain") or "?")
-        telegram_lines.append(f"[{domain}] {profile}: health_score={score:.1f}")
+        alert = _strategy_health_alert(row)
+        if alert:
+            line, identity = alert
+            telegram_lines.append(line)
+            alert_identities.append(identity)
 
     for domain in DOMAINS:
         drifts = drift_results.get(domain, [])
@@ -220,6 +232,9 @@ def main() -> int:
             label = f"[{domain}] {drift.strategy_profile}: drift_score={score:.2f}"
             if score >= DRIFT_CRITICAL:
                 critical_lines.append(label)
+                alert_identities.append(
+                    f"critical_drift:{domain}:{drift.strategy_profile}"
+                )
             elif score >= DRIFT_REVIEW:
                 pass  # tracked via create_issues_for_domain below
 
@@ -234,18 +249,23 @@ def main() -> int:
             body=f"Quant-monitor detected critical drift.\n\n- {line}",
         )
 
-    data_error_lines = [
-        f"[{error['domain']}] {error['code']} ({error['error_type']})"
-        for error in drift_errors
-    ]
+    data_error_lines: list[str] = []
+    for error in drift_errors:
+        data_error_lines.append(
+            f"[{error['domain']}] {error['code']} ({error['error_type']})"
+        )
+        alert_identities.append(
+            f"data_error:{error['domain']}:{error['code']}:{error['error_type']}"
+        )
     if collector_payload_invalid:
         data_error_lines.append("[collector] dashboard_data_unavailable")
+        alert_identities.append("data_error:collector:dashboard_data_unavailable")
     notify_lines = telegram_lines + critical_lines + data_error_lines
     telegram_sent = False
     duplicate_alert_suppressed = False
     if notify_lines:
         body = "🚨 quant-monitor health_cycle\n" + "\n".join(f"• {line}" for line in notify_lines)
-        fingerprint = _alert_fingerprint(notify_lines)
+        fingerprint = _alert_fingerprint(alert_identities)
         duplicate_alert_suppressed = _is_duplicate_alert(root, fingerprint)
         if not duplicate_alert_suppressed:
             telegram_sent = _send_telegram(body)

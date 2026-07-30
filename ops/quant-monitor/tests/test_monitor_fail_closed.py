@@ -85,6 +85,28 @@ class MonitorFailClosedTests(unittest.TestCase):
             HEALTH_CYCLE._clear_alert(root)
             self.assertFalse(HEALTH_CYCLE._is_duplicate_alert(root, fingerprint))
 
+    def test_health_cycle_score_changes_keep_the_same_incident_fingerprint(self) -> None:
+        first_line, first_identity = HEALTH_CYCLE._strategy_health_alert(
+            {
+                "domain": "us_equity",
+                "strategy_profile": "example",
+                "overall_score": 59.9,
+            }
+        )
+        second_line, second_identity = HEALTH_CYCLE._strategy_health_alert(
+            {
+                "domain": "us_equity",
+                "strategy_profile": "example",
+                "overall_score": 59.8,
+            }
+        )
+
+        self.assertNotEqual(first_line, second_line)
+        self.assertEqual(
+            HEALTH_CYCLE._alert_fingerprint([first_identity]),
+            HEALTH_CYCLE._alert_fingerprint([second_identity]),
+        )
+
     def test_health_cycle_non_object_alert_state_is_a_cache_miss(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
