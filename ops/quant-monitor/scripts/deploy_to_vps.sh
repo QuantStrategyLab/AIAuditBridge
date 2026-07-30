@@ -26,6 +26,8 @@ rsync -avz -e "ssh -p ${VPS_PORT}" \
   --exclude '.git' \
   --exclude 'data/' \
   --exclude '.venv/' \
+  --exclude '__pycache__/' \
+  --exclude '*.py[co]' \
   "$AAB_ROOT/ops/quant-monitor/" "${VPS_HOST}:${REMOTE_MONITOR}/"
 
 echo "[deploy] bootstrap runtime + systemd"
@@ -36,7 +38,12 @@ REMOTE_MONITOR="$REMOTE_AAB/ops/quant-monitor"
 OLD_UNIT="/etc/systemd/system/codex-quant.service"
 CHAT_ID=""
 if [[ -f "$OLD_UNIT" ]]; then
-  CHAT_ID="$(grep -E '^Environment=GLOBAL_TELEGRAM_CHAT_ID=' "$OLD_UNIT" | head -1 | cut -d= -f2- || true)"
+  CHAT_ID="$(
+    grep -E '^Environment=GLOBAL_TELEGRAM_CHAT_ID=' "$OLD_UNIT" \
+      | head -1 \
+      | sed -E 's/^Environment=(GLOBAL_TELEGRAM_CHAT_ID=)+//' \
+      || true
+  )"
 fi
 
 bash "$REMOTE_MONITOR/scripts/setup_vps_runtime.sh"
@@ -62,7 +69,14 @@ sudo cp "$REMOTE_MONITOR/systemd/codex-daily-briefing.timer.example" /etc/system
 sudo systemctl daemon-reload
 sudo systemctl enable codex-quant.timer codex-daily-briefing.timer
 sudo systemctl restart codex-quant.timer codex-daily-briefing.timer
-sudo systemctl start codex-quant.service || true
+if ! sudo systemctl start codex-quant.service; then
+  monitor_status="$(systemctl show codex-quant.service -p ExecMainStatus --value)"
+  if [[ "$monitor_status" != "2" ]]; then
+    echo "[deploy] codex-quant.service failed with unexpected status ${monitor_status}" >&2
+    exit 1
+  fi
+  echo "[deploy] codex-quant.service completed with active monitor alerts" >&2
+fi
 
 systemctl is-active codex-quant.timer
 systemctl is-active codex-daily-briefing.timer
