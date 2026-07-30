@@ -1,7 +1,9 @@
 import importlib.util
 import json
 import os
+import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -107,18 +109,25 @@ class MonitorFailClosedTests(unittest.TestCase):
     def test_daily_briefing_marks_missing_dashboard_unavailable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            qpk = types.ModuleType("quant_platform_kit")
+            lifecycle = types.ModuleType("quant_platform_kit.strategy_lifecycle")
+            drift_detector = types.ModuleType("quant_platform_kit.strategy_lifecycle.drift_detector")
+            health_dashboard = types.ModuleType("quant_platform_kit.strategy_lifecycle.health_dashboard")
+            drift_detector.run_drift_detection = lambda _domain: []
+            health_dashboard.build_dashboard = lambda **_kwargs: None
             with (
                 mock.patch.dict(
                     os.environ,
                     {"QUANT_MONITOR_ROOT": str(root), "DAY": "2026-07-30"},
                 ),
-                mock.patch(
-                    "quant_platform_kit.strategy_lifecycle.drift_detector.run_drift_detection",
-                    return_value=[],
-                ),
-                mock.patch(
-                    "quant_platform_kit.strategy_lifecycle.health_dashboard.build_dashboard",
-                    return_value=None,
+                mock.patch.dict(
+                    sys.modules,
+                    {
+                        "quant_platform_kit": qpk,
+                        "quant_platform_kit.strategy_lifecycle": lifecycle,
+                        "quant_platform_kit.strategy_lifecycle.drift_detector": drift_detector,
+                        "quant_platform_kit.strategy_lifecycle.health_dashboard": health_dashboard,
+                    },
                 ),
             ):
                 self.assertEqual(DAILY_BRIEFING.main(), 0)
