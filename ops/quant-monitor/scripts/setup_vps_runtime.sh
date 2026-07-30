@@ -34,7 +34,12 @@ python3 -m venv "$VENV"
 "$VENV/bin/pip" install numpy pandas google-cloud-storage
 
 if ! command -v gh >/dev/null 2>&1; then
-  echo "[setup] warning: gh CLI not installed; drift issues will be skipped" >&2
+  echo "[setup] gh CLI is required for trusted lifecycle artifact synchronization" >&2
+  exit 1
+fi
+if ! gh auth status >/dev/null 2>&1; then
+  echo "[setup] gh CLI authentication is required for lifecycle artifacts" >&2
+  exit 1
 fi
 if ! command -v gcloud >/dev/null 2>&1; then
   echo "[setup] warning: gcloud not installed; telegram env load may fail" >&2
