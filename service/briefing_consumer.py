@@ -167,7 +167,12 @@ def _classify_report_payload(
 
     if payload.get("ok") is False:
         error = str(payload.get("error") or "ok=false")
-        level = BriefingAction.TELEGRAM if "circuit" in error.lower() else BriefingAction.GITHUB_ISSUE
+        data_unavailable = str(payload.get("data_status") or "").strip().lower() == "unavailable"
+        level = (
+            BriefingAction.TELEGRAM
+            if data_unavailable or "circuit" in error.lower()
+            else BriefingAction.GITHUB_ISSUE
+        )
         findings.append(
             BriefingFinding(source=source, level=level, reason=error, domain=str(payload.get("domain") or ""))
         )

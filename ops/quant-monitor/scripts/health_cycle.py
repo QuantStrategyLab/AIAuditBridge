@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -16,6 +17,96 @@ DOMAINS = ("cn_equity", "hk_equity", "us_equity", "crypto")
 SCORE_ALERT = 60.0
 DRIFT_REVIEW = 0.50
 DRIFT_CRITICAL = 0.75
+_ALERT_STATE_RELATIVE_PATH = Path("data/alert-state/health_cycle.json")
+
+
+def _collect_drift_results(run_drift_detection, *, domains=DOMAINS):
+    results: dict[str, list[Any]] = {}
+    errors: list[dict[str, str]] = []
+    for domain in domains:
+        try:
+            results[domain] = list(run_drift_detection(domain))
+        except Exception as exc:
+            errors.append(
+                {
+                    "domain": domain,
+                    "code": "drift_data_unavailable",
+                    "error_type": type(exc).__name__,
+                }
+            )
+    return results, errors
+
+
+def _alert_fingerprint(lines: list[str]) -> str:
+    payload = "\n".join(sorted(str(line) for line in lines))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _strategy_health_alert(row: dict[str, Any]) -> tuple[str, str] | None:
+    try:
+        score = float(row.get("overall_score"))
+    except (TypeError, ValueError):
+        return None
+    if score >= SCORE_ALERT:
+        return None
+    profile = str(row.get("strategy_profile") or "?")
+    domain = str(row.get("domain") or "?")
+    return (
+        f"[{domain}] {profile}: health_score={score:.1f}",
+        f"strategy_health_below_{SCORE_ALERT:g}:{domain}:{profile}",
+    )
+
+
+def _alert_state_path(root: Path) -> Path:
+    return root / _ALERT_STATE_RELATIVE_PATH
+
+
+def _is_duplicate_alert(root: Path, fingerprint: str) -> bool:
+    try:
+        payload = json.loads(_alert_state_path(root).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    return str(payload.get("fingerprint") or "") == fingerprint
+
+
+def _record_alert(root: Path, fingerprint: str) -> None:
+    path = _alert_state_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(".tmp")
+    temp_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "quant_monitor_alert_state.v1",
+                "fingerprint": fingerprint,
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    temp_path.replace(path)
+
+
+def _clear_alert(root: Path) -> None:
+    try:
+        _alert_state_path(root).unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _create_issues_for_available_domains(
+    drift_results: dict[str, list[Any]],
+    create_issues_for_domain,
+    *,
+    domains=DOMAINS,
+) -> list[dict[str, Any]]:
+    issue_results: list[dict[str, Any]] = []
+    for domain in domains:
+        if domain in drift_results:
+            issue_results.extend(create_issues_for_domain(domain))
+    return issue_results
 
 
 def _send_telegram(text: str) -> bool:
@@ -26,8 +117,7 @@ def _send_telegram(text: str) -> bool:
     try:
         from quant_platform_kit.notifications.telegram import send_telegram_message
 
-        send_telegram_message(bot_token=token, chat_ids=chat, text=text)
-        return True
+        return bool(send_telegram_message(bot_token=token, chat_ids=chat, text=text))
     except Exception:
         return False
 
@@ -72,6 +162,7 @@ def main() -> int:
     from quant_platform_kit.strategy_lifecycle.drift_detector import run_drift_detection
     from quant_platform_kit.strategy_lifecycle.health_dashboard import build_dashboard
 
+    drift_results, drift_errors = _collect_drift_results(run_drift_detection)
     build_dashboard(output_dir=str(dash_dir), output_format="json")
 
     strategies: list[dict[str, Any]] = []
@@ -125,30 +216,32 @@ def main() -> int:
 
     telegram_lines: list[str] = []
     critical_lines: list[str] = []
+    alert_identities: list[str] = []
 
     for row in strategies:
-        try:
-            score = float(row.get("overall_score"))
-        except (TypeError, ValueError):
-            continue
-        if score >= SCORE_ALERT:
-            continue
-        profile = str(row.get("strategy_profile") or "?")
-        domain = str(row.get("domain") or "?")
-        telegram_lines.append(f"[{domain}] {profile}: health_score={score:.1f}")
+        alert = _strategy_health_alert(row)
+        if alert:
+            line, identity = alert
+            telegram_lines.append(line)
+            alert_identities.append(identity)
 
-    issue_results: list[dict[str, Any]] = []
     for domain in DOMAINS:
-        drifts = run_drift_detection(domain)
+        drifts = drift_results.get(domain, [])
         for drift in drifts:
             score = float(drift.drift_score or 0.0)
             label = f"[{domain}] {drift.strategy_profile}: drift_score={score:.2f}"
             if score >= DRIFT_CRITICAL:
                 critical_lines.append(label)
+                alert_identities.append(
+                    f"critical_drift:{domain}:{drift.strategy_profile}"
+                )
             elif score >= DRIFT_REVIEW:
                 pass  # tracked via create_issues_for_domain below
 
-        issue_results.extend(create_issues_for_domain(domain))
+    issue_results = _create_issues_for_available_domains(
+        drift_results,
+        create_issues_for_domain,
+    )
 
     for line in critical_lines:
         _create_owner_issue(
@@ -156,18 +249,41 @@ def main() -> int:
             body=f"Quant-monitor detected critical drift.\n\n- {line}",
         )
 
-    notify_lines = telegram_lines + critical_lines
+    data_error_lines: list[str] = []
+    for error in drift_errors:
+        data_error_lines.append(
+            f"[{error['domain']}] {error['code']} ({error['error_type']})"
+        )
+        alert_identities.append(
+            f"data_error:{error['domain']}:{error['code']}:{error['error_type']}"
+        )
+    if collector_payload_invalid:
+        data_error_lines.append("[collector] dashboard_data_unavailable")
+        alert_identities.append("data_error:collector:dashboard_data_unavailable")
+    notify_lines = telegram_lines + critical_lines + data_error_lines
+    telegram_sent = False
+    duplicate_alert_suppressed = False
     if notify_lines:
         body = "🚨 quant-monitor health_cycle\n" + "\n".join(f"• {line}" for line in notify_lines)
-        _send_telegram(body)
+        fingerprint = _alert_fingerprint(alert_identities)
+        duplicate_alert_suppressed = _is_duplicate_alert(root, fingerprint)
+        if not duplicate_alert_suppressed:
+            telegram_sent = _send_telegram(body)
+            if telegram_sent:
+                _record_alert(root, fingerprint)
+    else:
+        _clear_alert(root)
 
     summary = {
         "as_of": datetime.now(timezone.utc).isoformat(),
         "domains": list(DOMAINS),
         "strategy_count": len(strategies),
         "telegram_alerts": notify_lines,
+        "telegram_sent": telegram_sent,
+        "duplicate_alert_suppressed": duplicate_alert_suppressed,
+        "data_errors": drift_errors,
         "issues_created": len([r for r in issue_results if r.get("issue_url")]),
-        "ok": not notify_lines,
+        "ok": not notify_lines and not collector_payload_invalid,
         "collector_payload_valid": not collector_payload_invalid,
         "snapshot_data_status": normalized_payload.get("data_status"),
     }

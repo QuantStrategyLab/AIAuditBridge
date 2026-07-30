@@ -97,6 +97,18 @@ class BriefingConsumerTests(unittest.TestCase):
         )
         self.assertEqual(findings[0].level, BriefingAction.TELEGRAM)
 
+    def test_telegram_when_briefing_data_is_unavailable(self) -> None:
+        findings = consume_briefing_report(
+            {
+                "ok": False,
+                "data_status": "unavailable",
+                "domain": "us_equity",
+                "error": "drift_data_unavailable:RuntimeError",
+            }
+        )
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].level, BriefingAction.TELEGRAM)
+
     def test_consume_briefing_dir_reads_files(self) -> None:
         import json
         import tempfile
