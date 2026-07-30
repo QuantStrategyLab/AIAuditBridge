@@ -202,6 +202,22 @@ class MonitorFailClosedTests(unittest.TestCase):
             HEALTH_CYCLE._alert_fingerprint([second_identity]),
         )
 
+    def test_health_cycle_labels_strategy_scores_as_lifecycle_not_runtime(self) -> None:
+        line, _identity = HEALTH_CYCLE._strategy_health_alert(
+            {
+                "domain": "us_equity",
+                "strategy_profile": "example",
+                "overall_score": 59.9,
+            }
+        )
+
+        body = HEALTH_CYCLE._build_alert_body([line])
+
+        self.assertIn("quant-monitor strategy_lifecycle", body)
+        self.assertIn("research/backtest lifecycle health", body)
+        self.assertIn("not platform runtime execution", body)
+        self.assertIn("lifecycle_health_score=59.9", body)
+
     def test_health_cycle_non_object_alert_state_is_a_cache_miss(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
