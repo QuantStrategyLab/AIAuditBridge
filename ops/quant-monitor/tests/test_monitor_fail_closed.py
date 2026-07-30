@@ -52,6 +52,101 @@ class MonitorFailClosedTests(unittest.TestCase):
         )
         self.assertNotIn("sensitive path", str(errors))
 
+    def test_health_cycle_refreshes_snapshots_before_drift(self) -> None:
+        calls: list[tuple[str, str]] = []
+
+        snapshots, results, errors = HEALTH_CYCLE._refresh_and_collect_drift(
+            lambda domain: calls.append(("monitor", domain)) or [object()],
+            lambda domain: calls.append(("drift", domain)) or [domain],
+            domains=("us_equity", "crypto"),
+        )
+
+        self.assertEqual(
+            calls,
+            [
+                ("monitor", "us_equity"),
+                ("drift", "us_equity"),
+                ("monitor", "crypto"),
+                ("drift", "crypto"),
+            ],
+        )
+        self.assertEqual(set(snapshots), {"us_equity", "crypto"})
+        self.assertEqual(results, {"us_equity": ["us_equity"], "crypto": ["crypto"]})
+        self.assertEqual(errors, [])
+
+    def test_health_cycle_skips_drift_when_snapshot_refresh_fails(self) -> None:
+        drift_calls: list[str] = []
+
+        snapshots, results, errors = HEALTH_CYCLE._refresh_and_collect_drift(
+            lambda _domain: (_ for _ in ()).throw(RuntimeError("sensitive details")),
+            lambda domain: drift_calls.append(domain) or [],
+            domains=("hk_equity",),
+        )
+
+        self.assertEqual(snapshots, {})
+        self.assertEqual(results, {})
+        self.assertEqual(drift_calls, [])
+        self.assertEqual(
+            errors,
+            [
+                {
+                    "domain": "hk_equity",
+                    "code": "monitor_data_unavailable",
+                    "error_type": "RuntimeError",
+                }
+            ],
+        )
+        self.assertNotIn("sensitive details", str(errors))
+
+    def test_health_cycle_only_accepts_ready_artifact_domains(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            status_path = root / "data" / "lifecycle-artifacts" / "status.json"
+            status_path.parent.mkdir(parents=True)
+            status_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "quant_monitor_lifecycle_artifact_status.v1",
+                        "as_of": "2026-07-30T07:00:00+00:00",
+                        "domains": {
+                            "us_equity": {
+                                "status": "ready",
+                                "artifact_id": 1,
+                                "run_id": 2,
+                                "head_sha": "a" * 40,
+                                "profiles": ["global_etf_rotation"],
+                            },
+                            "crypto": {
+                                "status": "error",
+                                "code": "trusted_artifact_unavailable",
+                                "error_type": "LifecycleArtifactError",
+                            },
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            ready, errors = HEALTH_CYCLE._load_lifecycle_artifact_status(
+                root,
+                domains=("us_equity", "crypto"),
+                now=HEALTH_CYCLE.datetime.fromisoformat(
+                    "2026-07-30T07:30:00+00:00"
+                ),
+            )
+
+        self.assertEqual(ready, ("us_equity",))
+        self.assertEqual(
+            errors,
+            [
+                {
+                    "domain": "crypto",
+                    "code": "trusted_artifact_unavailable",
+                    "error_type": "LifecycleArtifactError",
+                }
+            ],
+        )
+
     def test_daily_briefing_collects_drift_errors_without_aborting(self) -> None:
         def unavailable(_domain):
             raise RuntimeError("sensitive path must not escape")

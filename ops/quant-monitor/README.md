@@ -11,6 +11,18 @@ bash scripts/health_check.sh
 bash scripts/daily_briefing.sh
 ```
 
+`health_check.sh` 会先更新代码仓库，再从四个策略仓库选择最近 7 天内、
+由 `main` 分支定时或手动 workflow 的成功 `preflight_backtests` 任务生成的
+`lifecycle-preflight-*` 工件。工件经路径、文件类型、domain/profile、JSON/CSV
+contract 和大小限制校验后原子切换；代码仓库与 lifecycle 数据分别保存在：
+
+- `PROJECTS_ROOT`：策略代码和 `QuantPlatformKit`；
+- `QUANT_PROJECTS_ROOT`：只读收益矩阵镜像；
+- `LIFECYCLE_LOCAL_ROOT`：backtest、monitor snapshot 和 drift 状态。
+
+任一 domain 缺少可信工件时只阻断该 domain，并写入
+`data/lifecycle-artifacts/status.json`；不会回退到演示或合成数据。
+
 ## Telegram（量化哨兵）
 
 Token 从 GCP Secret `quant-sentinel-telegram-bot-token` 加载；**不要**把 token 或 chat id 写进 git。

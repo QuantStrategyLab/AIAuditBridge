@@ -6,10 +6,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,9 @@ SCORE_ALERT = 60.0
 DRIFT_REVIEW = 0.50
 DRIFT_CRITICAL = 0.75
 _ALERT_STATE_RELATIVE_PATH = Path("data/alert-state/health_cycle.json")
+_ARTIFACT_STATUS_RELATIVE_PATH = Path("data/lifecycle-artifacts/status.json")
+_ARTIFACT_STATUS_SCHEMA = "quant_monitor_lifecycle_artifact_status.v1"
+_SAFE_TOKEN = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,99}$")
 
 
 def _collect_drift_results(run_drift_detection, *, domains=DOMAINS):
@@ -35,6 +39,111 @@ def _collect_drift_results(run_drift_detection, *, domains=DOMAINS):
                 }
             )
     return results, errors
+
+
+def _refresh_and_collect_drift(run_monitor, run_drift_detection, *, domains=DOMAINS):
+    snapshots: dict[str, list[Any]] = {}
+    results: dict[str, list[Any]] = {}
+    errors: list[dict[str, str]] = []
+    for domain in domains:
+        try:
+            domain_snapshots = list(run_monitor(domain))
+            if not domain_snapshots:
+                raise RuntimeError("monitor produced no snapshots")
+            snapshots[domain] = domain_snapshots
+        except Exception as exc:
+            errors.append(
+                {
+                    "domain": domain,
+                    "code": "monitor_data_unavailable",
+                    "error_type": type(exc).__name__,
+                }
+            )
+            continue
+        try:
+            results[domain] = list(run_drift_detection(domain))
+        except Exception as exc:
+            errors.append(
+                {
+                    "domain": domain,
+                    "code": "drift_data_unavailable",
+                    "error_type": type(exc).__name__,
+                }
+            )
+    return snapshots, results, errors
+
+
+def _artifact_status_error(
+    domain: str,
+    *,
+    code: str = "artifact_sync_status_unavailable",
+    error_type: str = "RuntimeError",
+) -> dict[str, str]:
+    safe_code = code if _SAFE_TOKEN.fullmatch(code) else "artifact_sync_status_unavailable"
+    safe_error_type = error_type if _SAFE_TOKEN.fullmatch(error_type) else "RuntimeError"
+    return {"domain": domain, "code": safe_code, "error_type": safe_error_type}
+
+
+def _load_lifecycle_artifact_status(
+    root: Path,
+    *,
+    domains=DOMAINS,
+    now: datetime | None = None,
+    max_age: timedelta = timedelta(hours=2),
+) -> tuple[tuple[str, ...], list[dict[str, str]]]:
+    path = root / _ARTIFACT_STATUS_RELATIVE_PATH
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        as_of = datetime.fromisoformat(str(payload["as_of"]).replace("Z", "+00:00"))
+        if as_of.tzinfo is None:
+            raise ValueError("status timestamp has no timezone")
+        current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        age = current - as_of.astimezone(timezone.utc)
+        domain_statuses = payload["domains"]
+        if (
+            not isinstance(payload, dict)
+            or payload.get("schema_version") != _ARTIFACT_STATUS_SCHEMA
+            or not isinstance(domain_statuses, dict)
+            or age > max_age
+            or age < -timedelta(minutes=5)
+        ):
+            raise ValueError("artifact status is invalid or stale")
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        return (), [
+            _artifact_status_error(domain, error_type=type(exc).__name__)
+            for domain in domains
+        ]
+
+    ready: list[str] = []
+    errors: list[dict[str, str]] = []
+    for domain in domains:
+        status = domain_statuses.get(domain)
+        if not isinstance(status, dict):
+            errors.append(_artifact_status_error(domain))
+            continue
+        profiles = status.get("profiles")
+        valid_ready = (
+            status.get("status") == "ready"
+            and isinstance(status.get("artifact_id"), int)
+            and status["artifact_id"] > 0
+            and isinstance(status.get("run_id"), int)
+            and status["run_id"] > 0
+            and re.fullmatch(r"[0-9a-f]{40}", str(status.get("head_sha") or ""))
+            and isinstance(profiles, list)
+            and bool(profiles)
+            and all(isinstance(profile, str) and profile for profile in profiles)
+        )
+        if valid_ready:
+            ready.append(domain)
+            continue
+        errors.append(
+            _artifact_status_error(
+                domain,
+                code=str(status.get("code") or "artifact_sync_status_unavailable"),
+                error_type=str(status.get("error_type") or "RuntimeError"),
+            )
+        )
+    return tuple(ready), errors
 
 
 def _alert_fingerprint(lines: list[str]) -> str:
@@ -161,8 +270,15 @@ def main() -> int:
     from quant_platform_kit.strategy_lifecycle.codex_integration import create_issues_for_domain
     from quant_platform_kit.strategy_lifecycle.drift_detector import run_drift_detection
     from quant_platform_kit.strategy_lifecycle.health_dashboard import build_dashboard
+    from quant_platform_kit.strategy_lifecycle.performance_monitor import run_monitor
 
-    drift_results, drift_errors = _collect_drift_results(run_drift_detection)
+    ready_domains, artifact_errors = _load_lifecycle_artifact_status(root)
+    snapshot_results, drift_results, lifecycle_errors = _refresh_and_collect_drift(
+        run_monitor,
+        run_drift_detection,
+        domains=ready_domains,
+    )
+    data_errors = artifact_errors + lifecycle_errors
     build_dashboard(output_dir=str(dash_dir), output_format="json")
 
     strategies: list[dict[str, Any]] = []
@@ -250,7 +366,7 @@ def main() -> int:
         )
 
     data_error_lines: list[str] = []
-    for error in drift_errors:
+    for error in data_errors:
         data_error_lines.append(
             f"[{error['domain']}] {error['code']} ({error['error_type']})"
         )
@@ -281,7 +397,8 @@ def main() -> int:
         "telegram_alerts": notify_lines,
         "telegram_sent": telegram_sent,
         "duplicate_alert_suppressed": duplicate_alert_suppressed,
-        "data_errors": drift_errors,
+        "data_errors": data_errors,
+        "snapshot_count": sum(len(rows) for rows in snapshot_results.values()),
         "issues_created": len([r for r in issue_results if r.get("issue_url")]),
         "ok": not notify_lines and not collector_payload_invalid,
         "collector_payload_valid": not collector_payload_invalid,
