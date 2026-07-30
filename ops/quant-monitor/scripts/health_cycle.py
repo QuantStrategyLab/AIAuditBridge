@@ -161,8 +161,16 @@ def _strategy_health_alert(row: dict[str, Any]) -> tuple[str, str] | None:
     profile = str(row.get("strategy_profile") or "?")
     domain = str(row.get("domain") or "?")
     return (
-        f"[{domain}] {profile}: health_score={score:.1f}",
+        f"[{domain}] {profile}: lifecycle_health_score={score:.1f}",
         f"strategy_health_below_{SCORE_ALERT:g}:{domain}:{profile}",
+    )
+
+
+def _build_alert_body(lines: list[str]) -> str:
+    return (
+        "🚨 quant-monitor strategy_lifecycle\n"
+        "• scope: research/backtest lifecycle health; not platform runtime execution\n"
+        + "\n".join(f"• {line}" for line in lines)
     )
 
 
@@ -380,7 +388,7 @@ def main() -> int:
     telegram_sent = False
     duplicate_alert_suppressed = False
     if notify_lines:
-        body = "🚨 quant-monitor health_cycle\n" + "\n".join(f"• {line}" for line in notify_lines)
+        body = _build_alert_body(notify_lines)
         fingerprint = _alert_fingerprint(alert_identities)
         duplicate_alert_suppressed = _is_duplicate_alert(root, fingerprint)
         if not duplicate_alert_suppressed:

@@ -21,7 +21,7 @@ VPS Codex 定时监控（`codex-quant.timer` 每 30 分钟）+ 收盘简报（`c
 
 1. `sync_strategy_repos.sh` — `git pull` 四策略仓 + QPK
 2. `health_cycle.py` — `build_dashboard` + `run_drift_detection`
-3. `overall_score < 60` → Telegram 量化哨兵
+3. lifecycle `overall_score < 60` → Telegram 量化哨兵（研究/回测健康，不代表平台执行故障）
 4. drift ≥ 0.50（~2σ）→ `create_issues_for_domain` 开 Issue（不 @）
 5. drift ≥ 0.75（~3σ）→ Telegram + Issue **@owner**
 
