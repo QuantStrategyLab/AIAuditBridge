@@ -1,7 +1,10 @@
 import importlib.util
+import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -79,6 +82,59 @@ class MonitorFailClosedTests(unittest.TestCase):
 
             HEALTH_CYCLE._clear_alert(root)
             self.assertFalse(HEALTH_CYCLE._is_duplicate_alert(root, fingerprint))
+
+    def test_health_cycle_non_object_alert_state_is_a_cache_miss(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_path = HEALTH_CYCLE._alert_state_path(root)
+            state_path.parent.mkdir(parents=True)
+            for payload in (None, [], "invalid"):
+                state_path.write_text(json.dumps(payload), encoding="utf-8")
+                self.assertFalse(HEALTH_CYCLE._is_duplicate_alert(root, "fingerprint"))
+
+    def test_health_cycle_skips_issue_creation_when_drift_is_unavailable(self) -> None:
+        created_for: list[str] = []
+
+        results = HEALTH_CYCLE._create_issues_for_available_domains(
+            {"us_equity": []},
+            lambda domain: created_for.append(domain) or [],
+            domains=("us_equity", "crypto"),
+        )
+
+        self.assertEqual(results, [])
+        self.assertEqual(created_for, ["us_equity"])
+
+    def test_daily_briefing_marks_missing_dashboard_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {"QUANT_MONITOR_ROOT": str(root), "DAY": "2026-07-30"},
+                ),
+                mock.patch(
+                    "quant_platform_kit.strategy_lifecycle.drift_detector.run_drift_detection",
+                    return_value=[],
+                ),
+                mock.patch(
+                    "quant_platform_kit.strategy_lifecycle.health_dashboard.build_dashboard",
+                    return_value=None,
+                ),
+            ):
+                self.assertEqual(DAILY_BRIEFING.main(), 0)
+
+            for domain in DAILY_BRIEFING.DOMAINS:
+                report = json.loads(
+                    (root / "data" / "daily-reports" / "2026-07-30" / f"{domain}.json").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                self.assertFalse(report["ok"])
+                self.assertEqual(report["data_status"], "unavailable")
+                self.assertIn(
+                    {"code": "dashboard_data_unavailable", "error_type": "FileNotFoundError"},
+                    report["errors"],
+                )
 
 
 if __name__ == "__main__":

@@ -57,10 +57,16 @@ def main() -> int:
         build_dashboard(output_dir=tmp, output_format="json")
         dash_path = Path(tmp) / "strategy_health_dashboard.json"
         strategies_raw: list[dict[str, Any]] = []
+        dashboard_error: dict[str, str] | None = None
         if dash_path.is_file():
             payload = json.loads(dash_path.read_text(encoding="utf-8"))
             if isinstance(payload.get("strategies"), list):
                 strategies_raw = [row for row in payload["strategies"] if isinstance(row, dict)]
+        else:
+            dashboard_error = {
+                "code": "dashboard_data_unavailable",
+                "error_type": "FileNotFoundError",
+            }
 
     by_domain: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in strategies_raw:
@@ -74,6 +80,8 @@ def main() -> int:
         strategies = by_domain.get(domain, [])
         summary = _status_counts(strategies)
         domain_errors = [drift_errors[domain]] if domain in drift_errors else []
+        if dashboard_error:
+            domain_errors.append(dashboard_error)
         report = {
             "domain": domain,
             "ok": not domain_errors,

@@ -51,6 +51,8 @@ def _is_duplicate_alert(root: Path, fingerprint: str) -> bool:
         payload = json.loads(_alert_state_path(root).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return False
+    if not isinstance(payload, dict):
+        return False
     return str(payload.get("fingerprint") or "") == fingerprint
 
 
@@ -77,6 +79,19 @@ def _clear_alert(root: Path) -> None:
         _alert_state_path(root).unlink()
     except FileNotFoundError:
         pass
+
+
+def _create_issues_for_available_domains(
+    drift_results: dict[str, list[Any]],
+    create_issues_for_domain,
+    *,
+    domains=DOMAINS,
+) -> list[dict[str, Any]]:
+    issue_results: list[dict[str, Any]] = []
+    for domain in domains:
+        if domain in drift_results:
+            issue_results.extend(create_issues_for_domain(domain))
+    return issue_results
 
 
 def _send_telegram(text: str) -> bool:
@@ -198,7 +213,6 @@ def main() -> int:
         domain = str(row.get("domain") or "?")
         telegram_lines.append(f"[{domain}] {profile}: health_score={score:.1f}")
 
-    issue_results: list[dict[str, Any]] = []
     for domain in DOMAINS:
         drifts = drift_results.get(domain, [])
         for drift in drifts:
@@ -209,7 +223,10 @@ def main() -> int:
             elif score >= DRIFT_REVIEW:
                 pass  # tracked via create_issues_for_domain below
 
-        issue_results.extend(create_issues_for_domain(domain))
+    issue_results = _create_issues_for_available_domains(
+        drift_results,
+        create_issues_for_domain,
+    )
 
     for line in critical_lines:
         _create_owner_issue(
