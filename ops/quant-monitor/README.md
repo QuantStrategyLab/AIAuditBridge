@@ -27,6 +27,18 @@ contract 和大小限制校验后原子切换；代码仓库与 lifecycle 数据
 
 Token 从 GCP Secret `quant-sentinel-telegram-bot-token` 加载；**不要**把 token 或 chat id 写进 git。
 
+告警路由：
+
+| 事件 | 处置 |
+|------|------|
+| lifecycle score / drift 劣化 | 写入对应策略仓的去重、issue-only AI optimization proposal |
+| 数据或可信工件不可用 | Telegram |
+| circuit breaker / runtime risk | Telegram |
+| optimization proposal 记录失败 | Telegram |
+
+监控证据只触发研究审查，不自动修改策略代码、live 参数、仓位、风险预算，不自动
+merge 或 deploy。成功记录策略劣化后，monitor 正常结束，不再重复通知人工。
+
 | 变量 | 说明 |
 |------|------|
 | `QUANT_SENTINEL_TELEGRAM_SECRET_NAME` | 默认 `quant-sentinel-telegram-bot-token` |

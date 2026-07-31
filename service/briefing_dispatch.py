@@ -10,7 +10,9 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
-from service.briefing_consumer import BriefingAction, BriefingConsumptionResult
+from scripts.run_strategy_optimization_watcher import dispatch_strategy_watch_findings
+from service.briefing_consumer import BriefingAction, BriefingConsumptionResult, BriefingFinding
+from service.strategy_watch import StrategyWatchFinding, build_strategy_monitoring_finding
 
 _REPOSITORY_RE = re.compile(
     r"[A-Za-z0-9][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*/"
@@ -63,14 +65,17 @@ def _format_telegram_body(result: BriefingConsumptionResult) -> str:
     return "\n".join(lines)
 
 
-def _format_github_body(result: BriefingConsumptionResult) -> str:
+def _format_github_body(
+    result: BriefingConsumptionResult,
+    findings: list[BriefingFinding] | None = None,
+) -> str:
     lines = [
         f"## Daily briefing alerts ({result.day})",
         "",
         f"Report dir: `{result.report_dir}`",
         "",
     ]
-    for finding in result.findings:
+    for finding in result.findings if findings is None else findings:
         if finding.level != BriefingAction.GITHUB_ISSUE:
             continue
         lines.append(
@@ -102,7 +107,7 @@ def send_telegram_alert(*, text: str, token: str, chat_ids: tuple[str, ...]) -> 
     return ok
 
 
-def create_github_issue(*, title: str, body: str, labels: tuple[str, ...] = ("briefing", "monitoring")) -> str | None:
+def create_github_issue(*, title: str, body: str, labels: tuple[str, ...] = ()) -> str | None:
     repo = str(
         os.environ.get("QSL_GITHUB_REPO")
         or os.environ.get("GITHUB_REPOSITORY")
@@ -138,6 +143,31 @@ def shutil_which(name: str) -> str | None:
     return which(name)
 
 
+def _strategy_monitoring_findings(
+    result: BriefingConsumptionResult,
+) -> list[StrategyWatchFinding]:
+    findings: list[StrategyWatchFinding] = []
+    for finding in result.findings:
+        if (
+            finding.level != BriefingAction.GITHUB_ISSUE
+            or finding.kind != "strategy_monitoring"
+            or not finding.strategy_profile
+        ):
+            continue
+        findings.append(
+            build_strategy_monitoring_finding(
+                domain=finding.domain,
+                profile=finding.strategy_profile,
+                severity=finding.severity,
+                metrics=finding.metrics,
+                signals=finding.signals or [{"metric": "briefing", "reason": finding.reason}],
+                source=f"quant-monitor/daily-briefing/{finding.source}",
+                generated_at=str(finding.metrics.get("as_of") or result.day),
+            )
+        )
+    return findings
+
+
 def dispatch_briefing_result(
     result: BriefingConsumptionResult,
     *,
@@ -148,6 +178,9 @@ def dispatch_briefing_result(
         "action": result.action.value,
         "telegram_sent": False,
         "github_issue": None,
+        "optimization_watch": None,
+        "operational_fallback_sent": False,
+        "errors": [],
         "skipped": [],
     }
 
@@ -155,26 +188,67 @@ def dispatch_briefing_result(
         summary["skipped"].append("quiet")
         return summary
 
-    if result.action == BriefingAction.TELEGRAM:
-        token = _telegram_token()
-        chat_ids = _telegram_chat_ids()
-        text = _format_telegram_body(result)
-        if dry_run:
-            summary["telegram_dry_run"] = text
-            return summary
-        if token and chat_ids:
-            summary["telegram_sent"] = send_telegram_alert(text=text, token=token, chat_ids=chat_ids)
-        else:
-            summary["skipped"].append("telegram_missing_env")
-
     if result.action in {BriefingAction.GITHUB_ISSUE, BriefingAction.TELEGRAM}:
-        github_findings = [f for f in result.findings if f.level == BriefingAction.GITHUB_ISSUE]
+        try:
+            optimization_findings = _strategy_monitoring_findings(result)
+            if optimization_findings:
+                summary["optimization_watch"] = dispatch_strategy_watch_findings(
+                    optimization_findings,
+                    dry_run=dry_run,
+                    comment_existing=False,
+                )
+                if int(summary["optimization_watch"].get("errors") or 0):
+                    summary["errors"].append("optimization_record_failed")
+        except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError) as exc:
+            summary["optimization_watch"] = {
+                "status": "error",
+                "errors": 1,
+                "error_type": type(exc).__name__,
+            }
+            summary["errors"].append("optimization_record_failed")
+        github_findings = [
+            finding
+            for finding in result.findings
+            if finding.level == BriefingAction.GITHUB_ISSUE
+            and not (finding.kind == "strategy_monitoring" and finding.strategy_profile)
+        ]
         if github_findings:
             title = f"[briefing] {result.day} — {len(github_findings)} review-level alert(s)"
-            body = _format_github_body(result)
+            body = _format_github_body(result, github_findings)
             if dry_run:
                 summary["github_dry_run"] = {"title": title, "body": body}
             else:
                 summary["github_issue"] = create_github_issue(title=title, body=body)
+                if not summary["github_issue"]:
+                    summary["errors"].append("github_issue_record_failed")
+
+    record_failed = any(
+        error in {"optimization_record_failed", "github_issue_record_failed"}
+        for error in summary["errors"]
+    )
+    if result.action == BriefingAction.TELEGRAM or record_failed:
+        if result.action == BriefingAction.TELEGRAM:
+            text = _format_telegram_body(result)
+        else:
+            text = (
+                f"🚨 量化哨兵 operational ({result.day})\n\n"
+                "• optimization-record delivery failure; manual review required"
+            )
+        if record_failed and result.action == BriefingAction.TELEGRAM:
+            text += "\n• optimization-record delivery failure; manual review required"
+        if dry_run:
+            summary["telegram_dry_run"] = text
+        else:
+            token = _telegram_token()
+            chat_ids = _telegram_chat_ids()
+            if token and chat_ids:
+                sent = send_telegram_alert(text=text, token=token, chat_ids=chat_ids)
+                summary["telegram_sent"] = sent
+                summary["operational_fallback_sent"] = bool(record_failed and sent)
+                if not sent:
+                    summary["errors"].append("telegram_delivery_failed")
+            else:
+                summary["skipped"].append("telegram_missing_env")
+                summary["errors"].append("telegram_missing_env")
 
     return summary

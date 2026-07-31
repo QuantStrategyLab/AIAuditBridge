@@ -2,10 +2,42 @@ from __future__ import annotations
 
 import unittest
 
-from service.strategy_watch import evaluate_strategy_watch, finding_to_automation_task, issue_for_task, watcher_issue_key
+from service.strategy_watch import (
+    build_strategy_monitoring_finding,
+    evaluate_strategy_watch,
+    finding_to_automation_task,
+    issue_for_task,
+    watcher_issue_key,
+)
 
 
 class StrategyWatchTest(unittest.TestCase):
+    def test_monitoring_trigger_becomes_issue_only_optimization_record(self) -> None:
+        finding = build_strategy_monitoring_finding(
+            domain="us_equity",
+            profile="global_etf_rotation",
+            severity="high",
+            metrics={"overall_score": 14.2, "performance_score": 0.0},
+            signals=[
+                {
+                    "metric": "overall_score",
+                    "reason": "overall_score=14.2 is below monitoring threshold 60.0",
+                }
+            ],
+            source="quant-monitor/daily-briefing",
+            generated_at="2026-07-31T00:00:00Z",
+        )
+
+        task = finding_to_automation_task(finding)
+        payload = task.to_dict()
+
+        self.assertEqual(finding.snapshot.repo, "QuantStrategyLab/UsEquityStrategies")
+        self.assertEqual(finding.finding_type, "monitoring_trigger")
+        self.assertEqual(payload["trigger"]["kind"], "strategy_monitoring_trigger")
+        self.assertEqual(payload["proposed_action"]["action"], "open_issue")
+        self.assertFalse(payload["gate_decision"]["metadata"]["live_impact_allowed"])
+        self.assertIn("bounded, no-order", payload["proposed_action"]["rationale"])
+
     def test_degraded_snapshot_becomes_issue_only_task(self) -> None:
         findings = evaluate_strategy_watch(
             {

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""VPS health cycle — roadmap task 7 (scores, drift, issues, Telegram)."""
+"""VPS health cycle — route strategy evidence to issue-only optimization monitoring."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ import hashlib
 import json
 import os
 import re
-import subprocess
 import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -151,25 +150,10 @@ def _alert_fingerprint(lines: list[str]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _strategy_health_alert(row: dict[str, Any]) -> tuple[str, str] | None:
-    try:
-        score = float(row.get("overall_score"))
-    except (TypeError, ValueError):
-        return None
-    if score >= SCORE_ALERT:
-        return None
-    profile = str(row.get("strategy_profile") or "?")
-    domain = str(row.get("domain") or "?")
-    return (
-        f"[{domain}] {profile}: lifecycle_health_score={score:.1f}",
-        f"strategy_health_below_{SCORE_ALERT:g}:{domain}:{profile}",
-    )
-
-
 def _build_alert_body(lines: list[str]) -> str:
     return (
-        "🚨 quant-monitor strategy_lifecycle\n"
-        "• scope: research/backtest lifecycle health; not platform runtime execution\n"
+        "🚨 quant-monitor operational\n"
+        "• scope: data/evidence or optimization-record delivery failure\n"
         + "\n".join(f"• {line}" for line in lines)
     )
 
@@ -213,17 +197,83 @@ def _clear_alert(root: Path) -> None:
         pass
 
 
-def _create_issues_for_available_domains(
+def _build_monitoring_findings(
+    strategies: list[dict[str, Any]],
     drift_results: dict[str, list[Any]],
-    create_issues_for_domain,
-    *,
-    domains=DOMAINS,
-) -> list[dict[str, Any]]:
-    issue_results: list[dict[str, Any]] = []
-    for domain in domains:
-        if domain in drift_results:
-            issue_results.extend(create_issues_for_domain(domain))
-    return issue_results
+) -> list[Any]:
+    from service.strategy_watch import build_strategy_monitoring_finding
+
+    records: dict[tuple[str, str], dict[str, Any]] = {}
+    metric_keys = (
+        "overall_score",
+        "performance_score",
+        "risk_score",
+        "decay_score",
+        "stability_score",
+        "operational_score",
+        "status",
+        "as_of",
+    )
+    for row in strategies:
+        try:
+            score = float(row.get("overall_score"))
+        except (TypeError, ValueError):
+            continue
+        if score >= SCORE_ALERT:
+            continue
+        domain = str(row.get("domain") or "").strip()
+        profile = str(row.get("strategy_profile") or "").strip()
+        if not domain or not profile:
+            continue
+        record = records.setdefault(
+            (domain, profile),
+            {"metrics": {}, "signals": [], "severity": "medium", "generated_at": ""},
+        )
+        record["metrics"].update({key: row[key] for key in metric_keys if key in row})
+        record["signals"].append(
+            {
+                "metric": "overall_score",
+                "reason": f"overall_score={score:.1f} is below monitoring threshold {SCORE_ALERT:.1f}",
+            }
+        )
+        record["generated_at"] = str(row.get("as_of") or "")
+        if str(row.get("status") or "").lower() == "critical" or score <= 40.0:
+            record["severity"] = "high"
+
+    for domain, drifts in drift_results.items():
+        for drift in drifts:
+            score = float(drift.drift_score or 0.0)
+            if score < DRIFT_REVIEW:
+                continue
+            profile = str(drift.strategy_profile or "").strip()
+            if not profile:
+                continue
+            record = records.setdefault(
+                (domain, profile),
+                {"metrics": {}, "signals": [], "severity": "medium", "generated_at": ""},
+            )
+            record["metrics"]["drift_score"] = score
+            record["signals"].append(
+                {
+                    "metric": "drift_score",
+                    "reason": f"drift_score={score:.2f} exceeds monitoring threshold {DRIFT_REVIEW:.2f}",
+                }
+            )
+            if score >= DRIFT_CRITICAL:
+                record["severity"] = "high"
+
+    return [
+        build_strategy_monitoring_finding(
+            domain=domain,
+            profile=profile,
+            severity=record["severity"],
+            metrics=record["metrics"],
+            signals=record["signals"],
+            source="quant-monitor/health-cycle",
+            generated_at=record["generated_at"],
+        )
+        for (domain, profile), record in sorted(records.items())
+    ]
 
 
 def _send_telegram(text: str) -> bool:
@@ -239,46 +289,16 @@ def _send_telegram(text: str) -> bool:
         return False
 
 
-def _create_owner_issue(*, title: str, body: str) -> str | None:
-    repo = (os.environ.get("QSL_GITHUB_REPO") or "QuantStrategyLab/CnEquityStrategies").strip()
-    owner = (os.environ.get("QSL_MONITOR_ISSUE_OWNER") or "Pigbibi").strip()
-    full_body = f"{body}\n\ncc @{owner}"
-    try:
-        out = subprocess.check_output(
-            [
-                "gh",
-                "issue",
-                "create",
-                "--repo",
-                repo,
-                "--title",
-                title,
-                "--body",
-                full_body,
-                "--label",
-                "monitoring",
-                "--label",
-                "drift-critical",
-            ],
-            text=True,
-            stderr=subprocess.STDOUT,
-            env={**os.environ, "GH_PROMPT": "disabled"},
-        )
-        return out.strip()
-    except Exception:
-        return None
-
-
 def main() -> int:
     root = Path(os.environ.get("QUANT_MONITOR_ROOT") or Path(__file__).resolve().parents[1])
     out_dir = root / "data" / "health"
     dash_dir = out_dir / "dashboard"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    from quant_platform_kit.strategy_lifecycle.codex_integration import create_issues_for_domain
     from quant_platform_kit.strategy_lifecycle.drift_detector import run_drift_detection
     from quant_platform_kit.strategy_lifecycle.health_dashboard import build_dashboard
     from quant_platform_kit.strategy_lifecycle.performance_monitor import run_monitor
+    from scripts.run_strategy_optimization_watcher import dispatch_strategy_watch_findings
 
     ready_domains, artifact_errors = _load_lifecycle_artifact_status(root)
     snapshot_results, drift_results, lifecycle_errors = _refresh_and_collect_drift(
@@ -338,40 +358,13 @@ def main() -> int:
     elif not json_path.is_file():
         collector_payload_invalid = True
 
-    telegram_lines: list[str] = []
-    critical_lines: list[str] = []
     alert_identities: list[str] = []
-
-    for row in strategies:
-        alert = _strategy_health_alert(row)
-        if alert:
-            line, identity = alert
-            telegram_lines.append(line)
-            alert_identities.append(identity)
-
-    for domain in DOMAINS:
-        drifts = drift_results.get(domain, [])
-        for drift in drifts:
-            score = float(drift.drift_score or 0.0)
-            label = f"[{domain}] {drift.strategy_profile}: drift_score={score:.2f}"
-            if score >= DRIFT_CRITICAL:
-                critical_lines.append(label)
-                alert_identities.append(
-                    f"critical_drift:{domain}:{drift.strategy_profile}"
-                )
-            elif score >= DRIFT_REVIEW:
-                pass  # tracked via create_issues_for_domain below
-
-    issue_results = _create_issues_for_available_domains(
-        drift_results,
-        create_issues_for_domain,
+    monitoring_findings = _build_monitoring_findings(strategies, drift_results)
+    optimization_watch = dispatch_strategy_watch_findings(
+        monitoring_findings,
+        dry_run=False,
+        comment_existing=False,
     )
-
-    for line in critical_lines:
-        _create_owner_issue(
-            title=f"[monitor] critical drift — {line}",
-            body=f"Quant-monitor detected critical drift.\n\n- {line}",
-        )
 
     data_error_lines: list[str] = []
     for error in data_errors:
@@ -384,7 +377,16 @@ def main() -> int:
     if collector_payload_invalid:
         data_error_lines.append("[collector] dashboard_data_unavailable")
         alert_identities.append("data_error:collector:dashboard_data_unavailable")
-    notify_lines = telegram_lines + critical_lines + data_error_lines
+    optimization_error_lines: list[str] = []
+    optimization_errors = int(optimization_watch.get("errors") or 0)
+    if optimization_errors:
+        optimization_error_lines.append(
+            f"[optimization] issue_record_failed ({optimization_errors})"
+        )
+        alert_identities.append(
+            f"optimization_error:issue_record_failed:{optimization_errors}"
+        )
+    notify_lines = data_error_lines + optimization_error_lines
     telegram_sent = False
     duplicate_alert_suppressed = False
     if notify_lines:
@@ -407,7 +409,11 @@ def main() -> int:
         "duplicate_alert_suppressed": duplicate_alert_suppressed,
         "data_errors": data_errors,
         "snapshot_count": sum(len(rows) for rows in snapshot_results.values()),
-        "issues_created": len([r for r in issue_results if r.get("issue_url")]),
+        "optimization_findings": len(monitoring_findings),
+        "optimization_issues_created": len(
+            [result for result in optimization_watch.get("issues", []) if result.get("created")]
+        ),
+        "optimization_issue_errors": optimization_errors,
         "ok": not notify_lines and not collector_payload_invalid,
         "collector_payload_valid": not collector_payload_invalid,
         "snapshot_data_status": normalized_payload.get("data_status"),

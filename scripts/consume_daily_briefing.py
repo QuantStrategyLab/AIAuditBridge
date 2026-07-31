@@ -14,6 +14,17 @@ from service.dual_review_dispatch import dispatch_dual_review_result
 from service.dual_review_orchestrator import orchestrate_from_payload
 
 
+def _dispatch_failed(summary: object) -> bool:
+    if not isinstance(summary, dict):
+        return True
+    if summary.get("errors"):
+        return True
+    optimization_watch = summary.get("optimization_watch")
+    return isinstance(optimization_watch, dict) and int(
+        optimization_watch.get("errors") or 0
+    ) > 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Consume quant-monitor daily briefing reports.")
     parser.add_argument(
@@ -56,7 +67,16 @@ def main(argv: list[str] | None = None) -> int:
             dual_results.append(entry)
         payload["dual_review"] = summarize_dual_review_runs(dual_results)
     print(json.dumps(payload, ensure_ascii=False, indent=2))
-    exit_code = 0 if result.action.value == "quiet" else 2
+    if result.action.value == "quiet":
+        exit_code = 0
+    elif (
+        result.action.value == "github_issue"
+        and args.dispatch
+        and not _dispatch_failed(payload.get("dispatch"))
+    ):
+        exit_code = 0
+    else:
+        exit_code = 2
     if args.dual_review and payload.get("dual_review", {}).get("disagreements"):
         exit_code = 2
     return exit_code
