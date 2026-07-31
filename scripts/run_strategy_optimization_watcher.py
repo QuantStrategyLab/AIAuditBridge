@@ -16,7 +16,13 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from service.strategy_watch import evaluate_strategy_watch, finding_to_automation_task, issue_for_task, watcher_issue_key  # noqa: E402
+from service.strategy_watch import (  # noqa: E402
+    StrategyWatchFinding,
+    evaluate_strategy_watch,
+    finding_to_automation_task,
+    issue_for_task,
+    watcher_issue_key,
+)
 
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
@@ -185,21 +191,18 @@ def _payload_for_source_repo(payload: dict[str, Any], source_repo: str) -> dict[
     return normalized
 
 
-def run_watcher(
-    payload: dict[str, Any],
+def dispatch_strategy_watch_findings(
+    findings: list[StrategyWatchFinding],
     *,
     source_repo: str = "",
     dry_run: bool = True,
+    comment_existing: bool = True,
     create_issue: Callable[[str, str, str], str] = create_github_issue,
     comment_issue: Callable[[str, str, str], str] = comment_github_issue,
     list_issues: Callable[[str], dict[str, str]] = list_open_issue_urls,
 ) -> dict[str, Any]:
-    if not dry_run and not source_repo:
-        raise ValueError("source_repo is required for non-dry-run strategy watcher runs")
     if source_repo and not REPO_RE.fullmatch(source_repo):
         raise ValueError("source_repo must be in owner/name form")
-    watch_payload = _payload_for_source_repo(payload, source_repo)
-    findings = evaluate_strategy_watch(watch_payload)
     issues: list[dict[str, Any]] = []
     open_issue_cache: dict[str, dict[str, str]] = {}
     for finding in findings:
@@ -207,6 +210,8 @@ def run_watcher(
         issue = issue_for_task(task)
         issue_key = watcher_issue_key(task)
         repo = source_repo or finding.snapshot.repo
+        if not REPO_RE.fullmatch(repo):
+            raise ValueError("finding repository must be in owner/name form")
         issue_result: dict[str, Any] = {
             "repo": repo,
             "title": issue["title"],
@@ -223,9 +228,12 @@ def run_watcher(
                 existing_url = open_issue_cache[repo].get(issue_key, "")
                 if existing_url:
                     issue_result["existing_url"] = existing_url
-                    issue_result["comment_url"] = comment_issue(repo, existing_url, issue["body"])
-                    issue_result["commented"] = True
-                    issue_result["skipped_reason"] = "open issue already exists; appended watcher update"
+                    if comment_existing:
+                        issue_result["comment_url"] = comment_issue(repo, existing_url, issue["body"])
+                        issue_result["commented"] = True
+                        issue_result["skipped_reason"] = "open issue already exists; appended watcher update"
+                    else:
+                        issue_result["skipped_reason"] = "open issue already records this strategy"
                 else:
                     issue_result["url"] = create_issue(repo, issue["title"], issue["body"])
                     open_issue_cache[repo][issue_key] = str(issue_result["url"])
@@ -241,6 +249,31 @@ def run_watcher(
         "issues": issues,
         "errors": errors,
     }
+
+
+def run_watcher(
+    payload: dict[str, Any],
+    *,
+    source_repo: str = "",
+    dry_run: bool = True,
+    create_issue: Callable[[str, str, str], str] = create_github_issue,
+    comment_issue: Callable[[str, str, str], str] = comment_github_issue,
+    list_issues: Callable[[str], dict[str, str]] = list_open_issue_urls,
+) -> dict[str, Any]:
+    if not dry_run and not source_repo:
+        raise ValueError("source_repo is required for non-dry-run strategy watcher runs")
+    if source_repo and not REPO_RE.fullmatch(source_repo):
+        raise ValueError("source_repo must be in owner/name form")
+    watch_payload = _payload_for_source_repo(payload, source_repo)
+    findings = evaluate_strategy_watch(watch_payload)
+    return dispatch_strategy_watch_findings(
+        findings,
+        source_repo=source_repo,
+        dry_run=dry_run,
+        create_issue=create_issue,
+        comment_issue=comment_issue,
+        list_issues=list_issues,
+    )
 
 
 def main() -> int:

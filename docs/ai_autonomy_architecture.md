@@ -278,6 +278,18 @@ GitHub Codex App 是唯一 AI PR reviewer。AIAuditBridge 只保留月度审计�
 
 这样可以把策略优化先收敛为可审计、可回放的建议流，再逐步扩展到受控执行面。
 
+Quant Monitor 的具体路由遵循同一边界：
+
+- lifecycle score、status 或 drift 越过阈值，只生成 monitoring evidence；
+- evidence 写入对应策略仓的去重 optimization issue，供 AI 诊断和有界、no-order
+  实验规划；
+- 监控不因分数低或漂移高直接发送 Telegram；
+- 数据/可信工件不可用、circuit breaker 或 optimization issue 记录失败，才升级为
+  人工运维告警。
+
+“监测到劣化”只代表产生优化触发证据，不代表已授权启动优化周期，更不代表可以影响
+broker、订单、资金或 live deployment。
+
 ---
 
 ## 4. 可落地的阶段性改造计划

@@ -87,11 +87,26 @@ class BriefingConsumerTests(unittest.TestCase):
         self.assertEqual(len(findings), 1)
         self.assertEqual(findings[0].level, BriefingAction.GITHUB_ISSUE)
 
-    def test_telegram_for_critical_drift(self) -> None:
+    def test_optimization_issue_for_critical_drift(self) -> None:
         findings = consume_briefing_report(
             {
                 "strategies": [
                     {"strategy_profile": "demo", "status": "watch", "drift_score": 0.9},
+                ],
+            }
+        )
+        self.assertEqual(findings[0].level, BriefingAction.GITHUB_ISSUE)
+
+    def test_telegram_for_circuit_breaker(self) -> None:
+        findings = consume_briefing_report(
+            {
+                "strategies": [
+                    {
+                        "strategy_profile": "demo",
+                        "status": "critical",
+                        "overall_score": 20,
+                        "risk_flags": ["circuit_breaker"],
+                    },
                 ],
             }
         )
@@ -127,7 +142,7 @@ class BriefingConsumerTests(unittest.TestCase):
                 encoding="utf-8",
             )
             result = consume_briefing_dir(report_dir)
-            self.assertEqual(result.action, BriefingAction.TELEGRAM)
+            self.assertEqual(result.action, BriefingAction.GITHUB_ISSUE)
             self.assertEqual(len(result.findings), 1)
 
 

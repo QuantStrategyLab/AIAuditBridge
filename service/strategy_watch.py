@@ -19,6 +19,15 @@ OPERATIONAL_SCHEMA_VERSION = "strategy_operational_metrics.v1"
 METRICS_KIND_PERFORMANCE = "performance"
 METRICS_KIND_OPERATIONAL = "operational_quality"
 REQUIRED_PERFORMANCE_METRICS = ("sharpe", "cagr", "calmar", "win_rate", "max_dd")
+MONITORING_SCHEMA_VERSION = "strategy_monitoring_evidence.v1"
+METRICS_KIND_MONITORING = "monitoring_evidence"
+MONITORING_FINDING_TYPE = "monitoring_trigger"
+STRATEGY_REPOSITORY_BY_DOMAIN = {
+    "cn_equity": "QuantStrategyLab/CnEquityStrategies",
+    "hk_equity": "QuantStrategyLab/HkEquityStrategies",
+    "us_equity": "QuantStrategyLab/UsEquityStrategies",
+    "crypto": "QuantStrategyLab/CryptoStrategies",
+}
 
 
 def _dict_payload(value: Any) -> dict[str, Any]:
@@ -94,6 +103,41 @@ class StrategyWatchFinding:
             "finding_type": self.finding_type,
             "registry_context": self.registry_context,
         }
+
+
+def build_strategy_monitoring_finding(
+    *,
+    domain: str,
+    profile: str,
+    severity: str,
+    metrics: dict[str, Any],
+    signals: list[dict[str, Any]],
+    source: str,
+    generated_at: str = "",
+    repo: str = "",
+) -> StrategyWatchFinding:
+    """Build a pre-classified, issue-only finding from trusted monitor evidence."""
+    normalized_domain = str(domain or "").strip()
+    normalized_profile = str(profile or "").strip()
+    resolved_repo = str(repo or STRATEGY_REPOSITORY_BY_DOMAIN.get(normalized_domain) or "").strip()
+    if not normalized_domain or not normalized_profile:
+        raise ValueError("strategy monitoring finding requires domain and profile")
+    if not resolved_repo:
+        raise ValueError(f"no strategy repository is configured for domain={normalized_domain!r}")
+    return StrategyWatchFinding(
+        snapshot=StrategyWatchSnapshot(
+            repo=resolved_repo,
+            profile=normalized_profile,
+            schema_version=MONITORING_SCHEMA_VERSION,
+            metrics_kind=METRICS_KIND_MONITORING,
+            current_metrics=dict(metrics),
+            source=str(source or "").strip(),
+            generated_at=str(generated_at or "").strip(),
+        ),
+        severity="high" if str(severity).strip().lower() == "high" else "medium",
+        signals=[dict(signal) for signal in signals],
+        finding_type=MONITORING_FINDING_TYPE,
+    )
 
 
 def _snapshots_from_payload(payload: dict[str, Any]) -> list[StrategyWatchSnapshot]:
@@ -262,9 +306,24 @@ def finding_to_automation_task(finding: StrategyWatchFinding) -> AutomationTask:
     event_key = finding_event_key(finding)
     signal_reasons = [str(signal.get("reason") or signal.get("metric") or "metric degraded") for signal in finding.signals]
     finding_type = str(finding.finding_type or "metric_degradation")
+    if finding_type == "data_quality":
+        trigger_kind = "strategy_metrics_contract_invalid"
+        evidence_summary = "Strategy metrics payload failed watcher contract validation."
+        rationale = (
+            "Open a data-quality issue so the source repo publishes "
+            "strategy_performance.v2 before optimization automation runs again."
+        )
+    elif finding_type == MONITORING_FINDING_TYPE:
+        trigger_kind = "strategy_monitoring_trigger"
+        evidence_summary = "Strategy monitoring evidence crossed a research-review threshold."
+        rationale = "Open a research optimization issue for AI diagnosis and bounded, no-order experiment planning."
+    else:
+        trigger_kind = "strategy_metric_degradation"
+        evidence_summary = "Deterministic strategy metrics crossed degradation thresholds."
+        rationale = "Open a research optimization issue for AI diagnosis and sandbox experiment planning."
     trigger = TriggerRecord(
         source="strategy_optimization_watcher",
-        kind="strategy_metrics_contract_invalid" if finding_type == "data_quality" else "strategy_metric_degradation",
+        kind=trigger_kind,
         severity=finding.severity,
         reason="; ".join(signal_reasons) or ("strategy metrics contract invalid" if finding_type == "data_quality" else "strategy metrics degraded"),
         subject=finding.snapshot.subject(),
@@ -272,11 +331,7 @@ def finding_to_automation_task(finding: StrategyWatchFinding) -> AutomationTask:
         evidence=signal_reasons,
     )
     evidence = EvidenceBundle(
-        summary=(
-            "Strategy metrics payload failed watcher contract validation."
-            if finding_type == "data_quality"
-            else "Deterministic strategy metrics crossed degradation thresholds."
-        ),
+        summary=evidence_summary,
         artifacts=[finding.snapshot.source] if finding.snapshot.source else [],
         metrics={
             "current": finding.snapshot.current_metrics,
@@ -291,11 +346,7 @@ def finding_to_automation_task(finding: StrategyWatchFinding) -> AutomationTask:
         action=ISSUE_ONLY_ACTION,
         lane=lane,
         target=finding.snapshot.repo,
-        rationale=(
-            "Open a data-quality issue so the source repo publishes strategy_performance.v2 before optimization automation runs again."
-            if finding_type == "data_quality"
-            else "Open a research optimization issue for AI diagnosis and sandbox experiment planning."
-        ),
+        rationale=rationale,
         requires_human_review=True,
         metadata={"profile": finding.snapshot.profile, "plugin": finding.snapshot.plugin, "event_key": event_key, "finding_type": finding_type},
     )

@@ -1,9 +1,9 @@
-"""Consume quant-monitor daily briefing JSON and classify alert severity.
+"""Consume quant-monitor daily briefing JSON and classify routing.
 
 Roadmap task 10b:
 - all normal → quiet
-- deviation ~2σ (review / elevated drift) → github_issue
-- deviation >3σ / circuit breaker / critical → telegram
+- strategy health / drift degradation → issue-only optimization monitor
+- data unavailable / circuit breaker → telegram
 """
 
 from __future__ import annotations
@@ -48,6 +48,10 @@ class BriefingFinding:
     reason: str
     strategy_profile: str = ""
     domain: str = ""
+    kind: str = "monitoring"
+    severity: str = "medium"
+    metrics: dict[str, Any] = field(default_factory=dict)
+    signals: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -56,6 +60,10 @@ class BriefingFinding:
             "reason": self.reason,
             "strategy_profile": self.strategy_profile,
             "domain": self.domain,
+            "kind": self.kind,
+            "severity": self.severity,
+            "metrics": self.metrics,
+            "signals": self.signals,
         }
 
 
@@ -114,29 +122,61 @@ def _classify_strategy(
 
     level = BriefingAction.QUIET
     reasons: list[str] = []
+    signals: list[dict[str, Any]] = []
+    severity = "medium"
+    kind = "strategy_monitoring"
 
     if status == "critical":
-        level = BriefingAction.TELEGRAM
+        level = BriefingAction.GITHUB_ISSUE
+        severity = "high"
         reasons.append("status=critical")
+        signals.append({"metric": "status", "reason": "status=critical"})
     elif status == "review":
         level = _max_level(level, BriefingAction.GITHUB_ISSUE)
         reasons.append("status=review")
+        signals.append({"metric": "status", "reason": "status=review"})
 
     if drift_score is not None:
         if drift_score >= _DRIFT_CRITICAL:
-            level = BriefingAction.TELEGRAM
+            level = _max_level(level, BriefingAction.GITHUB_ISSUE)
+            severity = "high"
             reasons.append(f"drift_score={drift_score:.2f}")
+            signals.append(
+                {
+                    "metric": "drift_score",
+                    "reason": f"drift_score={drift_score:.2f} exceeds {_DRIFT_CRITICAL:.2f}",
+                }
+            )
         elif drift_score >= _DRIFT_WARN:
             level = _max_level(level, BriefingAction.GITHUB_ISSUE)
             reasons.append(f"drift_score={drift_score:.2f}")
+            signals.append(
+                {
+                    "metric": "drift_score",
+                    "reason": f"drift_score={drift_score:.2f} exceeds {_DRIFT_WARN:.2f}",
+                }
+            )
 
     if overall_score is not None:
         if overall_score <= _SCORE_CRITICAL:
-            level = BriefingAction.TELEGRAM
+            level = _max_level(level, BriefingAction.GITHUB_ISSUE)
+            severity = "high"
             reasons.append(f"overall_score={overall_score:.1f}")
+            signals.append(
+                {
+                    "metric": "overall_score",
+                    "reason": f"overall_score={overall_score:.1f} is below {_SCORE_CRITICAL:.1f}",
+                }
+            )
         elif overall_score <= _SCORE_REVIEW:
             level = _max_level(level, BriefingAction.GITHUB_ISSUE)
             reasons.append(f"overall_score={overall_score:.1f}")
+            signals.append(
+                {
+                    "metric": "overall_score",
+                    "reason": f"overall_score={overall_score:.1f} is below {_SCORE_REVIEW:.1f}",
+                }
+            )
 
     flags = strategy.get("risk_flags") or strategy.get("alerts") or ()
     if isinstance(flags, Mapping):
@@ -145,16 +185,34 @@ def _classify_strategy(
         text = str(flag).lower()
         if any(keyword in text for keyword in _CIRCUIT_KEYWORDS):
             level = BriefingAction.TELEGRAM
+            kind = "runtime_risk"
+            severity = "high"
             reasons.append(f"flag={flag}")
+            signals.append({"metric": "risk_flag", "reason": f"flag={flag}"})
 
     if level == BriefingAction.QUIET:
         return None
+    metric_keys = (
+        "overall_score",
+        "performance_score",
+        "risk_score",
+        "decay_score",
+        "stability_score",
+        "operational_score",
+        "drift_score",
+        "status",
+        "as_of",
+    )
     return BriefingFinding(
         source=source,
         level=level,
         reason="; ".join(reasons) or "anomaly",
         strategy_profile=profile,
         domain=str(strategy.get("domain") or domain),
+        kind=kind,
+        severity=severity,
+        metrics={key: strategy[key] for key in metric_keys if key in strategy},
+        signals=signals,
     )
 
 
@@ -174,7 +232,15 @@ def _classify_report_payload(
             else BriefingAction.GITHUB_ISSUE
         )
         findings.append(
-            BriefingFinding(source=source, level=level, reason=error, domain=str(payload.get("domain") or ""))
+            BriefingFinding(
+                source=source,
+                level=level,
+                reason=error,
+                domain=str(payload.get("domain") or ""),
+                kind="data_unavailable" if data_unavailable else "data_quality",
+                severity="high" if level == BriefingAction.TELEGRAM else "medium",
+                signals=[{"metric": "data_status", "reason": error}],
+            )
         )
         return findings
 
@@ -189,16 +255,18 @@ def _classify_report_payload(
                 findings.append(finding)
 
     summary = payload.get("summary")
-    if isinstance(summary, Mapping):
+    if isinstance(summary, Mapping) and not strategies:
         critical = int(summary.get("critical") or 0)
         review = int(summary.get("review") or 0)
         if critical > 0:
             findings.append(
                 BriefingFinding(
                     source=source,
-                    level=BriefingAction.TELEGRAM,
+                    level=BriefingAction.GITHUB_ISSUE,
                     reason=f"summary critical={critical}",
                     domain=domain,
+                    kind="strategy_monitoring_summary",
+                    severity="high",
                 )
             )
         elif review > 0:
@@ -208,6 +276,7 @@ def _classify_report_payload(
                     level=BriefingAction.GITHUB_ISSUE,
                     reason=f"summary review={review}",
                     domain=domain,
+                    kind="strategy_monitoring_summary",
                 )
             )
 
@@ -236,6 +305,7 @@ def consume_briefing_dir(report_dir: str | Path, *, day: str = "") -> BriefingCo
                     source=file_path.name,
                     level=BriefingAction.GITHUB_ISSUE,
                     reason=f"invalid_json: {exc}",
+                    kind="data_quality",
                 )
             )
             continue

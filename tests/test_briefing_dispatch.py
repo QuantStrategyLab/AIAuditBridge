@@ -4,7 +4,12 @@ import os
 import unittest
 from unittest.mock import patch
 
-from service.briefing_consumer import BriefingAction, BriefingConsumptionResult, BriefingFinding
+from service.briefing_consumer import (
+    BriefingAction,
+    BriefingConsumptionResult,
+    BriefingFinding,
+    consume_briefing_report,
+)
 from service.briefing_dispatch import create_github_issue, dispatch_briefing_result, send_telegram_alert
 
 
@@ -32,6 +37,77 @@ class BriefingDispatchTests(unittest.TestCase):
             summary = dispatch_briefing_result(result, dry_run=True)
         self.assertIn("telegram_dry_run", summary)
         self.assertIn("demo", summary["telegram_dry_run"])
+
+    @patch("service.briefing_dispatch.dispatch_strategy_watch_findings")
+    def test_strategy_health_dispatches_to_issue_only_watcher(self, dispatch_findings) -> None:
+        dispatch_findings.return_value = {
+            "status": "ok",
+            "findings": 1,
+            "issues": [{"repo": "QuantStrategyLab/UsEquityStrategies", "created": True}],
+            "errors": 0,
+        }
+        findings = consume_briefing_report(
+            {
+                "domain": "us_equity",
+                "strategies": [
+                    {
+                        "strategy_profile": "global_etf_rotation",
+                        "status": "critical",
+                        "overall_score": 14.2,
+                        "performance_score": 0.0,
+                    }
+                ],
+            }
+        )
+        result = BriefingConsumptionResult(day="2026-07-30", report_dir="/tmp", findings=findings)
+
+        summary = dispatch_briefing_result(result)
+
+        self.assertEqual(summary["action"], "github_issue")
+        self.assertFalse(summary["telegram_sent"])
+        self.assertEqual(summary["optimization_watch"]["findings"], 1)
+        dispatched = dispatch_findings.call_args.args[0]
+        self.assertEqual(dispatched[0].snapshot.repo, "QuantStrategyLab/UsEquityStrategies")
+        self.assertEqual(dispatched[0].finding_type, "monitoring_trigger")
+        self.assertEqual(summary["errors"], [])
+
+    @patch("service.briefing_dispatch.send_telegram_alert", return_value=True)
+    @patch("service.briefing_dispatch.dispatch_strategy_watch_findings")
+    def test_strategy_record_failure_falls_back_to_operational_telegram(
+        self,
+        dispatch_findings,
+        send_telegram,
+    ) -> None:
+        dispatch_findings.return_value = {
+            "status": "partial_error",
+            "findings": 1,
+            "issues": [{"error": "record failed"}],
+            "errors": 1,
+        }
+        findings = consume_briefing_report(
+            {
+                "domain": "crypto",
+                "strategies": [
+                    {
+                        "strategy_profile": "crypto_live_pool_rotation",
+                        "status": "critical",
+                        "overall_score": 27.7,
+                    }
+                ],
+            }
+        )
+        result = BriefingConsumptionResult(day="2026-07-30", report_dir="/tmp", findings=findings)
+
+        with patch.dict(
+            os.environ,
+            {"TELEGRAM_TOKEN": "token", "GLOBAL_TELEGRAM_CHAT_ID": "123"},
+            clear=True,
+        ):
+            summary = dispatch_briefing_result(result)
+
+        self.assertIn("optimization_record_failed", summary["errors"])
+        self.assertTrue(summary["operational_fallback_sent"])
+        self.assertIn("optimization-record delivery failure", send_telegram.call_args.kwargs["text"])
 
     @patch("service.briefing_dispatch.urllib.request.urlopen")
     def test_send_telegram_alert_success(self, mock_urlopen) -> None:

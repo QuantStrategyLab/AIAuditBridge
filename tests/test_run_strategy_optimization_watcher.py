@@ -6,7 +6,14 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from scripts.run_strategy_optimization_watcher import list_open_issue_urls, parse_bool, resolve_input_path, run_watcher
+from scripts.run_strategy_optimization_watcher import (
+    dispatch_strategy_watch_findings,
+    list_open_issue_urls,
+    parse_bool,
+    resolve_input_path,
+    run_watcher,
+)
+from service.strategy_watch import build_strategy_monitoring_finding, finding_to_automation_task, watcher_issue_key
 
 
 def _performance_payload(*, repo: str = "QuantStrategyLab/TestStrategies", profile: str = "live", sharpe: float = 0.5) -> dict[str, object]:
@@ -21,6 +28,32 @@ def _performance_payload(*, repo: str = "QuantStrategyLab/TestStrategies", profi
 
 
 class RunStrategyOptimizationWatcherTest(unittest.TestCase):
+    def test_monitoring_dispatch_does_not_repeat_existing_issue(self) -> None:
+        finding = build_strategy_monitoring_finding(
+            domain="crypto",
+            profile="crypto_live_pool_rotation",
+            severity="high",
+            metrics={"overall_score": 27.7},
+            signals=[{"metric": "overall_score", "reason": "overall_score=27.7"}],
+            source="quant-monitor/health-cycle",
+        )
+        issue_key = watcher_issue_key(finding_to_automation_task(finding))
+        comment_calls: list[tuple[str, str, str]] = []
+
+        result = dispatch_strategy_watch_findings(
+            [finding],
+            dry_run=False,
+            comment_existing=False,
+            create_issue=lambda repo, title, body: "https://example.test/new",
+            comment_issue=lambda repo, url, body: comment_calls.append((repo, url, body)) or "",
+            list_issues=lambda repo: {issue_key: "https://example.test/existing"},
+        )
+
+        self.assertEqual(result["errors"], 0)
+        self.assertEqual(result["issues"][0]["existing_url"], "https://example.test/existing")
+        self.assertEqual(result["issues"][0]["skipped_reason"], "open issue already records this strategy")
+        self.assertEqual(comment_calls, [])
+
     def test_dry_run_does_not_create_issue(self) -> None:
         calls: list[tuple[str, str, str]] = []
 
