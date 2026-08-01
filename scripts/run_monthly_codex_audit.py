@@ -19,11 +19,14 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from service.model_router import route_model
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from service.model_router import route_model  # noqa: E402
 
 
 API_BASE = "https://api.github.com"
-ROOT = Path(__file__).resolve().parents[1]
 PROMPT_TEMPLATES = {
     "monthly_snapshot_audit": ROOT / "prompts" / "monthly_crypto_snapshot_audit.md",
     "long_horizon_signal_shadow": ROOT / "prompts" / "long_horizon_signal_shadow.md",

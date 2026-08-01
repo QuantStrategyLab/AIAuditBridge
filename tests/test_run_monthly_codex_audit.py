@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -93,6 +94,25 @@ def _normalized_policy(policy: dict[str, object]) -> dict[str, object]:
 
 
 class RunMonthlyCodexAuditTests(unittest.TestCase):
+    def test_script_entrypoint_can_import_service_from_repo_root(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        env = dict(os.environ)
+        env.pop("PYTHONPATH", None)
+        env["ISSUE_NUMBER"] = ""
+
+        result = subprocess.run(
+            [sys.executable, "scripts/run_monthly_codex_audit.py"],
+            cwd=repo_root,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("ISSUE_NUMBER must be provided as an integer", result.stderr)
+        self.assertNotIn("ModuleNotFoundError", result.stderr)
+
     def test_parse_bool_accepts_common_true_values(self) -> None:
         for value in ("1", "true", "TRUE", "yes", "on", True):
             self.assertTrue(parse_bool(value))
