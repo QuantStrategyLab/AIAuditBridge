@@ -2544,6 +2544,23 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertNotIn("codex_pr_review.yml@", script_line)
         self.assertNotIn("codex_pr_review.yml@", workflow_line)
 
+    def test_vps_deploy_allows_canonical_audit_job_workflow_ref(self) -> None:
+        deploy_script = Path("scripts/deploy_codex_audit_service.sh").read_text(encoding="utf-8")
+        workflow = Path(".github/workflows/vps_codex_service_ops.yml").read_text(encoding="utf-8")
+        expected_ref = "QuantStrategyLab/AIAuditBridge/.github/workflows/codex_audit.yml@refs/heads/main"
+
+        script_line = next(
+            line for line in deploy_script.splitlines() if line.startswith('ALLOWED_JOB_WORKFLOW_REFS="')
+        )
+        workflow_line = next(
+            line.strip()
+            for line in workflow.splitlines()
+            if line.strip().startswith("CODEX_AUDIT_SERVICE_ALLOWED_JOB_WORKFLOW_REFS: ")
+        )
+
+        self.assertIn(expected_ref, script_line)
+        self.assertIn(expected_ref, workflow_line)
+
 
 if __name__ == "__main__":
     unittest.main()

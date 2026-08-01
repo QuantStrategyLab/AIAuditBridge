@@ -14,4 +14,6 @@ Current rotation: retain `644cd9002ae92f2aaca6f7efb4afa4986fae05ea`, `d0a081ca58
 
 Never use a wildcard for `job_workflow_ref`. Strategy drift delegation must use an exact QPK SHA. AIAuditBridge PR-review OIDC entries are retired and must not be restored; GitHub Codex App is the sole AI PR reviewer.
 
+The canonical direct audit identity `QuantStrategyLab/AIAuditBridge/.github/workflows/codex_audit.yml@refs/heads/main` is also pinned exactly because live `workflow_dispatch` tokens can include it as `job_workflow_ref`.
+
 The service also enforces that any allowed strategy `drift-check.yml` caller presents a `job_workflow_ref` for QuantPlatformKit's `reusable-drift-check.yml`. A different allowlisted reusable workflow cannot be substituted.
