@@ -2425,7 +2425,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertIn("QuantStrategyLab/CryptoLivePoolPipelines", workflow)
         self.assertIn("QuantStrategyLab/CryptoStrategies/.github/workflows/drift-check.yml@refs/heads/main", workflow)
         self.assertNotIn("QuantStrategyLab/CodexAuditBridge", workflow)
-        self.assertIn("actions/checkout@v6.0.3", workflow)
+        self.assertIn("actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3", workflow)
 
     def test_vps_deploy_adds_nginx_audit_route_without_router_service(self) -> None:
         deploy_script = Path("scripts/deploy_codex_audit_service.sh").read_text(encoding="utf-8")
