@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import unittest
 from unittest.mock import patch
 
@@ -133,6 +134,26 @@ class BriefingDispatchTests(unittest.TestCase):
 
         self.assertEqual(issue, "https://example.test/issues/1")
         self.assertIn("QuantStrategyLab/CryptoStrategies", check_output.call_args.args[0])
+
+    @patch(
+        "service.briefing_dispatch.subprocess.check_output",
+        side_effect=[
+            subprocess.CalledProcessError(1, ["gh"], output="label not found"),
+            "https://example.test/issues/2\n",
+        ],
+    )
+    @patch("service.briefing_dispatch.shutil_which", return_value="/usr/bin/gh")
+    def test_create_github_issue_retries_without_missing_labels(self, _which, check_output) -> None:
+        with patch.dict(os.environ, {"GITHUB_REPOSITORY": "QuantStrategyLab/CryptoStrategies"}, clear=True):
+            issue = create_github_issue(
+                title="review disagreement",
+                body="details",
+                labels=("dual-review", "needs-human"),
+            )
+
+        self.assertEqual(issue, "https://example.test/issues/2")
+        self.assertIn("--label", check_output.call_args_list[0].args[0])
+        self.assertNotIn("--label", check_output.call_args_list[1].args[0])
 
     @patch("service.briefing_dispatch.subprocess.check_output")
     @patch("service.briefing_dispatch.shutil_which", return_value="/usr/bin/gh")

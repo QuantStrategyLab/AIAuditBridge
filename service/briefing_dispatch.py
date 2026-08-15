@@ -117,7 +117,7 @@ def create_github_issue(*, title: str, body: str, labels: tuple[str, ...] = ()) 
         return None
     if not shutil_which("gh"):
         return None
-    cmd = [
+    base_cmd = [
         "gh",
         "issue",
         "create",
@@ -128,12 +128,33 @@ def create_github_issue(*, title: str, body: str, labels: tuple[str, ...] = ()) 
         "--body",
         body,
     ]
+    cmd = list(base_cmd)
     for label in labels:
         cmd.extend(["--label", label])
     try:
         output = subprocess.check_output(cmd, text=True, stderr=subprocess.STDOUT).strip()
         return output
-    except Exception:
+    except subprocess.CalledProcessError as exc:
+        if labels:
+            print(
+                "::warning title=GitHub issue labels unavailable::"
+                "retrying durable issue creation without labels"
+            )
+            try:
+                return subprocess.check_output(
+                    base_cmd,
+                    text=True,
+                    stderr=subprocess.STDOUT,
+                ).strip()
+            except (OSError, subprocess.CalledProcessError) as retry_exc:
+                detail = str(getattr(retry_exc, "output", "") or retry_exc).strip()
+                print(f"::warning title=GitHub issue creation failed::{detail}")
+                return None
+        detail = str(exc.output or exc).strip()
+        print(f"::warning title=GitHub issue creation failed::{detail}")
+        return None
+    except OSError as exc:
+        print(f"::warning title=GitHub issue creation failed::{exc}")
         return None
 
 
