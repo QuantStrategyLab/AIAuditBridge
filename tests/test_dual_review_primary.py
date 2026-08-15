@@ -124,8 +124,14 @@ class DualReviewPrimaryTests(unittest.TestCase):
         review.return_value = AiResult.unavailable("codex", "Daily budget exceeded")
         result = run_codex_primary_review(prompt="review")
         self.assertEqual(result["verdict"], VERDICT_UNAVAILABLE)
+        expected_prompt = (
+            "You are the primary Codex reviewer for quantitative strategy promotion and risk decisions. "
+            "Respond with JSON only: "
+            '{"verdict":"approve"|"reject","confidence":0.0-1.0,"summary":"..."}'
+            "\n\nreview"
+        )
         review.assert_called_once_with(
-            "review",
+            expected_prompt,
             task="dual_review",
             mode="review_only",
             complexity="high",

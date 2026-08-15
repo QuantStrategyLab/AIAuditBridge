@@ -87,8 +87,9 @@ def run_codex_primary_review(
         raise RuntimeError("CODEX_AUDIT_SERVICE_URL is not configured")
 
     timeout = int(timeout_minutes or os.environ.get("DUAL_REVIEW_PRIMARY_TIMEOUT_MINUTES", "15"))
+    review_prompt = f"{_PRIMARY_SYSTEM}\n\n{prompt}"
     result = AiGatewayClient(GatewayConfig.from_env()).execute(
-        prompt,
+        review_prompt,
         task="dual_review",
         mode="review_only",
         complexity="high",
