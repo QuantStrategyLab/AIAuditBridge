@@ -347,18 +347,18 @@ def finding_to_automation_task(finding: StrategyWatchFinding) -> AutomationTask:
         lane=lane,
         target=finding.snapshot.repo,
         rationale=rationale,
-        requires_human_review=True,
+        requires_human_review=False,
         metadata={"profile": finding.snapshot.profile, "plugin": finding.snapshot.plugin, "event_key": event_key, "finding_type": finding_type},
     )
     gate = GateDecision(
         allowed=True,
-        reason="Issue-only proposal is allowed; code changes and live-impact actions remain gated.",
+        reason="Issue-only proposal is allowed; it may only lead to a separately validated, inactive research task.",
         required_checks=[
-            "human review before strategy code changes",
-            "sandbox backtest before optimization PR",
-            "strategy registry/authority gate before live impact",
+            "qsl.research_task.v1 validation before any experiment",
+            "offline no-order sandbox backtest evidence before any candidate PR",
+            "inactive candidate registry/authority gate before P4-P6 impact",
         ],
-        human_review_required=True,
+        human_review_required=False,
         metadata={"issue_only": True, "live_impact_allowed": False},
     )
     return AutomationTask(
@@ -413,10 +413,10 @@ def issue_for_task(task: AutomationTask) -> dict[str, str]:
             "## Safety boundary",
             risks,
             "",
-            "## Required gates before code/live impact",
+            "## Required gates before candidate or live impact",
             checks,
             "",
-            "This watcher only opens an issue. It does not modify strategy code, tune live parameters, merge PRs, or deploy.",
+            "This watcher only opens an issue. It does not modify strategy code, tune active parameters, submit orders, merge PRs, or deploy.",
         ]
     )
     return {"title": title[:240], "body": body}

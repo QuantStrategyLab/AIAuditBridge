@@ -181,7 +181,7 @@ AIAuditBridge rejects absolute paths, `.git` paths, secret-like paths, and block
 
 - Treat generated reports as evidence or review material, not automatic trading instructions.
 - Keep source traceability and artifact timestamps visible.
-- Require human review before using outputs in downstream strategy or platform changes.
+- Research outputs may feed only a separately validated, inactive no-order candidate; P6 live use still requires an explicit owner decision.
 - Keep credentials, private data, and external service tokens out of Git and logs.
 
 ## Repository layout

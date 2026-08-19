@@ -266,7 +266,7 @@ GitHub Codex App 是唯一 AI PR reviewer。AIAuditBridge 只保留月度审计�
 2. 生成 evidence bundle；
 3. 只创建 optimization issue / task proposal；
 4. 经过 authority / registry gate 校验后再决定是否进入下一步；
-5. 后续如需执行，再由人工或 CI gate 接管。
+5. 后续只可生成通过 `qsl.research_task.v1` 校验的离线、no-order 实验；P4/P5 仍由独立策略接管，P6 才需要所有者决定。
 
 当前首批实现的安全边界是：
 
@@ -275,6 +275,8 @@ GitHub Codex App 是唯一 AI PR reviewer。AIAuditBridge 只保留月度审计�
 - 不调 live 参数；
 - 不联网检索；
 - 不自动 merge / deploy。
+
+研究 issue 不要求逐次人工点击：它本身没有运行、策略或资金影响。无人值守的后续动作只能是创建/验证一个固定上限的离线研究任务和未激活候选；任何试图越过 P3 进入 P4/P5/P6 的动作都必须被独立的 lifecycle gate 拒绝。
 
 这样可以把策略优化先收敛为可审计、可回放的建议流，再逐步扩展到受控执行面。
 

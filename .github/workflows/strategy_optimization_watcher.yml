@@ -15,16 +15,25 @@ on:
         description: "JSON metrics payload path inside the source repository"
         required: false
         default: "data/output/strategy_metrics.json"
+      workflow_file:
+        description: "Trusted source workflow file that produced the metrics artifact"
+        required: false
+        default: "monthly_publish.yml"
+      metrics_filename:
+        description: "Sanitized metrics filename inside each source artifact"
+        required: false
+        default: "strategy_metrics.json"
       dry_run:
         description: "Do not create GitHub issues"
         required: false
         type: boolean
         default: true
   schedule:
-    - cron: "17 3 * * *"
+    - cron: "17 6 * * *"
 
 permissions:
   contents: read
+  actions: read
   issues: write
 
 concurrency:
@@ -40,6 +49,8 @@ jobs:
       SOURCE_REPO: ${{ github.event.inputs.source_repo || vars.STRATEGY_WATCH_SOURCE_REPO || 'QuantStrategyLab/CryptoLivePoolPipelines' }}
       SOURCE_REF: ${{ github.event.inputs.source_ref || vars.STRATEGY_WATCH_SOURCE_REF || 'main' }}
       METRICS_PATH: ${{ github.event.inputs.metrics_path || vars.STRATEGY_WATCH_METRICS_PATH || 'data/output/strategy_metrics.json' }}
+      SOURCE_WORKFLOW_FILE: ${{ github.event.inputs.workflow_file || vars.STRATEGY_WATCH_WORKFLOW_FILE || 'monthly_publish.yml' }}
+      METRICS_FILENAME: ${{ github.event.inputs.metrics_filename || vars.STRATEGY_WATCH_METRICS_FILENAME || 'strategy_metrics.json' }}
       STRATEGY_WATCH_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.dry_run) || vars.STRATEGY_WATCH_DRY_RUN || 'true' }}
       ALLOWED_SOURCE_REPOS: ${{ vars.STRATEGY_WATCH_ALLOWED_SOURCE_REPOS || 'QuantStrategyLab/CryptoLivePoolPipelines' }}
       ALLOWED_SOURCE_REFS: ${{ vars.STRATEGY_WATCH_ALLOWED_SOURCE_REFS || 'main' }}
@@ -112,6 +123,7 @@ jobs:
           private-key: ${{ secrets.CROSS_REPO_GITHUB_APP_PRIVATE_KEY }}
           owner: ${{ steps.source_repo.outputs.owner }}
           repositories: ${{ steps.source_repo.outputs.repository }}
+          permission-actions: read
           permission-contents: read
           permission-issues: write
 
@@ -134,46 +146,83 @@ jobs:
           token: ${{ steps.source_app_token.outputs.token || github.token }}
           persist-credentials: false
 
-      - name: Fetch strategy metrics from latest Monthly Publish artifact
+      - name: Fetch comparable strategy metrics from trusted source artifacts
         id: fetch-metrics
         env:
           GH_TOKEN: ${{ steps.source_app_token.outputs.token || github.token }}
         run: |
           set -euo pipefail
-          echo "Looking for latest successful Monthly Publish run on ${SOURCE_REF} in ${SOURCE_REPO}..."
+          if [[ ! "${SOURCE_WORKFLOW_FILE}" =~ ^[A-Za-z0-9_.-]+\.ya?ml$ ]]; then
+            echo "Invalid SOURCE_WORKFLOW_FILE" >&2
+            exit 1
+          fi
+          if [[ ! "${METRICS_FILENAME}" =~ ^[A-Za-z0-9_.-]+\.json$ ]]; then
+            echo "Invalid METRICS_FILENAME" >&2
+            exit 1
+          fi
+          echo "Looking for completed ${SOURCE_WORKFLOW_FILE} metrics on ${SOURCE_REF} in ${SOURCE_REPO}..."
 
-          WORKFLOW_FILE="monthly_publish.yml"
           # Restrict to the canonical branch so we never consume metrics from a
           # feature-branch or PR workflow run.
-          RUN_ID=$(gh run list --repo "${SOURCE_REPO}" --workflow "${WORKFLOW_FILE}" --branch "${SOURCE_REF}" --status success --limit 1 --json databaseId --jq '.[0].databaseId // ""')
+          mapfile -t RUN_IDS < <(gh run list --repo "${SOURCE_REPO}" --workflow "${SOURCE_WORKFLOW_FILE}" --branch "${SOURCE_REF}" --status success --limit 2 --json databaseId --jq '.[].databaseId')
 
-          if [ -z "${RUN_ID}" ]; then
-            echo "No successful Monthly Publish run on ${SOURCE_REF} in ${SOURCE_REPO} — metrics not available yet"
+          if [ "${#RUN_IDS[@]}" -eq 0 ]; then
+            echo "No successful source run on ${SOURCE_REF} in ${SOURCE_REPO} — metrics not available yet"
             echo "downloaded=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          echo "Found run ${RUN_ID}, downloading artifacts..."
           mkdir -p source/data/output
-          # Artifact download failures (expired artifacts, missing bundles) are
-          # expected when the monthly publish hasn't run recently or doesn't
-          # produce the file yet.  Let the watcher script skip gracefully.
-          if ! gh run download "${RUN_ID}" --repo "${SOURCE_REPO}" --dir source/data/output/_artifacts 2>/dev/null; then
-            echo "Artifact download from run ${RUN_ID} failed (may have expired or not contain the expected bundle)"
-            echo "downloaded=false" >> "$GITHUB_OUTPUT"
+          if [ "${METRICS_FILENAME}" = "strategy_metrics.json" ]; then
+            current_run_id="${RUN_IDS[0]}"
+            if ! gh run download "${current_run_id}" --repo "${SOURCE_REPO}" --dir "source/data/output/_artifacts/${current_run_id}" 2>/dev/null; then
+              echo "Artifact download from run ${current_run_id} failed"
+              echo "downloaded=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            metrics_file=$(find "source/data/output/_artifacts/${current_run_id}" -name "strategy_metrics.json" -type f -print -quit)
+            if [ -z "${metrics_file}" ]; then
+              echo "strategy_metrics.json not found in trusted source artifacts"
+              echo "downloaded=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            cp "${metrics_file}" "source/${METRICS_PATH}"
+            echo "Downloaded compatible strategy_metrics.json from run ${current_run_id}"
+            echo "downloaded=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          # The artifact name is dynamic; search for strategy_metrics.json in all downloaded artifacts
-          METRICS_FILE=$(find source/data/output/_artifacts -name "strategy_metrics.json" -type f 2>/dev/null | head -1)
-          if [ -n "${METRICS_FILE}" ]; then
-            cp "${METRICS_FILE}" source/data/output/strategy_metrics.json
-            echo "Downloaded strategy_metrics.json from run ${RUN_ID}"
-            echo "downloaded=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "strategy_metrics.json not found in Monthly Publish artifacts — source repo may not generate it yet"
+          if [ "${#RUN_IDS[@]}" -lt 2 ]; then
+            echo "Two completed observations are required before comparing strategy_performance.v2 metrics"
             echo "downloaded=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          current_run_id="${RUN_IDS[0]}"
+          baseline_run_id="${RUN_IDS[1]}"
+          for run_id in "${current_run_id}" "${baseline_run_id}"; do
+            if ! gh run download "${run_id}" --repo "${SOURCE_REPO}" --dir "source/data/output/_artifacts/${run_id}" 2>/dev/null; then
+              echo "Artifact download from run ${run_id} failed"
+              echo "downloaded=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+          current_file=$(find "source/data/output/_artifacts/${current_run_id}" -name "${METRICS_FILENAME}" -type f -print -quit)
+          baseline_file=$(find "source/data/output/_artifacts/${baseline_run_id}" -name "${METRICS_FILENAME}" -type f -print -quit)
+          if [ -z "${current_file}" ] || [ -z "${baseline_file}" ]; then
+            echo "Comparable ${METRICS_FILENAME} artifacts are not available yet"
+            echo "downloaded=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          python bridge/scripts/build_strategy_watcher_artifact_payload.py \
+            --current "${current_file}" \
+            --baseline "${baseline_file}" \
+            --source-repository "${SOURCE_REPO}" \
+            --workflow-file "${SOURCE_WORKFLOW_FILE}" \
+            --current-run-id "${current_run_id}" \
+            --baseline-run-id "${baseline_run_id}" \
+            --output "source/${METRICS_PATH}"
+          echo "Built comparable watcher payload from ${baseline_run_id} and ${current_run_id}"
+          echo "downloaded=true" >> "$GITHUB_OUTPUT"
 
       - name: Run Strategy Optimization Watcher
         env:

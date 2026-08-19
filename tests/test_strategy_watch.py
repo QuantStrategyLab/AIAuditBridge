@@ -59,10 +59,10 @@ class StrategyWatchTest(unittest.TestCase):
         self.assertEqual(len(findings), 1)
         task = finding_to_automation_task(findings[0])
         payload = task.to_dict()
-        self.assertFalse(task.is_actionable)
+        self.assertTrue(task.is_actionable)
         self.assertEqual(payload["proposed_action"]["action"], "open_issue")
-        self.assertTrue(payload["proposed_action"]["requires_human_review"])
-        self.assertTrue(payload["gate_decision"]["human_review_required"])
+        self.assertFalse(payload["proposed_action"]["requires_human_review"])
+        self.assertFalse(payload["gate_decision"]["human_review_required"])
         self.assertFalse(payload["gate_decision"]["metadata"]["live_impact_allowed"])
 
     def test_malformed_metrics_snapshot_is_ignored_without_crashing(self) -> None:
