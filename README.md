@@ -204,6 +204,7 @@ python3 -m unittest discover -s tests -v
 - [`docs/architecture.md`](docs/architecture.md): service components and endpoint map.
 - [`docs/async_service_deployment.md`](docs/async_service_deployment.md): VPS service and Worker deployment.
 - [`docs/health_taxonomy.md`](docs/health_taxonomy.md): dashboard, quota, workflow, job, and artifact health semantics.
+- [`docs/bounded_research_diagnosis.md`](docs/bounded_research_diagnosis.md): verified P3 task → one read-only AI diagnosis, with low-frequency escalation boundaries.
 - [`docs/ai_autonomy_architecture.md`](docs/ai_autonomy_architecture.md): AI autonomy design review and phased roadmap.
 
 ## Community and security

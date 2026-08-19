@@ -94,6 +94,11 @@ POST /v1/ai/analyze
   → return {output, model, latency}
 ```
 
+`Strategy Optimization Watcher` may use this endpoint for one bounded,
+text-only diagnosis of an already verified `qsl.research_task.v1`.  The
+diagnosis is an Issue comment, not a code change or experiment: it does not
+receive raw bars or credentials and cannot activate P4--P6.
+
 ### Execute (async)
 ```
 POST /v1/ai/execute/jobs

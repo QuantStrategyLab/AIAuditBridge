@@ -127,6 +127,12 @@ def task_public_summary(task: Any) -> dict[str, Any]:
             "kind": trigger.get("kind", ""),
             "severity": trigger.get("severity", ""),
             "subject": trigger.get("subject", ""),
+            "reason": trigger.get("reason", ""),
+            "signals": [
+                {"reason": str(item)}
+                for item in trigger.get("evidence", [])
+                if isinstance(item, str)
+            ],
         },
         "proposed_action": {
             "action": proposed_action.get("action", ""),
@@ -139,6 +145,7 @@ def task_public_summary(task: Any) -> dict[str, Any]:
             "human_review_required": gate_decision.get("human_review_required", True),
         },
         "finding_type": metadata.get("finding_type", "metric_degradation"),
+        "event_key": metadata.get("event_key", ""),
         "status": payload.get("status", ""),
     }
 

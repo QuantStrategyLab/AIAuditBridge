@@ -97,6 +97,7 @@ class AiGatewayClient:
         system: str = "",
         max_tokens: int = 4000,
         timeout: float | None = None,
+        source_repository: str | None = None,
     ) -> AiResult:
         """Sync LLM completion via ``POST /v1/ai/analyze``."""
         selected_model = model or self.config.default_analyze_model
@@ -113,6 +114,7 @@ class AiGatewayClient:
                 "system": system,
                 "max_tokens": max_tokens,
                 "timeout_seconds": int(timeout),
+                "source_repository": source_repository or self.config.source_repository,
             }).encode("utf-8")
 
             req = urllib.request.Request(

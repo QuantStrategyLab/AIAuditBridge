@@ -11,7 +11,7 @@ ALLOWED_REPOSITORIES="${CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES:-QuantStrategyL
 # Direct review and strategy workflow identities are pinned to protected main because GitHub emits workflow_ref with the dispatch branch.
 # Delegated reusable code is constrained separately by the exact job_workflow_ref SHA below.
 # The ref allowlist retains PR merge refs because GitHub can preserve the incoming PR ref for reusable calls; _verify_github_oidc requires both allowlists.
-ALLOWED_WORKFLOW_REFS="${CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS:-QuantStrategyLab/AIAuditBridge/.github/workflows/codex_audit.yml@refs/heads/main,QuantStrategyLab/CnEquityStrategies/.github/workflows/drift-check.yml@refs/heads/main,QuantStrategyLab/UsEquityStrategies/.github/workflows/drift-check.yml@refs/heads/main,QuantStrategyLab/CryptoStrategies/.github/workflows/drift-check.yml@refs/heads/main}"
+ALLOWED_WORKFLOW_REFS="${CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS:-QuantStrategyLab/AIAuditBridge/.github/workflows/codex_audit.yml@refs/heads/main,QuantStrategyLab/AIAuditBridge/.github/workflows/strategy_optimization_watcher.yml@refs/heads/main,QuantStrategyLab/CnEquityStrategies/.github/workflows/drift-check.yml@refs/heads/main,QuantStrategyLab/UsEquityStrategies/.github/workflows/drift-check.yml@refs/heads/main,QuantStrategyLab/CryptoStrategies/.github/workflows/drift-check.yml@refs/heads/main}"
 ALLOWED_REFS="${CODEX_AUDIT_SERVICE_ALLOWED_REFS:-refs/heads/main}"
 ALLOWED_REPOSITORY_VISIBILITIES="${CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORY_VISIBILITIES:-public}"
 # Exact canonical audit job identity. Single source of truth for delegated drift code follows.

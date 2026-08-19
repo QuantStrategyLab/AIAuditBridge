@@ -35,6 +35,7 @@ permissions:
   contents: read
   actions: read
   issues: write
+  id-token: write
 
 concurrency:
   group: strategy-optimization-watcher-${{ github.event.inputs.source_repo || vars.STRATEGY_WATCH_SOURCE_REPO || 'QuantStrategyLab/CryptoLivePoolPipelines' }}
@@ -235,6 +236,21 @@ jobs:
           set -euo pipefail
           mkdir -p data/output/strategy_optimization_watcher
           python scripts/run_strategy_optimization_watcher.py | tee data/output/strategy_optimization_watcher/result.json
+
+      - name: Run one bounded AI research diagnosis
+        if: steps.fetch-metrics.outputs.downloaded == 'true' && github.event_name == 'schedule'
+        env:
+          CODEX_AUDIT_SERVICE_URL: ${{ secrets.CODEX_AUDIT_SERVICE_URL }}
+          CODEX_AUDIT_SERVICE_AUDIENCE: ${{ vars.CODEX_AUDIT_SERVICE_AUDIENCE || 'quant-codex-audit' }}
+          DEFAULT_ANALYZE_MODEL: ${{ vars.RESEARCH_DIAGNOSIS_MODEL || 'gpt-5.4-mini' }}
+          RESEARCH_DIAGNOSIS_MAX_PER_RUN: "1"
+        working-directory: bridge
+        run: |
+          set -euo pipefail
+          python scripts/run_research_task_diagnosis.py \
+            --input data/output/strategy_optimization_watcher/result.json \
+            --max-per-run "${RESEARCH_DIAGNOSIS_MAX_PER_RUN}" \
+            | tee data/output/strategy_optimization_watcher/research-diagnosis.json
 
       - name: Extract bounded research task source snapshot
         if: steps.fetch-metrics.outputs.downloaded == 'true'
