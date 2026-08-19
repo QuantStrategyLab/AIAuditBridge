@@ -145,4 +145,129 @@ def build_strategy_diagnosis_task(
     return task
 
 
-__all__ = ["ResearchTaskError", "SCHEMA", "build_strategy_diagnosis_task", "calculate_task_sha256"]
+def validate_strategy_diagnosis_task(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Fail closed unless ``value`` is the exact bounded watcher task shape.
+
+    Consumers that trigger any automatic follow-up must validate the complete
+    task, rather than trusting a task ID or a digest copied from an Issue.
+    """
+    if not isinstance(value, Mapping):
+        raise ResearchTaskError("research task must be an object")
+    task = copy.deepcopy(dict(value))
+    expected_fields = {
+        "schema",
+        "task_id",
+        "created_at",
+        "digest_algorithm",
+        "task_type",
+        "target",
+        "evidence",
+        "experiment",
+        "authority",
+        "task_sha256",
+    }
+    if set(task) != expected_fields:
+        raise ResearchTaskError("research task has unexpected fields")
+    if task.get("schema") != SCHEMA or task.get("digest_algorithm") != "sha256":
+        raise ResearchTaskError("research task schema is unsupported")
+    task_id = task.get("task_id")
+    if not isinstance(task_id, str) or re.fullmatch(r"watcher-[0-9a-f]{12}", task_id) is None:
+        raise ResearchTaskError("research task ID is invalid")
+    created_at = _timestamp(task.get("created_at"), "created_at")
+    if task.get("task_type") != "strategy_diagnosis":
+        raise ResearchTaskError("research task type is unsupported")
+
+    target = task.get("target")
+    if not isinstance(target, Mapping) or set(target) != {
+        "candidate_id",
+        "candidate_kind",
+        "domain",
+        "repository",
+        "strategy_revision",
+    }:
+        raise ResearchTaskError("research task target is incomplete")
+    candidate_id = _identity(target.get("candidate_id"), "target.candidate_id")
+    candidate_kind = target.get("candidate_kind")
+    if candidate_kind not in _CANDIDATE_KINDS:
+        raise ResearchTaskError("target.candidate_kind is unsupported")
+    domain = target.get("domain")
+    if domain not in _DOMAINS:
+        raise ResearchTaskError("target.domain is unsupported")
+    repository = target.get("repository")
+    if not isinstance(repository, str) or _REPOSITORY.fullmatch(repository) is None:
+        raise ResearchTaskError("target.repository is invalid")
+    strategy_revision = _revision(target.get("strategy_revision"), "target.strategy_revision")
+
+    raw_evidence = task.get("evidence")
+    expected_evidence_fields = _EVIDENCE_FIELDS - {"strategy_revision"}
+    if not isinstance(raw_evidence, Mapping) or set(raw_evidence) != expected_evidence_fields:
+        raise ResearchTaskError("research task evidence is incomplete")
+    evidence = _evidence({**dict(raw_evidence), "strategy_revision": strategy_revision})
+    if evidence["strategy_revision"] != strategy_revision:
+        raise ResearchTaskError("research task strategy revision is not bound to evidence")
+
+    experiment = task.get("experiment")
+    expected_experiment = {
+        "objective",
+        "hypothesis",
+        "parameter_bounds_sha256",
+        "max_runs",
+        "max_wall_seconds",
+    }
+    if not isinstance(experiment, Mapping) or set(experiment) != expected_experiment:
+        raise ResearchTaskError("research task experiment is incomplete")
+    if (
+        experiment.get("objective") != "diagnose_degradation"
+        or experiment.get("hypothesis")
+        != "A verified P3 observation crossed a degradation threshold; diagnose it with one bounded offline comparison without changing active parameters."
+        or experiment.get("parameter_bounds_sha256") is not None
+        or experiment.get("max_runs") != 1
+        or experiment.get("max_wall_seconds") != 3600
+    ):
+        raise ResearchTaskError("research task experiment exceeds the bounded diagnosis contract")
+
+    authority = task.get("authority")
+    expected_authority = {
+        "research_only": True,
+        "no_order": True,
+        "size_zero_required": True,
+        "p4_p5_p6_authorized": False,
+    }
+    if authority != expected_authority:
+        raise ResearchTaskError("research task authority is not bounded")
+    supplied_digest = _sha256(task.get("task_sha256"), "task_sha256")
+    if supplied_digest != calculate_task_sha256(task):
+        raise ResearchTaskError("research task digest does not match canonical content")
+
+    return {
+        "schema": SCHEMA,
+        "task_id": task_id,
+        "created_at": created_at,
+        "digest_algorithm": "sha256",
+        "task_type": "strategy_diagnosis",
+        "target": {
+            "candidate_id": candidate_id,
+            "candidate_kind": candidate_kind,
+            "domain": domain,
+            "repository": repository,
+            "strategy_revision": strategy_revision,
+        },
+        "evidence": {
+            "p1_input_digest": evidence["p1_input_digest"],
+            "p2_config_digest": evidence["p2_config_digest"],
+            "p3_evidence_id": evidence["p3_evidence_id"],
+            "producer_revision": evidence["producer_revision"],
+        },
+        "experiment": dict(experiment),
+        "authority": dict(expected_authority),
+        "task_sha256": supplied_digest,
+    }
+
+
+__all__ = [
+    "ResearchTaskError",
+    "SCHEMA",
+    "build_strategy_diagnosis_task",
+    "calculate_task_sha256",
+    "validate_strategy_diagnosis_task",
+]
