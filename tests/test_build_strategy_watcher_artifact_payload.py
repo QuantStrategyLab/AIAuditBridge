@@ -63,6 +63,16 @@ class StrategyWatcherArtifactPayloadTest(unittest.TestCase):
             "github_actions:QuantStrategyLab/UsEquitySnapshotPipelines:tqqq-p1-p3-daily-research.yml:123455-123456",
         )
         self.assertNotIn("evidence", payload)
+        self.assertEqual(
+            payload["research_task_evidence"],
+            {
+                "p1_input_digest": "a" * 64,
+                "p2_config_digest": "b" * 64,
+                "p3_evidence_id": "c" * 64,
+                "strategy_revision": "d" * 40,
+                "producer_revision": "e" * 40,
+            },
+        )
         findings = evaluate_strategy_watch(payload)
         self.assertEqual(len(findings), 1)
         self.assertEqual(findings[0].finding_type, "metric_degradation")

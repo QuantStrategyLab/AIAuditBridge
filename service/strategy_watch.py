@@ -9,6 +9,7 @@ import math
 from typing import Any
 
 from service.automation_contracts import AutomationTask, EvidenceBundle, GateDecision, ProposedAction, TriggerRecord
+from service.research_task import ResearchTaskError, build_strategy_diagnosis_task
 from service.strategy_automation_registry import LANE_RESEARCH_BACKLOG, summarize_strategy_registry_context
 from service.strategy_optimization_policy import evaluate_strategy_metrics
 
@@ -22,6 +23,8 @@ REQUIRED_PERFORMANCE_METRICS = ("sharpe", "cagr", "calmar", "win_rate", "max_dd"
 MONITORING_SCHEMA_VERSION = "strategy_monitoring_evidence.v1"
 METRICS_KIND_MONITORING = "monitoring_evidence"
 MONITORING_FINDING_TYPE = "monitoring_trigger"
+RESEARCH_TASK_SOURCE_SCHEMA_VERSION = "qsl_research_task_source_snapshot.v1"
+RESEARCH_TASK_SOURCE_ID = "aiaudit.strategy_optimization_watcher"
 STRATEGY_REPOSITORY_BY_DOMAIN = {
     "cn_equity": "QuantStrategyLab/CnEquityStrategies",
     "hk_equity": "QuantStrategyLab/HkEquityStrategies",
@@ -39,10 +42,13 @@ class StrategyWatchSnapshot:
     repo: str
     profile: str
     plugin: str = ""
+    candidate_kind: str = "individual"
+    domain: str = ""
     schema_version: str = ""
     metrics_kind: str = ""
     current_metrics: dict[str, Any] = field(default_factory=dict)
     baseline_metrics: dict[str, Any] = field(default_factory=dict)
+    research_task_evidence: dict[str, Any] = field(default_factory=dict)
     source: str = ""
     generated_at: str = ""
 
@@ -60,10 +66,13 @@ class StrategyWatchSnapshot:
             repo=str(payload.get("repo") or payload.get("repository") or default_repo).strip(),
             profile=profile,
             plugin=str(payload.get("plugin") or payload.get("strategy_plugin") or "").strip(),
+            candidate_kind=str(payload.get("candidate_kind") or "individual").strip(),
+            domain=str(payload.get("domain") or "").strip(),
             schema_version=str(payload.get("schema_version") or default_schema_version).strip(),
             metrics_kind=str(payload.get("metrics_kind") or payload.get("metric_set") or default_metrics_kind).strip(),
             current_metrics=_dict_payload(payload.get("current_metrics") or payload.get("current")),
             baseline_metrics=_dict_payload(payload.get("baseline_metrics") or payload.get("baseline")),
+            research_task_evidence=_dict_payload(payload.get("research_task_evidence")),
             source=str(payload.get("source") or "").strip(),
             generated_at=str(payload.get("generated_at") or "").strip(),
         )
@@ -77,10 +86,13 @@ class StrategyWatchSnapshot:
             "repo": self.repo,
             "profile": self.profile,
             "plugin": self.plugin,
+            "candidate_kind": self.candidate_kind,
+            "domain": self.domain,
             "schema_version": self.schema_version,
             "metrics_kind": self.metrics_kind,
             "current_metrics": self.current_metrics,
             "baseline_metrics": self.baseline_metrics,
+            "research_task_evidence": self.research_task_evidence,
             "source": self.source,
             "generated_at": self.generated_at,
         }
@@ -368,6 +380,76 @@ def finding_to_automation_task(finding: StrategyWatchFinding) -> AutomationTask:
         gate_decision=gate,
         metadata={"event_key": event_key, "finding_type": finding_type},
     )
+
+
+def finding_to_research_task(finding: StrategyWatchFinding) -> dict[str, Any] | None:
+    """Build a task only when a verified P3 comparison binds every input.
+
+    Existing legacy/operational watcher lanes remain issue-only.  They must not
+    be promoted into a research task merely because they emitted a finding.
+    """
+    snapshot = finding.snapshot
+    if finding.finding_type != "metric_degradation" or snapshot.metrics_kind != METRICS_KIND_PERFORMANCE:
+        return None
+    strategy_repository = STRATEGY_REPOSITORY_BY_DOMAIN.get(snapshot.domain)
+    if not strategy_repository:
+        return None
+    try:
+        return build_strategy_diagnosis_task(
+            event_key=finding_event_key(finding),
+            created_at=snapshot.generated_at,
+            candidate_id=snapshot.profile,
+            candidate_kind=snapshot.candidate_kind,
+            domain=snapshot.domain,
+            strategy_repository=strategy_repository,
+            evidence=snapshot.research_task_evidence,
+        )
+    except ResearchTaskError:
+        return None
+
+
+def research_task_context_available(payload: dict[str, Any]) -> bool:
+    """Whether the watcher payload carries the bounded P3 bindings a task needs."""
+    snapshot = StrategyWatchSnapshot.from_dict(payload)
+    evidence = snapshot.research_task_evidence
+    return (
+        snapshot.metrics_kind == METRICS_KIND_PERFORMANCE
+        and snapshot.candidate_kind in {"individual", "portfolio", "plugin"}
+        and snapshot.domain in STRATEGY_REPOSITORY_BY_DOMAIN
+        and bool(snapshot.profile)
+        and set(evidence) == {"p1_input_digest", "p2_config_digest", "p3_evidence_id", "strategy_revision", "producer_revision"}
+    )
+
+
+def research_task_source_snapshot(
+    findings: list[StrategyWatchFinding],
+    *,
+    context_available: bool,
+    computed_at: str,
+) -> dict[str, Any]:
+    """Project only verified tasks into the separate, source-owned queue index."""
+    tasks: list[dict[str, Any]] = []
+    errors: list[str] = []
+    if not context_available:
+        errors.append("research_task_context_unavailable")
+    else:
+        for finding in findings:
+            task = finding_to_research_task(finding)
+            if task is None:
+                errors.append("research_task_contract_unavailable")
+            else:
+                tasks.append(task)
+    generated_values = [finding.snapshot.generated_at for finding in findings if finding.snapshot.generated_at]
+    generated_at = max(generated_values) if generated_values else computed_at
+    return {
+        "schema_version": RESEARCH_TASK_SOURCE_SCHEMA_VERSION,
+        "source_id": RESEARCH_TASK_SOURCE_ID,
+        "generated_at": generated_at,
+        "computed_at": computed_at,
+        "data_status": "unavailable" if errors else "ready",
+        "tasks": [] if errors else tasks,
+        "errors": sorted(set(errors)),
+    }
 
 
 def watcher_issue_key(task: AutomationTask) -> str:

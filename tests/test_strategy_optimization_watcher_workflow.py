@@ -53,6 +53,17 @@ class StrategyOptimizationWatcherWorkflowTest(unittest.TestCase):
         self.assertIn("owner=${owner}", text)
         self.assertIn("owner: ${{ steps.source_repo.outputs.owner }}", text)
 
+    def test_research_task_index_is_scheduled_and_uses_a_dedicated_sync_identity(self) -> None:
+        text = WORKFLOW_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("qsl_research_task_source_snapshot.v1", text)
+        self.assertIn("QSL_RESEARCH_TASK_SYNC_URL", text)
+        self.assertIn("QSL_RESEARCH_TASK_SYNC_TOKEN", text)
+        self.assertIn("github.event_name == 'schedule'", text)
+        self.assertIn("/api/internal/sync-research-task-source", text)
+        self.assertIn("RESEARCH_TASK_SYNC_STATUS=NOT_CONFIGURED", text)
+        self.assertNotIn("/api/switch", text)
+
 
 if __name__ == "__main__":
     unittest.main()

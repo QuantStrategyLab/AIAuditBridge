@@ -14,6 +14,7 @@ from scripts.run_strategy_optimization_watcher import (
     run_watcher,
 )
 from service.strategy_watch import build_strategy_monitoring_finding, finding_to_automation_task, watcher_issue_key
+from service.research_task import calculate_task_sha256
 
 
 def _performance_payload(*, repo: str = "QuantStrategyLab/TestStrategies", profile: str = "live", sharpe: float = 0.5) -> dict[str, object]:
@@ -24,6 +25,22 @@ def _performance_payload(*, repo: str = "QuantStrategyLab/TestStrategies", profi
         "metrics_kind": "performance",
         "current_metrics": {"sharpe": sharpe, "cagr": 0.1, "calmar": 0.7, "win_rate": 0.52, "max_dd": 0.12},
         "baseline_metrics": {"sharpe": 1.0, "cagr": 0.2, "calmar": 1.0, "win_rate": 0.58, "max_dd": 0.08},
+    }
+
+
+def _verified_p3_payload(*, sharpe: float = 0.5) -> dict[str, object]:
+    return {
+        **_performance_payload(repo="QuantStrategyLab/UsEquitySnapshotPipelines", profile="tqqq_core_only_p2_v5", sharpe=sharpe),
+        "candidate_kind": "individual",
+        "domain": "us_equity",
+        "generated_at": "2026-08-20T00:00:00Z",
+        "research_task_evidence": {
+            "p1_input_digest": "a" * 64,
+            "p2_config_digest": "b" * 64,
+            "p3_evidence_id": "c" * 64,
+            "strategy_revision": "d" * 40,
+            "producer_revision": "e" * 40,
+        },
     }
 
 
@@ -70,6 +87,40 @@ class RunStrategyOptimizationWatcherTest(unittest.TestCase):
         self.assertTrue(result["issues"][0]["dry_run"])
         self.assertNotIn("metrics", result["issues"][0]["task"]["trigger"])
         self.assertEqual(calls, [])
+        self.assertEqual(result["research_task_source_snapshot"]["data_status"], "unavailable")
+
+    def test_verified_p3_degradation_creates_one_bounded_research_task(self) -> None:
+        result = run_watcher(
+            _verified_p3_payload(),
+            source_repo="QuantStrategyLab/UsEquitySnapshotPipelines",
+            dry_run=True,
+        )
+
+        snapshot = result["research_task_source_snapshot"]
+        self.assertEqual(snapshot["schema_version"], "qsl_research_task_source_snapshot.v1")
+        self.assertEqual(snapshot["data_status"], "ready")
+        self.assertEqual(snapshot["errors"], [])
+        self.assertEqual(len(snapshot["tasks"]), 1)
+        task = snapshot["tasks"][0]
+        self.assertEqual(task["target"]["repository"], "QuantStrategyLab/UsEquityStrategies")
+        self.assertEqual(task["authority"], {"research_only": True, "no_order": True, "size_zero_required": True, "p4_p5_p6_authorized": False})
+        self.assertEqual(task["experiment"]["max_runs"], 1)
+        self.assertEqual(task["task_sha256"], calculate_task_sha256(task))
+
+    def test_healthy_verified_p3_observation_publishes_an_empty_ready_queue(self) -> None:
+        result = run_watcher(
+            _verified_p3_payload(sharpe=1.0) | {
+                "current_metrics": {"sharpe": 1.0, "cagr": 0.2, "calmar": 1.0, "win_rate": 0.58, "max_dd": 0.08},
+                "baseline_metrics": {"sharpe": 1.0, "cagr": 0.2, "calmar": 1.0, "win_rate": 0.58, "max_dd": 0.08},
+            },
+            source_repo="QuantStrategyLab/UsEquitySnapshotPipelines",
+            dry_run=True,
+        )
+
+        snapshot = result["research_task_source_snapshot"]
+        self.assertEqual(result["findings"], 0)
+        self.assertEqual(snapshot["data_status"], "ready")
+        self.assertEqual(snapshot["tasks"], [])
 
     def test_non_dry_run_uses_source_repo_override(self) -> None:
         calls: list[tuple[str, str, str]] = []
