@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import copy
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -21,6 +22,8 @@ from service.strategy_watch import (  # noqa: E402
     evaluate_strategy_watch,
     finding_to_automation_task,
     issue_for_task,
+    research_task_context_available,
+    research_task_source_snapshot,
     watcher_issue_key,
 )
 
@@ -266,7 +269,7 @@ def run_watcher(
         raise ValueError("source_repo must be in owner/name form")
     watch_payload = _payload_for_source_repo(payload, source_repo)
     findings = evaluate_strategy_watch(watch_payload)
-    return dispatch_strategy_watch_findings(
+    result = dispatch_strategy_watch_findings(
         findings,
         source_repo=source_repo,
         dry_run=dry_run,
@@ -274,6 +277,12 @@ def run_watcher(
         comment_issue=comment_issue,
         list_issues=list_issues,
     )
+    result["research_task_source_snapshot"] = research_task_source_snapshot(
+        findings,
+        context_available=research_task_context_available(watch_payload),
+        computed_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+    return result
 
 
 def main() -> int:

@@ -236,6 +236,56 @@ jobs:
           mkdir -p data/output/strategy_optimization_watcher
           python scripts/run_strategy_optimization_watcher.py | tee data/output/strategy_optimization_watcher/result.json
 
+      - name: Extract bounded research task source snapshot
+        if: steps.fetch-metrics.outputs.downloaded == 'true'
+        working-directory: bridge
+        run: |
+          set -euo pipefail
+          python - data/output/strategy_optimization_watcher/result.json data/output/strategy_optimization_watcher/research-task-source.json <<'PY'
+          import json
+          import sys
+
+          source = json.load(open(sys.argv[1], encoding="utf-8"))
+          snapshot = source.get("research_task_source_snapshot")
+          if not isinstance(snapshot, dict) or snapshot.get("schema_version") != "qsl_research_task_source_snapshot.v1":
+              raise SystemExit("watcher did not emit a bounded research task source snapshot")
+          with open(sys.argv[2], "w", encoding="utf-8") as handle:
+              json.dump(snapshot, handle, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+          PY
+
+      - name: Publish research task index to the unified console
+        if: steps.fetch-metrics.outputs.downloaded == 'true' && github.event_name == 'schedule'
+        env:
+          RESEARCH_TASK_SYNC_URL: ${{ vars.QSL_RESEARCH_TASK_SYNC_URL }}
+          RESEARCH_TASK_SYNC_TOKEN: ${{ secrets.QSL_RESEARCH_TASK_SYNC_TOKEN }}
+        working-directory: bridge
+        run: |
+          set -euo pipefail
+          if [ -z "${RESEARCH_TASK_SYNC_URL:-}" ] || [ -z "${RESEARCH_TASK_SYNC_TOKEN:-}" ]; then
+            echo 'RESEARCH_TASK_SYNC_STATUS=NOT_CONFIGURED' >> "$GITHUB_STEP_SUMMARY"
+            echo 'Research task index is not configured; issue-only watcher behavior remains unchanged.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          input_path="data/output/strategy_optimization_watcher/research-task-source.json"
+          response_path="data/output/strategy_optimization_watcher/research-task-response.json"
+          curl --fail --show-error --silent --retry 3 --retry-all-errors --connect-timeout 10 \
+            --request POST \
+            --header "Authorization: Bearer ${RESEARCH_TASK_SYNC_TOKEN}" \
+            --header 'Content-Type: application/json' \
+            --header 'User-Agent: QuantStrategyLab-AIAuditBridge-ResearchTask/1' \
+            --data-binary "@$input_path" \
+            --output "$response_path" \
+            "${RESEARCH_TASK_SYNC_URL%/}/api/internal/sync-research-task-source"
+          python - "$response_path" <<'PY'
+          import json
+          import sys
+
+          response = json.load(open(sys.argv[1], encoding="utf-8"))
+          if response.get("ok") is not True or response.get("schema_version") != "qsl_research_task_source_snapshot.v1":
+              raise SystemExit("unexpected research task source response")
+          PY
+          echo 'RESEARCH_TASK_SYNC_STATUS=PUBLISHED' >> "$GITHUB_STEP_SUMMARY"
+
       - name: Upload watcher diagnostics
         if: always()
         uses: actions/upload-artifact@v7

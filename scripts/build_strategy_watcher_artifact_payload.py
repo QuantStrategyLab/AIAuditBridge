@@ -172,6 +172,13 @@ def build_strategy_watcher_artifact_payload(
         "generated_at": current["generated_at"],
         "current_metrics": current["current_metrics"],
         "baseline_metrics": baseline["current_metrics"],
+        "research_task_evidence": {
+            "p1_input_digest": current["evidence"]["p1_input_digest"],
+            "p2_config_digest": current["evidence"]["p2_config_digest"],
+            "p3_evidence_id": current["evidence"]["p3_evidence_id"],
+            "strategy_revision": current["evidence"]["strategy_revision"],
+            "producer_revision": current["evidence"]["producer_revision"],
+        },
         "source": f"github_actions:{source_repository}:{workflow_file}:{baseline_run_id}-{current_run_id}",
     }
 

@@ -135,6 +135,19 @@ AIAuditBridge 会在本地写文件前拒绝绝对路径、`.git` 路径、疑�
 - 研究输出只能进入另行验证的、未激活且无订单的候选；P6 live 使用仍需要所有者明确决定。
 - 凭据、私人数据和外部服务 token 不能提交到 Git，也不能写入日志。
 
+## 策略观察到研究任务索引
+
+`Strategy Optimization Watcher` 仍是观察器：两次可比较的 P3 脱敏观察出现退化后，它照常只创建或更新 source repository 的 Issue。它不会执行回测、调参、改代码、创建 PR、合并、部署、进入 paper/shadow/live 或触碰订单。
+
+对于同时携带候选身份、策略 revision 和 P1/P2/P3 digest 的 `strategy_performance.v2` 来源，watcher 还会生成一个不可变的 `qsl.research_task.v1`，并把它投影为 `qsl_research_task_source_snapshot.v1` artifact。该任务固定为 `research_only=true`、`no_order=true`、`size_zero_required=true`、`p4_p5_p6_authorized=false`，最多一次、最多一小时的离线诊断实验。
+
+仅定时运行在同时配置以下两项后才会把这个**只读索引**同步到 QuantRuntimeSettings 控制台：
+
+- repository variable `QSL_RESEARCH_TASK_SYNC_URL`：统一控制台 Worker 的根 URL；
+- repository secret `QSL_RESEARCH_TASK_SYNC_TOKEN`：专用于研究任务索引的同步凭证。
+
+缺少其中任一项时 workflow 会明确记录 `NOT_CONFIGURED`，而 issue-only 观察行为不变；它不会退化为复用控制面 token。控制台也必须继续显示空队列，不能从 Issue 推断任务存在。
+
 ## 仓库结构
 
 - `tests/`：单元测试、契约测试和回归测试。
