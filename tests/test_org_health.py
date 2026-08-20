@@ -442,7 +442,7 @@ class OrgHealthTest(unittest.TestCase):
             {"id": 4, "name": "Codex Review Gate", "state": "active"},
         ]
         selected = org_health._monitored_workflows(workflows)
-        self.assertEqual([item["name"] for item in selected], ["CI", "Codex Review Gate"])
+        self.assertEqual([item["name"] for item in selected], ["CI"])
 
     def test_read_org_health_fallback_excludes_retired_pr_reviewer(self) -> None:
         workflows = [
