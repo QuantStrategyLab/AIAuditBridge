@@ -46,7 +46,6 @@ DEFAULT_WORKFLOW_ALLOWLIST = (
     "Auto Merge Dependabot PR",
     "Check",
     "CI",
-    "Codex Review Gate",
     "Monthly Orchestrator",
     "Secret Scan",
     "VPS Codex Service Ops",

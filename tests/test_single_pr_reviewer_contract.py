@@ -12,18 +12,17 @@ RETIRED_PATHS = (
     "scripts/run_codex_pr_review.py",
     "tests/test_run_codex_pr_review.py",
 )
-COMPATIBILITY_WORKFLOW = ROOT / ".github/workflows/codex_pr_review.yml"
+RETIRED_WORKFLOWS = (
+    ROOT / ".github/workflows/codex_pr_review.yml",
+    ROOT / ".github/workflows/codex_review_gate.yml",
+)
 
 
-def test_github_codex_app_is_the_only_ai_pr_reviewer() -> None:
+def test_legacy_ai_pr_review_workflows_are_absent() -> None:
     for relative_path in RETIRED_PATHS:
         assert not (ROOT / relative_path).exists(), relative_path
-
-    compatibility_workflow = COMPATIBILITY_WORKFLOW.read_text(encoding="utf-8")
-    assert "workflow_call:" in compatibility_workflow
-    assert "pull_request_target:" not in compatibility_workflow
-    assert "run_codex_pr_review.py" not in compatibility_workflow
-    assert "exit 1" in compatibility_workflow
+    for workflow in RETIRED_WORKFLOWS:
+        assert not workflow.exists(), workflow
 
     actionlint_config = (ROOT / ".github/actionlint.yaml").read_text(encoding="utf-8")
     assert "codex_pr_review" not in actionlint_config
@@ -33,7 +32,7 @@ def test_github_codex_app_is_the_only_ai_pr_reviewer() -> None:
         for path in (ROOT / ".github/workflows").glob("*.yml")
     )
     assert "name: Codex PR Review" not in workflow_text
-    assert "name: Codex Review Gate" in workflow_text
+    assert "name: Codex Review Gate" not in workflow_text
     assert (ROOT / ".github/workflows/codex_audit.yml").is_file()
     assert (ROOT / ".github/workflows/monthly-orchestrator.yml").is_file()
 

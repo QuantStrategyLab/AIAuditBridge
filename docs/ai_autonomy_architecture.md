@@ -52,13 +52,6 @@ AIAuditBridge 是 QuantStrategyLab 的 AI 审计控制面，负责：
   - 使用 `CODEX_AUDIT_SERVICE_URL` 指向服务端。
   - 支持 guarded auto-merge。
 
-- `codex_review_gate.yml`
-  - 只执行确定性的 secret / path / metadata 静态门禁。
-  - 使用受信任 base 代码检查 PR diff，并通过 Checks API 把 `Codex Review Gate`
-    明确发布到 current head SHA；API 失败时 fail closed。
-  - GitHub Codex App 是唯一 AI PR reviewer；AIAuditBridge 不再运行第二套 reviewer。
-  - Codex App review 与 unresolved threads 不再镜像成仓库自建 AI check。
-
 - `monthly-orchestrator.yml`
   - 生成月度审计 issue。
   - 验证目标仓库必须是 snapshot repositories。
@@ -99,7 +92,7 @@ AIAuditBridge 是 QuantStrategyLab 的 AI 审计控制面，负责：
   - 包括 repo/task 校验、service patch contract、path guard、PR 创建、label 管理、auto-merge 请求、stale label cleanup。
 
 - `scripts/gate_codex_app_review.py`
-  - 以 current-head 静态 check 的形式保护合并；不处理 AI review verdict。
+  - 历史静态检查辅助脚本；当前没有 workflow 调用它，也不发布合并门禁。
 
 ### 1.3 已经具备的自动化能力
 
@@ -199,9 +192,9 @@ AIAuditBridge 是 QuantStrategyLab 的 AI 审计控制面，负责：
 
 #### 3.3.1 单一 PR reviewer 边界
 
-GitHub Codex App 是唯一 AI PR reviewer。AIAuditBridge 只保留月度审计和低风险修复职责，不维护第二套 review verdict、finding 历史、重试或仲裁状态。
+若启用 GitHub Codex App，其 review 仅是非阻塞的建议性证据。AIAuditBridge 只保留月度审计和低风险修复职责，不维护 review verdict、finding 历史、重试或仲裁状态。
 
-合并仍必须同时满足源仓 CI、确定性 `Codex Review Gate`、未解决会话保护和 branch protection。任何自动化都不得用 label、admin 或自建 AI check 绕过这些控制。
+合并仍必须同时满足源仓确定性 CI、未解决会话保护和 branch protection。任何自动化都不得用 label、admin 或自建 AI check 绕过这些控制。
 
 ### P1：强烈建议补的缺口
 
