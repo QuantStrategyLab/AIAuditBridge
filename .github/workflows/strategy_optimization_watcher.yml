@@ -238,7 +238,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p data/output/strategy_optimization_watcher
-          python scripts/run_strategy_optimization_watcher.py | tee data/output/strategy_optimization_watcher/result.json
+          # Module invocation keeps the repository root on sys.path even when
+          # the runner changes its working directory or wraps this step.
+          python -m scripts.run_strategy_optimization_watcher | tee data/output/strategy_optimization_watcher/result.json
 
       - name: Run one bounded AI research diagnosis
         if: steps.fetch-metrics.outputs.downloaded == 'true' && github.event_name == 'schedule'
@@ -250,7 +252,7 @@ jobs:
         working-directory: bridge
         run: |
           set -euo pipefail
-          python scripts/run_research_task_diagnosis.py \
+          python -m scripts.run_research_task_diagnosis \
             --input data/output/strategy_optimization_watcher/result.json \
             --max-per-run "${RESEARCH_DIAGNOSIS_MAX_PER_RUN}" \
             | tee data/output/strategy_optimization_watcher/research-diagnosis.json
