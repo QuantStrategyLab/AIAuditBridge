@@ -3,15 +3,25 @@ from __future__ import annotations
 import unittest
 
 from service.strategy_watch import (
+    STRATEGY_WATCH_REGISTRY,
     build_strategy_monitoring_finding,
     evaluate_strategy_watch,
     finding_to_automation_task,
     issue_for_task,
+    resolve_strategy_watch_repository,
     watcher_issue_key,
 )
 
 
 class StrategyWatchTest(unittest.TestCase):
+    def test_strategy_watch_registry_resolves_known_domains_and_fails_closed(self) -> None:
+        self.assertEqual(
+            {item.domain for item in STRATEGY_WATCH_REGISTRY},
+            {"cn_equity", "hk_equity", "us_equity", "crypto"},
+        )
+        self.assertEqual(resolve_strategy_watch_repository("us_equity"), "QuantStrategyLab/UsEquityStrategies")
+        self.assertEqual(resolve_strategy_watch_repository("unknown"), "")
+
     def test_monitoring_trigger_becomes_issue_only_optimization_record(self) -> None:
         finding = build_strategy_monitoring_finding(
             domain="us_equity",

@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 import hashlib
 import json
 import math
-from typing import Any
+from typing import Any, Final
 
 from service.automation_contracts import AutomationTask, EvidenceBundle, GateDecision, ProposedAction, TriggerRecord
 from service.research_task import ResearchTaskError, build_strategy_diagnosis_task
@@ -25,12 +25,39 @@ METRICS_KIND_MONITORING = "monitoring_evidence"
 MONITORING_FINDING_TYPE = "monitoring_trigger"
 RESEARCH_TASK_SOURCE_SCHEMA_VERSION = "qsl_research_task_source_snapshot.v1"
 RESEARCH_TASK_SOURCE_ID = "aiaudit.strategy_optimization_watcher"
-STRATEGY_REPOSITORY_BY_DOMAIN = {
-    "cn_equity": "QuantStrategyLab/CnEquityStrategies",
-    "hk_equity": "QuantStrategyLab/HkEquityStrategies",
-    "us_equity": "QuantStrategyLab/UsEquityStrategies",
-    "crypto": "QuantStrategyLab/CryptoStrategies",
+@dataclass(frozen=True)
+class StrategyWatchRegistration:
+    """Trusted source registration used by monitoring findings.
+
+    Keep this registry data-only: adding a domain must not add a new
+    execution path.  Unknown domains intentionally resolve to no repository
+    so the watcher remains fail-closed.
+    """
+
+    domain: str
+    repository: str
+
+
+STRATEGY_WATCH_REGISTRY: Final[tuple[StrategyWatchRegistration, ...]] = (
+    StrategyWatchRegistration("cn_equity", "QuantStrategyLab/CnEquityStrategies"),
+    StrategyWatchRegistration("hk_equity", "QuantStrategyLab/HkEquityStrategies"),
+    StrategyWatchRegistration("us_equity", "QuantStrategyLab/UsEquityStrategies"),
+    StrategyWatchRegistration("crypto", "QuantStrategyLab/CryptoStrategies"),
+)
+# Compatibility view for callers that used the old mapping.  The tuple above
+# remains the single source of truth.
+STRATEGY_REPOSITORY_BY_DOMAIN: Final[dict[str, str]] = {
+    item.domain: item.repository for item in STRATEGY_WATCH_REGISTRY
 }
+
+
+def resolve_strategy_watch_repository(domain: str) -> str:
+    """Resolve a registered domain, returning ``""`` for unknown domains."""
+    normalized = str(domain or "").strip()
+    return next(
+        (item.repository for item in STRATEGY_WATCH_REGISTRY if item.domain == normalized),
+        "",
+    )
 
 
 def _dict_payload(value: Any) -> dict[str, Any]:
@@ -131,7 +158,7 @@ def build_strategy_monitoring_finding(
     """Build a pre-classified, issue-only finding from trusted monitor evidence."""
     normalized_domain = str(domain or "").strip()
     normalized_profile = str(profile or "").strip()
-    resolved_repo = str(repo or STRATEGY_REPOSITORY_BY_DOMAIN.get(normalized_domain) or "").strip()
+    resolved_repo = str(repo or resolve_strategy_watch_repository(normalized_domain) or "").strip()
     if not normalized_domain or not normalized_profile:
         raise ValueError("strategy monitoring finding requires domain and profile")
     if not resolved_repo:
