@@ -32,6 +32,23 @@
 AI Gateway 不可用、任务不完整或 Issue 评论失败时，调度器不采取替代动作；
 已有 Issue 和受限任务仍保留为下一次计划运行的审计起点。
 
+## 组合研究线索诊断
+
+`portfolio_research_proposal_diagnosis.yml` 是与上述 P3 退化诊断分开的低频
+消费者。它只从 `UsEquitySnapshotPipelines` 下载已保留的、脱敏的
+`qsl.portfolio-candidate-readiness.v1` artifact；它不读取行情、GCS、凭证、账户
+或订单。
+
+只有 artifact 自身以 canonical SHA-256 通过校验，并且两个单策略均为 `P1
+ACCEPTED`、P3 `COMPLETE`、且共用同一 cutoff 时，才会寻找上游已创建的同一条
+readiness Issue。每个 `(proposal_id, readiness_sha256)` 最多获得一条 AI 评论。AI
+只能列出组合候选设计问题与独立证据缺口；它不得选择具体权重、创建 P2、共同 P1
+root 或组合 P3，也不得启动回测、paper、shadow、live 或订单。
+
+该 workflow 的 OIDC 身份会在下一次受控 VPS Codex service 部署后才进入精确
+allowlist。部署前或 AI Gateway 未配置时，它只记录 `not_configured`/`unavailable`
+并安全退出；不会采取替代动作。
+
 ## 启用条件
 
 代码合并后，VPS Codex service 必须通过受控的 `VPS Codex Service Ops`
