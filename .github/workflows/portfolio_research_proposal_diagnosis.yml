@@ -1,0 +1,112 @@
+name: Portfolio Research Proposal Diagnosis
+
+on:
+  schedule:
+    # Run after UESP's readiness aggregation. This workflow only consumes one
+    # already-sanitized terminal artifact and never waits for upstream work.
+    - cron: '10 12 * * 2-6'
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: portfolio-research-proposal-diagnosis
+  cancel-in-progress: false
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SOURCE_REPOSITORY: QuantStrategyLab/UsEquitySnapshotPipelines
+    steps:
+      - uses: actions/checkout@v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Detect read-only cross-repository credentials
+        id: app_credentials
+        env:
+          APP_ID: ${{ vars.CROSS_REPO_GITHUB_APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.CROSS_REPO_GITHUB_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -n "${APP_ID:-}" ] && [ -n "${APP_PRIVATE_KEY:-}" ]; then
+            echo 'available=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'available=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create source-read and Issue-comment token
+        id: source_app_token
+        if: steps.app_credentials.outputs.available == 'true'
+        continue-on-error: true
+        uses: actions/create-github-app-token@v3.2.0
+        with:
+          app-id: ${{ vars.CROSS_REPO_GITHUB_APP_ID }}
+          private-key: ${{ secrets.CROSS_REPO_GITHUB_APP_PRIVATE_KEY }}
+          owner: QuantStrategyLab
+          repositories: UsEquitySnapshotPipelines
+          permission-actions: read
+          permission-contents: read
+          permission-issues: write
+
+      - name: Download latest sanitized readiness artifact
+        id: readiness
+        env:
+          GH_TOKEN: ${{ steps.source_app_token.outputs.token }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo 'SOURCE_ACCESS=NOT_CONFIGURED' >> "$GITHUB_STEP_SUMMARY"
+            echo 'available=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          latest_run="$(gh run list --repo "$SOURCE_REPOSITORY" --workflow portfolio-candidate-readiness.yml \
+            --branch main --event schedule --status completed --limit 20 --json databaseId,conclusion \
+            --jq '[.[] | select(.conclusion == "success")][0].databaseId // ""' || true)"
+          if [ -z "$latest_run" ]; then
+            echo 'PORTFOLIO_READINESS_SOURCE=NOT_AVAILABLE' >> "$GITHUB_STEP_SUMMARY"
+            echo 'available=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          root="${RUNNER_TEMP}/portfolio-research-proposal"
+          mkdir -p "$root"
+          if ! gh run download "$latest_run" --repo "$SOURCE_REPOSITORY" \
+            --pattern 'portfolio-candidate-readiness-*' --dir "$root"; then
+            echo 'PORTFOLIO_READINESS_SOURCE=ARTIFACT_UNAVAILABLE' >> "$GITHUB_STEP_SUMMARY"
+            echo 'available=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          input="$(find "$root" -type f -name portfolio-candidate-readiness.json -print -quit)"
+          if [ -z "$input" ]; then
+            echo 'PORTFOLIO_READINESS_SOURCE=TERMINAL_RECORD_UNAVAILABLE' >> "$GITHUB_STEP_SUMMARY"
+            echo 'available=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "input=$input" >> "$GITHUB_OUTPUT"
+          echo 'available=true' >> "$GITHUB_OUTPUT"
+
+      - name: Run one bounded portfolio research proposal diagnosis
+        if: steps.readiness.outputs.available == 'true'
+        env:
+          GH_TOKEN: ${{ steps.source_app_token.outputs.token }}
+          CODEX_AUDIT_SERVICE_URL: ${{ secrets.CODEX_AUDIT_SERVICE_URL }}
+          CODEX_AUDIT_SERVICE_AUDIENCE: ${{ vars.CODEX_AUDIT_SERVICE_AUDIENCE || 'quant-codex-audit' }}
+          DEFAULT_ANALYZE_MODEL: ${{ vars.RESEARCH_DIAGNOSIS_MODEL || 'gpt-5.4-mini' }}
+          READINESS_INPUT: ${{ steps.readiness.outputs.input }}
+        run: |
+          set -euo pipefail
+          output_dir="${RUNNER_TEMP}/portfolio-research-proposal"
+          python scripts/run_portfolio_research_proposal_diagnosis.py \
+            --input "$READINESS_INPUT" | tee "$output_dir/diagnosis.json"
+
+      - name: Upload sanitized diagnosis record
+        if: always() && steps.readiness.outputs.available == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: portfolio-research-proposal-diagnosis-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/portfolio-research-proposal/diagnosis.json
+          if-no-files-found: warn
+          retention-days: 35
