@@ -19,6 +19,7 @@ if str(ROOT) not in sys.path:
 
 from service.strategy_watch import (  # noqa: E402
     StrategyWatchFinding,
+    build_research_input_unavailable_finding,
     evaluate_strategy_watch,
     finding_to_automation_task,
     issue_for_task,
@@ -292,6 +293,44 @@ def run_watcher(
     return result
 
 
+def run_research_input_terminal_watcher(
+    terminal: dict[str, Any],
+    *,
+    source_repo: str,
+    profile: str = "",
+    source: str = "",
+    dry_run: bool = True,
+    create_issue: Callable[[str, str, str], str] = create_github_issue,
+    comment_issue: Callable[[str, str, str], str] = comment_github_issue,
+    list_issues: Callable[[str], dict[str, str]] = list_open_issue_urls,
+) -> dict[str, Any]:
+    """Surface a trusted deferred P1 record as an issue-only finding."""
+    candidate = terminal.get("candidate") if isinstance(terminal.get("candidate"), dict) else {}
+    finding = build_research_input_unavailable_finding(
+        repo=source_repo,
+        profile=profile,
+        status=str(terminal.get("status") or ""),
+        reason_code=str(terminal.get("reason_code") or ""),
+        candidate_id=str(candidate.get("candidate_id") or ""),
+        date_cutoff=str(terminal.get("date_cutoff") or ""),
+        source=source,
+    )
+    result = dispatch_strategy_watch_findings(
+        [finding],
+        source_repo=source_repo,
+        dry_run=dry_run,
+        create_issue=create_issue,
+        comment_issue=comment_issue,
+        list_issues=list_issues,
+    )
+    result["research_task_source_snapshot"] = research_task_source_snapshot(
+        [finding],
+        context_available=False,
+        computed_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+    return result
+
+
 def main() -> int:
     try:
         input_path = resolve_input_path(
@@ -305,9 +344,36 @@ def main() -> int:
     if input_path is None:
         print(json.dumps({"status": "skipped", "reason": "strategy metrics input not configured"}, sort_keys=True))
         return 0
+    terminal_path_text = os.environ.get("STRATEGY_WATCH_TERMINAL_STATUS_PATH", "").strip()
+    terminal_path = None
+    if terminal_path_text:
+        try:
+            terminal_path = resolve_input_path(
+                input_path=terminal_path_text,
+                source_root=os.environ.get("STRATEGY_WATCH_SOURCE_ROOT", "").strip(),
+            )
+        except ValueError as exc:
+            print(json.dumps({"status": "error", "error": str(exc)}, sort_keys=True))
+            return 2
     if not input_path.exists():
-        print(json.dumps({"status": "skipped", "reason": "strategy metrics input not found — this is expected when the source repository has not yet published metrics"}, sort_keys=True))
-        return 0
+        if terminal_path is None or not terminal_path.is_file():
+            print(json.dumps({"status": "skipped", "reason": "strategy metrics input not found — this is expected when the source repository has not yet published metrics"}, sort_keys=True))
+            return 0
+        try:
+            terminal = load_payload(terminal_path)
+            dry_run = parse_bool(os.environ.get("STRATEGY_WATCH_DRY_RUN"), default=True)
+            result = run_research_input_terminal_watcher(
+                terminal,
+                source_repo=os.environ.get("STRATEGY_WATCH_SOURCE_REPO", "").strip(),
+                profile=os.environ.get("STRATEGY_WATCH_TERMINAL_PROFILE", "").strip(),
+                source=str(terminal_path),
+                dry_run=dry_run,
+            )
+        except (OSError, json.JSONDecodeError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
+            print(json.dumps({"status": "error", "error": str(exc)}, sort_keys=True))
+            return 2
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+        return 1 if int(result.get("errors", 0)) > 0 or result.get("status") != "ok" else 0
     if not input_path.is_file():
         print(json.dumps({"status": "error", "error": "strategy metrics input is not a file"}, sort_keys=True))
         return 2

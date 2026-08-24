@@ -23,6 +23,7 @@ REQUIRED_PERFORMANCE_METRICS = ("sharpe", "cagr", "calmar", "win_rate", "max_dd"
 MONITORING_SCHEMA_VERSION = "strategy_monitoring_evidence.v1"
 METRICS_KIND_MONITORING = "monitoring_evidence"
 MONITORING_FINDING_TYPE = "monitoring_trigger"
+RESEARCH_INPUT_UNAVAILABLE_FINDING_TYPE = "research_input_unavailable"
 RESEARCH_TASK_SOURCE_SCHEMA_VERSION = "qsl_research_task_source_snapshot.v1"
 RESEARCH_TASK_SOURCE_ID = "aiaudit.strategy_optimization_watcher"
 @dataclass(frozen=True)
@@ -176,6 +177,59 @@ def build_strategy_monitoring_finding(
         severity="high" if str(severity).strip().lower() == "high" else "medium",
         signals=[dict(signal) for signal in signals],
         finding_type=MONITORING_FINDING_TYPE,
+    )
+
+
+def build_research_input_unavailable_finding(
+    *,
+    repo: str,
+    profile: str,
+    status: str,
+    reason_code: str,
+    candidate_id: str = "",
+    date_cutoff: str = "",
+    source: str = "",
+) -> StrategyWatchFinding:
+    """Build a high-severity issue-only finding for a deferred research input.
+
+    A deferred P1 source has not produced an observation.  It must be visible
+    to operators, but it must never be treated as performance degradation or
+    allowed to produce a strategy-change task.
+    """
+    normalized_repo = str(repo or "").strip()
+    normalized_profile = str(profile or candidate_id or "").strip()
+    normalized_status = str(status or "").strip().upper()
+    normalized_reason = str(reason_code or "").strip()
+    if not normalized_repo or not normalized_profile:
+        raise ValueError("research input finding requires repository and profile")
+    if normalized_status != "DEFERRED" or not normalized_reason:
+        raise ValueError("research input finding requires a deferred status and reason code")
+    metrics = {
+        "p1_status": normalized_status,
+        "reason_code": normalized_reason,
+        "candidate_id": str(candidate_id or "").strip(),
+        "date_cutoff": str(date_cutoff or "").strip(),
+    }
+    return StrategyWatchFinding(
+        snapshot=StrategyWatchSnapshot(
+            repo=normalized_repo,
+            profile=normalized_profile,
+            schema_version="research_input_terminal.v1",
+            metrics_kind="research_input_terminal",
+            current_metrics=metrics,
+            source=str(source or "").strip(),
+        ),
+        severity="high",
+        signals=[
+            {
+                "metric": "p1_status",
+                "reason": (
+                    f"P1 research input is deferred: {normalized_reason}; "
+                    "no comparable performance observation was published"
+                ),
+            }
+        ],
+        finding_type=RESEARCH_INPUT_UNAVAILABLE_FINDING_TYPE,
     )
 
 
@@ -352,6 +406,13 @@ def finding_to_automation_task(finding: StrategyWatchFinding) -> AutomationTask:
             "Open a data-quality issue so the source repo publishes "
             "strategy_performance.v2 before optimization automation runs again."
         )
+    elif finding_type == RESEARCH_INPUT_UNAVAILABLE_FINDING_TYPE:
+        trigger_kind = "strategy_research_input_unavailable"
+        evidence_summary = "A trusted P1 terminal record deferred the research input."
+        rationale = (
+            "Restore the trusted research-data input before optimization automation "
+            "or any strategy-change proposal resumes."
+        )
     elif finding_type == MONITORING_FINDING_TYPE:
         trigger_kind = "strategy_monitoring_trigger"
         evidence_summary = "Strategy monitoring evidence crossed a research-review threshold."
@@ -364,7 +425,13 @@ def finding_to_automation_task(finding: StrategyWatchFinding) -> AutomationTask:
         source="strategy_optimization_watcher",
         kind=trigger_kind,
         severity=finding.severity,
-        reason="; ".join(signal_reasons) or ("strategy metrics contract invalid" if finding_type == "data_quality" else "strategy metrics degraded"),
+        reason="; ".join(signal_reasons) or (
+            "strategy metrics contract invalid"
+            if finding_type == "data_quality"
+            else "research input unavailable"
+            if finding_type == RESEARCH_INPUT_UNAVAILABLE_FINDING_TYPE
+            else "strategy metrics degraded"
+        ),
         subject=finding.snapshot.subject(),
         metrics=finding.snapshot.current_metrics,
         evidence=signal_reasons,

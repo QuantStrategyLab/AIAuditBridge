@@ -12,6 +12,7 @@ from scripts.run_strategy_optimization_watcher import (
     parse_bool,
     resolve_input_path,
     run_watcher,
+    run_research_input_terminal_watcher,
 )
 from service.strategy_watch import build_strategy_monitoring_finding, finding_to_automation_task, watcher_issue_key
 from service.research_task import calculate_task_sha256
@@ -45,6 +46,27 @@ def _verified_p3_payload(*, sharpe: float = 0.5) -> dict[str, object]:
 
 
 class RunStrategyOptimizationWatcherTest(unittest.TestCase):
+
+    def test_deferred_terminal_creates_issue_only_finding(self) -> None:
+        created = []
+
+        result = run_research_input_terminal_watcher(
+            {
+                "status": "DEFERRED",
+                "reason_code": "ALPACA_SIP_ACCESS_FORBIDDEN",
+                "date_cutoff": "2026-08-21",
+                "candidate": {"candidate_id": "soxl_soxx_core_only_p2_v3"},
+            },
+            source_repo="QuantStrategyLab/UsEquitySnapshotPipelines",
+            profile="soxl_soxx_trend_income",
+            dry_run=False,
+            create_issue=lambda repo, title, body: created.append((repo, title, body)) or "https://example.test/issues/1",
+            list_issues=lambda _repo: {},
+        )
+
+        self.assertEqual(result["findings"], 1)
+        self.assertEqual(len(created), 1)
+        self.assertEqual(result["issues"][0]["task"]["trigger"]["kind"], "strategy_research_input_unavailable")
     def test_monitoring_dispatch_does_not_repeat_existing_issue(self) -> None:
         finding = build_strategy_monitoring_finding(
             domain="crypto",
