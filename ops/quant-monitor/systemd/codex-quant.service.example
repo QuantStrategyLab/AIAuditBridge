@@ -10,7 +10,7 @@ Group=ubuntu
 WorkingDirectory=/home/ubuntu/Projects/AIAuditBridge/ops/quant-monitor
 Environment=QUANT_MONITOR_ROOT=/home/ubuntu/Projects/AIAuditBridge/ops/quant-monitor
 Environment=AIAUDIT_BRIDGE_ROOT=/home/ubuntu/Projects/AIAuditBridge
-Environment=QUANT_PLATFORM_KIT_ROOT=/home/ubuntu/Projects/QuantPlatformKit
+Environment=QUANT_PLATFORM_KIT_ROOT=/home/ubuntu/Projects/AIAuditBridge/ops/quant-monitor/data/lifecycle-projects/QuantPlatformKit
 Environment=QUANT_SENTINEL_TELEGRAM_SECRET_NAME=quant-sentinel-telegram-bot-token
 Environment=QUANT_SENTINEL_GCP_PROJECT=firstradequant
 # Set on VPS only — do not commit real chat id to git:

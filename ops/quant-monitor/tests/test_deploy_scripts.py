@@ -46,9 +46,17 @@ class DeployScriptTests(unittest.TestCase):
                 str(Path(home) / "Projects"),
                 str(monitor_root / "data" / "lifecycle-projects"),
                 str(monitor_root / "data" / "lifecycle-store"),
-                str(Path(home) / "Projects" / "QuantPlatformKit"),
+                str(monitor_root / "data" / "lifecycle-projects" / "QuantPlatformKit"),
             ],
         )
+
+    def test_strategy_sync_uses_dedicated_mirrors(self) -> None:
+        script = (ROOT / "scripts" / "sync_strategy_repos.sh").read_text(encoding="utf-8")
+
+        self.assertIn('MIRROR_ROOT="${QUANT_PROJECTS_ROOT:-$ROOT/data/lifecycle-projects}"', script)
+        self.assertIn('dir="$MIRROR_ROOT/$repo"', script)
+        self.assertIn("checkout --detach --quiet origin/main", script)
+        self.assertNotIn("pull --ff-only", script)
 
     def test_health_check_syncs_artifacts_before_monitoring(self) -> None:
         script = (ROOT / "scripts" / "health_check.sh").read_text(encoding="utf-8")
