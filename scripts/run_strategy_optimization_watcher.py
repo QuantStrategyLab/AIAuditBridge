@@ -349,8 +349,8 @@ def main() -> int:
     if terminal_path_text:
         try:
             terminal_path = resolve_input_path(
-                input_path=terminal_path_text,
                 source_root=os.environ.get("STRATEGY_WATCH_SOURCE_ROOT", "").strip(),
+                metrics_path=terminal_path_text,
             )
         except ValueError as exc:
             print(json.dumps({"status": "error", "error": str(exc)}, sort_keys=True))
