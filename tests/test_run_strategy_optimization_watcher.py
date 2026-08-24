@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
 import subprocess
 import tempfile
 import unittest
@@ -13,6 +15,7 @@ from scripts.run_strategy_optimization_watcher import (
     resolve_input_path,
     run_watcher,
     run_research_input_terminal_watcher,
+    main,
 )
 from service.strategy_watch import build_strategy_monitoring_finding, finding_to_automation_task, watcher_issue_key
 from service.research_task import calculate_task_sha256
@@ -46,6 +49,39 @@ def _verified_p3_payload(*, sharpe: float = 0.5) -> dict[str, object]:
 
 
 class RunStrategyOptimizationWatcherTest(unittest.TestCase):
+
+    def test_main_reads_terminal_status_relative_to_trusted_source_root(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source_root = Path(directory)
+            terminal_path = source_root / "data/output/p1-status.json"
+            terminal_path.parent.mkdir(parents=True)
+            terminal_path.write_text(
+                json.dumps(
+                    {
+                        "status": "DEFERRED",
+                        "reason_code": "ALPACA_SIP_ACCESS_FORBIDDEN",
+                        "candidate": {"candidate_id": "soxl_soxx_core_only_p2_v3"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            absent_metrics_path = "data/output/strategy_performance.v2.json"
+            original = dict(os.environ)
+            try:
+                os.environ.update(
+                    {
+                        "STRATEGY_WATCH_SOURCE_ROOT": str(source_root),
+                        "STRATEGY_WATCH_METRICS_PATH": absent_metrics_path,
+                        "STRATEGY_WATCH_TERMINAL_STATUS_PATH": "data/output/p1-status.json",
+                        "STRATEGY_WATCH_SOURCE_REPO": "QuantStrategyLab/UsEquitySnapshotPipelines",
+                        "STRATEGY_WATCH_TERMINAL_PROFILE": "soxl_soxx_trend_income",
+                        "STRATEGY_WATCH_DRY_RUN": "true",
+                    }
+                )
+                self.assertEqual(main(), 0)
+            finally:
+                os.environ.clear()
+                os.environ.update(original)
 
     def test_deferred_terminal_creates_issue_only_finding(self) -> None:
         created = []
