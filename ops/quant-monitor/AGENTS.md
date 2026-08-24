@@ -9,8 +9,8 @@ VPS Codex 定时监控（`codex-quant.timer` 每 30 分钟）+ 收盘简报（`c
 | 变量 | 说明 |
 |------|------|
 | `QUANT_MONITOR_ROOT` | 本目录 |
-| `AIAUDIT_BRIDGE_ROOT` | `~/Projects/AIAuditBridge` |
-| `QUANT_PLATFORM_KIT_ROOT` | `~/Projects/QuantPlatformKit` |
+| `AIAUDIT_BRIDGE_ROOT` | `/home/ubuntu/quant-monitor-runtime/AIAuditBridge`（专用运行副本） |
+| `QUANT_PLATFORM_KIT_ROOT` | `$QUANT_MONITOR_ROOT/data/lifecycle-projects/QuantPlatformKit`（专用镜像） |
 | `GLOBAL_TELEGRAM_CHAT_ID` | systemd 注入，勿提交 git |
 | `GH_TOKEN` | `gh` 拉仓 + 开 Issue |
 | `QSL_GITHUB_REPO` | 非策略类 briefing Issue 的默认仓库；策略证据按 domain 写入对应策略仓 |
@@ -19,8 +19,8 @@ VPS Codex 定时监控（`codex-quant.timer` 每 30 分钟）+ 收盘简报（`c
 
 ## 每 30 分钟（health_check.sh）
 
-1. `sync_strategy_repos.sh` — `git pull` 四策略仓 + QPK
-2. `health_cycle.py` — `build_dashboard` + `run_drift_detection`
+1. `sync_strategy_repos.sh` — 更新四策略仓 + QPK 的只读专用镜像
+2. `sync_lifecycle_artifacts.py`，随后 `health_cycle.py` — `build_dashboard` + `run_drift_detection`
 3. lifecycle `overall_score < 60` 或 drift ≥ 0.50 → 生成 monitoring evidence
 4. evidence → 对应策略仓的去重、issue-only AI optimization proposal
 5. 分数或漂移本身不发 Telegram；数据/工件不可用或 Issue 记录失败才通知人工

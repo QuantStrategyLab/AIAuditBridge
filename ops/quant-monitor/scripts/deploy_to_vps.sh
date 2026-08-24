@@ -5,7 +5,10 @@ set -euo pipefail
 VPS_HOST="${VPS_HOST:-qvps}"
 VPS_PORT="${VPS_PORT:-8822}"
 AAB_ROOT="${AIAUDIT_BRIDGE_ROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
-REMOTE_AAB="${REMOTE_AAB:-/home/ubuntu/Projects/AIAuditBridge}"
+# Keep the production monitor separate from developers' worktrees.  The
+# service is allowed to fast-forward this checkout, while developer checkouts
+# must remain untouched.
+REMOTE_AAB="/home/ubuntu/quant-monitor-runtime/AIAuditBridge"
 REMOTE_MONITOR="$REMOTE_AAB/ops/quant-monitor"
 
 echo "[deploy] updating AIAuditBridge on ${VPS_HOST}"
@@ -33,7 +36,7 @@ rsync -avz -e "ssh -p ${VPS_PORT}" \
 echo "[deploy] bootstrap runtime + systemd"
 ssh -p "${VPS_PORT}" "${VPS_HOST}" bash -s <<'REMOTE'
 set -euo pipefail
-REMOTE_AAB="/home/ubuntu/Projects/AIAuditBridge"
+REMOTE_AAB="/home/ubuntu/quant-monitor-runtime/AIAuditBridge"
 REMOTE_MONITOR="$REMOTE_AAB/ops/quant-monitor"
 OLD_UNIT="/etc/systemd/system/codex-quant.service"
 CHAT_ID=""

@@ -83,6 +83,17 @@ class DeployScriptTests(unittest.TestCase):
         self.assertIn("ExecMainStatus", script)
         self.assertIn('if [[ "$monitor_status" != "2" ]]', script)
 
+    def test_deployment_uses_a_dedicated_runtime_checkout(self) -> None:
+        script = (ROOT / "scripts" / "deploy_to_vps.sh").read_text(encoding="utf-8")
+        service = (ROOT / "systemd" / "codex-quant.service.example").read_text(
+            encoding="utf-8"
+        )
+
+        runtime_root = "/home/ubuntu/quant-monitor-runtime/AIAuditBridge"
+        self.assertIn(f'REMOTE_AAB="{runtime_root}"', script)
+        self.assertIn(f"WorkingDirectory={runtime_root}/ops/quant-monitor", service)
+        self.assertNotIn("/home/ubuntu/Projects/AIAuditBridge", service)
+
 
 if __name__ == "__main__":
     unittest.main()
