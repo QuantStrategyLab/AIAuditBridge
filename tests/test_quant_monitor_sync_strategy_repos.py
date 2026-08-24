@@ -9,14 +9,14 @@ from pathlib import Path
 
 
 class SyncStrategyReposTests(unittest.TestCase):
-    def test_exits_nonzero_when_a_repo_pull_fails(self) -> None:
+    def test_exits_nonzero_when_a_repo_fetch_fails(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         script = repo_root / "ops" / "quant-monitor" / "scripts" / "sync_strategy_repos.sh"
 
         with tempfile.TemporaryDirectory() as tmp:
-            projects_root = Path(tmp) / "Projects"
+            mirror_root = Path(tmp) / "lifecycle-projects"
             bin_dir = Path(tmp) / "bin"
-            projects_root.mkdir()
+            mirror_root.mkdir()
             bin_dir.mkdir()
 
             for name in [
@@ -26,7 +26,7 @@ class SyncStrategyReposTests(unittest.TestCase):
                 "UsEquityStrategies",
                 "CryptoStrategies",
             ]:
-                (projects_root / name / ".git").mkdir(parents=True)
+                (mirror_root / name / ".git").mkdir(parents=True)
 
             git_stub = bin_dir / "git"
             git_stub.write_text(
@@ -45,8 +45,8 @@ class SyncStrategyReposTests(unittest.TestCase):
                     if len(args) >= 3 and args[0] == "-C":
                         repo = Path(args[1]).name
                         command = args[2]
-                    if repo == "QuantPlatformKit" and command == "pull":
-                        print("error: simulated pull failure", file=sys.stderr)
+                    if repo == "QuantPlatformKit" and command == "fetch":
+                        print("error: simulated fetch failure", file=sys.stderr)
                         raise SystemExit(1)
                     raise SystemExit(0)
                     """
@@ -57,7 +57,7 @@ class SyncStrategyReposTests(unittest.TestCase):
 
             env = {
                 **os.environ,
-                "PROJECTS_ROOT": str(projects_root),
+                "QUANT_PROJECTS_ROOT": str(mirror_root),
                 "PATH": f"{bin_dir}:{os.environ.get('PATH', '')}",
             }
             completed = subprocess.run(
@@ -70,7 +70,7 @@ class SyncStrategyReposTests(unittest.TestCase):
             )
 
         self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("[sync] QuantPlatformKit pull failed", completed.stderr)
+        self.assertIn("[sync] QuantPlatformKit fetch failed", completed.stderr)
         self.assertIn("[sync] CnEquityStrategies ok", completed.stdout)
         self.assertNotIn("[sync] QuantPlatformKit ok", completed.stdout)
 
