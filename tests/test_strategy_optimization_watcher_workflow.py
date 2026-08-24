@@ -12,6 +12,10 @@ class StrategyOptimizationWatcherWorkflowTest(unittest.TestCase):
         text = WORKFLOW_PATH.read_text(encoding="utf-8")
 
         self.assertIn("name: Strategy Optimization Watcher", text)
+        self.assertIn('cron: "17 6 * * *"', text)
+        self.assertIn('cron: "23 6 * * *"', text)
+        self.assertIn("github.event.schedule == '23 6 * * *'", text)
+        self.assertIn("soxl-p1-p3-daily-research.yml", text)
         self.assertIn("default: true", text)
         self.assertIn("STRATEGY_WATCH_DRY_RUN", text)
         self.assertIn("python -m scripts.run_strategy_optimization_watcher", text)
