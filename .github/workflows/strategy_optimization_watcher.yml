@@ -30,6 +30,7 @@ on:
         default: true
   schedule:
     - cron: "17 6 * * *"
+    - cron: "23 6 * * *"
 
 permissions:
   contents: read
@@ -49,10 +50,10 @@ jobs:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
       SOURCE_REPO: ${{ github.event.inputs.source_repo || vars.STRATEGY_WATCH_SOURCE_REPO || 'QuantStrategyLab/CryptoLivePoolPipelines' }}
       SOURCE_REF: ${{ github.event.inputs.source_ref || vars.STRATEGY_WATCH_SOURCE_REF || 'main' }}
-      METRICS_PATH: ${{ github.event.inputs.metrics_path || vars.STRATEGY_WATCH_METRICS_PATH || 'data/output/strategy_metrics.json' }}
-      SOURCE_WORKFLOW_FILE: ${{ github.event.inputs.workflow_file || vars.STRATEGY_WATCH_WORKFLOW_FILE || 'monthly_publish.yml' }}
+      METRICS_PATH: ${{ github.event.schedule == '23 6 * * *' && 'data/output/soxl-p3-watcher-comparison.json' || github.event.inputs.metrics_path || vars.STRATEGY_WATCH_METRICS_PATH || 'data/output/strategy_metrics.json' }}
+      SOURCE_WORKFLOW_FILE: ${{ github.event.schedule == '23 6 * * *' && 'soxl-p1-p3-daily-research.yml' || github.event.inputs.workflow_file || vars.STRATEGY_WATCH_WORKFLOW_FILE || 'monthly_publish.yml' }}
       METRICS_FILENAME: ${{ github.event.inputs.metrics_filename || vars.STRATEGY_WATCH_METRICS_FILENAME || 'strategy_metrics.json' }}
-      TERMINAL_PROFILE: ${{ vars.STRATEGY_WATCH_TERMINAL_PROFILE || '' }}
+      TERMINAL_PROFILE: ${{ github.event.schedule == '23 6 * * *' && 'soxl_soxx_trend_income' || vars.STRATEGY_WATCH_TERMINAL_PROFILE || '' }}
       STRATEGY_WATCH_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.dry_run) || vars.STRATEGY_WATCH_DRY_RUN || 'true' }}
       # Keep the watcher opt-in (dry-run remains the default), while allowing
       # the canonical US-equity metrics producer to be selected without a
