@@ -3,6 +3,8 @@ from __future__ import annotations
 import unittest
 
 from service.strategy_watch import (
+    RESEARCH_INPUT_UNAVAILABLE_FINDING_TYPE,
+    build_research_input_unavailable_finding,
     STRATEGY_WATCH_REGISTRY,
     build_strategy_monitoring_finding,
     evaluate_strategy_watch,
@@ -14,6 +16,24 @@ from service.strategy_watch import (
 
 
 class StrategyWatchTest(unittest.TestCase):
+
+    def test_deferred_research_input_creates_issue_only_data_finding(self) -> None:
+        finding = build_research_input_unavailable_finding(
+            repo="QuantStrategyLab/UsEquitySnapshotPipelines",
+            profile="soxl_soxx_trend_income",
+            status="DEFERRED",
+            reason_code="ALPACA_SIP_ACCESS_FORBIDDEN",
+            candidate_id="soxl_soxx_core_only_p2_v3",
+            date_cutoff="2026-08-21",
+            source="artifact://p1-status.json",
+        )
+
+        task = finding_to_automation_task(finding)
+
+        self.assertEqual(finding.finding_type, RESEARCH_INPUT_UNAVAILABLE_FINDING_TYPE)
+        self.assertEqual(task.trigger.kind, "strategy_research_input_unavailable")
+        self.assertTrue(task.gate_decision.metadata["issue_only"])
+        self.assertFalse(task.gate_decision.metadata["live_impact_allowed"])
     def test_strategy_watch_registry_resolves_known_domains_and_fails_closed(self) -> None:
         self.assertEqual(
             {item.domain for item in STRATEGY_WATCH_REGISTRY},

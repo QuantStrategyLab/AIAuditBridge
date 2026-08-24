@@ -52,6 +52,7 @@ jobs:
       METRICS_PATH: ${{ github.event.inputs.metrics_path || vars.STRATEGY_WATCH_METRICS_PATH || 'data/output/strategy_metrics.json' }}
       SOURCE_WORKFLOW_FILE: ${{ github.event.inputs.workflow_file || vars.STRATEGY_WATCH_WORKFLOW_FILE || 'monthly_publish.yml' }}
       METRICS_FILENAME: ${{ github.event.inputs.metrics_filename || vars.STRATEGY_WATCH_METRICS_FILENAME || 'strategy_metrics.json' }}
+      TERMINAL_PROFILE: ${{ vars.STRATEGY_WATCH_TERMINAL_PROFILE || '' }}
       STRATEGY_WATCH_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.dry_run) || vars.STRATEGY_WATCH_DRY_RUN || 'true' }}
       # Keep the watcher opt-in (dry-run remains the default), while allowing
       # the canonical US-equity metrics producer to be selected without a
@@ -214,6 +215,16 @@ jobs:
           baseline_file=$(find "source/data/output/_artifacts/${baseline_run_id}" -name "${METRICS_FILENAME}" -type f -print -quit)
           if [ -z "${current_file}" ] || [ -z "${baseline_file}" ]; then
             echo "Comparable ${METRICS_FILENAME} artifacts are not available yet"
+            terminal_file=$(find "source/data/output/_artifacts/${current_run_id}" -name "p1-status.json" -type f -print -quit)
+            if [ -n "${terminal_file}" ]; then
+              case "${SOURCE_WORKFLOW_FILE}" in
+                soxl-p1-p3-daily-research.yml)
+                  echo "terminal_profile=${TERMINAL_PROFILE:-soxl_soxx_trend_income}" >> "$GITHUB_OUTPUT"
+                  ;;
+              esac
+              echo "terminal_status_path=${terminal_file#source/}" >> "$GITHUB_OUTPUT"
+              echo "Found P1 terminal status for unavailable comparable metrics"
+            fi
             echo "downloaded=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -234,6 +245,8 @@ jobs:
           STRATEGY_WATCH_SOURCE_ROOT: ${{ github.workspace }}/source
           STRATEGY_WATCH_METRICS_PATH: ${{ env.METRICS_PATH }}
           STRATEGY_WATCH_SOURCE_REPO: ${{ env.SOURCE_REPO }}
+          STRATEGY_WATCH_TERMINAL_STATUS_PATH: ${{ steps.fetch-metrics.outputs.terminal_status_path }}
+          STRATEGY_WATCH_TERMINAL_PROFILE: ${{ steps.fetch-metrics.outputs.terminal_profile }}
         working-directory: bridge
         run: |
           set -euo pipefail
