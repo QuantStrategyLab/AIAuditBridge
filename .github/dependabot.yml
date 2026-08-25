@@ -1,14 +1,7 @@
 version: 2
 updates:
-- package-ecosystem: "pip"
-  directory: "/"
-  schedule:
-    interval: "weekly"
-  open-pull-requests-limit: 5
-  ignore:
-  - dependency-name: "*"
-    update-types:
-    - "version-update:semver-major"
+# The repository has no tracked Python dependency manifest. Keeping a pip entry
+# causes Dependabot to fail every scheduled update with "No files found in /".
 - package-ecosystem: "github-actions"
   directory: "/"
   schedule:
