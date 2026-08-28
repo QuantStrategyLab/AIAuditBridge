@@ -77,7 +77,8 @@ bash scripts/refresh_strategy_health.sh
 的临时输出只在 monitor 数据目录内处理。没有可用输入时输出 `unavailable`，不会生成演示指标。
 
 默认不向外同步。只有在显式设置 `STRATEGY_HEALTH_PUBLISH=1`、专用
-`STRATEGY_HEALTH_SYNC_URL` 和 `STRATEGY_HEALTH_SYNC_TOKEN` 后，才运行：
+`STRATEGY_HEALTH_SYNC_URL`，以及 `STRATEGY_HEALTH_SYNC_TOKEN` 或 root-owned
+`STRATEGY_HEALTH_SYNC_TOKEN_FILE` 后，才运行：
 
 ```bash
 bash scripts/publish_strategy_health.sh
