@@ -304,13 +304,24 @@ def run_research_input_terminal_watcher(
     comment_issue: Callable[[str, str, str], str] = comment_github_issue,
     list_issues: Callable[[str], dict[str, str]] = list_open_issue_urls,
 ) -> dict[str, Any]:
-    """Surface a trusted deferred P1 record as an issue-only finding."""
+    """Surface a trusted deferred P1 record as an issue-only finding.
+
+    An accepted P1 terminal record is not a failure.  It simply means that
+    the producer has not yet emitted the two comparable P3 observations the
+    watcher needs.  Keep that state visible to the unified console without
+    opening a misleading issue or failing the scheduled watcher.
+    """
     candidate = terminal.get("candidate") if isinstance(terminal.get("candidate"), dict) else {}
+    status = str(terminal.get("status") or "").strip().upper()
+    reason_code = str(terminal.get("reason_code") or "").strip()
+    if status != "DEFERRED" or not reason_code:
+        reason = "p1_terminal_accepted" if status == "ACCEPTED" else "p1_terminal_contract_unavailable"
+        return no_comparable_metrics_result(reason=reason, dry_run=dry_run)
     finding = build_research_input_unavailable_finding(
         repo=source_repo,
         profile=profile,
-        status=str(terminal.get("status") or ""),
-        reason_code=str(terminal.get("reason_code") or ""),
+        status=status,
+        reason_code=reason_code,
         candidate_id=str(candidate.get("candidate_id") or ""),
         date_cutoff=str(terminal.get("date_cutoff") or ""),
         source=source,
@@ -331,6 +342,32 @@ def run_research_input_terminal_watcher(
     return result
 
 
+def no_comparable_metrics_result(
+    *, reason: str = "comparable_metrics_unavailable", dry_run: bool = True
+) -> dict[str, Any]:
+    """Return a successful, source-owned unavailable queue snapshot.
+
+    This is deliberately not an exception: optimization requires two trusted
+    comparable P3 observations.  Until they exist, the console must show an
+    unavailable source rather than silently retaining stale tasks or marking
+    an accepted P1 acquisition as a watcher failure.
+    """
+    snapshot = research_task_source_snapshot(
+        [],
+        context_available=False,
+        computed_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+    snapshot["errors"] = sorted(set(snapshot["errors"] + [reason]))
+    return {
+        "status": "ok",
+        "dry_run": dry_run,
+        "findings": 0,
+        "issues": [],
+        "errors": 0,
+        "research_task_source_snapshot": snapshot,
+    }
+
+
 def main() -> int:
     try:
         input_path = resolve_input_path(
@@ -342,7 +379,8 @@ def main() -> int:
         print(json.dumps({"status": "error", "error": str(exc)}, sort_keys=True))
         return 2
     if input_path is None:
-        print(json.dumps({"status": "skipped", "reason": "strategy metrics input not configured"}, sort_keys=True))
+        result = no_comparable_metrics_result(reason="metrics_input_not_configured")
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         return 0
     terminal_path_text = os.environ.get("STRATEGY_WATCH_TERMINAL_STATUS_PATH", "").strip()
     terminal_path = None
@@ -357,7 +395,8 @@ def main() -> int:
             return 2
     if not input_path.exists():
         if terminal_path is None or not terminal_path.is_file():
-            print(json.dumps({"status": "skipped", "reason": "strategy metrics input not found — this is expected when the source repository has not yet published metrics"}, sort_keys=True))
+            result = no_comparable_metrics_result()
+            print(json.dumps(result, ensure_ascii=False, sort_keys=True))
             return 0
         try:
             terminal = load_payload(terminal_path)

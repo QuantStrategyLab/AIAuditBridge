@@ -6,6 +6,8 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from unittest.mock import patch
 
 from scripts.run_strategy_optimization_watcher import (
@@ -103,6 +105,54 @@ class RunStrategyOptimizationWatcherTest(unittest.TestCase):
         self.assertEqual(result["findings"], 1)
         self.assertEqual(len(created), 1)
         self.assertEqual(result["issues"][0]["task"]["trigger"]["kind"], "strategy_research_input_unavailable")
+
+    def test_accepted_terminal_is_visible_but_not_a_watcher_failure(self) -> None:
+        result = run_research_input_terminal_watcher(
+            {
+                "status": "ACCEPTED",
+                "reason_code": "",
+                "candidate": {"candidate_id": "soxl_soxx_core_only_p2_v3"},
+            },
+            source_repo="QuantStrategyLab/UsEquitySnapshotPipelines",
+            profile="soxl_soxx_trend_income",
+            dry_run=False,
+        )
+
+        snapshot = result["research_task_source_snapshot"]
+        self.assertEqual(result["status"], "ok")
+        self.assertFalse(result["dry_run"])
+        self.assertEqual(result["errors"], 0)
+        self.assertEqual(result["findings"], 0)
+        self.assertEqual(snapshot["data_status"], "unavailable")
+        self.assertEqual(snapshot["tasks"], [])
+        self.assertIn("p1_terminal_accepted", snapshot["errors"])
+        self.assertIn("research_task_context_unavailable", snapshot["errors"])
+
+    def test_main_publishes_unavailable_snapshot_when_metrics_do_not_exist(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            original = dict(os.environ)
+            output = StringIO()
+            try:
+                os.environ.update(
+                    {
+                        "STRATEGY_WATCH_SOURCE_ROOT": directory,
+                        "STRATEGY_WATCH_METRICS_PATH": "data/output/not-yet-published.json",
+                        "STRATEGY_WATCH_SOURCE_REPO": "QuantStrategyLab/UsEquitySnapshotPipelines",
+                        "STRATEGY_WATCH_DRY_RUN": "true",
+                    }
+                )
+                with redirect_stdout(output):
+                    self.assertEqual(main(), 0)
+            finally:
+                os.environ.clear()
+                os.environ.update(original)
+
+        result = json.loads(output.getvalue())
+        snapshot = result["research_task_source_snapshot"]
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(snapshot["data_status"], "unavailable")
+        self.assertIn("comparable_metrics_unavailable", snapshot["errors"])
+
     def test_monitoring_dispatch_does_not_repeat_existing_issue(self) -> None:
         finding = build_strategy_monitoring_finding(
             domain="crypto",
