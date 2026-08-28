@@ -66,6 +66,16 @@ class DeployScriptTests(unittest.TestCase):
             script.index("health_cycle.py"),
         )
 
+    def test_health_check_publishes_the_snapshot_before_returning_an_alert_status(self) -> None:
+        script = (ROOT / "scripts" / "health_check.sh").read_text(encoding="utf-8")
+
+        self.assertIn('health_cycle_status=$?', script)
+        self.assertLess(
+            script.index("health_cycle.py"),
+            script.index("publish_strategy_health.sh"),
+        )
+        self.assertIn('exit "$health_cycle_status"', script)
+
     def test_deploy_script_normalizes_chat_id_and_excludes_bytecode(self) -> None:
         script = (ROOT / "scripts" / "deploy_to_vps.sh").read_text(encoding="utf-8")
 
