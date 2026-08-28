@@ -24,9 +24,9 @@ ALLOWED_DOMAINS = {"us_equity", "hk_equity", "cn_equity", "crypto"}
 MAX_STRATEGIES = 100
 DECISIONS = {
     "healthy": {
-        "code": "auto_advance",
-        "label": "系统可自动推进下一阶段",
-        "reason": "机器检查通过；仅在预批准的 canary 预算内推进，不自动进入正常 live。",
+        "code": "canary_eligible",
+        "label": "满足 canary 条件，等待预授权执行器确认",
+        "reason": "机器检查通过；监控只生成证据。仅已接入的预授权 canary 执行器才能推进，绝不自动进入正常 live。",
     },
     "watch": {
         "code": "stay_shadow",
@@ -39,9 +39,9 @@ DECISIONS = {
         "reason": "健康度进入复核区，先确认数据、成本和风险。",
     },
     "critical": {
-        "code": "auto_pause",
-        "label": "自动暂停 / 回滚复核",
-        "reason": "触发严重告警，系统先控制风险，不等待人工确认。",
+        "code": "pause_request_pending_confirmation",
+        "label": "已提出暂停请求，待实际运行时确认",
+        "reason": "触发严重告警；监控会隔离晋级并生成可审计的暂停请求。缺少运行时回执时，券商执行状态为未知。",
     },
 }
 
@@ -181,7 +181,7 @@ def _decision(status: str, requested_stage: str | None = None) -> dict[str, str]
         return {
             "code": "human_live_gate",
             "label": "机器检查通过，等待你批准正常 live",
-            "reason": "进入正常资金暴露前仍需人工确认，不会因健康分自动上线。",
+            "reason": "进入正常资金暴露前仍需人工确认；健康监控本身不具备下单、暂停或上线权限。",
         }
     return dict(DECISIONS.get(status, {
         "code": "evidence_missing",

@@ -39,6 +39,10 @@ Token 从 GCP Secret `quant-sentinel-telegram-bot-token` 加载；**不要**把 
 监控证据只触发研究审查，不自动修改策略代码、live 参数、仓位、风险预算，不自动
 merge 或 deploy。成功记录策略劣化后，monitor 正常结束，不再重复通知人工。
 
+因此健康卡片里的 `canary_eligible` 和
+`pause_request_pending_confirmation` 是**证据状态**，不是券商侧已执行的事实。
+只有日后接入并回传执行回执的预授权运行时，才能把暂停或 canary 推进标为已完成。
+
 | 变量 | 说明 |
 |------|------|
 | `QUANT_SENTINEL_TELEGRAM_SECRET_NAME` | 默认 `quant-sentinel-telegram-bot-token` |

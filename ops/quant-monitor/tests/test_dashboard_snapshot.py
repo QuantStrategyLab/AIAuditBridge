@@ -62,7 +62,7 @@ class DashboardSnapshotTests(unittest.TestCase):
         self.assertEqual(payload["data_status"], "ready")
         self.assertEqual(payload["summary"]["healthy"], 1)
         self.assertEqual(strategy["review"]["requested_stage"], "shadow_candidate")
-        self.assertEqual(strategy["decision"]["code"], "auto_advance")
+        self.assertEqual(strategy["decision"]["code"], "canary_eligible")
         self.assertEqual(strategy["freshness"]["status"], "unknown")
         self.assertEqual(strategy["source_revision"], "https://example.invalid/revisions/rev-1")
         self.assertEqual(strategy["review"]["evidence_package_id"], "https://example.invalid/evidence-1")
@@ -271,6 +271,23 @@ class DashboardSnapshotTests(unittest.TestCase):
             payload = build_payload(health_file=health, review_dir=reviews)
 
         self.assertEqual(payload["strategies"][0]["decision"]["code"], "human_live_gate")
+
+    def test_critical_status_never_claims_an_unconfirmed_broker_pause(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            health = Path(tmp) / "health.json"
+            health.write_text(json.dumps({"strategies": [{
+                "strategy_profile": "critical_strategy",
+                "domain": "us_equity",
+                "status": "critical",
+                "overall_score": 12,
+            }]}), encoding="utf-8")
+
+            payload = build_payload(health_file=health)
+
+        decision = payload["strategies"][0]["decision"]
+        self.assertEqual(decision["code"], "pause_request_pending_confirmation")
+        self.assertIn("待实际运行时确认", decision["label"])
+        self.assertNotIn("已停单", decision["reason"])
 
 
 if __name__ == "__main__":
