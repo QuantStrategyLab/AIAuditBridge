@@ -1,0 +1,6 @@
+[Service]
+# Install this as a root-owned drop-in only after the dedicated Worker secret
+# and /etc/codex-quant/strategy-health.sync.token have been provisioned.
+Environment=STRATEGY_HEALTH_PUBLISH=1
+Environment=STRATEGY_HEALTH_SYNC_URL=https://qsl-strategy-switch-console.pigbibi.workers.dev/api/internal/sync-strategy-health
+Environment=STRATEGY_HEALTH_SYNC_TOKEN_FILE=/etc/codex-quant/strategy-health.sync.token

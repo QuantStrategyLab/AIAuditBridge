@@ -104,6 +104,16 @@ class DeployScriptTests(unittest.TestCase):
         self.assertIn(f"WorkingDirectory={runtime_root}/ops/quant-monitor", service)
         self.assertNotIn("/home/ubuntu/Projects/AIAuditBridge", service)
 
+    def test_strategy_health_sync_has_a_separate_root_owned_drop_in_example(self) -> None:
+        drop_in = (
+            ROOT / "systemd" / "codex-quant.service.d" / "strategy-health-sync.conf.example"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("STRATEGY_HEALTH_PUBLISH=1", drop_in)
+        self.assertIn("/api/internal/sync-strategy-health", drop_in)
+        self.assertIn("STRATEGY_HEALTH_SYNC_TOKEN_FILE=/etc/codex-quant/strategy-health.sync.token", drop_in)
+        self.assertNotIn("STRATEGY_HEALTH_SYNC_TOKEN=", drop_in)
+
 
 if __name__ == "__main__":
     unittest.main()
