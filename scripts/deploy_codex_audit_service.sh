@@ -22,6 +22,7 @@ ALLOWED_DIRECT_REPOSITORIES="${CODEX_AUDIT_SERVICE_ALLOWED_DIRECT_REPOSITORIES:-
 ALLOWED_SOURCE_REPOSITORIES="${CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES:-QuantStrategyLab/AIAuditBridge,QuantStrategyLab/BinancePlatform,QuantStrategyLab/CharlesSchwabPlatform,QuantStrategyLab/CnEquitySnapshotPipelines,QuantStrategyLab/CnEquityStrategies,QuantStrategyLab/CryptoLivePoolPipelines,QuantStrategyLab/CryptoStrategies,QuantStrategyLab/FirstradePlatform,QuantStrategyLab/HkEquitySnapshotPipelines,QuantStrategyLab/HkEquityStrategies,QuantStrategyLab/IBKRGatewayManager,QuantStrategyLab/InteractiveBrokersPlatform,QuantStrategyLab/LongBridgePlatform,QuantStrategyLab/MarketSignalSources,QuantStrategyLab/PoliticalEventTrackingResearch,QuantStrategyLab/QmtPlatform,QuantStrategyLab/QuantAdvisorResearch,QuantStrategyLab/QuantPlatformKit,QuantStrategyLab/QuantRuntimeSettings,QuantStrategyLab/QuantStrategyPlugins,QuantStrategyLab/ResearchSignalContextPipelines,QuantStrategyLab/SchwabTokenAutoRefresher,QuantStrategyLab/UsEquitySnapshotPipelines,QuantStrategyLab/UsEquityStrategies}"
 JOB_DIR="${CODEX_AUDIT_SERVICE_JOB_DIR:-/var/lib/codex-audit-bridge/jobs}"
 ADMIN_ENV_FILE="${CODEX_AUDIT_SERVICE_ADMIN_ENV_FILE:-/etc/codex-audit-bridge/admin.env}"
+SERVICE_TOKEN_ENV_FILE="${CODEX_AUDIT_SERVICE_TOKEN_ENV_FILE:-/etc/codex-audit-bridge/service-token.env}"
 # The model-catalog deploy owns the provider-key file.  Reuse that root-owned
 # file instead of duplicating API keys in a second deployment path.
 PROVIDER_ENV_FILE="${CODEX_AUDIT_SERVICE_PROVIDER_ENV_FILE:-/etc/codex-audit-bridge/model-catalog.env}"
@@ -226,6 +227,25 @@ write_admin_env_file_if_needed() {
   trap - RETURN
 }
 
+write_service_token_env_file_if_needed() {
+  # The dashboard fallback token is optional. When supplied, it must stay in
+  # a root-only EnvironmentFile instead of the world-readable systemd unit.
+  # A deploy without this optional secret preserves the current file so it
+  # cannot silently revoke a dashboard session.
+  if [ -z "${CODEX_AUDIT_SERVICE_TOKEN:-}" ]; then
+    return
+  fi
+  local tmp
+  tmp="$(mktemp)"
+  trap 'rm -f "$tmp"' RETURN
+  chmod 0600 "$tmp"
+  printf 'CODEX_AUDIT_SERVICE_TOKEN=%s\n' "$CODEX_AUDIT_SERVICE_TOKEN" >"$tmp"
+  sudo install -d -m 0700 "$(dirname "$SERVICE_TOKEN_ENV_FILE")"
+  sudo install -m 0600 -o root -g root "$tmp" "$SERVICE_TOKEN_ENV_FILE"
+  rm -f "$tmp"
+  trap - RETURN
+}
+
 write_default_execution_policy_if_missing() {
   local policy_path="${EXECUTION_POLICY_FILE}"
   local policy_dir
@@ -355,10 +375,6 @@ write_audit_service_unit() {
   if [ -n "$AUDIT_REASONING_EFFORT" ]; then
     audit_reasoning_effort_line="Environment=CODEX_AUDIT_SERVICE_REASONING_EFFORT=${AUDIT_REASONING_EFFORT}"
   fi
-  audit_token_line=""
-  if [ -n "${CODEX_AUDIT_SERVICE_TOKEN:-}" ]; then
-    audit_token_line="Environment=CODEX_AUDIT_SERVICE_TOKEN=${CODEX_AUDIT_SERVICE_TOKEN}"
-  fi
   sudo tee "/etc/systemd/system/${AUDIT_SERVICE_NAME}.service" >/dev/null <<EOF_UNIT
 [Unit]
 Description=QuantStrategyLab Codex audit service
@@ -389,10 +405,10 @@ Environment=CODEX_AUDIT_SERVICE_OPENAI_USAGE_WINDOW_DAYS=${OPENAI_USAGE_WINDOW_D
 Environment=CODEX_AUDIT_SERVICE_ANTHROPIC_USAGE_WINDOW_DAYS=${ANTHROPIC_USAGE_WINDOW_DAYS}
 Environment=CODEX_AUDIT_SERVICE_SANDBOX=read-only
 EnvironmentFile=-${ADMIN_ENV_FILE}
+EnvironmentFile=-${SERVICE_TOKEN_ENV_FILE}
 EnvironmentFile=-${PROVIDER_ENV_FILE}
 ${audit_model_line}
 ${audit_reasoning_effort_line}
-${audit_token_line}
 ExecStart=/usr/bin/env python3 -m service.ai_gateway_service
 Restart=on-failure
 RestartSec=5
@@ -646,6 +662,7 @@ deploy() {
   sudo install -d -m 0700 -o "$runner_user" -g "$runner_user" "$JOB_DIR"
   write_default_execution_policy_if_missing
   write_admin_env_file_if_needed
+  write_service_token_env_file_if_needed
   write_audit_service_unit
   write_managed_audit_service_dropin
   sudo systemctl daemon-reload
