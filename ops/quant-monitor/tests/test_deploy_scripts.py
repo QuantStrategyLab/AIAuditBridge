@@ -111,7 +111,11 @@ class DeployScriptTests(unittest.TestCase):
 
         self.assertIn("STRATEGY_HEALTH_PUBLISH=1", drop_in)
         self.assertIn("/api/internal/sync-strategy-health", drop_in)
-        self.assertIn("STRATEGY_HEALTH_SYNC_TOKEN_FILE=/etc/codex-quant/strategy-health.sync.token", drop_in)
+        self.assertIn(
+            "LoadCredential=strategy-health-sync.token:/etc/codex-quant/strategy-health.sync.token",
+            drop_in,
+        )
+        self.assertIn("STRATEGY_HEALTH_SYNC_TOKEN_FILE=%d/strategy-health-sync.token", drop_in)
         self.assertNotIn("STRATEGY_HEALTH_SYNC_TOKEN=", drop_in)
 
 
