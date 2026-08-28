@@ -42,6 +42,8 @@ merge 或 deploy。成功记录策略劣化后，monitor 正常结束，不再�
 因此健康卡片里的 `canary_eligible` 和
 `pause_request_pending_confirmation` 是**证据状态**，不是券商侧已执行的事实。
 只有日后接入并回传执行回执的预授权运行时，才能把暂停或 canary 推进标为已完成。
+当前 payload 的 policy mode 为 `evidence_only`：自动化仅限监控、工件校验和
+issue-only 研究任务，任何策略阶段、canary 或券商订单状态都不会被它自行改变。
 
 | 变量 | 说明 |
 |------|------|

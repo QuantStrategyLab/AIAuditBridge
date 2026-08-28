@@ -245,12 +245,15 @@ class DashboardSnapshotTests(unittest.TestCase):
         self.assertNotIn("secret", strategy["review"])
         self.assertNotIn("token", strategy["review"]["validation"])
 
-    def test_policy_keeps_normal_live_as_human_gate(self):
+    def test_policy_reports_evidence_only_until_runtime_is_bound(self):
         with tempfile.TemporaryDirectory() as tmp:
             payload = build_payload(health_file=Path(tmp) / "missing.json")
 
-        self.assertIn("bounded_canary_run", payload["policy"]["automatic_modes"])
+        self.assertEqual(payload["policy"]["mode"], "evidence_only")
+        self.assertEqual(payload["policy"]["automatic_stages"], [])
+        self.assertEqual(payload["policy"]["automatic_modes"], [])
         self.assertEqual(payload["policy"]["human_gate_stages"], ["live_candidate", "runtime_enabled"])
+        self.assertIn("不暂停券商订单", payload["policy"]["notice"])
 
     def test_healthy_live_candidate_still_waits_for_human(self):
         with tempfile.TemporaryDirectory() as tmp:
