@@ -10,7 +10,7 @@ To rotate the QPK reusable workflow without an untrusted or unavailable window:
 4. Verify CN, US, and crypto drift runs.
 5. Remove the old SHA, merge, and deploy again.
 
-Current rotation retains the prior exact QPK workflow refs while CN, HK, US, and crypto move to `bb91e4cad1a32d58dc0e4023f1cbe0c7ec150d81`. That version only corrects the fail-closed classification of completed review outcomes; it does not broaden caller identity or execution authority. [issue #64](https://github.com/QuantStrategyLab/AIAuditBridge/issues/64) tracks removal after the new pins complete scheduled verification. The deploy workflow verifies that every allowlisted QPK SHA resolves to `reusable-drift-check.yml` before changing the service.
+Current rotation retains the prior exact QPK workflow refs while CN, HK, US, and crypto move to `6b887d9954eb656141597eac077ca22053a525ef`. That version upgrades artifact actions to the supported runner runtime; it does not broaden caller identity or execution authority. [issue #64](https://github.com/QuantStrategyLab/AIAuditBridge/issues/64) tracks removal after the new pins complete scheduled verification. The deploy workflow verifies that every allowlisted QPK SHA resolves to `reusable-drift-check.yml` before changing the service.
 
 Never use a wildcard for `job_workflow_ref`. Strategy drift delegation must use an exact QPK SHA. AIAuditBridge PR-review OIDC entries are retired and must not be restored; GitHub Codex App is the sole AI PR reviewer.
 
