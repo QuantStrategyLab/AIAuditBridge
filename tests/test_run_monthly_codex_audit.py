@@ -2465,6 +2465,8 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertIn("Single source of truth for delegated drift code", deploy_script)
         self.assertIn("Rotation #64 removes the old SHA by 2026-07-18", deploy_script)
         self.assertIn("QuantStrategyLab/CnEquityStrategies", deploy_script)
+        self.assertIn("QuantStrategyLab/HkEquityStrategies/.github/workflows/drift-check.yml@refs/heads/main", deploy_script)
+        self.assertIn("QuantStrategyLab/HkEquityStrategies/.github/workflows/drift-check.yml@refs/heads/main", workflow)
         self.assertIn("QuantStrategyLab/UsEquityStrategies", deploy_script)
         self.assertIn("QuantStrategyLab/CryptoStrategies", deploy_script)
         self.assertNotIn("QuantStrategyLab/CodexAuditBridge", deploy_script)
