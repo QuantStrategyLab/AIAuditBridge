@@ -2453,12 +2453,15 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         qpk_job_ref = "QuantStrategyLab/QuantPlatformKit/.github/workflows/reusable-drift-check.yml@644cd9002ae92f2aaca6f7efb4afa4986fae05ea"
         next_qpk_job_ref = "QuantStrategyLab/QuantPlatformKit/.github/workflows/reusable-drift-check.yml@4f8465b28a6787d39d21e50f9d95a77841d6ad56"
         timeout_qpk_job_ref = "QuantStrategyLab/QuantPlatformKit/.github/workflows/reusable-drift-check.yml@651c9ac4f37ce6e7fe1bac84dc7646cd5abc9e6e"
+        outcome_qpk_job_ref = "QuantStrategyLab/QuantPlatformKit/.github/workflows/reusable-drift-check.yml@bb91e4cad1a32d58dc0e4023f1cbe0c7ec150d81"
         self.assertIn(qpk_job_ref, deploy_script)
         self.assertIn(qpk_job_ref, workflow)
         self.assertIn(next_qpk_job_ref, deploy_script)
         self.assertIn(next_qpk_job_ref, workflow)
         self.assertIn(timeout_qpk_job_ref, deploy_script)
         self.assertIn(timeout_qpk_job_ref, workflow)
+        self.assertIn(outcome_qpk_job_ref, deploy_script)
+        self.assertIn(outcome_qpk_job_ref, workflow)
         self.assertIn("Single source of truth for delegated drift code", deploy_script)
         self.assertIn("Rotation #64 removes the old SHA by 2026-07-18", deploy_script)
         self.assertIn("QuantStrategyLab/CnEquityStrategies", deploy_script)
