@@ -95,6 +95,43 @@ class DashboardScriptTests(unittest.TestCase):
         self.assertIn(token, curl_config)
         self.assertIn(f'header = "Authorization: Bearer {token}"', curl_config)
 
+    def test_publish_reads_dedicated_sync_token_from_a_regular_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data = root / "data" / "health" / "strategy_health_dashboard.v1.json"
+            data.parent.mkdir(parents=True)
+            data.write_text(json.dumps({"schema_version": "strategy_health_dashboard.v1"}), encoding="utf-8")
+            token_file = root / "strategy-health.token"
+            token = "file-backed dedicated sync value"
+            token_file.write_text(token, encoding="utf-8")
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            fake_curl = fake_bin / "curl"
+            fake_curl.write_text(
+                "#!/usr/bin/env bash\n"
+                "cat > \"$CURL_CONFIG\"\n",
+                encoding="utf-8",
+            )
+            fake_curl.chmod(0o755)
+            config_path = root / "curl.config"
+            result = subprocess.run(
+                ["bash", str(ROOT / "scripts/publish_strategy_health.sh")],
+                env=os.environ | {
+                    "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                    "QUANT_MONITOR_ROOT": str(root),
+                    "STRATEGY_HEALTH_PUBLISH": "1",
+                    "STRATEGY_HEALTH_SYNC_URL": "https://example.invalid/sync",
+                    "STRATEGY_HEALTH_SYNC_TOKEN_FILE": str(token_file),
+                    "CURL_CONFIG": str(config_path),
+                },
+                capture_output=True,
+                text=True,
+            )
+            curl_config = config_path.read_text(encoding="utf-8")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f'header = "Authorization: Bearer {token}"', curl_config)
+
 
 if __name__ == "__main__":
     unittest.main()
