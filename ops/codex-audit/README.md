@@ -17,6 +17,15 @@ Repo secrets `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` are written to
 The same root-owned file is imported by `codex-audit-service`; no provider key
 is placed in repository code, workflow output, or an inline systemd setting.
 
+## Service-token storage
+
+If the optional `CODEX_AUDIT_SERVICE_TOKEN` is configured for the dashboard's
+read-only fallback, the deployment writes it to
+`/etc/codex-audit-bridge/service-token.env` with mode `0600`. The systemd unit
+references that file; it never embeds the token in the unit text. An OIDC
+caller remains the required path for GitHub Actions, so this fallback must not
+be copied into repository variables or workflow logs.
+
 - **auto**: push to `main` that touches catalog paths triggers deploy
 - **manual**: Actions → Deploy Model Catalog Sync → `deploy` / `inspect` / `sync-now`
 
