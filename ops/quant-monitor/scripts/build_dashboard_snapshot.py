@@ -303,9 +303,9 @@ def build_payload(
             **counts,
         },
         "policy": {
-            "mode": "read_only",
-            "automatic_stages": ["research_backtest_only", "ai_monitored_candidate", "shadow_candidate"],
-            "automatic_modes": ["bounded_canary_run"],
+            "mode": "evidence_only",
+            "automatic_stages": [],
+            "automatic_modes": [],
             "human_gate_stages": ["live_candidate", "runtime_enabled"],
             "canary_requirements": ["预批准固定预算", "固定最长运行时间", "最大回撤熔断", "禁止自动加仓与加杠杆"],
             "machine_checks": [
@@ -314,7 +314,7 @@ def build_payload(
                 "成本、OOS/WFA 与证据包（如已提供）",
             ],
             "human_actions": ["批准正常 live", "批准提高资金/杠杆", "确认例外覆盖"],
-            "notice": "研究、shadow、canary 可按固定规则自动推进；正常 live 与资金/杠杆变更必须人工确认。",
+            "notice": "当前监控只自动生成研究与风险证据，不推进阶段、不运行 canary、不暂停券商订单；正常 live 与资金/杠杆变更必须人工确认。",
         },
         "strategies": strategies,
     }
