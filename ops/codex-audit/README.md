@@ -14,6 +14,8 @@ Fully automatic monthly model tier maintenance:
 Repo secrets `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` are written to
 `/etc/codex-audit-bridge/model-catalog.env` by the self-hosted workflow
 [Deploy Model Catalog Sync](../../.github/workflows/deploy_model_catalog_sync.yml).
+The same root-owned file is imported by `codex-audit-service`; no provider key
+is placed in repository code, workflow output, or an inline systemd setting.
 
 - **auto**: push to `main` that touches catalog paths triggers deploy
 - **manual**: Actions → Deploy Model Catalog Sync → `deploy` / `inspect` / `sync-now`
