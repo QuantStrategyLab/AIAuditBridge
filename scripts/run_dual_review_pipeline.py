@@ -163,7 +163,10 @@ def _exit_code(result: dict[str, Any]) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run Codex primary + dual API secondary review pipeline.")
-    parser.add_argument("--trigger", choices=("promotion", "hit_rate", "drift"))
+    parser.add_argument(
+        "--trigger",
+        choices=("promotion", "hit_rate", "drift", "reconciliation_baseline"),
+    )
     parser.add_argument("--strategy-profile")
     parser.add_argument("--context-json", default="{}", help="Inline JSON or file path for trigger context")
     parser.add_argument("--evidence-file", help="Evidence package path (promotion)")

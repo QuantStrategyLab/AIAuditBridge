@@ -125,7 +125,7 @@ class DualReviewPrimaryTests(unittest.TestCase):
         result = run_codex_primary_review(prompt="review")
         self.assertEqual(result["verdict"], VERDICT_UNAVAILABLE)
         expected_prompt = (
-            "You are the primary Codex reviewer for quantitative strategy promotion and risk decisions. "
+            "You are the primary Codex reviewer for quantitative strategy promotion, risk, and recovery decisions. "
             "Respond with JSON only: "
             '{"verdict":"approve"|"reject","confidence":0.0-1.0,"summary":"..."}'
             "\n\nreview"

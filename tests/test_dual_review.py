@@ -14,6 +14,7 @@ from service.dual_review import (
     DualReviewTrigger,
     compare_reviews,
     compare_three_reviews,
+    requires_mandatory_multi_review,
     should_escalate,
 )
 
@@ -140,10 +141,15 @@ class TestDualReviewTrigger(unittest.TestCase):
         self.assertEqual(DualReviewTrigger.PROMOTION.value, "promotion")
         self.assertEqual(DualReviewTrigger.HIT_RATE.value, "hit_rate")
         self.assertEqual(DualReviewTrigger.DRIFT.value, "drift")
+        self.assertEqual(DualReviewTrigger.RECONCILIATION_BASELINE.value, "reconciliation_baseline")
 
     def test_trigger_is_string_enum(self) -> None:
         self.assertIsInstance(DualReviewTrigger.PROMOTION, str)
         self.assertEqual(DualReviewTrigger("drift"), DualReviewTrigger.DRIFT)
+
+    def test_reconciliation_baseline_requires_multiple_reviewers(self) -> None:
+        self.assertTrue(requires_mandatory_multi_review(DualReviewTrigger.RECONCILIATION_BASELINE))
+        self.assertFalse(requires_mandatory_multi_review(DualReviewTrigger.PROMOTION))
 
 
 if __name__ == "__main__":

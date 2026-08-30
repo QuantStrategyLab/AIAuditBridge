@@ -18,6 +18,7 @@ VERDICT_UNAVAILABLE = "review_unavailable"
 VERDICT_INVALID = "invalid_review"
 
 DEFAULT_ESCALATION_THRESHOLD = 0.8
+MANDATORY_MULTI_REVIEW_TRIGGERS = frozenset({"reconciliation_baseline"})
 
 _PASS_VALUES = frozenset({"pass", "approve", "approved", "accept", "accepted"})
 _FAIL_VALUES = frozenset({"fail", "reject", "rejected", "deny", "denied", "block", "blocked"})
@@ -31,6 +32,14 @@ class DualReviewTrigger(str, Enum):
     PROMOTION = "promotion"
     HIT_RATE = "hit_rate"
     DRIFT = "drift"
+    RECONCILIATION_BASELINE = "reconciliation_baseline"
+
+
+def requires_mandatory_multi_review(trigger: DualReviewTrigger | str) -> bool:
+    """Return whether a decision may never be approved by one reviewer alone."""
+
+    value = trigger.value if isinstance(trigger, DualReviewTrigger) else str(trigger).strip().lower()
+    return value in MANDATORY_MULTI_REVIEW_TRIGGERS
 
 
 def _normalize_verdict(value: Any) -> str | None:

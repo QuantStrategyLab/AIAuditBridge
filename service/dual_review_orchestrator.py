@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -16,6 +17,7 @@ from service.dual_review import (
     compare_three_reviews,
     extract_confidence,
     extract_verdict,
+    requires_mandatory_multi_review,
     should_escalate,
 )
 from service.dual_review_secondary import dual_api_secondary_reviewer, is_dual_api_secondary
@@ -24,6 +26,7 @@ from service.dual_review_triggers import resolve_trigger
 from service.model_router import route_model
 
 SecondaryReviewer = Callable[["DualReviewRequest"], dict[str, Any]]
+_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
 @dataclass(frozen=True)
@@ -33,6 +36,7 @@ class DualReviewRequest:
     primary_review: dict[str, Any]
     context: dict[str, Any] = field(default_factory=dict)
     escalation_threshold: float = DEFAULT_ESCALATION_THRESHOLD
+    evidence_binding_sha256: str | None = None
 
 
 @dataclass
@@ -46,6 +50,7 @@ class DualReviewResult:
     outcome: str = ""
     reason: str = ""
     model_route: dict[str, str] = field(default_factory=dict)
+    evidence_binding_sha256: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -58,6 +63,7 @@ class DualReviewResult:
             "outcome": self.outcome,
             "reason": self.reason,
             "model_route": self.model_route,
+            "evidence_binding_sha256": self.evidence_binding_sha256,
         }
 
 
@@ -77,12 +83,19 @@ def build_request_from_payload(payload: dict[str, Any]) -> DualReviewRequest | N
     except (TypeError, ValueError):
         cutoff = DEFAULT_ESCALATION_THRESHOLD
     context = {k: v for k, v in payload.items() if k not in {"primary_review", "secondary_review"}}
+    evidence_binding_sha256 = None
+    if trigger is DualReviewTrigger.RECONCILIATION_BASELINE:
+        candidate = str(payload.get("reconciliation_candidate_sha256") or "").strip().lower()
+        if not _SHA256_PATTERN.fullmatch(candidate):
+            return None
+        evidence_binding_sha256 = candidate
     return DualReviewRequest(
         trigger=trigger,
         strategy_profile=strategy_profile,
         primary_review=primary,
         context=context,
         escalation_threshold=cutoff,
+        evidence_binding_sha256=evidence_binding_sha256,
     )
 
 
@@ -127,27 +140,32 @@ def orchestrate_dual_review(
         strategy_profile=request.strategy_profile,
         primary_review=request.primary_review,
         model_route=dict(route),
+        evidence_binding_sha256=request.evidence_binding_sha256,
     )
 
-    primary_confidence = extract_confidence(request.primary_review)
-    if primary_confidence is None:
+    if requires_mandatory_multi_review(request.trigger):
         result.escalated = True
-        result.reason = "primary confidence missing; escalating"
-    elif should_escalate(primary_confidence, threshold=request.escalation_threshold):
-        result.escalated = True
-        result.reason = f"primary confidence {primary_confidence:.2f} below {request.escalation_threshold:.2f}"
+        result.reason = "mandatory multi-review for reconciliation baseline enrollment"
     else:
-        primary_verdict = extract_verdict(request.primary_review)
-        if primary_verdict == VERDICT_PASS:
-            result.outcome = VERDICT_PASS
-            result.reason = "primary confidence sufficient; approved without secondary review"
-            return result
-        if primary_verdict == VERDICT_FAIL:
-            result.outcome = VERDICT_FAIL
-            result.reason = "primary confidence sufficient; rejected without secondary review"
-            return result
-        result.escalated = True
-        result.reason = "primary verdict unclear; escalating"
+        primary_confidence = extract_confidence(request.primary_review)
+        if primary_confidence is None:
+            result.escalated = True
+            result.reason = "primary confidence missing; escalating"
+        elif should_escalate(primary_confidence, threshold=request.escalation_threshold):
+            result.escalated = True
+            result.reason = f"primary confidence {primary_confidence:.2f} below {request.escalation_threshold:.2f}"
+        else:
+            primary_verdict = extract_verdict(request.primary_review)
+            if primary_verdict == VERDICT_PASS:
+                result.outcome = VERDICT_PASS
+                result.reason = "primary confidence sufficient; approved without secondary review"
+                return result
+            if primary_verdict == VERDICT_FAIL:
+                result.outcome = VERDICT_FAIL
+                result.reason = "primary confidence sufficient; rejected without secondary review"
+                return result
+            result.escalated = True
+            result.reason = "primary verdict unclear; escalating"
 
     secondary = reviewer(request)
     result.secondary_review = secondary
