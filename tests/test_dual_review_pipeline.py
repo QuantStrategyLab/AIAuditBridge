@@ -85,6 +85,30 @@ class DualReviewPipelineTests(unittest.TestCase):
     def test_disagreement_is_a_hard_block(self) -> None:
         self.assertEqual(_exit_code({"ok": True, "outcome": "disagreement"}), 2)
 
+    @patch("scripts.run_dual_review_pipeline.orchestrate_from_payload")
+    def test_reconciliation_baseline_requires_human_recovery_approval(self, mock_orchestrate) -> None:
+        from service.dual_review import DualReviewTrigger
+        from service.dual_review_orchestrator import DualReviewResult
+
+        candidate_sha256 = "a" * 64
+        mock_orchestrate.return_value = DualReviewResult(
+            trigger=DualReviewTrigger.RECONCILIATION_BASELINE,
+            strategy_profile="soxl_soxx_trend_income",
+            primary_review={"verdict": "approve", "confidence": 0.95},
+            outcome="pass",
+            evidence_binding_sha256=candidate_sha256,
+        )
+        result = run_pipeline(
+            trigger="reconciliation_baseline",
+            strategy_profile="soxl_soxx_trend_income",
+            context={"reconciliation_candidate_sha256": candidate_sha256},
+            primary_review={"verdict": "approve", "confidence": 0.95},
+        )
+
+        self.assertTrue(result["requires_human_recovery_approval"])
+        self.assertTrue(result["recovery_authority"]["human_review_required"])
+        self.assertEqual(result["recovery_authority"]["final_action"], "escalate")
+
     @patch.dict("os.environ", {"DUAL_REVIEW_GATE_SKIP": "1"}, clear=False)
     def test_from_evidence_cli_without_trigger_flags(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
