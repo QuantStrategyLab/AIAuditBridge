@@ -9,6 +9,11 @@ import os
 from pathlib import Path
 from typing import Any
 
+from service.automation_authority import (
+    CLASS_BROKER_OR_ORDER_EXECUTION,
+    evaluate_automation_authority,
+)
+from service.autonomy import ACTION_ORDER
 from service.dual_review import VERDICT_DISAGREEMENT, VERDICT_FAIL, VERDICT_UNAVAILABLE
 from service.dual_review_dispatch import dispatch_dual_review_result
 from service.dual_review_orchestrator import orchestrate_from_payload
@@ -135,6 +140,16 @@ def run_pipeline(
         return {"ok": False, "error": "orchestration_failed", "payload": payload}
 
     result = outcome.to_dict()
+    if trigger == "reconciliation_baseline":
+        # A matching, dual-reviewed candidate proves only that a legacy state
+        # is ready for a human recovery decision.  The authority policy treats
+        # restoring broker execution as high risk and must never auto-apply it.
+        result["recovery_authority"] = evaluate_automation_authority(
+            ["broker_reconciliation_baseline"],
+            trusted_metadata={"change_class": CLASS_BROKER_OR_ORDER_EXECUTION},
+            proposed_action=ACTION_ORDER,
+        )
+        result["requires_human_recovery_approval"] = True
     if outcome.outcome == VERDICT_UNAVAILABLE:
         result["skipped"] = ["reviewers_unavailable"]
         result["degraded"] = True
