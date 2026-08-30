@@ -80,7 +80,16 @@ def build_secondary_prompt(request: DualReviewRequest) -> str:
         f"Strategy profile: {request.strategy_profile}",
         f"Trigger: {request.trigger.value}",
     ]
-    for key in ("domain", "old_status", "new_status", "drift_sigma", "drift_score"):
+    for key in (
+        "domain",
+        "old_status",
+        "new_status",
+        "drift_sigma",
+        "drift_score",
+        "reconciliation_candidate_sha256",
+        "source_evidence_count",
+        "observation_window_seconds",
+    ):
         if key in context and context[key] not in (None, ""):
             lines.append(f"{key}: {context[key]}")
     monthly = context.get("monthly_hit_rates")
@@ -90,8 +99,9 @@ def build_secondary_prompt(request: DualReviewRequest) -> str:
     if evidence:
         lines.append(f"context: {evidence}")
     lines.append(
-        "Decide whether this strategy change should proceed. "
-        "Use approve only when evidence supports promotion or continued operation."
+        "Decide whether this strategy change should proceed. For reconciliation_baseline, approve "
+        "only when the candidate is fresh, read-only, internally consistent, and safely scoped; "
+        "approval never authorises orders or a state change by itself."
     )
     return "\n".join(lines)
 

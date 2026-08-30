@@ -13,7 +13,7 @@ from service.dual_review import VERDICT_INVALID, VERDICT_UNAVAILABLE
 from service.dual_review_secondary import parse_llm_review_output
 
 _PRIMARY_SYSTEM = (
-    "You are the primary Codex reviewer for quantitative strategy promotion and risk decisions. "
+    "You are the primary Codex reviewer for quantitative strategy promotion, risk, and recovery decisions. "
     "Respond with JSON only: "
     '{"verdict":"approve"|"reject","confidence":0.0-1.0,"summary":"..."}'
 )
@@ -37,6 +37,9 @@ def build_primary_prompt(
         "drift_sigma",
         "drift_score",
         "repository",
+        "reconciliation_candidate_sha256",
+        "source_evidence_count",
+        "observation_window_seconds",
     ):
         value = context.get(key)
         if value not in (None, ""):
@@ -65,7 +68,9 @@ def build_primary_prompt(
         except (OSError, json.JSONDecodeError):
             lines.append(f"evidence_file: {evidence_path}")
     lines.append(
-        "Provide an independent primary review for whether this strategy change should proceed."
+        "Provide an independent primary review. For reconciliation_baseline, approve only when the "
+        "candidate is a fresh, matching, read-only observation set; this decision still requires "
+        "independent secondary approval and never authorises orders."
     )
     return "\n".join(lines)
 

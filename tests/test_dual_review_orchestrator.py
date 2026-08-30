@@ -107,6 +107,37 @@ class DualReviewOrchestratorTests(unittest.TestCase):
         self.assertEqual(result.outcome, VERDICT_FAIL)
         self.assertFalse(result.escalated)
 
+    def test_reconciliation_baseline_forces_independent_review_and_binds_candidate(self) -> None:
+        candidate_sha256 = "a" * 64
+        result = orchestrate_from_payload(
+            {
+                "trigger": "reconciliation_baseline",
+                "strategy_profile": "soxl_soxx_trend_income",
+                "reconciliation_candidate_sha256": candidate_sha256,
+                "primary_review": {"verdict": "approve", "confidence": 0.99},
+            },
+            secondary_review={
+                "gpt": {"verdict": "approve", "confidence": 0.95},
+                "claude": {"verdict": "approve", "confidence": 0.94},
+            },
+        )
+
+        assert result is not None
+        self.assertTrue(result.escalated)
+        self.assertEqual(result.outcome, VERDICT_PASS)
+        self.assertEqual(result.evidence_binding_sha256, candidate_sha256)
+
+    def test_reconciliation_baseline_requires_candidate_binding(self) -> None:
+        request = build_request_from_payload(
+            {
+                "trigger": "reconciliation_baseline",
+                "strategy_profile": "soxl_soxx_trend_income",
+                "primary_review": {"verdict": "approve", "confidence": 0.99},
+            }
+        )
+
+        self.assertIsNone(request)
+
 
 if __name__ == "__main__":
     unittest.main()
