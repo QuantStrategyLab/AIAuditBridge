@@ -120,8 +120,25 @@ POST /v1/ai/review
   → optional Codex verification
   → extract confidence scores
   → compute consensus + recommended action
-  → return {results, consensus, recommended_action}
+→ return {results, consensus, recommended_action}
 ```
+
+### Provenance and evaluation receipts
+
+Every successful Analyze/Review provider output includes an
+`ai_provenance_receipt.v1`. The frozen receipt binds the requested and actual
+provider/model identities to canonical input, raw output, evaluation, and
+policy verdicts with SHA-256 digests. The adapter reads the actual model from
+the provider response; it never substitutes the requested model as proof.
+
+Analyze remains `advisory` because it has no deterministic output evaluator.
+Review is eligible for the existing autonomy policy only when every output has
+an exact requested/actual identity match and strict JSON evaluation with a
+positive verdict (`approve`, `agree`, or `verified`). Missing/mismatched
+identity, malformed/negative evaluation, provider failure, or an unverifiable
+Codex verifier forces `advisory`/`unavailable`, `escalate`, and explicitly
+prohibits PR creation, merge, and deploy. Mutating a serialized receipt
+invalidates its canonical `receipt_sha256`.
 
 ## Security
 

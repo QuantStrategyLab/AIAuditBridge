@@ -126,13 +126,15 @@ class AiGatewayClient:
             with urllib.request.urlopen(req, timeout=timeout + 30) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
 
-            if data.get("status") == "ok":
+            status = str(data.get("status") or "")
+            if status in {"ok", "advisory"}:
                 self._breaker.on_success()
                 return AiResult(
                     provider=data.get("provider", ""),
                     model=data.get("model", selected_model),
-                    success=True,
+                    success=status == "ok",
                     output=str(data.get("output", "")),
+                    note="advisory" if status == "advisory" else "",
                     latency_seconds=time.time() - started,
                     raw=data,
                 )
@@ -332,8 +334,9 @@ class AiGatewayClient:
                     latency_seconds=float(r.get("latency_seconds", 0)),
                 ))
 
-            all_ok = bool(data.get("status") == "ok")
-            if all_ok:
+            status = str(data.get("status") or "")
+            all_ok = status == "ok"
+            if status in {"ok", "advisory"}:
                 self._breaker.on_success()
             else:
                 self._breaker.on_failure()

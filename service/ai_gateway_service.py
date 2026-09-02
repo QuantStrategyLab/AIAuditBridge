@@ -46,6 +46,10 @@ from service.contracts import (
 )
 from service.adapters.llm_adapter import LlmAdapter, resolve_model
 from service.adapters.codex_adapter import CodexAdapter
+from service.ai_provenance import (
+    build_provenance_receipt,
+    fail_closed_review_action,
+)
 from service.autonomy import (
     ACTION_AUTO_PR,
     ACTION_RANK,
@@ -110,6 +114,10 @@ ACTIVE_JOB_STATUSES = frozenset({"queued", "running"})
 WRITE_AUTH_METHODS = frozenset({"github_oidc", "none"})
 TRUSTED_AUTOMATION_PROOF_PATH_ENV = "CODEX_AUDIT_SERVICE_TRUSTED_AUTOMATION_PROOF_PATH"
 DASHBOARD_REPOSITORIES_ENV = "CODEX_AUDIT_SERVICE_DASHBOARD_REPOSITORIES"
+REVIEW_SYSTEM_PROMPT = (
+    "You are a careful quantitative strategy reviewer. "
+    "Return JSON with verdict, confidence (0.0-1.0), and summary."
+)
 
 # sandbox allowlist — restrict what callers can request
 ALLOWED_SANDBOXES: frozenset[str] = frozenset(
@@ -1419,24 +1427,42 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             max_tokens=req.max_tokens, timeout=req.timeout_seconds,
         )
         latency = time.time() - started
+        requested_provider, requested_model = resolve_model(resolved_model)
+        receipt = build_provenance_receipt(
+            operation="analyze",
+            requested_provider=requested_provider,
+            requested_model=requested_model,
+            actual_provider=result.actual_provider,
+            actual_model=result.actual_model,
+            system=req.system,
+            user=req.prompt,
+            output=result.output,
+        ).to_dict()
 
         # Record quota and health
         quota.record(source_repo, resolved_model, req.prompt, result.output if result.success else "")
         get_health_monitor().record("/v1/ai/analyze", latency, result.success, result.error if not result.success else "")
 
         _audit_log("analyze_completed", model=result.model, provider=result.provider,
-                   success=result.success, latency=result.latency_seconds)
+                   actual_model=result.actual_model, success=result.success,
+                   policy_verdict=receipt["policy_verdict"], latency=result.latency_seconds)
         if result.success:
             _json_response(self, HTTPStatus.OK, {
-                "status": "ok", "output": result.output,
+                "status": receipt["policy_verdict"], "output": result.output,
                 "model": result.model, "provider": result.provider,
+                "provenance_receipt": receipt,
+                "policy_verdict": receipt["policy_verdict"],
+                "prohibited_actions": ["create_pr", "merge", "deploy"],
                 "latency_seconds": result.latency_seconds,
                 "cost_estimate_usd": qr.get("cost_estimate_usd", 0),
             })
         else:
             _json_response(self, HTTPStatus.BAD_GATEWAY, {
-                "status": "error", "error": result.error,
+                "status": "unavailable", "error": result.error,
                 "model": result.model, "provider": result.provider,
+                "provenance_receipt": receipt,
+                "policy_verdict": "advisory",
+                "prohibited_actions": ["create_pr", "merge", "deploy"],
             })
 
     def _handle_execute_async(self, claims: dict[str, Any], payload: dict[str, Any]) -> None:
@@ -1530,7 +1556,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                    changed_paths_count=len(changed_paths))
         llm_results = llm.parallel_review(
             reviewers=reviewer_tuples,
-            system="You are a careful quantitative strategy reviewer. Return JSON with verdict, confidence (0.0-1.0), and summary.",
+            system=REVIEW_SYSTEM_PROMPT,
             user=req.prompt,
             timeout=req.timeout_seconds,
         )
@@ -1548,6 +1574,16 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         # Step 3: build per-reviewer results with extracted confidence
         results: list[dict[str, Any]] = []
         for r in llm_results:
+            receipt = build_provenance_receipt(
+                operation="review",
+                requested_provider=r.provider,
+                requested_model=r.model,
+                actual_provider=r.actual_provider,
+                actual_model=r.actual_model,
+                system=REVIEW_SYSTEM_PROMPT,
+                user=req.prompt,
+                output=r.output,
+            ).to_dict()
             entry: dict[str, Any] = {
                 "reviewer": r.provider,
                 "model": r.model,
@@ -1556,9 +1592,20 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 "error": r.error if not r.success else "",
                 "latency_seconds": r.latency_seconds,
                 "confidence": _extract_confidence_from_output(r.output) if r.success else 0.0,
+                "provenance_receipt": receipt,
             }
             results.append(entry)
         if codex_result is not None:
+            receipt = build_provenance_receipt(
+                operation="review",
+                requested_provider="codex",
+                requested_model=str(payload.get("codex_model") or "unspecified"),
+                actual_provider="",
+                actual_model="",
+                system="",
+                user=req.prompt,
+                output=codex_result.output,
+            ).to_dict()
             results.append({
                 "reviewer": "codex",
                 "model": "codex-cli",
@@ -1566,6 +1613,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 "output": codex_result.output if codex_result.success else "",
                 "error": codex_result.error if not codex_result.success else "",
                 "confidence": _extract_confidence_from_output(codex_result.output) if codex_result.success else 0.0,
+                "provenance_receipt": receipt,
             })
 
         # Step 4: compute consensus + recommended action
@@ -1592,14 +1640,23 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             quota_status=str(quota_status),
             org_health_status=org_health_status,
         )
+        policy_eligible = bool(results) and all(
+            result["provenance_receipt"]["policy_verdict"] == "eligible"
+            for result in results
+        )
+        if not policy_eligible:
+            action = fail_closed_review_action(action)
         _audit_log("review_completed", consensus=consensus, all_success=all_ok,
-                   action=action["action"], confidence=action["confidence"], risk=action["risk"])
+                   action=action["action"], confidence=action["confidence"], risk=action["risk"],
+                   policy_verdict="eligible" if policy_eligible else "advisory")
 
         _json_response(self, HTTPStatus.OK, {
-            "status": "ok" if all_ok else "partial",
+            "status": "ok" if all_ok and policy_eligible else "advisory" if all_ok else "unavailable",
             "results": results,
             "consensus": consensus,
             "recommended_action": action,
+            "policy_verdict": "eligible" if policy_eligible else "advisory",
+            "prohibited_actions": [] if policy_eligible else ["create_pr", "merge", "deploy"],
         })
 
     # -- automation control handlers --

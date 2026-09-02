@@ -55,6 +55,17 @@ class LlmResult:
     success: bool = True
     error: str = ""
     latency_seconds: float = 0.0
+    actual_provider: str = ""
+    actual_model: str = ""
+
+
+@dataclass(frozen=True)
+class ProviderCompletion:
+    """Provider response fields needed to attest the actual model identity."""
+
+    provider: str
+    model: str
+    output: str
 
 
 class LlmAdapterError(RuntimeError):
@@ -122,7 +133,7 @@ def _openai_completion(
     *,
     max_tokens: int = DEFAULT_MAX_TOKENS,
     timeout: float = DEFAULT_TIMEOUT,
-) -> str:
+) -> ProviderCompletion:
     api_key = _env("OPENAI_API_KEY")
     if not api_key:
         raise LlmAdapterError("OPENAI_API_KEY is not configured on the service host")
@@ -147,7 +158,7 @@ def _openai_completion(
         },
     )
 
-    def _call() -> str:
+    def _call() -> ProviderCompletion:
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
@@ -164,7 +175,12 @@ def _openai_completion(
         content = message.get("content", "") if isinstance(message, dict) else ""
         if not content.strip():
             raise LlmAdapterError("OpenAI returned empty content")
-        return content.strip()
+        actual_model = str(payload.get("model") or "").strip()
+        return ProviderCompletion(
+            provider=PROVIDER_OPENAI,
+            model=actual_model,
+            output=content.strip(),
+        )
 
     return _retry_with_backoff(_call)
 
@@ -186,7 +202,7 @@ def _anthropic_completion(
     *,
     max_tokens: int = DEFAULT_MAX_TOKENS,
     timeout: float = DEFAULT_TIMEOUT,
-) -> str:
+) -> ProviderCompletion:
     api_key = _env("ANTHROPIC_API_KEY")
     if not api_key:
         raise LlmAdapterError("ANTHROPIC_API_KEY is not configured on the service host")
@@ -210,7 +226,7 @@ def _anthropic_completion(
         },
     )
 
-    def _call() -> str:
+    def _call() -> ProviderCompletion:
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
@@ -230,7 +246,12 @@ def _anthropic_completion(
         ]
         if not text_parts:
             raise LlmAdapterError("Anthropic returned no text content")
-        return "\n\n".join(text_parts)
+        actual_model = str(payload.get("model") or "").strip()
+        return ProviderCompletion(
+            provider=PROVIDER_ANTHROPIC,
+            model=actual_model,
+            output="\n\n".join(text_parts),
+        )
 
     return _retry_with_backoff(_call)
 
@@ -270,10 +291,17 @@ class LlmAdapter:
         started = time.time()
         try:
             if provider == PROVIDER_ANTHROPIC:
-                output = _anthropic_completion(resolved_model, system, user, max_tokens=max_tokens, timeout=timeout)
+                completion = _anthropic_completion(resolved_model, system, user, max_tokens=max_tokens, timeout=timeout)
             else:
-                output = _openai_completion(resolved_model, system, user, max_tokens=max_tokens, timeout=timeout)
-            return LlmResult(provider=provider, model=resolved_model, output=output, latency_seconds=time.time() - started)
+                completion = _openai_completion(resolved_model, system, user, max_tokens=max_tokens, timeout=timeout)
+            return LlmResult(
+                provider=provider,
+                model=resolved_model,
+                output=completion.output,
+                latency_seconds=time.time() - started,
+                actual_provider=completion.provider,
+                actual_model=completion.model,
+            )
         except LlmAdapterError as exc:
             return LlmResult(
                 provider=provider,
@@ -309,8 +337,14 @@ class LlmAdapter:
                 try:
                     results.append(f.result())
                 except Exception as exc:
-                    label, model = futures[f]
+                    _label, model = futures[f]
                     results.append(
-                        LlmResult(provider=label, model=model, output="", success=False, error=str(exc))
+                        LlmResult(
+                            provider=resolve_model(model)[0],
+                            model=resolve_model(model)[1],
+                            output="",
+                            success=False,
+                            error=str(exc),
+                        )
                     )
         return results
