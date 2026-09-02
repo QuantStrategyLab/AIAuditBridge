@@ -1306,9 +1306,11 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
                 "service.ai_gateway_service.LlmAdapter.parallel_review",
                 return_value=[
                     LlmResult(
-                        provider="claude",
+                        provider="anthropic",
                         model="claude-sonnet-4-6",
                         output='{"verdict":"approve","confidence":0.99,"summary":"ok"}',
+                        actual_provider="anthropic",
+                        actual_model="claude-sonnet-4-6",
                     )
                 ],
             ), patch(
@@ -1359,6 +1361,98 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
                 finally:
                     server.shutdown()
                     server.server_close()
+
+    def test_review_route_fails_closed_without_actual_identity(self) -> None:
+        from service.ai_provenance import verify_receipt
+
+        env = {
+            "CODEX_AUDIT_SERVICE_AUTH": "none",
+            "CODEX_AUDIT_SERVICE_ALLOW_NO_AUTH_FOR_LOCAL_TESTS": "true",
+        }
+        with patch.dict(os.environ, env, clear=False), patch(
+            "service.ai_gateway_service.LlmAdapter.parallel_review",
+            return_value=[
+                LlmResult(
+                    provider="openai",
+                    model="gpt-5.4-mini",
+                    output='{"verdict":"approve","confidence":0.99,"summary":"ok"}',
+                )
+            ],
+        ), patch("service.ai_gateway_service.read_org_health", return_value={"status": "healthy"}):
+            server = ThreadingHTTPServer(("127.0.0.1", 0), AiGatewayRequestHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                request = urllib.request.Request(
+                    f"http://127.0.0.1:{server.server_port}/v1/ai/review",
+                    data=json.dumps({
+                        "prompt": "review",
+                        "reviewers": ["gpt"],
+                        "verifier": None,
+                        "changed_paths": ["docs/readme.md"],
+                    }).encode("utf-8"),
+                    method="POST",
+                    headers={"Content-Type": "application/json"},
+                )
+                with urllib.request.urlopen(request, timeout=5) as response:
+                    body = json.loads(response.read().decode("utf-8"))
+            finally:
+                server.shutdown()
+                server.server_close()
+
+        receipt = body["results"][0]["provenance_receipt"]
+        self.assertEqual(body["status"], "advisory")
+        self.assertEqual(body["policy_verdict"], "advisory")
+        self.assertEqual(receipt["identity_verdict"], "unavailable")
+        self.assertTrue(verify_receipt(receipt))
+        self.assertEqual(body["recommended_action"]["action"], "escalate")
+        self.assertFalse(body["recommended_action"]["auto_merge_allowed"])
+        self.assertEqual(body["prohibited_actions"], ["create_pr", "merge", "deploy"])
+        authority = body["recommended_action"]["automation_authority"]
+        self.assertEqual(authority["max_action"], "escalate")
+        self.assertEqual(authority["proposed_action"], "escalate")
+        self.assertEqual(authority["final_action"], "escalate")
+
+    def test_analyze_route_is_advisory_without_provable_evaluation(self) -> None:
+        from service.ai_provenance import verify_receipt
+
+        env = {
+            "CODEX_AUDIT_SERVICE_AUTH": "none",
+            "CODEX_AUDIT_SERVICE_ALLOW_NO_AUTH_FOR_LOCAL_TESTS": "true",
+        }
+        with patch.dict(os.environ, env, clear=False), patch(
+            "service.ai_gateway_service.LlmAdapter.complete",
+            return_value=LlmResult(
+                provider="openai",
+                model="gpt-5.4-mini",
+                output="analysis output",
+                actual_provider="openai",
+                actual_model="gpt-5.4-mini",
+            ),
+        ):
+            server = ThreadingHTTPServer(("127.0.0.1", 0), AiGatewayRequestHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                request = urllib.request.Request(
+                    f"http://127.0.0.1:{server.server_port}/v1/ai/analyze",
+                    data=json.dumps({"prompt": "analyze", "model": "gpt-5.4-mini"}).encode("utf-8"),
+                    method="POST",
+                    headers={"Content-Type": "application/json"},
+                )
+                with urllib.request.urlopen(request, timeout=5) as response:
+                    body = json.loads(response.read().decode("utf-8"))
+            finally:
+                server.shutdown()
+                server.server_close()
+
+        receipt = body["provenance_receipt"]
+        self.assertEqual(body["status"], "advisory")
+        self.assertEqual(receipt["evaluation_status"], "unavailable")
+        self.assertEqual(receipt["policy_verdict"], "advisory")
+        self.assertTrue(verify_receipt(receipt))
+        self.assertEqual(body["policy_verdict"], "advisory")
+        self.assertEqual(body["prohibited_actions"], ["create_pr", "merge", "deploy"])
 
 
 def test_job_dedupe_key_is_scoped_to_repository_run_and_attempt() -> None:
