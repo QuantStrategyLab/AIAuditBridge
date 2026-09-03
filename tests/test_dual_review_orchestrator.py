@@ -127,6 +127,39 @@ class DualReviewOrchestratorTests(unittest.TestCase):
         self.assertEqual(result.outcome, VERDICT_PASS)
         self.assertEqual(result.evidence_binding_sha256, candidate_sha256)
 
+    def test_reconciliation_baseline_blocks_when_any_required_reviewer_is_unavailable(self) -> None:
+        result = orchestrate_from_payload(
+            {
+                "trigger": "reconciliation_baseline",
+                "strategy_profile": "soxl_soxx_trend_income",
+                "reconciliation_candidate_sha256": "a" * 64,
+                "primary_review": {"verdict": "approve", "confidence": 0.99},
+            },
+            secondary_review={
+                "gpt": {"verdict": "approve", "confidence": 0.95},
+                "claude": {"verdict": "review_unavailable", "confidence": 0.0},
+            },
+        )
+
+        assert result is not None
+        self.assertEqual(result.outcome, VERDICT_DISAGREEMENT)
+
+    def test_other_triggers_preserve_available_reviewer_quorum(self) -> None:
+        result = orchestrate_from_payload(
+            {
+                "trigger": "promotion",
+                "strategy_profile": "soxl_soxx_trend_income",
+                "primary_review": {"verdict": "approve", "confidence": 0.99},
+            },
+            secondary_review={
+                "gpt": {"verdict": "approve", "confidence": 0.95},
+                "claude": {"verdict": "review_unavailable", "confidence": 0.0},
+            },
+        )
+
+        assert result is not None
+        self.assertEqual(result.outcome, VERDICT_PASS)
+
     def test_reconciliation_baseline_requires_candidate_binding(self) -> None:
         request = build_request_from_payload(
             {

@@ -105,6 +105,8 @@ def compare_three_reviews(
     primary: dict[str, Any],
     gpt_review: dict[str, Any],
     claude_review: dict[str, Any],
+    *,
+    require_all_reviewers: bool = False,
 ) -> dict[str, Any]:
     """Compare Codex primary with parallel GPT + Claude secondary reviews."""
     primary_verdict = _extract_verdict(primary)
@@ -125,9 +127,12 @@ def compare_three_reviews(
         reason = "codex, gpt, and claude unavailable"
     elif VERDICT_UNAVAILABLE in verdicts:
         available = [item for item in verdicts if item != VERDICT_UNAVAILABLE]
-        if primary_verdict != VERDICT_UNAVAILABLE and len(available) >= 2 and len(set(available)) == 1:
+        if not require_all_reviewers and primary_verdict != VERDICT_UNAVAILABLE and len(available) >= 2 and len(set(available)) == 1:
             verdict = available[0]
             reason = "primary and one available secondary reviewer agree"
+        elif require_all_reviewers:
+            verdict = VERDICT_DISAGREEMENT
+            reason = "all required reviewers must return a valid verdict"
         else:
             verdict = VERDICT_DISAGREEMENT
             reason = "primary unavailable or available reviewer quorum conflicts"
