@@ -46,6 +46,15 @@ def test_deploy_model_catalog_sync_keeps_self_hosted_secret_boundary_and_pins_ch
     assert "ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}" in workflow
 
 
+def test_deploy_model_catalog_sync_is_manual_only_and_keeps_inspect_mode() -> None:
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+    triggers = top_level_block(workflow, "on")
+
+    assert "workflow_dispatch:" in triggers
+    assert "          - inspect" in triggers
+    assert "\n  push:" not in triggers
+
+
 def test_permissions_boundary_rejects_added_write_permission() -> None:
     workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
     weakened = workflow.replace("permissions:\n", "permissions:\n  actions: write\n", 1)

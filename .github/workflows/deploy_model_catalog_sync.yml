@@ -1,6 +1,6 @@
 name: Deploy Model Catalog Sync
 
-# Fully automatic VPS install for monthly model-catalog sync.
+# Manual-only VPS install for monthly model-catalog sync.
 # Uses repo secrets OPENAI_API_KEY / ANTHROPIC_API_KEY — no manual SSH.
 on:
   workflow_dispatch:
@@ -14,17 +14,6 @@ on:
           - deploy
           - inspect
           - sync-now
-  push:
-    branches: [main]
-    paths:
-      - "ops/codex-audit/**"
-      - "scripts/sync_model_catalog.py"
-      - "service/model_catalog.py"
-      - "service/model_catalog_sync.py"
-      - "service/model_resolver.py"
-      - "generated/model_catalog.json"
-      - ".github/workflows/deploy_model_catalog_sync.yml"
-
 permissions:
   contents: read
 
