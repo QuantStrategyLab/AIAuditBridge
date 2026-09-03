@@ -174,6 +174,7 @@ def orchestrate_dual_review(
             request.primary_review,
             secondary["gpt"],
             secondary["claude"],
+            require_all_reviewers=requires_mandatory_multi_review(request.trigger),
         )
     else:
         legacy = secondary.get("legacy") if isinstance(secondary, dict) else None
