@@ -712,23 +712,40 @@ def service_context_path_allowed(path: str, *, task: str) -> bool:
     return suffix in SERVICE_CONTEXT_TEXT_SUFFIXES or name in SERVICE_CONTEXT_TEXT_NAMES
 
 
+def _service_context_file_path(repo_dir: Path, path: Path, *, task: str) -> Path | None:
+    try:
+        relative = path.relative_to(repo_dir)
+        if not service_context_path_allowed(relative.as_posix(), task=task):
+            return None
+        if any(
+            repo_dir.joinpath(*relative.parts[:index]).is_symlink()
+            for index in range(1, len(relative.parts) + 1)
+        ):
+            return None
+        resolved = path.resolve(strict=True)
+        if resolved.is_relative_to(repo_dir) and resolved.is_file():
+            return resolved
+    except (OSError, RuntimeError, ValueError):
+        pass
+    return None
+
+
 def service_context_file_paths(repo_dir: Path, *, task: str) -> list[str]:
+    repo_dir = repo_dir.resolve()
     candidates: list[str] = []
     seen: set[str] = set()
 
     def add_path(path: Path) -> None:
-        if not path.is_file():
+        if _service_context_file_path(repo_dir, path, task=task) is None:
             return
-        try:
-            rel = path.relative_to(repo_dir).as_posix()
-        except ValueError:
-            return
-        if rel not in seen and service_context_path_allowed(rel, task=task):
+        rel = path.relative_to(repo_dir).as_posix()
+        if rel not in seen:
             seen.add(rel)
             candidates.append(rel)
 
-    for path in sorted((repo_dir / ".codex-audit").glob("*")):
-        add_path(path)
+    if not (repo_dir / ".codex-audit").is_symlink():
+        for path in sorted((repo_dir / ".codex-audit").glob("*")):
+            add_path(path)
 
     result = run(["git", "ls-files", "-co", "--exclude-standard"], cwd=repo_dir, timeout=30)
     if result.returncode == 0:
@@ -748,6 +765,7 @@ def build_service_repository_context(
     max_bytes: int | None = None,
     max_file_bytes: int | None = None,
 ) -> str:
+    repo_dir = repo_dir.resolve()
     max_bytes = max_bytes or int_env("CODEX_AUDIT_SERVICE_CONTEXT_MAX_BYTES", DEFAULT_SERVICE_CONTEXT_MAX_BYTES)
     max_file_bytes = max_file_bytes or int_env(
         "CODEX_AUDIT_SERVICE_CONTEXT_MAX_FILE_BYTES",
@@ -763,7 +781,10 @@ def build_service_repository_context(
     total = len("\n".join(parts).encode("utf-8"))
     omitted = 0
     for rel in service_context_file_paths(repo_dir, task=task):
-        path = repo_dir / rel
+        path = _service_context_file_path(repo_dir, repo_dir / rel, task=task)
+        if path is None:
+            omitted += 1
+            continue
         try:
             content_bytes = path.read_bytes()
         except OSError:

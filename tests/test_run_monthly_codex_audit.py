@@ -27,6 +27,7 @@ from scripts.run_monthly_codex_audit import (
     apply_service_changes,
     blocked_paths,
     build_api_review_prompt,
+    build_service_repository_context,
     build_service_prompt,
     classify_service_failure,
     classify_guarded_auto_merge_risk,
@@ -567,7 +568,11 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
             (repo_dir / "docs").mkdir()
             (repo_dir / "docs" / "api-token.md").write_text("should not be included\n", encoding="utf-8")
 
-            prompt = build_service_prompt(repo_dir, "Base prompt", task="monthly_snapshot_audit", mode="review_and_fix")
+            with patch(
+                "scripts.run_monthly_codex_audit.run",
+                return_value=subprocess.CompletedProcess([], 1, stdout="", stderr=""),
+            ):
+                prompt = build_service_prompt(repo_dir, "Base prompt", task="monthly_snapshot_audit", mode="review_and_fix")
 
         self.assertIn("Base prompt", prompt)
         self.assertIn('context path=".codex-audit/monthly_issue.md"', prompt)
@@ -575,6 +580,86 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertIn("Service patch contract", prompt)
         self.assertNotIn("api-token.md", prompt)
         self.assertNotIn("should not be included", prompt)
+
+    def test_service_context_omits_absolute_and_relative_file_symlinks(self) -> None:
+        for target_kind in ("absolute", "relative", "inside"):
+            with self.subTest(target_kind=target_kind), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                repo_dir = root / "repo"
+                repo_dir.mkdir()
+                outside = root / "outside.py"
+                outside.write_text("SYNTHETIC_OUTSIDE_CONTENT", encoding="utf-8")
+                (repo_dir / "README.md").write_text("normal repository text", encoding="utf-8")
+                target = {
+                    "absolute": outside,
+                    "relative": Path("../outside.py"),
+                    "inside": Path("README.md"),
+                }[target_kind]
+                (repo_dir / "helper.py").symlink_to(target)
+                with patch(
+                    "scripts.run_monthly_codex_audit.run",
+                    return_value=subprocess.CompletedProcess([], 0, stdout="helper.py\nREADME.md\n"),
+                ):
+                    context = build_service_repository_context(repo_dir, task="monthly_snapshot_audit")
+                self.assertNotIn("SYNTHETIC_OUTSIDE_CONTENT", context)
+                self.assertNotIn('context path="helper.py"', context)
+                self.assertIn("normal repository text", context)
+
+    def test_service_context_omits_directory_symlinks(self) -> None:
+        for directory in ("linked", ".codex-audit"):
+            with self.subTest(directory=directory), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                repo_dir = root / "repo"
+                repo_dir.mkdir()
+                outside = root / "outside"
+                outside.mkdir()
+                (outside / "helper.py").write_text("SYNTHETIC_DIRECTORY_CONTENT", encoding="utf-8")
+                (repo_dir / directory).symlink_to(outside, target_is_directory=True)
+                with patch(
+                    "scripts.run_monthly_codex_audit.run",
+                    return_value=subprocess.CompletedProcess([], 0, stdout=f"{directory}/helper.py\n"),
+                ):
+                    context = build_service_repository_context(repo_dir, task="monthly_snapshot_audit")
+                self.assertNotIn("SYNTHETIC_DIRECTORY_CONTENT", context)
+
+    def test_service_context_rechecks_path_before_reading(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_dir = root / "repo"
+            repo_dir.mkdir()
+            outside = root / "outside.py"
+            outside.write_text("SYNTHETIC_REPLACED_CONTENT", encoding="utf-8")
+            helper = repo_dir / "helper.py"
+            helper.write_text("normal text", encoding="utf-8")
+
+            def replace_after_enumeration(*_args, **_kwargs):
+                helper.unlink()
+                helper.symlink_to(outside)
+                return ["helper.py"]
+
+            with patch(
+                "scripts.run_monthly_codex_audit.service_context_file_paths",
+                side_effect=replace_after_enumeration,
+            ):
+                context = build_service_repository_context(repo_dir, task="monthly_snapshot_audit")
+            self.assertNotIn("SYNTHETIC_REPLACED_CONTENT", context)
+
+    def test_service_context_omits_missing_and_outside_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo_dir = root / "repo"
+            repo_dir.mkdir()
+            outside = root / "outside.py"
+            outside.write_text("SYNTHETIC_TRAVERSAL_CONTENT", encoding="utf-8")
+            with patch(
+                "scripts.run_monthly_codex_audit.run",
+                return_value=subprocess.CompletedProcess(
+                    [], 0, stdout=f"missing.py\n../outside.py\n{outside}\n",
+                ),
+            ):
+                context = build_service_repository_context(repo_dir, task="monthly_snapshot_audit")
+            self.assertNotIn("SYNTHETIC_TRAVERSAL_CONTENT", context)
+            self.assertNotIn('<context path=', context)
 
     def test_parse_service_patch_response_accepts_fenced_json(self) -> None:
         final_message, changes = parse_service_patch_response(
