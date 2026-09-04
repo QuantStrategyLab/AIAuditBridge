@@ -931,6 +931,33 @@ def request_codex_service_json(
     return response_payload
 
 
+def admit_automation(
+    source_repo: str,
+    mode: str,
+    auto_merge: bool,
+) -> tuple[str, bool, str | None]:
+    """Fail closed when the service control plane does not admit a fix run."""
+    if mode == "review_only":
+        return mode, False, None
+
+    audience = env_value("CODEX_AUDIT_SERVICE_AUDIENCE", DEFAULT_SERVICE_AUDIENCE)
+    try:
+        service_url = normalize_codex_service_url(env_value("CODEX_AUDIT_SERVICE_URL"))
+        query = urllib.parse.urlencode({"repo": source_repo, "mode": mode})
+        response = request_codex_service_json(
+            method="GET",
+            url=f"{codex_service_api_url(service_url, '/v1/ai/automation/control')}?{query}",
+            audience=audience,
+        )
+    except (BridgeError, OSError, ValueError, json.JSONDecodeError):
+        return "review_only", False, "unavailable"
+
+    control = response.get("control") if response.get("status") == "ok" else None
+    if not isinstance(control, dict) or control.get("auto_fix_allowed") is not True:
+        return "review_only", False, "not_admitted"
+    return mode, auto_merge, None
+
+
 def request_codex_service(
     *,
     source_repo: str,
@@ -2795,9 +2822,12 @@ def main() -> int:
     if not issue_number_raw.isdigit():
         raise BridgeError("ISSUE_NUMBER must be provided as an integer")
     issue_number = int(issue_number_raw)
-    token = resolve_source_repo_token(source_repo)
     timeout_minutes = int(env_value("CODEX_AUDIT_TIMEOUT_MINUTES", "45"))
     auto_merge = parse_bool(env_value("CODEX_AUDIT_AUTO_MERGE"))
+    mode, auto_merge, admission_reason = admit_automation(source_repo, mode, auto_merge)
+    if admission_reason:
+        print(f"Automation admission {admission_reason}; downgraded to review_only.")
+    token = resolve_source_repo_token(source_repo)
 
     print(
         f"Running {task} for {source_repo} issue #{issue_number} on {source_ref} in {mode} mode "

@@ -23,6 +23,7 @@ from scripts.run_monthly_codex_audit import (
     SOURCE_REPO_TASKS,
     api_fallback_allowed_source_repos,
     api_fallback_allow_fix,
+    admit_automation,
     apply_service_changes,
     blocked_paths,
     build_api_review_prompt,
@@ -129,6 +130,44 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
             codex_service_api_url("https://codex.quant.example/v1/codex-audit", "/v1/ai/feedback/register"),
             "https://codex.quant.example/v1/ai/feedback/register",
         )
+
+    def test_automation_admission_allows_only_explicit_service_permission(self) -> None:
+        with (
+            patch.dict(
+                os.environ,
+                {"CODEX_AUDIT_SERVICE_URL": "https://service.example", "CODEX_AUDIT_SERVICE_AUDIENCE": "aud"},
+                clear=True,
+            ),
+            patch(
+                "scripts.run_monthly_codex_audit.request_codex_service_json",
+                return_value={"status": "ok", "control": {"auto_fix_allowed": True}},
+            ) as request,
+        ):
+            self.assertEqual(
+                admit_automation("QuantStrategyLab/CryptoLivePoolPipelines", "review_and_fix", True),
+                ("review_and_fix", True, None),
+            )
+
+        self.assertEqual(request.call_args.kwargs["method"], "GET")
+        self.assertIn("/v1/ai/automation/control?repo=", request.call_args.kwargs["url"])
+
+    def test_automation_admission_downgrades_missing_or_denied_control(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(
+                admit_automation("QuantStrategyLab/CryptoLivePoolPipelines", "review_and_fix", True),
+                ("review_only", False, "unavailable"),
+            )
+        with (
+            patch.dict(os.environ, {"CODEX_AUDIT_SERVICE_URL": "https://service.example"}, clear=True),
+            patch(
+                "scripts.run_monthly_codex_audit.request_codex_service_json",
+                return_value={"status": "ok", "control": {"auto_fix_allowed": False}},
+            ),
+        ):
+            self.assertEqual(
+                admit_automation("QuantStrategyLab/CryptoLivePoolPipelines", "review_and_fix", True),
+                ("review_only", False, "not_admitted"),
+            )
 
     def test_validate_repo_rejects_invalid_values(self) -> None:
         with self.assertRaises(Exception):
@@ -893,6 +932,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         }
         with (
             patch.dict(os.environ, env, clear=True),
+            patch("scripts.run_monthly_codex_audit.admit_automation", return_value=("review_and_fix", False, None)),
             patch("scripts.run_monthly_codex_audit.github_request", return_value=issue),
             patch("scripts.run_monthly_codex_audit.fetch_issue_comments", return_value=[]),
             patch("scripts.run_monthly_codex_audit.prepare_remediation_workspace") as prepare,
@@ -939,6 +979,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         }
         with (
             patch.dict(os.environ, env, clear=True),
+            patch("scripts.run_monthly_codex_audit.admit_automation", return_value=("review_and_fix", False, None)),
             patch("scripts.run_monthly_codex_audit.github_request", return_value=issue),
             patch("scripts.run_monthly_codex_audit.fetch_issue_comments", return_value=[]),
             patch("scripts.run_monthly_codex_audit.prepare_remediation_workspace") as prepare,
@@ -990,6 +1031,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         }
         with (
             patch.dict(os.environ, env, clear=True),
+            patch("scripts.run_monthly_codex_audit.admit_automation", return_value=("review_and_fix", False, None)),
             patch("scripts.run_monthly_codex_audit.github_request", return_value=issue),
             patch("scripts.run_monthly_codex_audit.fetch_issue_comments", return_value=[]),
             patch("scripts.run_monthly_codex_audit.prepare_remediation_workspace") as prepare,
@@ -1041,6 +1083,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         }
         with (
             patch.dict(os.environ, env, clear=True),
+            patch("scripts.run_monthly_codex_audit.admit_automation", return_value=("review_and_fix", False, None)),
             patch("scripts.run_monthly_codex_audit.github_request", return_value=issue),
             patch("scripts.run_monthly_codex_audit.fetch_issue_comments", return_value=[]),
             patch("scripts.run_monthly_codex_audit.prepare_remediation_workspace") as prepare,
@@ -2147,6 +2190,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         }
         with (
             patch.dict(os.environ, env, clear=True),
+            patch("scripts.run_monthly_codex_audit.admit_automation", return_value=("review_and_fix", False, None)),
             patch("scripts.run_monthly_codex_audit.github_request", return_value=issue),
             patch("scripts.run_monthly_codex_audit.fetch_issue_comments", return_value=[]),
             patch("scripts.run_monthly_codex_audit.clone_source_repo", side_effect=fake_clone),
@@ -2209,6 +2253,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         }
         with (
             patch.dict(os.environ, env, clear=True),
+            patch("scripts.run_monthly_codex_audit.admit_automation", return_value=("review_and_fix", False, None)),
             patch("scripts.run_monthly_codex_audit.github_request", return_value=issue),
             patch("scripts.run_monthly_codex_audit.fetch_issue_comments", return_value=[]),
             patch("scripts.run_monthly_codex_audit.clone_source_repo", side_effect=fake_clone),
