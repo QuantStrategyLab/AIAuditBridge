@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import hashlib
 import logging
+import math
 import os
 import posixpath
 import re
@@ -44,7 +45,7 @@ from service.contracts import (
     parse_execute_request,
     parse_review_request,
 )
-from service.adapters.llm_adapter import LlmAdapter, resolve_model
+from service.adapters.llm_adapter import DEFAULT_MAX_TOKENS, LlmAdapter, resolve_model
 from service.adapters.codex_adapter import CodexAdapter
 from service.ai_provenance import (
     build_provenance_receipt,
@@ -93,7 +94,7 @@ from service.feedback import (
     ChangeRecord,
     _new_change_id,
 )
-from service.quota import get_quota_manager
+from service.quota import DEFAULT_MODEL_COSTS, get_quota_manager
 from service.task_state import TERMINAL_STATES, job_task_state
 from service.health import get_health_monitor
 from service.org_health import read_org_health
@@ -1534,8 +1535,13 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         """
         _check_rate_limit()
         req = parse_review_request(payload)
-        llm = LlmAdapter()
-        codex = CodexAdapter()
+        # Charge the authenticated caller, never a caller-selected bucket.
+        quota_repo = str(claims.get("repository") or "unknown")
+        source_repo = str(payload.get("source_repository") or "")
+        if source_repo:
+            _validate_source_repo(source_repo)
+            _validate_source_repo_org(claims, source_repo)
+        quota = get_quota_manager()
 
         # Collect changed_paths from payload for risk classification
         changed_paths_raw = payload.get("changed_paths")
@@ -1552,6 +1558,34 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             (r, req.model) if req.model else (r, _default_model_for_reviewer(r))
             for r in req.reviewers
         ]
+        reviewer_tuples = [(label, resolve_model(model)[1]) for label, model in reviewer_tuples]
+        quota_prompt = REVIEW_SYSTEM_PROMPT + "\n" + req.prompt
+        remaining = quota.remaining_daily(quota_repo)
+        model_estimates = []
+        total_estimate = 0.0
+        allowed = math.isfinite(remaining) and remaining > 0
+        for _, model in reviewer_tuples:
+            check = quota.check(quota_repo, model, quota_prompt, estimated_output_tokens=DEFAULT_MAX_TOKENS)
+            cost = check.get("cost_estimate_usd")
+            valid_cost = isinstance(cost, (int, float)) and math.isfinite(cost) and cost >= 0
+            allowed = allowed and bool(check.get("allowed")) and valid_cost
+            if valid_cost:
+                total_estimate += cost
+            model_estimates.append({"model": model, "cost_estimate_usd": cost if valid_cost else None,
+                                    "cost_estimate_source": "model" if model in DEFAULT_MODEL_COSTS else "fallback"})
+        if not allowed or total_estimate > remaining:
+            _json_response(self, HTTPStatus.TOO_MANY_REQUESTS, {
+                "status": "quota_exceeded", "error": "Review budget is exhausted, insufficient or unavailable",
+                "remaining_usd": remaining if math.isfinite(remaining) else None,
+            })
+            return
+        if req.verifier == "codex":
+            check = quota.check(quota_repo, "codex-cli", req.prompt, codex_account=True)
+            if not check.get("allowed"):
+                _json_response(self, HTTPStatus.TOO_MANY_REQUESTS, {"status": "quota_exceeded", "error": "Codex quota unavailable"})
+                return
+        llm = LlmAdapter()
+        codex = CodexAdapter()
         _audit_log("review_started", reviewers=req.reviewers, verifier=req.verifier,
                    changed_paths_count=len(changed_paths))
         llm_results = llm.parallel_review(
@@ -1561,9 +1595,17 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             timeout=req.timeout_seconds,
         )
 
+        # Account for every returned result, including failed/partial reviews,
+        # before verification or response assembly can fail.
+        for result in llm_results:
+            quota.record(quota_repo, result.model, quota_prompt, result.output if result.success else "",
+                         reported_tokens_input=result.tokens_input, reported_tokens_output=result.tokens_output,
+                         reported_usage_complete=result.usage_complete)
+
         # Step 2: optional Codex verification
         codex_result = None
         if req.verifier == "codex":
+            quota.record_execute(quota_repo)
             codex_result = codex.execute(
                 prompt=req.prompt,
                 sandbox=_validate_sandbox("read-only"),
@@ -1591,6 +1633,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 "output": r.output if r.success else "",
                 "error": r.error if not r.success else "",
                 "latency_seconds": r.latency_seconds,
+                "usage": {"tokens_input": r.tokens_input, "tokens_output": r.tokens_output, "complete": r.usage_complete},
                 "confidence": _extract_confidence_from_output(r.output) if r.success else 0.0,
                 "provenance_receipt": receipt,
             }
@@ -1624,7 +1667,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         repo = str(payload.get("source_repository") or "")
         if trusted_proof and not repo:
             repo = str(trusted_proof.get("source_repository") or "")
-        quota_status = get_quota_manager().runtime_status(repo or "unknown").get("status", "ok")
+        quota_status = quota.runtime_status(quota_repo).get("status", "ok")
         try:
             org_health_status = str((read_org_health() or {}).get("status") or "unknown")
         except Exception:
@@ -1653,6 +1696,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         _json_response(self, HTTPStatus.OK, {
             "status": "ok" if all_ok and policy_eligible else "advisory" if all_ok else "unavailable",
             "results": results,
+            "quota": {"cost_basis": "estimate", "cost_estimate_usd": total_estimate, "model_estimates": model_estimates},
             "consensus": consensus,
             "recommended_action": action,
             "policy_verdict": "eligible" if policy_eligible else "advisory",
