@@ -46,10 +46,10 @@ class ReviewQuotaTests(TestCase):
             self.stack.enter_context(patch.object(gateway, name, mock))
         self.stack.enter_context(patch("service.quota.recommend_model", return_value="gpt-5.4-mini"))
 
-    def review(self, **overrides):
+    def review(self, *, claims=None, **overrides):
         payload = {"prompt": "synthetic review", "reviewers": ["gpt"], "model": "gpt-5.4-mini", "verifier": None}
         payload.update(overrides)
-        gateway.AiGatewayRequestHandler._handle_review(object(), {"repository": self.repo}, payload)
+        gateway.AiGatewayRequestHandler._handle_review(object(), claims if claims is not None else {"repository": self.repo}, payload)
         return self.response.call_args.args[1:]
 
     def test_exhausted_budget_blocks_all_review_providers(self) -> None:
@@ -141,3 +141,26 @@ class ReviewQuotaTests(TestCase):
         self.quota._reset_if_needed(record)
         self.assertIsNone(record.reported_tokens_input)
         self.assertFalse(record.reported_usage_incomplete)
+
+    def test_verified_local_auth_preserves_source_allowlist_and_local_quota_bucket(self) -> None:
+        self.llm.parallel_review.return_value = [LlmResult(provider="openai", model="gpt-5.4-mini", output="ok")]
+        with patch.dict("os.environ", {"CODEX_AUDIT_SERVICE_AUTH": "none",
+                                       "CODEX_AUDIT_SERVICE_ALLOW_NO_AUTH_FOR_LOCAL_TESTS": "true",
+                                       "CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES": "Synthetic/source"}):
+            claims = gateway.authenticate({})
+            status, _ = self.review(claims=claims, source_repository="Synthetic/source")
+        self.assertEqual(status, 200)
+        self.assertEqual(self.quota._records["local"].api_calls, 1)
+        self.assertNotIn("Synthetic/source", self.quota._records)
+
+    def test_oidc_cross_organization_source_still_rejected_before_model(self) -> None:
+        claims = {"repository": self.repo, "auth_method": "github_oidc"}
+        with self.assertRaises(PermissionError):
+            self.review(claims=claims, source_repository="OtherOrg/source")
+        self.llm.parallel_review.assert_not_called()
+
+    def test_local_auth_still_enforces_source_allowlist(self) -> None:
+        claims = {"repository": "local", "auth_method": "none"}
+        with patch.dict("os.environ", {"CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES": "Synthetic/allowed"}), self.assertRaises(PermissionError):
+            self.review(claims=claims, source_repository="Synthetic/denied")
+        self.llm.parallel_review.assert_not_called()

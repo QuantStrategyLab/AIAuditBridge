@@ -1540,7 +1540,9 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         source_repo = str(payload.get("source_repository") or "")
         if source_repo:
             _validate_source_repo(source_repo)
-            _validate_source_repo_org(claims, source_repo)
+            # authenticate() permits this identity only in explicit local-test mode.
+            if not (claims.get("auth_method") == "none" and claims.get("repository") == "local"):
+                _validate_source_repo_org(claims, source_repo)
         quota = get_quota_manager()
 
         # Collect changed_paths from payload for risk classification
