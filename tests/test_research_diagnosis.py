@@ -15,9 +15,9 @@ from service.research_diagnosis import (
 from service.research_task import ResearchTaskError, build_strategy_diagnosis_task
 
 
-def _task() -> dict[str, object]:
+def _task(*, event_key: str = "a1b2c3d4e5f6") -> dict[str, object]:
     return build_strategy_diagnosis_task(
-        event_key="a1b2c3d4e5f6",
+        event_key=event_key,
         created_at="2026-08-20T00:00:00Z",
         candidate_id="tqqq_core_only_p2_v5",
         candidate_kind="individual",
@@ -35,6 +35,7 @@ def _task() -> dict[str, object]:
 
 def _result(task: dict[str, object] | None = None) -> dict[str, object]:
     active_task = task or _task()
+    event_key = str(active_task["task_id"]).removeprefix("watcher-")
     return {
         "research_task_source_snapshot": {"data_status": "ready", "tasks": [active_task]},
         "issues": [
@@ -42,7 +43,7 @@ def _result(task: dict[str, object] | None = None) -> dict[str, object]:
                 "repo": "QuantStrategyLab/UsEquitySnapshotPipelines",
                 "url": "https://example.test/issues/1",
                 "task": {
-                    "event_key": "a1b2c3d4e5f6",
+                    "event_key": event_key,
                     "trigger": {
                         "kind": "strategy_metric_degradation",
                         "severity": "high",
@@ -95,7 +96,7 @@ class ResearchDiagnosisTests(unittest.TestCase):
         with patch.dict(os.environ, {"CODEX_AUDIT_SERVICE_URL": "https://example.test"}, clear=False):
             summary = run_diagnosis(
                 _result(),
-                marker_present=lambda _repo, _url: False,
+                marker_present=lambda _repo, _url, _marker: False,
                 create_comment=lambda repo, url, body: comments.append((repo, url, body)) or "https://example.test/comment/1",
                 client_factory=lambda _config: fake,  # type: ignore[arg-type]
             )
@@ -105,14 +106,37 @@ class ResearchDiagnosisTests(unittest.TestCase):
         self.assertEqual(len(fake.calls), 1)
         self.assertEqual(fake.calls[0]["source_repository"], "QuantStrategyLab/UsEquityStrategies")
         self.assertEqual(len(comments), 1)
-        self.assertIn(MARKER, comments[0][2])
+        self.assertIn("qsl-research-diagnosis:v1", comments[0][2])
         self.assertIn("没有代码、参数、数据、订单、P4/P5/P6", comments[0][2])
 
-    def test_existing_marker_skips_without_calling_ai(self) -> None:
+    def test_new_verified_task_on_existing_issue_is_not_blocked_by_legacy_marker(self) -> None:
+        fake = FakeClient()
+        comments: list[tuple[str, str, str]] = []
+        next_task = _task(event_key="f1e2d3c4b5a6")
+        legacy_comment = MARKER
+
+        with patch.dict(os.environ, {"CODEX_AUDIT_SERVICE_URL": "https://example.test"}, clear=False):
+            summary = run_diagnosis(
+                _result(next_task),
+                marker_present=lambda _repo, _url, *markers: MARKER in legacy_comment
+                if not markers
+                else markers[0] in legacy_comment,
+                create_comment=lambda repo, url, body: comments.append((repo, url, body)) or "https://example.test/comment/2",
+                client_factory=lambda _config: fake,  # type: ignore[arg-type]
+            )
+
+        self.assertEqual(summary["status"], "ok")
+        self.assertEqual(summary["diagnoses"][0]["status"], "diagnosed")
+        self.assertEqual(len(fake.calls), 1)
+        self.assertEqual(len(comments), 1)
+        self.assertIn(str(next_task["task_id"]), comments[0][2])
+        self.assertIn(str(next_task["task_sha256"]), comments[0][2])
+
+    def test_existing_task_marker_skips_without_calling_ai(self) -> None:
         with patch.dict(os.environ, {"CODEX_AUDIT_SERVICE_URL": "https://example.test"}, clear=False):
             summary = run_diagnosis(
                 _result(),
-                marker_present=lambda _repo, _url: True,
+                marker_present=lambda _repo, _url, _marker: True,
                 client_factory=lambda _config: (_ for _ in ()).throw(AssertionError("must not instantiate client")),  # type: ignore[arg-type]
             )
 
@@ -123,7 +147,11 @@ class ResearchDiagnosisTests(unittest.TestCase):
         request = build_research_diagnosis_request(_task())
         comment = format_research_diagnosis_comment(request, "x" * 13_000)
 
-        self.assertIn(MARKER, comment)
+        self.assertIn("qsl-research-diagnosis:v1", comment)
+        self.assertEqual(
+            comment.splitlines()[0],
+            f"<!-- qsl-research-diagnosis:v1:{request['task_id']}:{request['task_sha256']} -->",
+        )
         self.assertIn("输出已按安全上限截断", comment)
         self.assertLess(len(comment), 14_000)
 

@@ -25,10 +25,10 @@ if str(ROOT) not in sys.path:
 from client.config import GatewayConfig  # noqa: E402
 from client.gateway_client import AiGatewayClient  # noqa: E402
 from service.research_diagnosis import (  # noqa: E402
-    MARKER,
     build_research_diagnosis_prompt,
     build_research_diagnosis_request,
     format_research_diagnosis_comment,
+    marker_for_research_diagnosis,
 )
 
 
@@ -83,7 +83,7 @@ def diagnosis_candidates(result: Mapping[str, Any]) -> list[dict[str, Any]]:
     return sorted(candidates, key=lambda item: (str(item["repository"]), str(item["issue_url"])))
 
 
-def issue_has_diagnosis_marker(repository: str, issue_url: str) -> bool:
+def issue_has_diagnosis_marker(repository: str, issue_url: str, marker: str) -> bool:
     """Read comments only; any retrieval error means do not repeat an action."""
     try:
         completed = subprocess.run(
@@ -95,7 +95,7 @@ def issue_has_diagnosis_marker(repository: str, issue_url: str) -> bool:
         )
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return True
-    return MARKER in completed.stdout
+    return marker in completed.stdout
 
 
 def comment_issue(repository: str, issue_url: str, body: str) -> str:
@@ -118,7 +118,7 @@ def run_diagnosis(
     *,
     dry_run: bool = False,
     max_per_run: int = MAX_AUTOMATIC_DIAGNOSES,
-    marker_present: Callable[[str, str], bool] = issue_has_diagnosis_marker,
+    marker_present: Callable[[str, str, str], bool] = issue_has_diagnosis_marker,
     create_comment: Callable[[str, str, str], str] = comment_issue,
     client_factory: Callable[[GatewayConfig], AiGatewayClient] = AiGatewayClient,
 ) -> dict[str, Any]:
@@ -129,7 +129,11 @@ def run_diagnosis(
     pending = [
         item
         for item in candidates
-        if not marker_present(str(item["repository"]), str(item["issue_url"]))
+        if not marker_present(
+            str(item["repository"]),
+            str(item["issue_url"]),
+            marker_for_research_diagnosis(build_research_diagnosis_request(item["task"], trigger=item["trigger"])),
+        )
     ]
     summary: dict[str, Any] = {
         "schema_version": "qsl.research_diagnosis_dispatch.v1",
