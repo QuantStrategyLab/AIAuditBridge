@@ -2712,5 +2712,157 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertIn(expected_ref, workflow_line)
 
 
+class ShadowArtifactScopeTests(unittest.TestCase):
+    task = "long_horizon_signal_shadow"
+    allowed = ["data/output/latest_signal.json", "data/output/latest_signal.manifest.json",
+               "data/output/signal_history/2026-09-05.json"]
+
+    def test_shadow_exact_allowlist_ignores_allow_data_override(self) -> None:
+        denied = ["src/schema.py", "config/settings.json", ".github/workflows/ci.yml", "docs/review.md",
+                  "data/output/latest_signal.py", "data/output/latest_signal.json.bak",
+                  "data/output/latest_signal.manifest.json.extra", "data/output/latest_signal_other.json",
+                  "data/output/signal_history_backup/a.json", "data/output/signal_history/a.txt",
+                  "data/output/signal_history/sub/a.json", "data/output/signal_history/.json",
+                  "data/output/signal_history/../latest_signal.json", "/data/output/latest_signal.json",
+                  "data\\output\\latest_signal.json", "data//output/latest_signal.json",
+                  "data/output/./latest_signal.json", "", " data/output/latest_signal.json"]
+        for allow_data in ("false", "true"):
+            with self.subTest(allow_data=allow_data), patch.dict(os.environ, {"CODEX_AUDIT_ALLOW_DATA_CHANGES": allow_data}, clear=True):
+                self.assertEqual(blocked_paths(self.allowed, task=self.task), [])
+                self.assertEqual(blocked_paths(denied, task=self.task), denied)
+
+    def test_ordinary_task_retains_existing_source_and_data_policy(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(blocked_paths(["src/schema.py", "config/settings.json", ".github/workflows/ci.yml"]), [])
+            self.assertEqual(blocked_paths(["data/output/other.json"]), ["data/output/other.json"])
+        with patch.dict(os.environ, {"CODEX_AUDIT_ALLOW_DATA_CHANGES": "true"}, clear=True):
+            self.assertEqual(blocked_paths(["data/output/other.json"]), [])
+
+    def test_shadow_patch_writes_only_allowed_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            changes = [{"path": path, "content": "synthetic\n"} for path in self.allowed]
+            self.assertEqual(apply_service_changes(root, changes, task=self.task), self.allowed)
+            for path in self.allowed:
+                self.assertEqual((root / path).read_text(), "synthetic\n")
+
+    def test_shadow_mixed_patch_rejected_before_any_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with self.assertRaises(BridgeError):
+                apply_service_changes(root, [{"path": self.allowed[0], "content": "synthetic"},
+                                             {"path": "src/schema.py", "content": "not allowed"}], task=self.task)
+            self.assertFalse((root / self.allowed[0]).exists())
+            self.assertFalse((root / "src").exists())
+
+    def test_shadow_symlink_targets_are_preflighted_for_entire_patch(self) -> None:
+        for location in ("inside", "outside", "directory"):
+            with self.subTest(location=location), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp) / "repo"
+                (root / "data/output").mkdir(parents=True)
+                source_dir = root / "src" if location != "outside" else Path(tmp) / "outside"
+                source_dir.mkdir()
+                source = source_dir / ("artifact.json" if location == "directory" else "schema.py")
+                source.write_text("preserved synthetic source")
+                if location == "directory":
+                    (root / "data/output/signal_history").symlink_to(source_dir, target_is_directory=True)
+                    bad_path = "data/output/signal_history/artifact.json"
+                else:
+                    (root / self.allowed[1]).symlink_to(source)
+                    bad_path = self.allowed[1]
+                with self.assertRaises(BridgeError):
+                    apply_service_changes(root, [{"path": self.allowed[0], "content": "first"},
+                                                 {"path": bad_path, "content": "second"}], task=self.task)
+                self.assertFalse((root / self.allowed[0]).exists())
+                self.assertEqual(source.read_text(), "preserved synthetic source")
+
+    def test_shadow_directory_target_is_rejected_before_any_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / self.allowed[1]).mkdir(parents=True)
+            with self.assertRaises(BridgeError):
+                apply_service_changes(root, [{"path": self.allowed[0], "content": "first"},
+                                             {"path": self.allowed[1], "content": "second"}], task=self.task)
+            self.assertFalse((root / self.allowed[0]).exists())
+
+    def test_shadow_status_enumerates_untracked_and_both_rename_sides(self) -> None:
+        from scripts import run_monthly_codex_audit as audit
+        status = " D src/schema.py\0A  data/output/latest_signal.json\0?? data/output/signal_history/name with spaces.json\0"
+        with patch.object(audit, "run_checked", return_value=status) as run:
+            result = audit.git_status(Path("/synthetic"), task=self.task)
+        self.assertIn("--no-renames", run.call_args.args[0])
+        self.assertIn("--untracked-files=all", run.call_args.args[0])
+        self.assertIn("-z", run.call_args.args[0])
+        self.assertEqual(audit.changed_paths(result), ["src/schema.py", self.allowed[0], "data/output/signal_history/name with spaces.json"])
+        self.assertEqual(blocked_paths(audit.changed_paths(result), task=self.task), ["src/schema.py"])
+
+    def test_shadow_publish_blocks_source_deletion_rename_and_symlink_before_git_mutation(self) -> None:
+        from scripts import run_monthly_codex_audit as audit
+        for kind in ("source edit", "source deletion", "source renamed to artifact", "artifact symlink"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                source = root / "src/schema.py"
+                source.parent.mkdir()
+                source.write_text("preserved synthetic source")
+                if kind == "artifact symlink":
+                    target = root / self.allowed[0]
+                    target.parent.mkdir(parents=True)
+                    target.symlink_to(source)
+                    status = "A  " + self.allowed[0] + "\0"
+                elif kind == "source renamed to artifact":
+                    status = " D src/schema.py\0A  " + self.allowed[0] + "\0"
+                else:
+                    status = (" D " if kind == "source deletion" else " M ") + "src/schema.py\0"
+                workspace = RemediationWorkspace(root, "synthetic", {}, None, "", "", False, "synthetic")
+                with patch.object(audit, "git_status", return_value=status), patch.object(audit, "run_checked") as run, patch.object(
+                    audit, "git_with_token") as push, patch.object(audit, "create_pull_request") as create, patch.object(
+                    audit, "post_issue_comment") as comment, patch.object(audit, "request_human_review", return_value={"label": "synthetic"}), patch.object(
+                    audit, "register_gateway_change", return_value=""):
+                    result = audit.publish_remediation("synthetic", "Synthetic/repo", "main", {}, 1,
+                                                       workspace, "synthetic result", task=self.task, auto_merge=False)
+                self.assertEqual(result, 1)
+                run.assert_not_called()
+                push.assert_not_called()
+                create.assert_not_called()
+                comment.assert_called_once()
+
+    def test_shadow_remote_patch_entrypoints_reject_mixed_payload_before_writes(self) -> None:
+        from scripts import run_monthly_codex_audit as audit
+        payload = json.dumps({"final_message": "synthetic", "changes": [
+            {"path": self.allowed[0], "content": "first"}, {"path": "src/schema.py", "content": "second"},
+        ]})
+        for backend in ("service", "api"):
+            with self.subTest(backend=backend), tempfile.TemporaryDirectory() as tmp, patch.object(
+                audit, "build_service_prompt", return_value="synthetic"), patch.object(
+                audit, "request_codex_service", return_value=payload), patch.object(
+                audit, "request_openai_completion", return_value=payload):
+                root = Path(tmp)
+                if backend == "service":
+                    result = audit.run_codex_service(root, "synthetic", 1, task=self.task, mode="review_and_fix",
+                                                     source_repo="Synthetic/repo", source_ref="main")
+                else:
+                    result = audit.run_api_patch_provider(root, "synthetic", task=self.task,
+                                                         mode="review_and_fix", provider="openai")
+                self.assertEqual(result[0], 1)
+                self.assertFalse((root / self.allowed[0]).exists())
+                self.assertFalse((root / "src/schema.py").exists())
+
+    def test_shadow_publish_accepts_allowed_regular_artifact_scope(self) -> None:
+        from scripts import run_monthly_codex_audit as audit
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / self.allowed[0]
+            target.parent.mkdir(parents=True)
+            target.write_text("synthetic")
+            workspace = RemediationWorkspace(root, "synthetic", {}, None, "", "", False, "synthetic")
+            # Stop at the first Git mutation boundary: no commit, push or PR.
+            with patch.object(audit, "git_status", return_value=" M " + self.allowed[0] + "\0"), patch.object(
+                audit, "run_checked", side_effect=RuntimeError("synthetic publication boundary")) as run:
+                with self.assertRaisesRegex(RuntimeError, "synthetic publication boundary"):
+                    audit.publish_remediation("synthetic", "Synthetic/repo", "main", {}, 1,
+                                               workspace, "synthetic", task=self.task, auto_merge=False)
+            self.assertEqual(run.call_args.args[0], ["git", "add", "-A"])
+
+
 if __name__ == "__main__":
     unittest.main()

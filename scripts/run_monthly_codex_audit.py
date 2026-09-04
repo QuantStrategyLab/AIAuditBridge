@@ -167,10 +167,10 @@ SERVICE_CONTEXT_EXCLUDED_DIRS = frozenset(
         "venv",
     }
 )
-LONG_HORIZON_SIGNAL_OUTPUT_PREFIXES = (
-    "data/output/latest_signal.",
-    "data/output/signal_history/",
-)
+LONG_HORIZON_SIGNAL_OUTPUT_FILES = frozenset({
+    "data/output/latest_signal.json",
+    "data/output/latest_signal.manifest.json",
+})
 BLOCKED_PATH_RE = re.compile(
     r"(^|/)(\.env|.*secret.*|.*credential.*|.*token.*|.*private.*|.*\.pem|.*\.key)$",
     re.IGNORECASE,
@@ -1139,14 +1139,19 @@ def apply_service_changes(repo_dir: Path, changes: list[dict[str, str]], *, task
         raise BridgeError(f"Service patch contains {len(changes)} changes; limit is {max_changes}")
 
     validated_paths = [validate_service_change_path(change["path"]) for change in changes]
-    denied = blocked_paths(validated_paths, task=task)
+    policy_paths = [change["path"] for change in changes] if task == "long_horizon_signal_shadow" else validated_paths
+    denied = blocked_paths(policy_paths, task=task)
     if denied:
         denied_list = ", ".join(denied)
         raise BridgeError(f"Service patch includes blocked paths: {denied_list}")
 
     repo_root = repo_dir.resolve()
+    if task == "long_horizon_signal_shadow":
+        # Validate every target before writing any part of a mixed patch.
+        for rel_path in validated_paths:
+            _shadow_signal_target(repo_root, rel_path)
     for change, rel_path in zip(changes, validated_paths, strict=True):
-        target = (repo_root / rel_path).resolve()
+        target = _shadow_signal_target(repo_root, rel_path) if task == "long_horizon_signal_shadow" else (repo_root / rel_path).resolve()
         try:
             target.relative_to(repo_root)
         except ValueError as exc:
@@ -1696,7 +1701,7 @@ def publish_remediation(
     commit_prefix: str = "codex",
     remediation_note: str = "",
 ) -> int:
-    status = git_status(workspace.repo_dir)
+    status = git_status(workspace.repo_dir, task=task)
     paths = changed_paths(status)
     if not paths:
         review_message = format_codex_message(final_message, workspace.repo_dir, source_repo, source_ref)
@@ -1712,6 +1717,13 @@ def publish_remediation(
         return 0
 
     denied = blocked_paths(paths, task=task)
+    if task == "long_horizon_signal_shadow":
+        for path in paths:
+            if path not in denied:
+                try:
+                    _shadow_signal_target(workspace.repo_dir.resolve(), path)
+                except BridgeError:
+                    denied.append(path)
     if denied:
         denied_list = "\n".join(f"- `{path}`" for path in denied)
         review_message = format_codex_message(final_message, workspace.repo_dir, source_repo, source_ref)
@@ -2151,11 +2163,17 @@ def run_direct_api_provider(
     )
 
 
-def git_status(repo_dir: Path) -> str:
-    return run_checked(["git", "status", "--porcelain=v1"], cwd=repo_dir)
+def git_status(repo_dir: Path, *, task: str = DEFAULT_TASK) -> str:
+    args = ["git", "status", "--porcelain=v1"]
+    if task == "long_horizon_signal_shadow":
+        # Renames must expose both the deleted source and added destination.
+        args.extend(["-z", "--untracked-files=all", "--no-renames"])
+    return run_checked(args, cwd=repo_dir)
 
 
 def changed_paths(status: str) -> list[str]:
+    if "\0" in status:
+        return [entry[3:] for entry in status.split("\0") if entry]
     paths: list[str] = []
     for line in status.splitlines():
         if not line:
@@ -2519,17 +2537,45 @@ def classify_guarded_auto_merge_risk(
 
 
 def long_horizon_signal_data_path_allowed(path: str) -> bool:
-    return any(path.startswith(prefix) for prefix in LONG_HORIZON_SIGNAL_OUTPUT_PREFIXES)
+    if not path or "\\" in path or any(ord(char) < 32 for char in path):
+        return False
+    relative = PurePosixPath(path)
+    if path != relative.as_posix() or relative.is_absolute() or ".." in relative.parts:
+        return False
+    return path in LONG_HORIZON_SIGNAL_OUTPUT_FILES or (
+        relative.parent == PurePosixPath("data/output/signal_history") and relative.suffix == ".json"
+    )
+
+
+def _shadow_signal_target(repo_root: Path, path: str) -> Path:
+    """Validate an artifact target without following symlinks, including in-root ones."""
+    relative = PurePosixPath(path)
+    try:
+        for index in range(1, len(relative.parts) + 1):
+            component = repo_root.joinpath(*relative.parts[:index])
+            if component.is_symlink():
+                raise BridgeError(f"Shadow artifact path contains a symlink: {path!r}")
+            if index < len(relative.parts) and component.exists() and not component.is_dir():
+                raise BridgeError(f"Shadow artifact parent is not a directory: {path!r}")
+        target = (repo_root / path).resolve()
+        if not target.is_relative_to(repo_root) or (target.exists() and not target.is_file()):
+            raise BridgeError(f"Shadow artifact target is not an in-root file: {path!r}")
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise BridgeError(f"Cannot validate shadow artifact target: {path!r}") from exc
+    return target
 
 
 def blocked_paths(paths: list[str], *, task: str = DEFAULT_TASK) -> list[str]:
     allow_data = parse_bool(env_value("CODEX_AUDIT_ALLOW_DATA_CHANGES"))
     blocked: list[str] = []
     for path in paths:
+        if task == "long_horizon_signal_shadow" and not long_horizon_signal_data_path_allowed(path):
+            blocked.append(path)
+            continue
         normalized = path.strip()
         if not normalized:
             continue
-        task_allows_data = task == "long_horizon_signal_shadow" and long_horizon_signal_data_path_allowed(normalized)
+        task_allows_data = task == "long_horizon_signal_shadow"
         if normalized.startswith("data/") and not allow_data and not task_allows_data:
             blocked.append(normalized)
             continue
