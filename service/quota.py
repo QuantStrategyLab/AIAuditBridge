@@ -73,6 +73,10 @@ class QuotaRecord:
     api_key_tokens_output: int = 0
     api_calls: int = 0
     api_calls_incomplete: bool = False
+    # Separate provider-reported review usage from legacy character estimates.
+    reported_tokens_input: int | None = None
+    reported_tokens_output: int | None = None
+    reported_usage_incomplete: bool = False
     legacy_tokens_input: int = 0
     legacy_tokens_output: int = 0
     legacy_usage_incomplete: bool = False
@@ -95,6 +99,9 @@ class QuotaRecord:
             "api_key_tokens_output": self.api_key_tokens_output,
             "api_calls": self.api_calls,
             "api_calls_incomplete": self.api_calls_incomplete,
+            "reported_tokens_input": self.reported_tokens_input,
+            "reported_tokens_output": self.reported_tokens_output,
+            "reported_usage_incomplete": self.reported_usage_incomplete,
             "legacy_tokens_input": self.legacy_tokens_input,
             "legacy_tokens_output": self.legacy_tokens_output,
             "legacy_usage_incomplete": self.legacy_usage_incomplete,
@@ -158,6 +165,9 @@ class QuotaRecord:
             api_key_tokens_output=api_key_tokens_output,
             api_calls=api_calls,
             api_calls_incomplete=api_calls_incomplete,
+            reported_tokens_input=d.get("reported_tokens_input"),
+            reported_tokens_output=d.get("reported_tokens_output"),
+            reported_usage_incomplete=bool(d.get("reported_usage_incomplete", False)),
             legacy_tokens_input=legacy_tokens_input,
             legacy_tokens_output=legacy_tokens_output,
             legacy_usage_incomplete=bool(
@@ -307,6 +317,9 @@ class QuotaManager:
             record.total_cost_usd = 0.0
             record.api_calls = 0
             record.api_calls_incomplete = False
+            record.reported_tokens_input = None
+            record.reported_tokens_output = None
+            record.reported_usage_incomplete = False
             record.api_key_cost_usd = 0.0
             record.codex_cost_usd = 0.0
             record.last_reset_daily = now
@@ -422,11 +435,27 @@ class QuotaManager:
             "remaining_usd": remaining - cost,
         }
 
-    def record(self, repo: str, model: str, prompt: str, output: str = "") -> None:
-        """Record a completed API call for quota tracking."""
+    def record(
+        self, repo: str, model: str, prompt: str, output: str = "", *,
+        reported_tokens_input: int | None = None,
+        reported_tokens_output: int | None = None,
+        reported_usage_complete: bool | None = None,
+    ) -> None:
+        """Record usage plus an internal cost estimate, not a provider invoice.
+
+        Legacy callers keep character estimates. Review callers additionally
+        retain known reported totals, with missing attempts explicitly incomplete.
+        """
+        for count in (reported_tokens_input, reported_tokens_output):
+            if count is not None and (type(count) is not int or count < 0):
+                raise ValueError("reported token counts must be nonnegative integers")
+        complete = reported_usage_complete is True and reported_tokens_input is not None and reported_tokens_output is not None
         tokens_input = estimate_tokens(prompt)
         tokens_output = estimate_tokens(output) if output else tokens_input // 2
-        cost = estimate_cost(model, tokens_input, tokens_output if output else tokens_input // 2)
+        if reported_usage_complete is not None:
+            tokens_input = reported_tokens_input if complete else max(tokens_input, reported_tokens_input or 0)
+            tokens_output = reported_tokens_output if complete else max(tokens_output, reported_tokens_output or 0)
+        cost = estimate_cost(model, tokens_input, tokens_output)
 
         with self._lock:
             if repo not in self._records:
@@ -440,6 +469,12 @@ class QuotaManager:
                 record.codex_cost_usd += cost
             else:
                 record.api_calls += 1
+                if reported_usage_complete is not None:
+                    if reported_tokens_input is not None:
+                        record.reported_tokens_input = (record.reported_tokens_input or 0) + reported_tokens_input
+                    if reported_tokens_output is not None:
+                        record.reported_tokens_output = (record.reported_tokens_output or 0) + reported_tokens_output
+                    record.reported_usage_incomplete |= not complete
                 record.api_key_tokens_input += tokens_input
                 record.api_key_tokens_output += tokens_output
                 record.api_key_cost_usd += cost
