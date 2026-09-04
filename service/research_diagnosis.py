@@ -8,6 +8,7 @@ orders, or a P4--P6 capability.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -16,6 +17,7 @@ from service.research_task import ResearchTaskError, validate_strategy_diagnosis
 
 SCHEMA = "qsl.research_diagnosis_request.v1"
 MARKER = "<!-- qsl-research-diagnosis:v1 -->"
+MARKER_PREFIX = "qsl-research-diagnosis:v1"
 MAX_OUTPUT_CHARS = 12_000
 
 
@@ -70,6 +72,19 @@ def build_research_diagnosis_request(
         "notification": "none",
         "allowed_effect": "read_only_research_diagnosis",
     }
+
+
+def marker_for_research_diagnosis(request: Mapping[str, Any]) -> str:
+    """Return the comment marker bound to one verified task identity."""
+    if not isinstance(request, Mapping) or request.get("schema") != SCHEMA:
+        raise ResearchTaskError("research diagnosis request is invalid")
+    task_id = request.get("task_id")
+    task_sha256 = request.get("task_sha256")
+    if not isinstance(task_id, str) or re.fullmatch(r"watcher-[0-9a-f]{12}", task_id) is None:
+        raise ResearchTaskError("research diagnosis task ID is invalid")
+    if not isinstance(task_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", task_sha256) is None:
+        raise ResearchTaskError("research diagnosis task digest is invalid")
+    return f"<!-- {MARKER_PREFIX}:{task_id}:{task_sha256} -->"
 
 
 def build_research_diagnosis_prompt(request: Mapping[str, Any]) -> str:
@@ -150,7 +165,7 @@ def format_research_diagnosis_comment(
         text = text[:MAX_OUTPUT_CHARS].rstrip() + "\n\n（输出已按安全上限截断。）"
     return "\n".join(
         [
-            MARKER,
+            marker_for_research_diagnosis(request),
             "## 自动研究诊断（只读）",
             "",
             f"- 任务：`{request['task_id']}`",
@@ -165,8 +180,10 @@ def format_research_diagnosis_comment(
 
 __all__ = [
     "MARKER",
+    "MARKER_PREFIX",
     "SCHEMA",
     "build_research_diagnosis_prompt",
     "build_research_diagnosis_request",
     "format_research_diagnosis_comment",
+    "marker_for_research_diagnosis",
 ]
