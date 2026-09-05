@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import unittest
 from types import SimpleNamespace
@@ -67,6 +68,83 @@ class FakeClient:
 
 
 class ResearchDiagnosisTests(unittest.TestCase):
+    def _run_analysis_result(self, result):
+        from unittest.mock import Mock
+        comments = []
+        client = Mock()
+        client.analyze.return_value = result
+        with patch.dict(os.environ, {"CODEX_AUDIT_SERVICE_URL": "https://example.test"}, clear=True):
+            summary = run_diagnosis(_result(), marker_present=lambda *_args: False,
+                    create_comment=lambda _repo, _url, body: comments.append(body) or "https://example.test/comment/1",
+                    client_factory=lambda _config: client)
+        client.analyze.assert_called_once()
+        client.execute.assert_not_called()
+        client.review.assert_not_called()
+        return summary, comments
+
+    def test_real_client_advisory_and_ok_are_only_research_comments(self):
+        from client.config import GatewayConfig
+        from client.gateway_client import AiGatewayClient
+        from unittest.mock import MagicMock
+        for status, output in (
+            ("ok", "synthetic research suggestion"), ("advisory", "synthetic research suggestion"),
+            ("failed", "synthetic text"), ("invalid", "synthetic text"),
+            ("advisory", None), ("advisory", 42), ("ok", None), ("ok", 42),
+        ):
+            with self.subTest(status=status, output=output):
+                response = MagicMock()
+                response.__enter__.return_value.read.return_value = json.dumps({
+                    "status": status, "output": output,
+                    "provider": "openai", "model": "synthetic-model",
+                    "policy_verdict": "advisory" if status == "advisory" else "eligible",
+                    "prohibited_actions": ["create_pr", "merge", "deploy"],
+                }).encode()
+                client = AiGatewayClient(GatewayConfig(service_url="https://gateway.invalid"))
+                with (patch("client.gateway_client._fetch_oidc_token", return_value=""),
+                      patch("client.gateway_client.urllib.request.urlopen", return_value=response) as http):
+                    result = client.analyze("synthetic prompt")
+                http.assert_called_once()
+                self.assertEqual(result.success, status == "ok")
+                summary, comments = self._run_analysis_result(result)
+                if status not in ("ok", "advisory") or not isinstance(output, str):
+                    self.assertNotEqual(summary["status"], "ok")
+                    self.assertEqual(comments, [])
+                    continue
+                self.assertEqual(summary["status"], "ok")
+                self.assertEqual(len(comments), 1)
+                if status == "advisory":
+                    self.assertIn("advisory", comments[0])
+                    self.assertIn("不证明执行、晋级或授权", comments[0])
+                    self.assertFalse(result.success)
+                self.assertIn("synthetic research suggestion", comments[0])
+
+    def test_inconsistent_failed_and_empty_analysis_never_comments(self):
+        from client.gateway_client import AiResult
+        cases = [
+            dict(success=True, note="advisory", raw={"status": "failed"}),
+            dict(success=True, note="", raw={"status": "invalid"}),
+            dict(success=False, note="advisory", raw={"status": "ok"}),
+            dict(success=True, note="advisory", raw={"status": "advisory"}),
+            dict(success=False, note="advisory", raw={"status": "advisory", "policy_verdict": "invalid"}),
+            dict(success=False, note="advisory", raw=None),
+            dict(success=True, note="failed", raw=None),
+            dict(success=True, note="", raw={"status": "ok", "output": None}),
+            dict(success=True, note="", raw={"status": None}),
+            dict(success=True, note="", raw={"status": "ok", "policy_verdict": "failed"}),
+            dict(success=True, note="", raw={"status": "ok", "output": "different content"}),
+            dict(success=False, note="", raw={"status": "advisory", "output": "synthetic text"}),
+            dict(success=False, note="advisory", error="failed", raw={"status": "advisory"}),
+        ]
+        for output in (None, "", "   ", 42, {"text": "not a string"}):
+            cases.append(dict(success=True, output=output))
+        for case in cases:
+            with self.subTest(case=case):
+                fields = dict(provider="openai", model="synthetic-model", output="synthetic text")
+                fields.update(case)
+                summary, comments = self._run_analysis_result(AiResult(**fields))
+                self.assertNotEqual(summary["status"], "ok")
+                self.assertEqual(comments, [])
+
     def test_valid_task_projects_to_read_only_prompt(self) -> None:
         request = build_research_diagnosis_request(_task(), trigger={"signals": [{"metric": "sharpe", "reason": "drop"}]})
         prompt = build_research_diagnosis_prompt(request)

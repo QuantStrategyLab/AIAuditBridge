@@ -183,7 +183,23 @@ def run_diagnosis(
             timeout=120,
             source_repository=str(request["target"]["repository"]),
         )
-        if not ai_result.success:
+        # Content availability is separate from decision authority; never change success.
+        output = ai_result.output
+        raw = getattr(ai_result, "raw", None)
+        note = getattr(ai_result, "note", "")
+        status = raw.get("status", "ok") if isinstance(raw, dict) else "ok"
+        policy = raw.get("policy_verdict", status) if isinstance(raw, dict) else status
+        advisory = (ai_result.success is False and note == "advisory"
+                    and status == "advisory" and policy == "advisory" and isinstance(raw, dict))
+        ok = (ai_result.success is True and note == ""
+              and status == "ok" and policy in ("ok", "eligible"))
+        content_available = (
+            isinstance(output, str) and bool(output.strip())
+            and not ai_result.error and (raw is None or isinstance(raw, dict))
+            and (not isinstance(raw, dict) or raw.get("output", output) == output)
+            and (ok or advisory)
+        )
+        if not content_available:
             summary["diagnoses"].append(
                 {
                     "status": "unavailable",
@@ -192,10 +208,12 @@ def run_diagnosis(
                 }
             )
             continue
+        if advisory:
+            output = "advisory：仅供研究讨论，不证明执行、晋级或授权。\n\n" + output
         try:
             body = format_research_diagnosis_comment(
                 request,
-                ai_result.output,
+                output,
                 provider=ai_result.provider,
                 model=ai_result.model,
             )
