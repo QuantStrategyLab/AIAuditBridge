@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import urllib.error
@@ -52,8 +53,11 @@ def parse_llm_review_output(output: str, *, provider: str, model: str) -> dict[s
             raise ValueError("review JSON must be an object")
         verdict = str(obj.get("verdict") or obj.get("decision") or "").strip().lower()
         confidence_raw = obj.get("confidence", obj.get("ai_confidence", 0.5))
+        if isinstance(confidence_raw, bool):
+            raise TypeError("confidence must be a finite number in [0, 1]")
         confidence = float(confidence_raw)
-        confidence = max(0.0, min(1.0, confidence))
+        if not math.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
+            raise ValueError("confidence must be a finite number in [0, 1]")
         parsed.update(
             {
                 "verdict": verdict or "reject",
@@ -62,7 +66,7 @@ def parse_llm_review_output(output: str, *, provider: str, model: str) -> dict[s
             }
         )
         return parsed
-    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+    except (json.JSONDecodeError, TypeError, ValueError, OverflowError) as exc:
         parsed.update(
             {
                 "verdict": VERDICT_INVALID,
