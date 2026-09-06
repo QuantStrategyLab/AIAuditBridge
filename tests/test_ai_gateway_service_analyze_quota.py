@@ -60,13 +60,60 @@ class ReviewQuotaTests(TestCase):
         self.llm.parallel_review.assert_not_called()
         self.codex.execute.assert_not_called()
 
+    def test_exhausted_auth_budget_blocks_analyze_despite_spoofed_source_repositories(self) -> None:
+        """Auth bucket exhausted: payload cannot pick another repo to bypass quota."""
+        self.quota._repo_budgets[self.repo] = {"daily": 0.0}
+        self.llm.complete.return_value = LlmResult(
+            provider="openai", model="gpt-5.4-mini", output="should-not-run",
+        )
+        for source in ("Synthetic/other-a", "Synthetic/other-b", "Synthetic/other-c"):
+            with self.subTest(source_repository=source):
+                self.llm.complete.reset_mock()
+                status, _ = self.analyze(source_repository=source)
+                self.assertEqual(status, 429)
+                self.llm.complete.assert_not_called()
+                self.assertNotIn(source, self.quota._records)
+
+    def test_analyze_and_review_charge_same_authenticated_quota_bucket(self) -> None:
+        """Limited-budget analyze + review must land in the authenticated identity bucket."""
+        self.llm.complete.return_value = LlmResult(
+            provider="openai", model="gpt-5.4-mini", output="ok",
+            tokens_input=10, tokens_output=2, usage_complete=True,
+        )
+        self.llm.parallel_review.return_value = [
+            LlmResult(
+                provider="openai", model="gpt-5.4-mini", output="ok",
+                tokens_input=10, tokens_output=2, usage_complete=True,
+            ),
+        ]
+        display = "Synthetic/display-only"
+        status_analyze, _ = self.analyze(source_repository=display)
+        status_review, _ = self.review(source_repository=display)
+        self.assertEqual(status_analyze, 200)
+        self.assertEqual(status_review, 200)
+        record = self.quota._records[self.repo]
+        self.assertGreaterEqual(record.api_calls, 2)
+        self.assertGreater(record.api_key_cost_usd, 0)
+        self.assertNotIn(display, self.quota._records)
+
+    def analyze(self, *, claims=None, **overrides):
+        payload = {"prompt": "synthetic review", "model": "gpt-5.4-mini"}
+        payload.update(overrides)
+        gateway.AiGatewayRequestHandler._handle_analyze(
+            object(),
+            claims if claims is not None else {"repository": self.repo},
+            payload,
+        )
+        return self.response.call_args.args[1:]
+
     def _invoke_api(self, endpoint):
         payload = {"prompt": "synthetic review", "model": "gpt-5.4-mini", "source_repository": self.repo}
+        claims = {"repository": self.repo}
         if endpoint == "review":
             payload.update(reviewers=["gpt"], verifier=None)
-            gateway.AiGatewayRequestHandler._handle_review(object(), {"repository": self.repo}, payload)
+            gateway.AiGatewayRequestHandler._handle_review(object(), claims, payload)
         else:
-            gateway.AiGatewayRequestHandler._handle_analyze(object(), payload)
+            gateway.AiGatewayRequestHandler._handle_analyze(object(), claims, payload)
 
     def test_concurrent_api_requests_share_admission_before_spending(self) -> None:
         for first, second in (("review", "review"), ("review", "analyze"),
