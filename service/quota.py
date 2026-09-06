@@ -30,7 +30,9 @@ import json
 import os
 import threading
 import time
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor, wait
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -225,6 +227,7 @@ class QuotaManager:
     def __init__(self):
         self._records: dict[str, QuotaRecord] = {}
         self._lock = threading.RLock()
+        self._api_admission_lock = threading.Lock()
         self._model_costs = dict(DEFAULT_MODEL_COSTS)
         self._daily_budget = DEFAULT_DAILY_BUDGET_USD
         self._weekly_budget = DEFAULT_WEEKLY_BUDGET_USD
@@ -243,6 +246,16 @@ class QuotaManager:
         self._anthropic_account_lock = threading.Lock()
         self._load_config()
         self._load_records()
+
+    @contextmanager
+    def api_budget_admission(self) -> Iterator[None]:
+        """Serialize API check/call/record in this process, not quota status reads.
+
+        This protects estimated-budget admission only; it is not a shared
+        multi-process cap or a provider-invoice guarantee.
+        """
+        with self._api_admission_lock:
+            yield
 
     def _store_path(self) -> Path | None:
         path = os.environ.get("CODEX_AUDIT_SERVICE_QUOTA_STORE", "").strip()
