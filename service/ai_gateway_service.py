@@ -146,7 +146,7 @@ _audit_handler.setFormatter(logging.Formatter('{"logger":"ai_gateway.audit",%(js
 _audit.addHandler(_audit_handler)
 _audit.propagate = False
 
-_JOB_WRITE_LOCK = threading.Lock()
+_JOB_WRITE_LOCK = threading.RLock()
 
 # ── helpers ────────────────────────────────────────────────────────────
 
@@ -1193,46 +1193,52 @@ def _submit_job(claims: dict[str, Any], payload: dict[str, Any]) -> dict[str, ob
         run_id=str(claims.get("run_id") or ""),
         run_attempt=str(claims.get("run_attempt") or ""),
     )
-    existing_job = _find_active_job_by_dedupe_key(dedupe_key)
-    if existing_job is not None and existing_job.get("status") in ACTIVE_JOB_STATUSES:
-        public = _public_job_payload(existing_job)
-        public["deduped"] = True
-        return public
 
-    # check active job cap
-    max_active = _positive_int_env("CODEX_AUDIT_SERVICE_MAX_ACTIVE_JOBS", DEFAULT_JOB_MAX_ACTIVE)
-    if _active_job_count() >= max_active:
-        raise PermissionError(
-            f"too many active jobs: max {max_active}. Wait for existing jobs to complete."
-        )
+    # Admission check/dedupe/cap and create must be atomic: concurrent callers can
+    # otherwise both pass the unlocked checks and start duplicate jobs.
+    with _JOB_WRITE_LOCK:
+        existing_job = _find_active_job_by_dedupe_key(dedupe_key)
+        if existing_job is not None and existing_job.get("status") in ACTIVE_JOB_STATUSES:
+            public = _public_job_payload(existing_job)
+            public["deduped"] = True
+            return public
 
-    now = _now()
-    ttl_seconds = int(os.environ.get("CODEX_AUDIT_SERVICE_JOB_TTL_SECONDS", str(DEFAULT_JOB_TTL_SECONDS)))
-    job_id = _new_job_id()
-    job = {
-        "job_id": job_id,
-        "status": "queued",
-        "created_at": now,
-        "updated_at": now,
-        "expires_at": now + ttl_seconds,
-        "repository": str(claims.get("repository") or ""),
-        "run_id": str(claims.get("run_id") or ""),
-        "run_attempt": str(claims.get("run_attempt") or ""),
-        "actor": str(claims.get("actor") or ""),
-        "source_repository": str(payload.get("source_repository") or ""),
-        "source_ref": str(payload.get("source_ref") or ""),
-        "task": str(payload.get("task") or TASK_EXECUTE),
-        "mode": str(payload.get("mode") or MODE_REVIEW_ONLY),
-        "timeout_seconds": int(payload.get("timeout_seconds", 2700)),
-        "dedupe_key": dedupe_key,
-    }
-    _write_job(job)
-    _record_job_automation_run(job)
-    _audit_log("job_submitted", job_id=job_id, repository=job["repository"],
-               task=job["task"], source_repository=job["source_repository"])
-    thread = threading.Thread(target=_run_job, args=(job_id, payload), name=f"ai-gateway-job-{job_id}", daemon=True)
+        max_active = _positive_int_env("CODEX_AUDIT_SERVICE_MAX_ACTIVE_JOBS", DEFAULT_JOB_MAX_ACTIVE)
+        if _active_job_count() >= max_active:
+            raise PermissionError(
+                f"too many active jobs: max {max_active}. Wait for existing jobs to complete."
+            )
+
+        now = _now()
+        ttl_seconds = int(os.environ.get("CODEX_AUDIT_SERVICE_JOB_TTL_SECONDS", str(DEFAULT_JOB_TTL_SECONDS)))
+        job_id = _new_job_id()
+        job = {
+            "job_id": job_id,
+            "status": "queued",
+            "created_at": now,
+            "updated_at": now,
+            "expires_at": now + ttl_seconds,
+            "repository": str(claims.get("repository") or ""),
+            "run_id": str(claims.get("run_id") or ""),
+            "run_attempt": str(claims.get("run_attempt") or ""),
+            "actor": str(claims.get("actor") or ""),
+            "source_repository": str(payload.get("source_repository") or ""),
+            "source_ref": str(payload.get("source_ref") or ""),
+            "task": str(payload.get("task") or TASK_EXECUTE),
+            "mode": str(payload.get("mode") or MODE_REVIEW_ONLY),
+            "timeout_seconds": int(payload.get("timeout_seconds", 2700)),
+            "dedupe_key": dedupe_key,
+        }
+        _write_job(job)
+        _record_job_automation_run(job)
+        _audit_log("job_submitted", job_id=job_id, repository=job["repository"],
+                   task=job["task"], source_repository=job["source_repository"])
+        thread = threading.Thread(target=_run_job, args=(job_id, payload), name=f"ai-gateway-job-{job_id}", daemon=True)
+        public_payload = _public_job_payload(job)
+
     thread.start()
-    return _public_job_payload(job)
+    return public_payload
+
 
 
 # ── request dispatcher ─────────────────────────────────────────────────
@@ -1348,7 +1354,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             # Route by path
             if self.path in {"/v1/ai/analyze"}:
                 _assert_write_authz(claims, self.path)
-                self._handle_analyze(payload)
+                self._handle_analyze(claims, payload)
             elif self.path in {"/v1/ai/feedback/register"}:
                 _assert_write_authz(claims, self.path)
                 self._handle_feedback_register(claims, payload)
@@ -1402,17 +1408,24 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
 
     # -- endpoint handlers --
 
-    def _handle_analyze(self, payload: dict[str, Any]) -> None:
+    def _handle_analyze(self, claims: dict[str, Any], payload: dict[str, Any]) -> None:
         """POST /v1/ai/analyze — sync LLM completion via LlmAdapter."""
         _check_rate_limit()
         req = parse_analyze_request(payload)
-        source_repo = str(payload.get("source_repository") or "unknown")
+        # Charge the authenticated caller, never a caller-selected bucket.
+        quota_repo = str(claims.get("repository") or "")
+        source_repo = str(payload.get("source_repository") or "")
+        if source_repo:
+            _validate_source_repo(source_repo)
+            # authenticate() permits this identity only in explicit local-test mode.
+            if not (claims.get("auth_method") == "none" and claims.get("repository") == "local"):
+                _validate_source_repo_org(claims, source_repo)
 
         # Quota check
         quota = get_quota_manager()
         resolved_model = _resolve_analyze_model(req.model)
         with quota.api_budget_admission():
-            qr = quota.check(source_repo, resolved_model, req.prompt)
+            qr = quota.check(quota_repo, resolved_model, req.prompt)
             if not qr["allowed"]:
                 _json_response(self, HTTPStatus.TOO_MANY_REQUESTS, {
                     "status": "error",
@@ -1442,7 +1455,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             ).to_dict()
 
             # Record quota and health
-            quota.record(source_repo, resolved_model, req.prompt, result.output if result.success else "")
+            quota.record(quota_repo, resolved_model, req.prompt, result.output if result.success else "")
 
         get_health_monitor().record("/v1/ai/analyze", latency, result.success, result.error if not result.success else "")
 
