@@ -3,6 +3,7 @@ from service.ai_gateway_service import _resolve_analyze_model
 
 # Direct handler invocation: no HTTP server, provider, account lookup or disk quota.
 from contextlib import ExitStack
+import threading
 from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import Mock, patch
@@ -37,7 +38,7 @@ class ReviewQuotaTests(TestCase):
             "_trusted_automation_proof_for_review": Mock(return_value=None),
             "get_quota_manager": Mock(return_value=self.quota),
             "read_org_health": Mock(return_value={"status": "ok"}),
-            "get_health_monitor": Mock(return_value=SimpleNamespace(status="ok")),
+            "get_health_monitor": Mock(return_value=SimpleNamespace(status="ok", record=Mock())),
             "load_autonomy_policy": Mock(return_value={}),
             "compute_recommended_action": Mock(return_value={"action": "manual_review", "confidence": 0, "risk": "low"}),
             "_json_response": self.response,
@@ -58,6 +59,109 @@ class ReviewQuotaTests(TestCase):
         self.assertEqual(status, 429)
         self.llm.parallel_review.assert_not_called()
         self.codex.execute.assert_not_called()
+
+    def _invoke_api(self, endpoint):
+        payload = {"prompt": "synthetic review", "model": "gpt-5.4-mini", "source_repository": self.repo}
+        if endpoint == "review":
+            payload.update(reviewers=["gpt"], verifier=None)
+            gateway.AiGatewayRequestHandler._handle_review(object(), {"repository": self.repo}, payload)
+        else:
+            gateway.AiGatewayRequestHandler._handle_analyze(object(), payload)
+
+    def test_concurrent_api_requests_share_admission_before_spending(self) -> None:
+        for first, second in (("review", "review"), ("review", "analyze"),
+                              ("analyze", "review"), ("analyze", "analyze")):
+            with self.subTest(first=first, second=second):
+                self._assert_serial_budget(first, second)
+
+    def _assert_serial_budget(self, first, second):
+        self.quota = QuotaManager()
+        entered = threading.Event()
+        release = threading.Event()
+        second_at_quota = threading.Event()
+        second_provider = threading.Event()
+        errors = []
+        statuses = []
+        provider_calls = []
+        counts = {
+            "review": (estimate_tokens(gateway.REVIEW_SYSTEM_PROMPT + "\nsynthetic review"), gateway.DEFAULT_MAX_TOKENS),
+            "analyze": (estimate_tokens("synthetic review"), estimate_tokens("synthetic review") // 2),
+        }
+        costs = {name: estimate_cost("gpt-5.4-mini", *tokens) for name, tokens in counts.items()}
+        self.quota._daily_budget = max(costs[first], costs[second]) + min(costs[first], costs[second]) / 2
+
+        def get_quota():
+            if threading.current_thread().name == "second-budget-request":
+                second_at_quota.set()
+            return self.quota
+
+        def provider(endpoint):
+            provider_calls.append(endpoint)
+            if threading.current_thread().name == "first-budget-request":
+                entered.set()
+                if not release.wait(3):
+                    raise AssertionError("synthetic provider release timed out")
+            else:
+                second_provider.set()
+            tokens_input, tokens_output = counts[endpoint]
+            return LlmResult(provider="openai", model="gpt-5.4-mini", output="x" * (tokens_output * 4),
+                             tokens_input=tokens_input, tokens_output=tokens_output, usage_complete=True)
+
+        def invoke(endpoint):
+            try:
+                self._invoke_api(endpoint)
+            except Exception as exc:
+                errors.append(exc)
+
+        with patch.object(gateway, "get_quota_manager", side_effect=get_quota), \
+                patch.object(gateway, "_json_response", side_effect=lambda _handler, status, _body: statuses.append(status)):
+            self.llm.parallel_review.side_effect = lambda **kwargs: [provider("review")]
+            self.llm.complete.side_effect = lambda **kwargs: provider("analyze")
+            workers = [threading.Thread(target=invoke, args=(endpoint,), name=name, daemon=True)
+                       for endpoint, name in ((first, "first-budget-request"), (second, "second-budget-request"))]
+            workers[0].start()
+            try:
+                self.assertTrue(entered.wait(2))
+                workers[1].start()
+                self.assertTrue(second_at_quota.wait(2))
+                self.assertFalse(second_provider.wait(0.1), "second provider entered before first usage was recorded")
+            finally:
+                release.set()
+                for worker in workers:
+                    if worker.ident is not None:
+                        worker.join(3)
+            self.assertFalse(any(worker.is_alive() for worker in workers))
+        self.assertEqual(errors, [])
+        self.assertEqual(sorted(statuses), [200, 429])
+        self.assertEqual(provider_calls, [first])
+        self.assertLessEqual(self.quota._records[self.repo].api_key_cost_usd, self.quota._daily_budget)
+
+    def test_provider_exception_releases_admission_for_next_request(self) -> None:
+        for endpoint in ("review", "analyze"):
+            with self.subTest(endpoint=endpoint):
+                provider = self.llm.parallel_review if endpoint == "review" else self.llm.complete
+                provider.side_effect = RuntimeError("synthetic provider failure")
+                with self.assertRaisesRegex(RuntimeError, "synthetic provider failure"):
+                    self._invoke_api(endpoint)
+                provider.side_effect = None
+                result = LlmResult(provider="openai", model="gpt-5.4-mini", output="synthetic")
+                provider.return_value = [result] if endpoint == "review" else result
+                finished = threading.Event()
+                errors = []
+
+                def next_request():
+                    try:
+                        self._invoke_api(endpoint)
+                    except Exception as exc:
+                        errors.append(exc)
+                    finally:
+                        finished.set()
+
+                worker = threading.Thread(target=next_request, daemon=True)
+                worker.start()
+                self.assertTrue(finished.wait(3), "admission remained locked after exception")
+                worker.join(1)
+                self.assertEqual(errors, [])
 
     def test_parallel_models_share_the_request_budget(self) -> None:
         self.quota._daily_budget = 0.003

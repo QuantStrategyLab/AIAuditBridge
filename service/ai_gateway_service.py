@@ -1411,37 +1411,39 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         # Quota check
         quota = get_quota_manager()
         resolved_model = _resolve_analyze_model(req.model)
-        qr = quota.check(source_repo, resolved_model, req.prompt)
-        if not qr["allowed"]:
-            _json_response(self, HTTPStatus.TOO_MANY_REQUESTS, {
-                "status": "error",
-                "error": qr["reason"],
-                "recommended_model": qr.get("recommended_model", ""),
-                "remaining_usd": qr.get("remaining_usd", 0),
-            })
-            return
+        with quota.api_budget_admission():
+            qr = quota.check(source_repo, resolved_model, req.prompt)
+            if not qr["allowed"]:
+                _json_response(self, HTTPStatus.TOO_MANY_REQUESTS, {
+                    "status": "error",
+                    "error": qr["reason"],
+                    "recommended_model": qr.get("recommended_model", ""),
+                    "remaining_usd": qr.get("remaining_usd", 0),
+                })
+                return
 
-        started = time.time()
-        adapter = LlmAdapter()
-        result = adapter.complete(
-            model=resolved_model, system=req.system, user=req.prompt,
-            max_tokens=req.max_tokens, timeout=req.timeout_seconds,
-        )
-        latency = time.time() - started
-        requested_provider, requested_model = resolve_model(resolved_model)
-        receipt = build_provenance_receipt(
-            operation="analyze",
-            requested_provider=requested_provider,
-            requested_model=requested_model,
-            actual_provider=result.actual_provider,
-            actual_model=result.actual_model,
-            system=req.system,
-            user=req.prompt,
-            output=result.output,
-        ).to_dict()
+            started = time.time()
+            adapter = LlmAdapter()
+            result = adapter.complete(
+                model=resolved_model, system=req.system, user=req.prompt,
+                max_tokens=req.max_tokens, timeout=req.timeout_seconds,
+            )
+            latency = time.time() - started
+            requested_provider, requested_model = resolve_model(resolved_model)
+            receipt = build_provenance_receipt(
+                operation="analyze",
+                requested_provider=requested_provider,
+                requested_model=requested_model,
+                actual_provider=result.actual_provider,
+                actual_model=result.actual_model,
+                system=req.system,
+                user=req.prompt,
+                output=result.output,
+            ).to_dict()
 
-        # Record quota and health
-        quota.record(source_repo, resolved_model, req.prompt, result.output if result.success else "")
+            # Record quota and health
+            quota.record(source_repo, resolved_model, req.prompt, result.output if result.success else "")
+
         get_health_monitor().record("/v1/ai/analyze", latency, result.success, result.error if not result.success else "")
 
         _audit_log("analyze_completed", model=result.model, provider=result.provider,
@@ -1562,47 +1564,48 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         ]
         reviewer_tuples = [(label, resolve_model(model)[1]) for label, model in reviewer_tuples]
         quota_prompt = REVIEW_SYSTEM_PROMPT + "\n" + req.prompt
-        remaining = quota.remaining_daily(quota_repo)
-        model_estimates = []
-        total_estimate = 0.0
-        allowed = math.isfinite(remaining) and remaining > 0
-        for _, model in reviewer_tuples:
-            check = quota.check(quota_repo, model, quota_prompt, estimated_output_tokens=DEFAULT_MAX_TOKENS)
-            cost = check.get("cost_estimate_usd")
-            valid_cost = isinstance(cost, (int, float)) and math.isfinite(cost) and cost >= 0
-            allowed = allowed and bool(check.get("allowed")) and valid_cost
-            if valid_cost:
-                total_estimate += cost
-            model_estimates.append({"model": model, "cost_estimate_usd": cost if valid_cost else None,
-                                    "cost_estimate_source": "model" if model in DEFAULT_MODEL_COSTS else "fallback"})
-        if not allowed or total_estimate > remaining:
-            _json_response(self, HTTPStatus.TOO_MANY_REQUESTS, {
-                "status": "quota_exceeded", "error": "Review budget is exhausted, insufficient or unavailable",
-                "remaining_usd": remaining if math.isfinite(remaining) else None,
-            })
-            return
-        if req.verifier == "codex":
-            check = quota.check(quota_repo, "codex-cli", req.prompt, codex_account=True)
-            if not check.get("allowed"):
-                _json_response(self, HTTPStatus.TOO_MANY_REQUESTS, {"status": "quota_exceeded", "error": "Codex quota unavailable"})
+        with quota.api_budget_admission():
+            remaining = quota.remaining_daily(quota_repo)
+            model_estimates = []
+            total_estimate = 0.0
+            allowed = math.isfinite(remaining) and remaining > 0
+            for _, model in reviewer_tuples:
+                check = quota.check(quota_repo, model, quota_prompt, estimated_output_tokens=DEFAULT_MAX_TOKENS)
+                cost = check.get("cost_estimate_usd")
+                valid_cost = isinstance(cost, (int, float)) and math.isfinite(cost) and cost >= 0
+                allowed = allowed and bool(check.get("allowed")) and valid_cost
+                if valid_cost:
+                    total_estimate += cost
+                model_estimates.append({"model": model, "cost_estimate_usd": cost if valid_cost else None,
+                                        "cost_estimate_source": "model" if model in DEFAULT_MODEL_COSTS else "fallback"})
+            if not allowed or total_estimate > remaining:
+                _json_response(self, HTTPStatus.TOO_MANY_REQUESTS, {
+                    "status": "quota_exceeded", "error": "Review budget is exhausted, insufficient or unavailable",
+                    "remaining_usd": remaining if math.isfinite(remaining) else None,
+                })
                 return
-        llm = LlmAdapter()
-        codex = CodexAdapter()
-        _audit_log("review_started", reviewers=req.reviewers, verifier=req.verifier,
-                   changed_paths_count=len(changed_paths))
-        llm_results = llm.parallel_review(
-            reviewers=reviewer_tuples,
-            system=REVIEW_SYSTEM_PROMPT,
-            user=req.prompt,
-            timeout=req.timeout_seconds,
-        )
+            if req.verifier == "codex":
+                check = quota.check(quota_repo, "codex-cli", req.prompt, codex_account=True)
+                if not check.get("allowed"):
+                    _json_response(self, HTTPStatus.TOO_MANY_REQUESTS, {"status": "quota_exceeded", "error": "Codex quota unavailable"})
+                    return
+            llm = LlmAdapter()
+            codex = CodexAdapter()
+            _audit_log("review_started", reviewers=req.reviewers, verifier=req.verifier,
+                       changed_paths_count=len(changed_paths))
+            llm_results = llm.parallel_review(
+                reviewers=reviewer_tuples,
+                system=REVIEW_SYSTEM_PROMPT,
+                user=req.prompt,
+                timeout=req.timeout_seconds,
+            )
 
-        # Account for every returned result, including failed/partial reviews,
-        # before verification or response assembly can fail.
-        for result in llm_results:
-            quota.record(quota_repo, result.model, quota_prompt, result.output if result.success else "",
-                         reported_tokens_input=result.tokens_input, reported_tokens_output=result.tokens_output,
-                         reported_usage_complete=result.usage_complete)
+            # Account for every returned result, including failed/partial reviews,
+            # before verification or response assembly can fail.
+            for result in llm_results:
+                quota.record(quota_repo, result.model, quota_prompt, result.output if result.success else "",
+                             reported_tokens_input=result.tokens_input, reported_tokens_output=result.tokens_output,
+                             reported_usage_complete=result.usage_complete)
 
         # Step 2: optional Codex verification
         codex_result = None

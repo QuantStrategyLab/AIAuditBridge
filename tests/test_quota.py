@@ -171,6 +171,12 @@ class TestQuotaManager(unittest.TestCase):
         remaining = self.manager.remaining_daily("unknown/repo")
         self.assertEqual(remaining, DEFAULT_DAILY_BUDGET_USD)
 
+    def test_api_admission_does_not_hold_quota_state_lock(self) -> None:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            with self.manager.api_budget_admission():
+                remaining = executor.submit(self.manager.remaining_daily, "test/repo").result(timeout=1)
+                self.assertEqual(remaining, DEFAULT_DAILY_BUDGET_USD)
+
     def test_check_allows_request_within_budget(self) -> None:
         result = self.manager.check("test/repo", "gpt-5.4-mini", "short prompt")
         self.assertTrue(result["allowed"])
