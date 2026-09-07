@@ -106,6 +106,85 @@ class ReviewQuotaTests(TestCase):
         )
         return self.response.call_args.args[1:]
 
+    def test_analyze_admission_includes_system_and_output_limit(self) -> None:
+        self.llm.complete.return_value = LlmResult(provider="openai", model="gpt-5.4-mini", output="ok")
+        for system, max_tokens in (("synthetic " * 2000, 10), ("", 8192)):
+            with self.subTest(system_present=bool(system), max_tokens=max_tokens):
+                quota_prompt = system + "\nsynthetic review"
+                full_cost = estimate_cost("gpt-5.4-mini", estimate_tokens(quota_prompt), max_tokens)
+                self.quota._daily_budget = full_cost / 2
+                status, _ = self.analyze(system=system, max_tokens=max_tokens)
+                self.assertEqual(status, 429)
+                self.llm.complete.assert_not_called()
+                self.assertNotIn(self.repo, self.quota._records)
+
+    def test_analyze_records_complete_reported_usage_once(self) -> None:
+        self.llm.complete.return_value = LlmResult(
+            provider="openai", model="gpt-5.4-mini", output="ok",
+            tokens_input=1000, tokens_output=8000, usage_complete=True,
+        )
+        with patch.object(self.quota, "check", wraps=self.quota.check) as check, \
+                patch.object(self.quota, "record", wraps=self.quota.record) as record_usage:
+            status, _ = self.analyze(system="synthetic system", max_tokens=8192,
+                                     source_repository="Synthetic/display-only")
+        self.assertEqual(status, 200)
+        check.assert_called_once_with(self.repo, "gpt-5.4-mini", "synthetic system\nsynthetic review",
+                                      estimated_output_tokens=8192)
+        record_usage.assert_called_once()
+        record = self.quota._records[self.repo]
+        self.assertEqual(record.api_calls, 1)
+        self.assertEqual((record.reported_tokens_input, record.reported_tokens_output), (1000, 8000))
+        self.assertFalse(record.reported_usage_incomplete)
+        self.assertAlmostEqual(record.api_key_cost_usd, estimate_cost("gpt-5.4-mini", 1000, 8000))
+        self.assertNotIn("Synthetic/display-only", self.quota._records)
+
+    def test_analyze_failed_results_retain_partial_or_missing_usage(self) -> None:
+        for tokens_input, tokens_output, complete in ((20, 3, True), (20, None, False), (None, None, False)):
+            with self.subTest(tokens_input=tokens_input, tokens_output=tokens_output, complete=complete):
+                self.quota._records.clear()
+                self.llm.complete.return_value = LlmResult(
+                    provider="openai", model="gpt-5.4-mini", output="", success=False,
+                    error="synthetic parse failure", tokens_input=tokens_input,
+                    tokens_output=tokens_output, usage_complete=complete,
+                )
+                with patch.object(self.quota, "record", wraps=self.quota.record) as record_usage:
+                    status, _ = self.analyze(system="synthetic context")
+                self.assertEqual(status, 502)
+                record_usage.assert_called_once()
+                record = self.quota._records[self.repo]
+                self.assertEqual(record.api_calls, 1)
+                self.assertEqual((record.reported_tokens_input, record.reported_tokens_output),
+                                 (tokens_input, tokens_output))
+                self.assertEqual(record.reported_usage_incomplete, not complete)
+                self.assertGreater(record.api_key_cost_usd, 0)
+
+    def test_analyze_zero_reported_usage_is_not_unknown(self) -> None:
+        self.llm.complete.return_value = LlmResult(
+            provider="openai", model="gpt-5.4-mini", output="",
+            tokens_input=0, tokens_output=0, usage_complete=True,
+        )
+        self.analyze()
+        record = self.quota._records[self.repo]
+        self.assertEqual((record.reported_tokens_input, record.reported_tokens_output), (0, 0))
+        self.assertFalse(record.reported_usage_incomplete)
+        self.assertEqual(record.api_calls, 1)
+        self.assertEqual(record.api_key_cost_usd, 0)
+
+    def test_analyze_records_usage_before_receipt_assembly_failure(self) -> None:
+        self.llm.complete.return_value = LlmResult(
+            provider="openai", model="gpt-5.4-mini", output="ok",
+            tokens_input=12, tokens_output=1, usage_complete=True,
+        )
+        with patch.object(gateway, "build_provenance_receipt", side_effect=ValueError("synthetic receipt failure")), \
+                patch.object(self.quota, "record", wraps=self.quota.record) as record_usage:
+            with self.assertRaisesRegex(ValueError, "synthetic receipt failure"):
+                self.analyze()
+        record_usage.assert_called_once()
+        self.llm.complete.assert_called_once()
+        record = self.quota._records[self.repo]
+        self.assertEqual(record.api_calls, 1)
+        self.assertEqual((record.reported_tokens_input, record.reported_tokens_output), (12, 1))
+
     def _invoke_api(self, endpoint):
         payload = {"prompt": "synthetic review", "model": "gpt-5.4-mini", "source_repository": self.repo}
         claims = {"repository": self.repo}
@@ -132,7 +211,7 @@ class ReviewQuotaTests(TestCase):
         provider_calls = []
         counts = {
             "review": (estimate_tokens(gateway.REVIEW_SYSTEM_PROMPT + "\nsynthetic review"), gateway.DEFAULT_MAX_TOKENS),
-            "analyze": (estimate_tokens("synthetic review"), estimate_tokens("synthetic review") // 2),
+            "analyze": (estimate_tokens("\nsynthetic review"), gateway.DEFAULT_MAX_TOKENS),
         }
         costs = {name: estimate_cost("gpt-5.4-mini", *tokens) for name, tokens in counts.items()}
         self.quota._daily_budget = max(costs[first], costs[second]) + min(costs[first], costs[second]) / 2
