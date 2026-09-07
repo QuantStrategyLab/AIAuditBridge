@@ -1,13 +1,63 @@
 from __future__ import annotations
 
+import subprocess
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import service.ai_gateway_service as gateway
+from service.quota import QuotaManager
 
 
 class AiGatewayExecuteTelemetryTests(unittest.TestCase):
+    def test_exhausted_subscription_rejects_both_execute_routes_before_submission(self) -> None:
+        quota = QuotaManager()
+        account = {"status": "available", "rate_limits": {"primary": {"used_percent": 100}}}
+        for method in ("_handle_execute_async", "_handle_execute_sync"):
+            with (
+                self.subTest(method=method),
+                patch.object(quota, "_codex_account_snapshot", return_value=account),
+                patch.object(gateway, "get_quota_manager", return_value=quota),
+                patch.object(gateway, "_json_response") as response,
+                patch.object(gateway, "_submit_job") as submit,
+                patch.object(gateway, "CodexAdapter") as adapter,
+            ):
+                getattr(gateway.AiGatewayRequestHandler, method)(
+                    object(), {"repository": "Synthetic/caller"}, {"prompt": "synthetic", "mode": "review_only"},
+                )
+                self.assertEqual(response.call_args.args[1], 429)
+                submit.assert_not_called()
+                adapter.assert_not_called()
+                self.assertNotIn("Synthetic/caller", quota._records)
+
+    def test_failed_codex_diagnostics_never_reach_job_or_telemetry(self) -> None:
+        marker = "synthetic-private-diagnostic"
+        failures = [
+            (SimpleNamespace(returncode=1, stdout=marker, stderr="quota exceeded " + marker), None, "quota_or_capacity_failure"),
+            (None, subprocess.TimeoutExpired([marker], 1), "transient_service_failure"),
+            (None, FileNotFoundError(marker), "unknown_failure"),
+        ]
+        for completed, error, category in failures:
+            job = {"job_id": "synthetic", "status": "queued", "task": "execute"}
+            writes = []
+            with (
+                self.subTest(category=category),
+                patch("service.adapters.codex_adapter._codex_command", return_value=["synthetic"]),
+                patch("service.adapters.codex_adapter.subprocess.run", return_value=completed, side_effect=error),
+                patch.dict(gateway.os.environ, {"CODEX_AUDIT_SERVICE_ENV": "production"}),
+                patch.object(gateway, "_read_job", return_value=job),
+                patch.object(gateway, "_write_job", side_effect=lambda payload: writes.append(dict(payload))),
+                patch.object(gateway, "_record_job_automation_run"),
+                patch.object(gateway, "_audit_log"),
+                patch.object(gateway, "get_health_monitor"),
+                patch.object(gateway, "_record_platform_execution_telemetry") as telemetry,
+            ):
+                gateway._run_job("synthetic", {"prompt": "synthetic", "task": "execute"})
+            self.assertEqual(job["status"], "failed")
+            self.assertEqual(job["failure_category"], category)
+            self.assertNotIn(marker, repr(writes))
+            self.assertNotIn(marker, repr(telemetry.call_args))
+
     @patch("service.ai_gateway_service.try_record_platform_execution")
     @patch("service.ai_gateway_service.get_health_monitor")
     @patch("service.ai_gateway_service._record_job_automation_run")

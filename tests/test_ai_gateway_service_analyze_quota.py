@@ -26,6 +26,9 @@ class ReviewQuotaTests(TestCase):
         self.addCleanup(self.stack.close)
         self.stack.enter_context(patch.dict("os.environ", {}, clear=True))
         self.quota = QuotaManager()
+        self.stack.enter_context(patch.object(self.quota, "_codex_account_snapshot", return_value={
+            "status": "available", "rate_limits": {"primary": {"used_percent": 74}},
+        }))
         self.llm = Mock()
         self.llm.parallel_review.return_value = []
         self.codex = Mock()

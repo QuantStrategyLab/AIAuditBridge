@@ -425,8 +425,21 @@ class QuotaManager:
         if codex_account:
             if model != "codex-cli":
                 raise ValueError("codex_account quota checks require model=codex-cli")
+            snapshot = self._codex_account_snapshot()
+            limits = snapshot.get("rate_limits") if isinstance(snapshot, dict) else None
+            windows = [limits.get(key) for key in ("primary", "secondary")] if isinstance(limits, dict) else []
+            windows = [window for window in windows if window is not None]
+            allowed = bool(windows) and snapshot.get("status") == "available"
+            for window in windows:
+                used = window.get("used_percent") if isinstance(window, dict) else None
+                allowed = allowed and (
+                    isinstance(used, (int, float))
+                    and not isinstance(used, bool)
+                    and 0 <= used < 100
+                )
             return {
-                "allowed": True,
+                "allowed": allowed,
+                "reason": "" if allowed else "Codex account quota exhausted or unavailable",
                 "cost_estimate_usd": cost,
                 "remaining_usd": self.remaining_daily(repo),
                 "quota_scope": "codex_account",
