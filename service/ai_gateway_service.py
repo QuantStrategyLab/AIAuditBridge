@@ -1424,8 +1424,10 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         # Quota check
         quota = get_quota_manager()
         resolved_model = _resolve_analyze_model(req.model)
+        quota_prompt = req.system + "\n" + req.prompt
         with quota.api_budget_admission():
-            qr = quota.check(quota_repo, resolved_model, req.prompt)
+            qr = quota.check(quota_repo, resolved_model, quota_prompt,
+                             estimated_output_tokens=req.max_tokens)
             if not qr["allowed"]:
                 _json_response(self, HTTPStatus.TOO_MANY_REQUESTS, {
                     "status": "error",
@@ -1442,6 +1444,10 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 max_tokens=req.max_tokens, timeout=req.timeout_seconds,
             )
             latency = time.time() - started
+            # Record returned usage, including partial failures, before receipt assembly.
+            quota.record(quota_repo, resolved_model, quota_prompt, result.output if result.success else "",
+                         reported_tokens_input=result.tokens_input, reported_tokens_output=result.tokens_output,
+                         reported_usage_complete=result.usage_complete)
             requested_provider, requested_model = resolve_model(resolved_model)
             receipt = build_provenance_receipt(
                 operation="analyze",
@@ -1453,9 +1459,6 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 user=req.prompt,
                 output=result.output,
             ).to_dict()
-
-            # Record quota and health
-            quota.record(quota_repo, resolved_model, req.prompt, result.output if result.success else "")
 
         get_health_monitor().record("/v1/ai/analyze", latency, result.success, result.error if not result.success else "")
 
