@@ -196,6 +196,29 @@ class TestQuotaManager(unittest.TestCase):
         remaining = self.manager.remaining_daily("test/repo")
         self.assertEqual(remaining, DEFAULT_DAILY_BUDGET_USD)
 
+    def test_codex_account_requires_available_unexhausted_percentages(self) -> None:
+        def snapshot(primary, secondary=None):
+            return {"status": "available", "rate_limits": {"primary": primary, "secondary": secondary}}
+
+        cases = [
+            (None, False),
+            (snapshot(None), False),
+            (snapshot({"used_percent": None}), False),
+            (snapshot({"used_percent": float("nan")}), False),
+            (snapshot({"used_percent": -1}), False),
+            (snapshot({"used_percent": True}), False),
+            (snapshot({"used_percent": 101}), False),
+            (snapshot({"used_percent": 100}), False),
+            (snapshot({"used_percent": 20}, {"used_percent": 100}), False),
+            (snapshot({"used_percent": 74}), True),
+            (snapshot({"used_percent": 20}, {"used_percent": 74}), True),
+        ]
+        for account, allowed in cases:
+            with self.subTest(account=account), patch.object(self.manager, "_codex_account_snapshot", return_value=account):
+                result = self.manager.check("test/repo", "codex-cli", codex_account=True)
+                self.assertEqual(result["allowed"], allowed)
+                self.assertEqual(result["quota_scope"], "codex_account")
+
     def test_only_trusted_codex_account_checks_ignore_api_budget(self) -> None:
         self.manager._repo_budgets["test/repo"] = {"daily": 0.05, "weekly": 1.0}
         self.manager._records["test/repo"] = QuotaRecord(
@@ -203,12 +226,12 @@ class TestQuotaManager(unittest.TestCase):
         )
 
         untrusted_result = self.manager.check("test/repo", "codex-cli", "review this pull request")
-        trusted_result = self.manager.check(
-            "test/repo",
-            "codex-cli",
-            "review this pull request",
-            codex_account=True,
-        )
+        with patch.object(self.manager, "_codex_account_snapshot", return_value={
+            "status": "available", "rate_limits": {"primary": {"used_percent": 74}},
+        }):
+            trusted_result = self.manager.check(
+                "test/repo", "codex-cli", "review this pull request", codex_account=True,
+            )
 
         self.assertFalse(untrusted_result["allowed"])
         self.assertTrue(trusted_result["allowed"])

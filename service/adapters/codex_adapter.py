@@ -141,14 +141,17 @@ class CodexAdapter:
                     timeout=timeout,
                     env=_codex_env(),
                 )
-            except subprocess.TimeoutExpired as exc:
-                return CodexResult(success=False, error=f"codex exec timed out after {timeout}s: {exc}")
-            except FileNotFoundError as exc:
-                return CodexResult(success=False, error=f"codex command not found: {exc}")
+            except subprocess.TimeoutExpired:
+                return CodexResult(success=False, error=f"codex exec timed out after {timeout}s")
+            except FileNotFoundError:
+                return CodexResult(success=False, error="codex command not found")
 
             if completed.returncode != 0:
-                detail = (completed.stdout[-4000:] + completed.stderr[-4000:]).strip()
-                return CodexResult(success=False, error=f"codex exec failed (rc={completed.returncode})" + (f":\n{detail}" if detail else ""))
+                detail = (completed.stdout + completed.stderr).lower()
+                category = "quota_or_capacity_failure" if any(
+                    word in detail for word in ("quota", "rate limit", "too many active", "budget")
+                ) else "unknown_failure"
+                return CodexResult(success=False, error=f"codex exec failed [{category}] (rc={completed.returncode})")
 
             if output_last_message.exists() and output_last_message.read_text(encoding="utf-8").strip():
                 return CodexResult(success=True, output=output_last_message.read_text(encoding="utf-8"))
