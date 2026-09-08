@@ -7,13 +7,14 @@ Wants=network-online.target
 Type=oneshot
 User=ubuntu
 Group=ubuntu
-WorkingDirectory=/home/ubuntu/Projects/AIAuditBridge
+WorkingDirectory=@MODEL_CATALOG_CODE_ROOT@
 StateDirectory=codex-audit-bridge
 Environment=MODEL_CATALOG_PATH=/var/lib/codex-audit-bridge/model_catalog.json
-Environment=PYTHONPATH=/home/ubuntu/Projects/AIAuditBridge
+Environment=PYTHONPATH=@MODEL_CATALOG_CODE_ROOT@
+Environment=PYTHONDONTWRITEBYTECODE=1
 # Provider keys are written by deploy_model_catalog_sync.sh from GitHub secrets.
 EnvironmentFile=-/etc/codex-audit-bridge/model-catalog.env
-ExecStart=/usr/bin/python3 /home/ubuntu/Projects/AIAuditBridge/scripts/sync_model_catalog.py --force
+ExecStart=/usr/bin/python3 @MODEL_CATALOG_CODE_ROOT@/scripts/sync_model_catalog.py --force
 Nice=10
 
 [Install]

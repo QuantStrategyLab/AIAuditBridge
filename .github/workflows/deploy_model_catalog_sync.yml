@@ -46,25 +46,11 @@ jobs:
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          AIAUDIT_BRIDGE_ROOT: /home/ubuntu/Projects/AIAuditBridge
+          AIAUDIT_BRIDGE_ROOT: ${{ github.workspace }}
+          MODEL_CATALOG_REVISION: ${{ github.sha }}
         run: |
           set -euo pipefail
           mode="${{ github.event_name == 'workflow_dispatch' && inputs.mode || 'deploy' }}"
-          # Keep the long-lived VPS checkout in sync with this workflow revision,
-          # then run the deploy script from that checkout.
-          mkdir -p "$AIAUDIT_BRIDGE_ROOT"
-          if [[ -d "${AIAUDIT_BRIDGE_ROOT}/.git" ]]; then
-            git -C "$AIAUDIT_BRIDGE_ROOT" fetch origin main --quiet
-            git -C "$AIAUDIT_BRIDGE_ROOT" checkout main --quiet
-            git -C "$AIAUDIT_BRIDGE_ROOT" pull --ff-only origin main --quiet
-          else
-            git clone --depth 1 https://github.com/QuantStrategyLab/AIAuditBridge.git "$AIAUDIT_BRIDGE_ROOT"
-          fi
-          # Prefer the just-checked-out workflow tree for the script itself so
-          # first-time deploys work before main has the new script.
-          script="${GITHUB_WORKSPACE}/ops/codex-audit/scripts/deploy_model_catalog_sync.sh"
-          if [[ ! -f "$script" ]]; then
-            script="${AIAUDIT_BRIDGE_ROOT}/ops/codex-audit/scripts/deploy_model_catalog_sync.sh"
-          fi
-          chmod +x "$script"
-          bash "$script" "$mode"
+          # Install committed code from this exact workflow checkout. The
+          # long-lived developer checkout and its local documents are untouched.
+          bash "$AIAUDIT_BRIDGE_ROOT/ops/codex-audit/scripts/deploy_model_catalog_sync.sh" "$mode"

@@ -40,18 +40,34 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--dry-run", action="store_true", help="Print dispatch actions without sending")
     parser.add_argument("--ai-summary", action="store_true", help="Add an advisory subscription AI summary (requires GitHub OIDC)")
+    parser.add_argument("--summary-only", action="store_true", help="Export only the advisory summary; never dispatch alerts or run dual review")
     parser.add_argument(
         "--dual-review",
         action="store_true",
         help="Run dual-review orchestration for briefing strategies with primary_review metadata",
     )
     args = parser.parse_args(argv)
+    if args.summary_only and (args.dispatch or args.dual_review):
+        parser.error("--summary-only cannot dispatch alerts or run dual review")
 
     report_dir = Path(args.report_dir)
     if not report_dir.is_dir():
+        if args.summary_only:
+            print(json.dumps({"day": args.day, "ai_summary": {
+                "status": "unavailable", "reason": "briefing_input_unavailable", "advisory_only": True,
+            }}))
+            return 3
         print(json.dumps({"ok": False, "error": f"report_dir_not_found: {report_dir}"}))
         return 1
 
+    if args.summary_only:
+        try:
+            result = consume_briefing_dir(report_dir, day=args.day)
+            summary = summarize_briefing(result, dry_run=args.dry_run)
+        except (OSError, ValueError, TypeError, KeyError, OverflowError):
+            summary = {"status": "unavailable", "reason": "briefing_input_unavailable", "advisory_only": True}
+        print(json.dumps({"day": args.day, "ai_summary": summary}, ensure_ascii=False, indent=2))
+        return 0 if summary["status"] in {"available", "dry_run"} else 3
     result = consume_briefing_dir(report_dir, day=args.day)
     payload: dict = result.to_dict()
     if args.dispatch:
