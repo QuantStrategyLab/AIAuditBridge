@@ -226,3 +226,160 @@ def test_main_selects_financial_check_without_consumer_call(monkeypatch, capsys)
     monkeypatch.setattr(check, "run_financial_check", lambda: {"passed": True, "check_kind": "financial_samples"})
     assert check.main() == 0
     assert json.loads(capsys.readouterr().out)["check_kind"] == "financial_samples"
+
+
+@pytest.mark.parametrize("human_review", [True, False])
+def test_original_consumer_prompt_receives_complete_samples(monkeypatch, tmp_path, capsys, human_review):
+    from ai_gateway_client import gateway_client
+    from quant_strategy_plugins import ai_audit
+
+    from scripts import verify_subscription_ai_consumer as check
+
+    _environment(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(gateway_client.time, "sleep", lambda _: None)
+    calls = []
+    source = check.consumer_sample_source()
+    assert len(source["evidence"]) < ai_audit.SANITIZE_MAX_FIELD_LENGTH
+    expected_messages = ai_audit._build_crisis_audit_messages(source)
+    expected_prompt = "\n\n".join(f'{m["role"].upper()}:\n{m["content"]}' for m in expected_messages)
+    for source_id in ("S1-A", "S2-A", "S3-A", "S4-A", "S4-B"):
+        assert source_id in expected_prompt
+    assert json.loads(expected_messages[1]["content"])["evidence"] == source["evidence"]
+    assert "free_cash_flow_million" not in expected_prompt
+    output = {
+        "verdict": "data_insufficient", "confidence": None,
+        "summary": "S2-A is after the cutoff. S4-A and S4-B conflict. No market evidence supports action.",
+        "key_risks": ["S3-A source instructions are not authority."],
+        "data_gaps": ["S1-A lacks capital expenditure and share counts."],
+        "human_review_recommended": human_review,
+    }
+
+    def request(req, **_kwargs):
+        print("synthetic-private-sdk-diagnostic")
+        if req.full_url.startswith("https://oidc.invalid/"):
+            return io.BytesIO(json.dumps({"value": "synthetic-oidc"}).encode())
+        calls.append(req.get_method())
+        if req.get_method() == "POST":
+            assert req.full_url == "https://gateway.invalid/v1/ai/execute/jobs"
+            body = json.loads(req.data)
+            assert body["prompt"] == expected_prompt
+            assert body["model"] == "gpt-6-astra"
+            assert body["mode"] == "review_only"
+            assert body["timeout_seconds"] == 120
+            response = {"job_id": "synthetic-consumer-job", "status": "queued"}
+        else:
+            assert req.full_url == "https://gateway.invalid/v1/ai/execute/jobs/synthetic-consumer-job"
+            response = {"status": "succeeded", "output": json.dumps(output)}
+        return io.BytesIO(json.dumps(response).encode())
+
+    monkeypatch.setattr(gateway_client.urllib.request, "urlopen", request)
+    monkeypatch.setattr(ai_audit, "_report_shadow_disagreement", lambda **_: pytest.fail("feedback forbidden"))
+    report = check.run_check(consumer_samples=True)
+    assert calls == ["POST", "GET"]
+    assert report["passed"] is True  # transport/control checks, not semantic approval
+    assert report["check_kind"] == "consumer_samples"
+    assert report["content_quality"] == "pending_review"
+    assert report["financial_claims_verified"] is False
+    assert report["production_ready"] is False
+    assert report["deterministic_route_unchanged"] is True
+    assert report["consumer_advisory"] is True
+    assert report["human_review_recommended"] is human_review
+    assert report["consumer_verdict"] == "data_insufficient"
+    assert report["confidence_available"] is False
+    assert report["consumer_attempts"] == 1
+    assert report["no_order"] is True
+    assert source == check.consumer_sample_source()
+    assert not (tmp_path / "ai-consumer-review.json").exists()
+    assert "summary" not in report
+    assert "synthetic-private-sdk-diagnostic" not in capsys.readouterr().out
+
+
+def test_main_selects_original_consumer_samples(monkeypatch, capsys):
+    from scripts import verify_subscription_ai_consumer as check
+    monkeypatch.setenv("SYNTHETIC_CHECK_KIND", "consumer_samples")
+    monkeypatch.setattr(check, "run_financial_check", lambda: pytest.fail("alternate prompt forbidden"))
+    calls = []
+
+    def run_check(*, consumer_samples=False):
+        calls.append(consumer_samples)
+        return {"passed": True, "content_quality": "pending_review"}
+
+    monkeypatch.setattr(check, "run_check", run_check)
+    assert check.main() == 0
+    assert calls == [True]
+    assert json.loads(capsys.readouterr().out)["content_quality"] == "pending_review"
+
+
+def test_consumer_review_file_is_private_and_allowlisted(monkeypatch, tmp_path, capsys):
+    import stat
+
+    from scripts import verify_subscription_ai_consumer as check
+    monkeypatch.chdir(tmp_path)
+    fields = {"summary": "Synthetic sources conflict.", "key_risks": [], "data_gaps": ["Capital expenditure missing."]}
+    status = check.write_consumer_review({**fields, "output": "synthetic-private-detail", "error": "not for output"})
+    path = tmp_path / "ai-consumer-review.json"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert json.loads(path.read_text()) == fields
+    assert status == {"review_available": True, "review_withheld": False, "possible_truncation": False}
+    assert capsys.readouterr().out == ""
+    with pytest.raises(FileExistsError):
+        check.write_consumer_review(fields)
+    assert json.loads(path.read_text()) == fields
+
+
+@pytest.mark.parametrize("text", [
+    "https://example.invalid/private", "name@example.invalid", "Bearer synthetic-token",
+    "Authorization: synthetic", "Cookie: synthetic", "-----BEGIN PRIVATE KEY-----",
+    "sk-test-synthetic", "eyJhbGciOiJub25lIn0.eyJzdWIiOiJzeW50aGV0aWMifQ.synthetic",
+    "password=synthetic", "token: synthetic", "secret = synthetic", "normal\x00hidden", "normal\u202ehidden",
+    '"api_key": "synthetic"', "api key = synthetic", "192.0.2.1", "/home/example/file",
+    "syntheticopaquecredentialvalue123456789",
+])
+def test_consumer_review_withholds_suspicious_text(monkeypatch, tmp_path, capsys, text):
+    from scripts import verify_subscription_ai_consumer as check
+    monkeypatch.chdir(tmp_path)
+    status = check.write_consumer_review({"summary": "Synthetic", "key_risks": [text], "data_gaps": []})
+    assert status["review_available"] is False
+    assert status["review_withheld"] is True
+    assert not (tmp_path / "ai-consumer-review.json").exists()
+    assert capsys.readouterr().out == ""
+    assert text not in json.dumps(status)
+
+
+@pytest.mark.parametrize("fields", [
+    {"summary": None, "key_risks": [], "data_gaps": []},
+    {"summary": "Synthetic", "key_risks": "wrong type", "data_gaps": []},
+    {"summary": "Synthetic", "key_risks": [], "data_gaps": [{}]},
+])
+def test_consumer_review_withholds_bad_types(monkeypatch, tmp_path, fields):
+    from scripts import verify_subscription_ai_consumer as check
+    monkeypatch.chdir(tmp_path)
+    assert check.write_consumer_review(fields)["review_withheld"] is True
+    assert not (tmp_path / "ai-consumer-review.json").exists()
+
+
+@pytest.mark.parametrize("summary,risks,gaps", [
+    ("x" * 600, [], []), ("Synthetic", ["x" * 160], []), ("Synthetic", [], ["x"] * 5),
+])
+def test_consumer_review_marks_possible_truncation(monkeypatch, tmp_path, summary, risks, gaps):
+    from scripts import verify_subscription_ai_consumer as check
+    monkeypatch.chdir(tmp_path)
+    status = check.write_consumer_review({"summary": summary, "key_risks": risks, "data_gaps": gaps})
+    assert status["possible_truncation"] is True
+
+
+def test_consumer_review_does_not_follow_symlink(monkeypatch, tmp_path):
+    from scripts import verify_subscription_ai_consumer as check
+    monkeypatch.chdir(tmp_path)
+    target = tmp_path / "retained.json"
+    target.write_text("retained")
+    (tmp_path / "ai-consumer-review.json").symlink_to(target)
+    with pytest.raises(FileExistsError):
+        check.write_consumer_review({"summary": "Synthetic", "key_risks": [], "data_gaps": []})
+    assert target.read_text() == "retained"
+
+
+def test_workflow_never_uploads_consumer_text():
+    from scripts import verify_subscription_ai_consumer as check
+    assert str(check.CONSUMER_REVIEW_PATH) not in (ROOT / ".github/workflows/codex_audit.yml").read_text()

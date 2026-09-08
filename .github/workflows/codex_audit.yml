@@ -16,6 +16,7 @@ on:
         options:
           - consumer
           - financial_samples
+          - consumer_samples
       source_repo:
         description: "Repository that owns the monthly review issue"
         required: true
