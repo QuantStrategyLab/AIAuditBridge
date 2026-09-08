@@ -15,7 +15,7 @@
 
 ## What this repository is
 
-AIAuditBridge is the QuantStrategyLab AI audit automation bridge. It runs Codex VPS/service-backed monthly audit workflows first, with OpenAI/Anthropic API fallback for approved audits and low-risk remediation pull requests.
+AIAuditBridge is the QuantStrategyLab AI audit automation bridge. It runs Codex VPS/service-backed monthly audit workflows. Direct OpenAI/Anthropic audit fallback is disabled because it bypassed authenticated service budgets; API analysis/review remains available through the budgeted service.
 
 It produces research, audit, or orchestration artifacts. It should not submit broker orders or mutate live allocations by itself.
 
@@ -74,23 +74,15 @@ Configure these values in `QuantStrategyLab/AIAuditBridge`:
 - Repository secret `CODEX_AUDIT_SERVICE_URL`, for example `https://codex-audit.example.com`.
   Use a secret because the URL may expose origin infrastructure details.
 - Optional repository variable `CODEX_AUDIT_SERVICE_AUDIENCE`, default `quant-codex-audit`.
-- Required repository variable `CODEX_AUDIT_API_FALLBACK_ALLOWED_SOURCE_REPOSITORIES`,
-  comma or newline separated. Only the listed source repositories may use
-  OpenAI/Anthropic fallback.
-- Optional repository variable `CODEX_AUDIT_API_FALLBACK_ALLOW_FIX`, default `true`.
-  When enabled and `CODEX_AUDIT_MODE=review_and_fix`, OpenAI/Anthropic fallback
-  uses the same service patch contract as the Codex backend and can open
-  remediation PRs instead of posting review-only comments.
-- Optional repository variable `CODEX_AUDIT_API_FALLBACK_PROVIDER_ORDER`, default
-  `openai,anthropic`.
-- Repository variable `OPENAI_MODEL` for OpenAI API fallback.
-- Repository variable `ANTHROPIC_MODEL` for Anthropic API fallback.
+- Legacy `CODEX_AUDIT_API_FALLBACK_*`, direct API keys/model overrides do not
+  enable direct provider calls. Such requests fail before network access;
+  use authenticated service analysis/review for API-backed work.
 - Monthly audits default to `provider=auto` for `monthly_snapshot_audit` and
   `provider=codex` for `long_horizon_signal_shadow`; override with
   `CODEX_AUDIT_PROVIDER` when you need a specific provider. Workflow dispatch
   uses `task_default` to defer provider selection to the task policy.
-- Monthly audits with `CODEX_AUDIT_PROVIDER=auto` fall back to the configured
-  API reviewers when the Codex service hits quota/capacity failures.
+- Monthly audits with `CODEX_AUDIT_PROVIDER=auto` do not make direct paid API
+  calls after Codex quota/capacity failure; the disabled fallback reports failure.
 - Repository variable `CODEX_AUDIT_SERVICE_MODEL` for the VPS Codex service primary
   path; `VPS Codex Service Ops` deploy writes it into the systemd unit.
 - Optional repository variable `CODEX_AUDIT_SERVICE_REASONING_EFFORT` for a
@@ -106,10 +98,6 @@ Configure these values in `QuantStrategyLab/AIAuditBridge`:
   `CODEX_AUDIT_SERVICE_<TASK>_<LOW|MEDIUM|HIGH>_REASONING_EFFORT`,
   `CODEX_AUDIT_SERVICE_<LOW|MEDIUM|HIGH>_COMPLEXITY_REASONING_EFFORT`, and
   `AI_GATEWAY_CODEX_<LOW|MEDIUM|HIGH>_COMPLEXITY_REASONING_EFFORT`.
-- Optional direct API fallback overrides:
-  `CODEX_AUDIT_OPENAI_LOW_COMPLEXITY_MODEL`,
-  `CODEX_AUDIT_ANTHROPIC_MEDIUM_COMPLEXITY_MODEL`, and matching
-  high/medium/low names.
 - Workflow permission `id-token: write` is already set so GitHub Actions can request an OIDC token for the service.
 
 Run the service host with:
@@ -139,7 +127,11 @@ apply only to API-key and legacy-unclassified usage. The dashboard's Codex
 amount is a nominal estimate for observability and never blocks Codex CLI;
 the authenticated Codex execution handlers, rather than a caller-supplied
 model name, select the Codex-account quota scope. Codex CLI is governed by the
-authenticated account's own rate limits.
+authenticated account's own rate limits. Existing unreadable/corrupt API quota
+stores block new API admissions and are preserved for recovery; they are not
+reset to an empty ledger. Configured model prices apply to both estimates and
+accounting, with daily and weekly limits checked together. These are
+single-process estimated-cost controls, not a provider invoice or monthly cap.
 Set `OPENAI_ADMIN_KEY` to an OpenAI Admin API key to add a sanitized
 GPT/OpenAI completions Usage snapshot to `/v1/ai/quota`. Optional
 `CODEX_AUDIT_SERVICE_OPENAI_ADMIN_API_KEY_IDS` can limit that snapshot to

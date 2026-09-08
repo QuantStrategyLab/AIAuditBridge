@@ -9,6 +9,7 @@ Consumed by:
 
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import os
@@ -132,7 +133,7 @@ def _http_error_detail(exc: urllib.error.HTTPError, provider: str) -> tuple[str,
         payload = json.loads(body)
     except ValueError:
         payload = None
-    return _scrub_api_keys(body[:500]), _reported_usage(payload, provider)
+    return "provider_request_failed", _reported_usage(payload, provider)
 
 
 def _retry_with_backoff(fn, *, max_retries: int = DEFAULT_MAX_RETRIES, base_seconds: float = DEFAULT_BACKOFF_BASE):
@@ -225,8 +226,8 @@ def _openai_completion(
         except urllib.error.HTTPError as exc:
             detail, usage = _http_error_detail(exc, PROVIDER_OPENAI)
             raise LlmAdapterError(f"OpenAI HTTP {exc.code}: {detail}", **usage) from exc
-        except (urllib.error.URLError, OSError, ValueError) as exc:
-            raise LlmAdapterError(f"OpenAI network error: {exc}") from exc
+        except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError) as exc:
+            raise LlmAdapterError("OpenAI network_or_response_error") from exc
 
         usage = _reported_usage(payload, PROVIDER_OPENAI)
         choices = payload.get("choices")
@@ -295,8 +296,8 @@ def _anthropic_completion(
         except urllib.error.HTTPError as exc:
             detail, usage = _http_error_detail(exc, PROVIDER_ANTHROPIC)
             raise LlmAdapterError(f"Anthropic HTTP {exc.code}: {detail}", **usage) from exc
-        except (urllib.error.URLError, OSError, ValueError) as exc:
-            raise LlmAdapterError(f"Anthropic network error: {exc}") from exc
+        except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError) as exc:
+            raise LlmAdapterError("Anthropic network_or_response_error") from exc
 
         usage = _reported_usage(payload, PROVIDER_ANTHROPIC)
         content = payload.get("content")
@@ -375,7 +376,7 @@ class LlmAdapter:
                 model=resolved_model,
                 output="",
                 success=False,
-                error=str(exc),
+                error="provider_request_failed",
                 tokens_input=exc.tokens_input,
                 tokens_output=exc.tokens_output,
                 usage_complete=exc.usage_complete,
@@ -406,7 +407,7 @@ class LlmAdapter:
             for f in concurrent.futures.as_completed(futures):
                 try:
                     results.append(f.result())
-                except Exception as exc:
+                except Exception:
                     _label, model = futures[f]
                     results.append(
                         LlmResult(
@@ -414,7 +415,7 @@ class LlmAdapter:
                             model=resolve_model(model)[1],
                             output="",
                             success=False,
-                            error=str(exc),
+                            error="provider_request_failed",
                         )
                     )
         return results

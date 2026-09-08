@@ -1146,18 +1146,9 @@ def apply_service_changes(repo_dir: Path, changes: list[dict[str, str]], *, task
         raise BridgeError(f"Service patch includes blocked paths: {denied_list}")
 
     repo_root = repo_dir.resolve()
-    if task == "long_horizon_signal_shadow":
-        # Validate every target before writing any part of a mixed patch.
-        for rel_path in validated_paths:
-            _shadow_signal_target(repo_root, rel_path)
-    for change, rel_path in zip(changes, validated_paths, strict=True):
-        target = _shadow_signal_target(repo_root, rel_path) if task == "long_horizon_signal_shadow" else (repo_root / rel_path).resolve()
-        try:
-            target.relative_to(repo_root)
-        except ValueError as exc:
-            raise BridgeError(f"Service patch path escapes the repository: {rel_path!r}") from exc
-        if target.exists() and target.is_dir():
-            raise BridgeError(f"Service patch cannot replace a directory: {rel_path!r}")
+    # Preflight the entire patch before the first write, for every task.
+    targets = [_service_change_target(repo_root, path) for path in validated_paths]
+    for change, target in zip(changes, targets, strict=True):
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(change["content"], encoding="utf-8")
     return validated_paths
@@ -1376,68 +1367,11 @@ def sanitize_fallback_error(error: object) -> str:
 
 
 def request_openai_completion(*, system: str, user: str) -> str:
-    api_key = env_value("OPENAI_API_KEY")
-    if not api_key:
-        raise BridgeError("OPENAI_API_KEY is required for OpenAI API review")
-    model = env_value("OPENAI_MODEL", "gpt-5.4-mini")
-    base_url = env_value("OPENAI_API_BASE_URL", "https://api.openai.com/v1").rstrip("/")
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-    }
-    request = urllib.request.Request(
-        f"{base_url}/chat/completions",
-        data=json.dumps(payload).encode("utf-8"),
-        method="POST",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "User-Agent": "codex-audit-bridge-openai",
-        },
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=120) as response:
-            body = response.read().decode("utf-8")
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise BridgeError(summarize_api_http_error("OpenAI", exc.code, detail)) from exc
-    return extract_openai_text(json.loads(body))
+    raise BridgeError("Direct API audit is disabled; use the authenticated budgeted service")
 
 
 def request_anthropic_completion(*, system: str, user: str) -> str:
-    api_key = env_value("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise BridgeError("ANTHROPIC_API_KEY is required for CODEX_AUDIT_PROVIDER=anthropic or API fallback")
-    model = env_value("ANTHROPIC_MODEL", "claude-sonnet-4-6")
-    base_url = env_value("ANTHROPIC_API_BASE_URL", "https://api.anthropic.com/v1").rstrip("/")
-    api_version = env_value("ANTHROPIC_VERSION", "2023-06-01")
-    payload = {
-        "model": model,
-        "max_tokens": int(env_value("ANTHROPIC_MAX_TOKENS", "4000")),
-        "system": system,
-        "messages": [{"role": "user", "content": user}],
-    }
-    request = urllib.request.Request(
-        f"{base_url}/messages",
-        data=json.dumps(payload).encode("utf-8"),
-        method="POST",
-        headers={
-            "x-api-key": api_key,
-            "anthropic-version": api_version,
-            "Content-Type": "application/json",
-            "User-Agent": "codex-audit-bridge-anthropic",
-        },
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=120) as response:
-            body = response.read().decode("utf-8")
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise BridgeError(summarize_api_http_error("Anthropic", exc.code, detail)) from exc
-    return extract_anthropic_text(json.loads(body))
+    raise BridgeError("Direct API audit is disabled; use the authenticated budgeted service")
 
 
 def run_openai_review(source_repo: str, source_ref: str, issue: dict[str, Any], comments: list[dict[str, Any]]) -> str:
@@ -1721,7 +1655,7 @@ def publish_remediation(
         for path in paths:
             if path not in denied:
                 try:
-                    _shadow_signal_target(workspace.repo_dir.resolve(), path)
+                    _service_change_target(workspace.repo_dir.resolve(), path)
                 except BridgeError:
                     denied.append(path)
     if denied:
@@ -2547,21 +2481,21 @@ def long_horizon_signal_data_path_allowed(path: str) -> bool:
     )
 
 
-def _shadow_signal_target(repo_root: Path, path: str) -> Path:
+def _service_change_target(repo_root: Path, path: str) -> Path:
     """Validate an artifact target without following symlinks, including in-root ones."""
     relative = PurePosixPath(path)
     try:
         for index in range(1, len(relative.parts) + 1):
             component = repo_root.joinpath(*relative.parts[:index])
             if component.is_symlink():
-                raise BridgeError(f"Shadow artifact path contains a symlink: {path!r}")
+                raise BridgeError(f"Service patch path contains a symlink: {path!r}")
             if index < len(relative.parts) and component.exists() and not component.is_dir():
-                raise BridgeError(f"Shadow artifact parent is not a directory: {path!r}")
+                raise BridgeError(f"Service patch parent is not a directory: {path!r}")
         target = (repo_root / path).resolve()
         if not target.is_relative_to(repo_root) or (target.exists() and not target.is_file()):
-            raise BridgeError(f"Shadow artifact target is not an in-root file: {path!r}")
+            raise BridgeError(f"Service patch target is not an in-root file: {path!r}")
     except (OSError, RuntimeError, ValueError) as exc:
-        raise BridgeError(f"Cannot validate shadow artifact target: {path!r}") from exc
+        raise BridgeError(f"Cannot validate service patch target: {path!r}") from exc
     return target
 
 

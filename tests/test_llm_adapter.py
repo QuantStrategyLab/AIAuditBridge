@@ -66,7 +66,7 @@ class LlmAdapterFailureTests(unittest.TestCase):
 
         self.assertFalse(result.success)
         self.assertEqual(result.output, "")
-        self.assertEqual(result.error, "provider unavailable")
+        self.assertEqual(result.error, "provider_request_failed")
 
     def test_parallel_review_returns_empty_output_on_worker_failure(self) -> None:
         with patch.object(LlmAdapter, "complete", side_effect=RuntimeError("worker failed")):
@@ -78,7 +78,7 @@ class LlmAdapterFailureTests(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertFalse(results[0].success)
         self.assertEqual(results[0].output, "")
-        self.assertEqual(results[0].error, "worker failed")
+        self.assertEqual(results[0].error, "provider_request_failed")
 
 
 class LlmAdapterUsageTests(unittest.TestCase):
