@@ -56,6 +56,46 @@ class ReviewQuotaTests(TestCase):
         gateway.AiGatewayRequestHandler._handle_review(object(), claims if claims is not None else {"repository": self.repo}, payload)
         return self.response.call_args.args[1:]
 
+    def test_weekly_budget_limits_combined_review_cost(self):
+        # Each reviewer fits separately; their total exceeds the weekly window.
+        self.quota._weekly_budget = 0.003
+        status, _ = self.review(reviewers=["gpt", "claude"])
+        self.assertEqual(status, 429)
+        self.llm.parallel_review.assert_not_called()
+
+    def test_corrupt_store_blocks_analyze_and_review_before_provider(self):
+        self.quota._store_available = False
+        self.assertEqual(self.analyze()[0], 429)
+        self.assertEqual(self.review()[0], 429)
+        self.llm.complete.assert_not_called()
+        self.llm.parallel_review.assert_not_called()
+
+    def test_loaded_invalid_usage_blocks_handlers_before_provider(self):
+        import json
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Path(tmp) / "quota.json"
+            store.write_text(json.dumps({"records": {self.repo: {"reported_tokens_input": "invalid"}}}))
+            with patch.dict("os.environ", {"CODEX_AUDIT_SERVICE_QUOTA_STORE": str(store)}):
+                quota = QuotaManager()
+            with patch.object(gateway, "get_quota_manager", return_value=quota):
+                self.assertEqual(self.analyze()[0], 429)
+                self.assertEqual(self.review()[0], 429)
+        self.llm.complete.assert_not_called()
+        self.llm.parallel_review.assert_not_called()
+
+    def test_nonfinite_windows_block_both_handlers(self):
+        for name in ("_daily_budget", "_weekly_budget"):
+            for value in (float("nan"), float("inf")):
+                with self.subTest(window=name, value=value):
+                    with patch.object(self.quota, name, value):
+                        self.assertEqual(self.analyze()[0], 429)
+                        self.assertEqual(self.review()[0], 429)
+        self.llm.complete.assert_not_called()
+        self.llm.parallel_review.assert_not_called()
+
     def test_exhausted_budget_blocks_all_review_providers(self) -> None:
         self.quota._daily_budget = 0
         status, _ = self.review(verifier="codex")

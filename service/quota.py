@@ -2,7 +2,7 @@
 
 Prevents a single repo or workflow from exhausting the shared API-key budget.
 Tracks API-key consumption, keeps separate nominal Codex CLI usage for the
-dashboard, enforces API-key daily limits, and supports model tier escalation.
+dashboard, enforces API-key daily/weekly limits, and supports model tier escalation.
 
 Configuration via environment::
 
@@ -27,6 +27,7 @@ Example quota.json::
 from __future__ import annotations
 
 import json
+import math
 import os
 import threading
 import time
@@ -195,13 +196,14 @@ def estimate_tokens(prompt: str) -> int:
     return max(1, len(prompt) // 4)
 
 
-def estimate_cost(model: str, tokens_input: int, tokens_output: int = 0) -> float:
+def estimate_cost(model: str, tokens_input: int, tokens_output: int | None = None, *,
+                  model_costs: dict[str, dict[str, float]] | None = None) -> float:
     """Estimate USD cost for a model call."""
-    costs = DEFAULT_MODEL_COSTS.get(model, {})
+    costs = (DEFAULT_MODEL_COSTS if model_costs is None else model_costs).get(model, {})
     if "flat" in costs:
         return costs["flat"]
     input_cost = costs.get("input", 0.001) * tokens_input / 1000
-    output_cost = costs.get("output", 0.005) * (tokens_output or tokens_input // 2) / 1000
+    output_cost = costs.get("output", 0.005) * (tokens_input // 2 if tokens_output is None else tokens_output) / 1000
     return input_cost + output_cost
 
 
@@ -226,6 +228,7 @@ class QuotaManager:
 
     def __init__(self):
         self._records: dict[str, QuotaRecord] = {}
+        self._store_available = True
         self._lock = threading.RLock()
         self._api_admission_lock = threading.Lock()
         self._model_costs = dict(DEFAULT_MODEL_COSTS)
@@ -284,22 +287,32 @@ class QuotaManager:
         path = self._store_path()
         if path is None:
             return
-        if not path.exists():
-            return
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return
-        records = raw.get("records") if isinstance(raw, dict) else None
-        if not isinstance(records, dict):
-            return
-        self._records = {
-            repo: QuotaRecord.from_dict(item)
-            for repo, item in records.items()
-            if isinstance(repo, str) and isinstance(item, dict)
-        }
+            records = raw.get("records") if isinstance(raw, dict) else None
+            if not isinstance(records, dict) or any(
+                not isinstance(repo, str) or not isinstance(item, dict)
+                for repo, item in records.items()
+            ):
+                raise ValueError("Invalid quota records")
+            loaded = {repo: QuotaRecord.from_dict(item) for repo, item in records.items()}
+            for record in loaded.values():
+                for count in (record.reported_tokens_input, record.reported_tokens_output):
+                    if count is not None and (type(count) is not int or count < 0):
+                        raise ValueError("Invalid reported quota count")
+                for value in vars(record).values():
+                    if isinstance(value, (int, float)) and (not math.isfinite(value) or value < 0):
+                        raise ValueError("Invalid quota value")
+            self._records = loaded
+        except FileNotFoundError:
+            return  # A genuinely new store has no prior usage.
+        except (OSError, ValueError, TypeError, OverflowError):
+            self._store_available = False
+
 
     def _save_records_locked(self) -> None:
+        if not self._store_available:
+            return  # Preserve the unreadable store, including during Codex accounting.
         path = self._store_path()
         if path is None:
             return
@@ -364,6 +377,8 @@ class QuotaManager:
         return record.weekly_api_key_cost_usd + record.weekly_legacy_unknown_cost_usd
 
     def remaining_daily(self, repo: str) -> float:
+        if not self._store_available:
+            return 0.0
         with self._lock:
             record = self._records.get(repo)
             if not record:
@@ -372,6 +387,8 @@ class QuotaManager:
             return max(0, self.get_daily_budget(repo) - self._api_budget_cost(record))
 
     def remaining_weekly(self, repo: str) -> float:
+        if not self._store_available:
+            return 0.0
         with self._lock:
             record = self._records.get(repo)
             if not record:
@@ -421,7 +438,7 @@ class QuotaManager:
         only that internal signal may bypass the API-key budget.
         """
         tokens_input = estimate_tokens(prompt)
-        cost = estimate_cost(model, tokens_input, estimated_output_tokens)
+        cost = estimate_cost(model, tokens_input, estimated_output_tokens, model_costs=self._model_costs)
         if codex_account:
             if model != "codex-cli":
                 raise ValueError("codex_account quota checks require model=codex-cli")
@@ -444,13 +461,24 @@ class QuotaManager:
                 "remaining_usd": self.remaining_daily(repo),
                 "quota_scope": "codex_account",
             }
-        remaining = self.remaining_daily(repo)
+        if not self._store_available:
+            return {"allowed": False, "reason": "API quota store unavailable",
+                    "remaining_usd": 0.0, "cost_estimate_usd": cost}
+        budgets = (self.get_daily_budget(repo), self.get_weekly_budget(repo))
+        if not all(type(value) in (int, float) and math.isfinite(value) and value >= 0 for value in budgets):
+            return {"allowed": False, "reason": "API budget configuration unavailable",
+                    "remaining_usd": 0.0, "cost_estimate_usd": cost}
+        daily, weekly = self.remaining_daily(repo), self.remaining_weekly(repo)
+        remaining = min(daily, weekly)
+        if not math.isfinite(cost) or cost < 0:
+            return {"allowed": False, "reason": "API cost estimate unavailable",
+                    "remaining_usd": remaining, "cost_estimate_usd": None}
 
-        if remaining < cost:
+        if remaining <= 0 or remaining < cost:
             recommended = recommend_model(remaining)
             return {
                 "allowed": False,
-                "reason": f"Daily budget exceeded: ${remaining:.4f} remaining, ${cost:.4f} needed",
+                "reason": f"{'Daily' if daily <= weekly else 'Weekly'} budget exceeded: ${remaining:.4f} remaining, ${cost:.4f} needed",
                 "recommended_model": recommended,
                 "remaining_usd": remaining,
                 "cost_estimate_usd": cost,
@@ -481,7 +509,7 @@ class QuotaManager:
         if reported_usage_complete is not None:
             tokens_input = reported_tokens_input if complete else max(tokens_input, reported_tokens_input or 0)
             tokens_output = reported_tokens_output if complete else max(tokens_output, reported_tokens_output or 0)
-        cost = estimate_cost(model, tokens_input, tokens_output)
+        cost = estimate_cost(model, tokens_input, tokens_output, model_costs=self._model_costs)
 
         with self._lock:
             if repo not in self._records:

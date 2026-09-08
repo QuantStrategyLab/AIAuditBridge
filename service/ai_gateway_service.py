@@ -1581,7 +1581,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         reviewer_tuples = [(label, resolve_model(model)[1]) for label, model in reviewer_tuples]
         quota_prompt = REVIEW_SYSTEM_PROMPT + "\n" + req.prompt
         with quota.api_budget_admission():
-            remaining = quota.remaining_daily(quota_repo)
+            remaining = min(quota.remaining_daily(quota_repo), quota.remaining_weekly(quota_repo))
             model_estimates = []
             total_estimate = 0.0
             allowed = math.isfinite(remaining) and remaining > 0
