@@ -14,10 +14,13 @@ def test_manual_check_is_separate_from_monthly_audit() -> None:
     text = (ROOT / ".github/workflows/codex_audit.yml").read_text()
     assert "synthetic_sdk_check:" in text
     assert "'codex-audit-synthetic-sdk'" in text
-    assert "cancel-in-progress: ${{ inputs.synthetic_sdk_check != true }}" in text
-    check = text.split("  synthetic-sdk-check:", 1)[1]
+    cancellation = next(line for line in text.splitlines() if "cancel-in-progress:" in line)
+    for guard in ("inputs.synthetic_sdk_check != true", "inputs.daily_summary != true", "github.event_name != 'schedule'"):
+        assert guard in cancellation
+    check = text.split("  synthetic-sdk-check:", 1)[1].split("\n  daily-summary:", 1)[0]
     assert "github.event_name == 'workflow_dispatch'" in check
     assert "inputs.synthetic_sdk_check == true" in check
+    assert "inputs.daily_summary != true" in check
     assert "github.ref == 'refs/heads/main'" in check
     assert "python scripts/verify_subscription_ai_consumer.py" in check
     assert "permission-contents: write" not in check
