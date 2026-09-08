@@ -83,7 +83,7 @@ class SyncStrategyReposTests(unittest.TestCase):
         )
         return result.stdout.strip()
 
-    def _local_mirrors(self, root: Path) -> tuple[Path, Path, str]:
+    def _local_mirrors(self, root: Path, *, depth: int | None = None) -> tuple[Path, Path, str]:
         upstream = root / "upstream"
         upstream.mkdir()
         self._git(upstream, "init", "--initial-branch=main")
@@ -97,10 +97,21 @@ class SyncStrategyReposTests(unittest.TestCase):
         (upstream / "README.md").write_text("original\n")
         self._git(upstream, "add", ".")
         self._git(upstream, "commit", "-m", "base")
+        if depth is not None:
+            # Real file:// transport honors depth; local-path clone ignores it.
+            # Keep enough history for both depth=1 and depth=2 to be shallow.
+            for version in (1, 2):
+                (upstream / "history.txt").write_text(str(version))
+                self._git(upstream, "add", "history.txt")
+                self._git(upstream, "commit", "-m", f"history {version}")
         mirrors = root / "mirrors"
         mirrors.mkdir()
         for repo in ("QuantPlatformKit", "CnEquityStrategies", "HkEquityStrategies", "UsEquityStrategies", "CryptoStrategies"):
-            self._git(root, "clone", str(upstream), str(mirrors / repo))
+            if depth is None:
+                self._git(root, "clone", str(upstream), str(mirrors / repo))
+            else:
+                self._git(root, "clone", "--depth", str(depth), upstream.as_uri(), str(mirrors / repo))
+                self._git(mirrors / repo, "checkout", "--detach", "HEAD")
         (metadata / "PKG-INFO").write_text("new metadata\n")
         (metadata / "SOURCES.txt").write_text("new sources\n")
         (upstream / "module.py").write_text("VERSION = 2\n")
@@ -138,6 +149,63 @@ class SyncStrategyReposTests(unittest.TestCase):
             self.assertNotEqual(blocked.returncode, 0)
             self.assertEqual((qpk / relative).read_text(), "unexpected repeated dirty metadata\n")
             self.assertEqual((backup / relative).read_text(), "generated installation metadata\n")
+
+    def test_shallow_detached_dirty_mirror_fetches_the_frozen_target_before_swap(self) -> None:
+        for depth in (1, 2):
+            with self.subTest(depth=depth), tempfile.TemporaryDirectory() as tmp:
+                mirrors, _, latest = self._local_mirrors(Path(tmp), depth=depth)
+                qpk = mirrors / "QuantPlatformKit"
+                self.assertEqual(self._git(qpk, "rev-parse", "--is-shallow-repository"), "true")
+                self.assertEqual(self._git(qpk, "rev-parse", "--abbrev-ref", "HEAD"), "HEAD")
+                before = self._git(qpk, "rev-parse", "HEAD")
+                metadata = qpk / "src/quant_platform_kit.egg-info"
+                for name in ("PKG-INFO", "SOURCES.txt"):
+                    (metadata / name).write_text(f"generated {name}\n")
+                (qpk / "private-local-state").write_text("preserve me\n")
+                result = self._sync(mirrors)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self._git(qpk, "rev-parse", "HEAD"), latest)
+                self.assertEqual(self._git(qpk, "status", "--porcelain"), "")
+                backup = mirrors / "QuantPlatformKit.preserved-before-metadata-refresh"
+                self.assertEqual(self._git(backup, "rev-parse", "HEAD"), before)
+                for name in ("PKG-INFO", "SOURCES.txt"):
+                    self.assertEqual((backup / "src/quant_platform_kit.egg-info" / name).read_text(), f"generated {name}\n")
+                self.assertEqual((backup / "private-local-state").read_text(), "preserve me\n")
+                self.assertEqual(list(mirrors.glob(".QuantPlatformKit.refresh.*")), [])
+                self.assertFalse((mirrors / ".sync-strategy-repos.lock").exists())
+                self.assertIn("[sync] CryptoStrategies ok", result.stdout)
+
+    def test_shallow_target_fetch_failure_preserves_original_and_releases_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mirrors, _, _ = self._local_mirrors(root, depth=1)
+            qpk = mirrors / "QuantPlatformKit"
+            metadata = qpk / "src/quant_platform_kit.egg-info/PKG-INFO"
+            metadata.write_text("generated metadata\n")
+            (qpk / "private-local-state").write_text("preserve me\n")
+            before = self._git(qpk, "rev-parse", "HEAD")
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            stub = bin_dir / "git"
+            stub.write_text(
+                "#!/usr/bin/env python3\nimport os,sys\nfrom pathlib import Path\n"
+                "args=sys.argv[1:]\n"
+                "if len(args)>2 and args[0]=='-C' and Path(args[1]).name.startswith('.QuantPlatformKit.refresh.') and args[2]=='fetch':\n"
+                "    print('synthetic target fetch failure',file=sys.stderr)\n"
+                "    raise SystemExit(1)\n"
+                f"os.execv({shutil.which('git')!r}, ['git', *args])\n"
+            )
+            stub.chmod(0o755)
+            result = self._sync(mirrors, {"PATH": f"{bin_dir}:{os.environ['PATH']}"})
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("synthetic target fetch failure", result.stderr)
+            self.assertEqual(self._git(qpk, "rev-parse", "HEAD"), before)
+            self.assertEqual(metadata.read_text(), "generated metadata\n")
+            self.assertEqual((qpk / "private-local-state").read_text(), "preserve me\n")
+            self.assertFalse((mirrors / "QuantPlatformKit.preserved-before-metadata-refresh").exists())
+            self.assertEqual(list(mirrors.glob(".QuantPlatformKit.refresh.*")), [])
+            self.assertFalse((mirrors / ".sync-strategy-repos.lock").exists())
+            self.assertIn("[sync] CryptoStrategies ok", result.stdout)
 
     def test_unknown_source_edits_are_not_carried_into_updated_mirror(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
