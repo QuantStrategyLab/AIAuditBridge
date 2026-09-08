@@ -94,7 +94,6 @@ jobs:
           GH_TOKEN: ${{ steps.source_app_token.outputs.token }}
           CODEX_AUDIT_SERVICE_URL: ${{ secrets.CODEX_AUDIT_SERVICE_URL }}
           CODEX_AUDIT_SERVICE_AUDIENCE: ${{ vars.CODEX_AUDIT_SERVICE_AUDIENCE || 'quant-codex-audit' }}
-          DEFAULT_ANALYZE_MODEL: ${{ vars.RESEARCH_DIAGNOSIS_MODEL || 'gpt-5.4-mini' }}
           READINESS_INPUT: ${{ steps.readiness.outputs.input }}
         run: |
           set -euo pipefail

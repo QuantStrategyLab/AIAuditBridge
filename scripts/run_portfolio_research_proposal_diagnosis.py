@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import subprocess
 import sys
 from collections.abc import Callable, Mapping
@@ -182,41 +183,50 @@ def run_portfolio_research_proposal_diagnosis(
         return summary
     client = client_factory(config)
     try:
-        ai_result = client.analyze(
+        ai_result = client.execute(
             prompt,
-            system="You provide bounded, read-only portfolio research proposal diagnosis only.",
-            max_tokens=1_600,
-            timeout=120,
+            mode="review_only",
+            research_stage="drift_analysis",
+            timeout=300,
             source_repository=repository,
         )
-    except Exception as exc:  # noqa: BLE001 - gateway failures must stay non-operative
+    except Exception:  # noqa: BLE001 - gateway failures must stay non-operative
         summary["status"] = "unavailable"
-        summary["reason"] = "ai_gateway_unavailable"
-        summary["error"] = _error_summary(exc)
+        summary["reason"] = "codex_unavailable"
         return summary
-    # Content availability is separate from decision authority; never change success.
+    # SDK execute performs capability preflight and completion route validation.
+    # Neither expected admission deferral nor failed execution has an API fallback.
     output = ai_result.output
     raw = getattr(ai_result, "raw", None)
-    note = getattr(ai_result, "note", "")
-    status = raw.get("status", "ok") if isinstance(raw, dict) else "ok"
-    policy = raw.get("policy_verdict", status) if isinstance(raw, dict) else status
-    advisory = (ai_result.success is False and note == "advisory"
-                and status == "advisory" and policy == "advisory" and isinstance(raw, dict))
-    ok = (ai_result.success is True and note == ""
-          and status == "ok" and policy in ("ok", "eligible"))
+    if ai_result.provider == "codex" and ai_result.success is False:
+        if isinstance(raw, dict) and raw.get("status") == "deferred":
+            retry_at = raw.get("retry_at")
+            if type(retry_at) not in (int, float) or not math.isfinite(retry_at) or retry_at <= 0:
+                retry_at = None
+            summary.update(status="deferred", reason="codex_research_deferred", retry_at=retry_at)
+            return summary
+        if ai_result.error == "codex_research_routing_unavailable":
+            summary.update(status="deferred", reason="codex_research_routing_unavailable", retry_at=None)
+            return summary
     content_available = (
-        isinstance(output, str) and bool(output.strip())
-        and not ai_result.error and (raw is None or isinstance(raw, dict))
-        and (not isinstance(raw, dict) or raw.get("output", output) == output)
-        and (ok or advisory)
+        ai_result.provider == "codex" and ai_result.success is True
+        and isinstance(output, str) and bool(output.strip())
+        and not ai_result.error and not getattr(ai_result, "note", "")
+        and isinstance(raw, dict) and raw.get("status") == "succeeded"
+        and raw.get("output") == output
+        and raw.get("research_stage") == "drift_analysis"
+        and isinstance(ai_result.model, str) and bool(ai_result.model.strip())
+        and raw.get("model") == ai_result.model
+        and raw.get("reasoning_effort") in ("low", "medium", "high", "xhigh")
+        and raw.get("policy_verdict", "advisory") in ("ok", "eligible", "advisory")
     )
     if not content_available:
         summary["status"] = "unavailable"
-        summary["reason"] = "ai_gateway_unavailable"
-        summary["error"] = _error_summary(ai_result.error)
+        summary["reason"] = "codex_result_unavailable"
         return summary
-    if advisory:
-        output = "advisory：仅供研究讨论，不证明执行、晋级或授权。\n\n" + output
+    # A succeeded Codex job only supplies text. Its completion is not verification
+    # of a portfolio hypothesis, readiness upgrade, or permission for P1--P6.
+    output = "advisory：仅供研究讨论，不证明执行、晋级或授权。\n\n" + output
     try:
         body = format_portfolio_research_proposal_comment(
             request, output, provider=ai_result.provider, model=ai_result.model
@@ -234,6 +244,10 @@ def run_portfolio_research_proposal_diagnosis(
             "repository": repository,
             "issue_url": issue_url,
             "comment_url": comment_url,
+            "research_stage": raw["research_stage"],
+            "model": ai_result.model,
+            "reasoning_effort": raw["reasoning_effort"],
+            "advisory_only": True,
         }
     )
     return summary
