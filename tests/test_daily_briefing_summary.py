@@ -97,6 +97,90 @@ def test_summary_requires_source_repository_before_submit(report):
     execute.assert_not_called()
 
 
+def test_summary_only_real_sdk_exports_whitelist_without_repeating_alerts(report, capsys):
+    path, payload = report
+    payload["strategies"][0].update(strategy_profile="private-profile", error="private-marker")
+    (path / "us_equity.json").write_text(json.dumps(payload))
+    route = {"provider": "codex", "research_stage": "research_summary", "model": "gpt-5.6-luna",
+             "reasoning_effort": "low", "job_id": "daily-summary-job"}
+    replies = [Response({"value": "synthetic-oidc"}), Response({"codex_research_routing": "v1"}),
+               Response({**route, "status": "queued"}), Response({"value": "synthetic-oidc"}),
+               Response({**route, "status": "succeeded", "output": "Synthetic advisory only."})]
+    with patch("client.gateway_client.urllib.request.urlopen", side_effect=replies) as http, patch(
+        "client.gateway_client.time.sleep",
+    ), patch("scripts.consume_daily_briefing.dispatch_briefing_result") as dispatch, patch(
+        "scripts.consume_daily_briefing.orchestrate_from_payload",
+    ) as optimize:
+        assert main(["--report-dir", str(path), "--day", "2026-09-09", "--summary-only"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert set(result) == {"day", "ai_summary"}
+    assert result["ai_summary"]["status"] == "available"
+    assert "private-" not in json.dumps(result) and str(path) not in json.dumps(result)
+    assert result["ai_summary"]["input"]["reports"][0]["strategy_counts"]["critical"] == 1
+    assert http.call_count == 5
+    dispatch.assert_not_called()
+    optimize.assert_not_called()
+
+
+@pytest.mark.parametrize("flag", ["--dispatch", "--dual-review"])
+def test_summary_only_rejects_action_flags_before_any_call(report, flag):
+    with patch("scripts.consume_daily_briefing.summarize_briefing") as summarize, pytest.raises(SystemExit) as exc:
+        main(["--report-dir", str(report[0]), "--summary-only", flag])
+    assert exc.value.code == 2
+    summarize.assert_not_called()
+
+
+def test_summary_only_missing_report_is_sanitized_unavailable(tmp_path, capsys):
+    with patch("client.gateway_client.AiGatewayClient.execute") as execute:
+        assert main(["--report-dir", str(tmp_path / "private-directory"), "--summary-only"]) == 3
+    result = json.loads(capsys.readouterr().out)
+    assert result == {"day": "", "ai_summary": {
+        "status": "unavailable", "reason": "briefing_input_unavailable", "advisory_only": True,
+    }}
+    execute.assert_not_called()
+
+
+def test_summary_only_malformed_rule_fields_do_not_expose_source_errors(report, capsys):
+    path, payload = report
+    payload.update(strategies=[], summary={"critical": "private-marker"})
+    (path / "us_equity.json").write_text(json.dumps(payload))
+    with patch("client.gateway_client.AiGatewayClient.execute") as execute:
+        assert main(["--report-dir", str(path), "--summary-only"]) == 3
+    output = capsys.readouterr()
+    assert json.loads(output.out)["ai_summary"]["reason"] == "briefing_input_unavailable"
+    assert "private-marker" not in output.out + output.err
+    execute.assert_not_called()
+
+
+def test_summary_only_dry_run_is_zero_auth_and_missing_oidc_never_calls(report, capsys):
+    with patch.dict(os.environ, {}, clear=True), patch("client.gateway_client.urllib.request.urlopen") as http:
+        assert main(["--report-dir", str(report[0]), "--summary-only", "--dry-run"]) == 0
+        assert json.loads(capsys.readouterr().out)["ai_summary"]["status"] == "dry_run"
+        assert main(["--report-dir", str(report[0]), "--summary-only"]) == 3
+        assert json.loads(capsys.readouterr().out)["ai_summary"]["reason"] == "github_oidc_required"
+    http.assert_not_called()
+
+
+def test_daily_job_uses_existing_oidc_workflow_and_only_exports_summary():
+    workflow = Path(__file__).resolve().parents[1] / ".github/workflows/codex_audit.yml"
+    text = workflow.read_text()
+    job = text.split("\n  daily-summary:\n", 1)[1]
+    assert "runs-on:\n      - self-hosted\n      - codex-vps" in job
+    assert "permissions:\n      contents: read\n      id-token: write" in job
+    assert "vars.AI_DAILY_SUMMARY_ENABLED == 'true'" in job
+    assert "github.ref == 'refs/heads/main'" in job
+    assert "inputs.daily_summary == true" in job
+    monthly_job = text.split("\n  codex-audit:\n", 1)[1].split("\n  synthetic-sdk-check:", 1)[0]
+    assert "github.event_name != 'schedule'" in monthly_job and "inputs.daily_summary != true" in monthly_job
+    assert "--summary-only" in job
+    assert "--dispatch" not in job and "--dual-review" not in job
+    assert "daily_briefing_builder" not in job and "health_check" not in job
+    assert "CODEX_AUDIT_SERVICE_TOKEN" not in job and "API_KEY" not in job
+    assert "ACTIONS_ID_TOKEN_REQUEST_TOKEN" not in job
+    assert "uses: actions/upload-artifact@v7" in job and "if: always()" in job
+    assert "path: daily-ai-summary.json" in job
+
+
 @pytest.mark.parametrize("kind", ["old_service", "quota", "failed", "wrong_route", "wrong_job"])
 def test_real_sdk_unavailable_or_deferred_does_not_fallback_or_leak(report, kind):
     path, _ = report

@@ -4,8 +4,10 @@
 set -euo pipefail
 
 MODE="${1:-deploy}"
-AAB_ROOT="${AIAUDIT_BRIDGE_ROOT:-/home/ubuntu/Projects/AIAuditBridge}"
+AAB_ROOT="${AIAUDIT_BRIDGE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
 UNIT_SRC="${AAB_ROOT}/ops/codex-audit/systemd"
+RELEASE_ROOT="${MODEL_CATALOG_RELEASE_ROOT:-/opt/codex-model-catalog/releases}"
+SYNC_CODE_ROOT=""
 ENV_FILE="/etc/codex-audit-bridge/model-catalog.env"
 CATALOG_PATH="/var/lib/codex-audit-bridge/model_catalog.json"
 
@@ -16,26 +18,63 @@ require_sudo() {
   fi
 }
 
-pull_bridge() {
-  mkdir -p "$(dirname "$AAB_ROOT")"
-  if [[ -d "${AAB_ROOT}/.git" ]]; then
-    git -C "$AAB_ROOT" fetch origin main --quiet
-    git -C "$AAB_ROOT" checkout main --quiet
-    git -C "$AAB_ROOT" pull --ff-only origin main --quiet
-  else
-    git clone --depth 1 https://github.com/QuantStrategyLab/AIAuditBridge.git "$AAB_ROOT"
+stage_bridge_release() (
+  # Archive committed inputs, never checkout/reset a developer's long-lived tree.
+  set -euo pipefail
+  local revision="${MODEL_CATALOG_REVISION:-${GITHUB_SHA:-}}"
+  if [[ ! "$revision" =~ ^[0-9a-f]{40}$ ]] || [[ "$(git -C "$AAB_ROOT" rev-parse HEAD)" != "$revision" ]]; then
+    echo "model catalog deployment requires the exact checkout revision" >&2
+    return 1
   fi
-  echo "bridge_head=$(git -C "$AAB_ROOT" rev-parse --short HEAD)"
+  if [[ ! "$RELEASE_ROOT" =~ ^/[A-Za-z0-9_./-]+$ ]] || [[ -L "$RELEASE_ROOT" ]]; then
+    echo "invalid model catalog release directory" >&2
+    return 1
+  fi
+  local release="$RELEASE_ROOT/$revision" archive_dir staged=""
+  archive_dir="$(mktemp -d)"
+  trap 'rm -rf "$archive_dir"; if [[ -n "$staged" ]]; then sudo rm -rf "$staged"; fi' EXIT
+  git -C "$AAB_ROOT" archive "$revision" service scripts/sync_model_catalog.py generated/model_catalog.json ops/codex-audit/systemd | tar -x -C "$archive_dir"
+  chmod -R a+rX "$archive_dir"
+  if [[ -e "$release" || -L "$release" ]]; then
+    if [[ -L "$release" || ! -d "$release" ]] || ! diff -qr "$archive_dir" "$release" >/dev/null; then
+      echo "existing model catalog release differs; refusing overwrite" >&2
+      return 1
+    fi
+  else
+    if [[ ! -d "$RELEASE_ROOT" ]]; then
+      sudo install -d -m 0755 "$RELEASE_ROOT"
+    fi
+    staged="$(sudo mktemp -d "$RELEASE_ROOT/.stage.XXXXXX")"
+    sudo cp -R "$archive_dir/." "$staged/"
+    sudo chmod -R a+rX "$staged"
+    sudo mv "$staged" "$release"
+    staged=""
+  fi
+  echo "bridge_head=$revision"
+)
+
+select_release() {
+  local revision="${MODEL_CATALOG_REVISION:-${GITHUB_SHA:-}}"
+  stage_bridge_release
+  SYNC_CODE_ROOT="$RELEASE_ROOT/$revision"
+  UNIT_SRC="$SYNC_CODE_ROOT/ops/codex-audit/systemd"
 }
 
 write_env_file() {
+  # The existing root-owned credentials and directory permissions are preserved.
+  if sudo test -f "$ENV_FILE"; then
+    echo "existing model catalog environment preserved"
+    return
+  fi
   local openai="${OPENAI_API_KEY:-}"
   local anthropic="${ANTHROPIC_API_KEY:-}"
   if [[ -z "$openai" && -z "$anthropic" ]]; then
     echo "OPENAI_API_KEY or ANTHROPIC_API_KEY required for live catalog sync" >&2
     exit 1
   fi
-  sudo mkdir -p /etc/codex-audit-bridge
+  if ! sudo test -d "$(dirname "$ENV_FILE")"; then
+    sudo install -d -m 0700 "$(dirname "$ENV_FILE")"
+  fi
   local tmp
   tmp="$(mktemp)"
   umask 077
@@ -53,7 +92,11 @@ write_env_file() {
 }
 
 install_units() {
-  sudo cp "${UNIT_SRC}/model-catalog-sync.service.example" /etc/systemd/system/model-catalog-sync.service
+  local unit_file
+  unit_file="$(mktemp)"
+  sed "s|@MODEL_CATALOG_CODE_ROOT@|$SYNC_CODE_ROOT|g" "${UNIT_SRC}/model-catalog-sync.service.example" > "$unit_file"
+  sudo install -m 0644 "$unit_file" /etc/systemd/system/model-catalog-sync.service
+  rm -f "$unit_file"
   sudo cp "${UNIT_SRC}/model-catalog-sync.timer.example" /etc/systemd/system/model-catalog-sync.timer
   sudo systemctl daemon-reload
   sudo systemctl enable model-catalog-sync.timer
@@ -71,8 +114,6 @@ run_sync_now() {
   systemctl is-failed model-catalog-sync.service >/dev/null 2>&1 && rc=1 || true
   if [[ "$rc" -ne 0 ]]; then
     echo "model-catalog-sync.service failed" >&2
-    systemctl status model-catalog-sync.service --no-pager --lines=40 >&2 || true
-    journalctl -u model-catalog-sync.service -n 80 --no-pager >&2 || true
     exit 1
   fi
   if [[ ! -f "$CATALOG_PATH" ]]; then
@@ -154,12 +195,17 @@ PY
 
 deploy() {
   require_sudo
-  pull_bridge
+  select_release
   write_env_file
   install_units
   run_sync_now
   echo "deploy complete"
 }
+
+# Functions may be sourced by offline deployment fixtures without side effects.
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+  return
+fi
 
 case "$MODE" in
   inspect)

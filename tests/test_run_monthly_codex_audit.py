@@ -2524,7 +2524,8 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertIn("CODEX_AUDIT_CODEX_BACKEND: service", workflow)
         self.assertIn("CODEX_AUDIT_SERVICE_URL: ${{ secrets.CODEX_AUDIT_SERVICE_URL }}", workflow)
         self.assertNotIn("codex_backend:", workflow)
-        self.assertNotIn("self-hosted", workflow)
+        monthly_job = workflow.split("\n  codex-audit:\n", 1)[1].split("\n  synthetic-sdk-check:", 1)[0]
+        self.assertNotIn("self-hosted", monthly_job)
         self.assertNotIn("vars.CODEX_AUDIT_SERVICE_URL", workflow)
         self.assertIn("actions/checkout@v6.0.3", workflow)
         self.assertIn("actions/create-github-app-token@v3.2.0", workflow)
