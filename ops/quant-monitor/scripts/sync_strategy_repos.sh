@@ -40,6 +40,7 @@ replace_metadata_dirty_mirror() (
   target=$(git -C "$dir" rev-parse origin/main) || return 1
   origin=$(git -C "$dir" remote get-url origin) || return 1
   git clone --no-hardlinks --no-checkout --quiet "$dir" "$replacement" || return 1
+  git -C "$replacement" fetch --quiet --no-tags "$dir" "$target" || return 1
   git -C "$replacement" remote set-url origin "$origin" || return 1
   git -C "$replacement" checkout --detach --quiet "$target" || return 1
   git -C "$replacement" update-ref refs/remotes/origin/main "$target" || return 1
