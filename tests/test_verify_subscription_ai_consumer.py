@@ -62,7 +62,10 @@ def test_unapproved_environment_stops_before_consumer(monkeypatch, key, value) -
 @pytest.mark.parametrize("output,expected", [
     ({"verdict": "data_insufficient", "confidence": 0.2, "summary": "Synthetic data has no market evidence."}, True),
     ({}, False),
-    ({"verdict": "agree", "confidence": "nan", "summary": "Synthetic"}, False),
+    ({"verdict": "data_insufficient", "confidence": "low", "summary": "Synthetic"}, True),
+    ({"verdict": "data_insufficient", "confidence": None, "summary": "Synthetic"}, True),
+    ({"verdict": "agree", "confidence": "nan", "summary": "Synthetic"}, True),
+    ({"verdict": "agree", "confidence": "inf", "summary": "Synthetic"}, True),
 ])
 def test_installed_consumer_uses_one_codex_job(monkeypatch, output, expected) -> None:
     from ai_gateway_client import gateway_client
@@ -96,6 +99,8 @@ def test_installed_consumer_uses_one_codex_job(monkeypatch, output, expected) ->
     monkeypatch.setattr(ai_audit, "_report_shadow_disagreement", lambda **_: pytest.fail("feedback forbidden"))
     report = check.run_check()
     assert report["passed"] is expected
+    assert report["confidence_available"] is isinstance(output.get("confidence"), (int, float))
+    assert report["financial_claims_verified"] is False
     assert report["learning_only"] is True
     assert report["live_ready"] is False
     assert report["no_order"] is True

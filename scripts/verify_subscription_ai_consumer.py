@@ -60,13 +60,17 @@ def run_check() -> dict[str, object]:
     )
     controls = result.get("execution_controls", {})
     confidence = result.get("confidence")
-    structured = (
-        result.get("verdict") in {"agree", "review", "data_insufficient"}
-        and bool(result.get("summary"))
-        and isinstance(confidence, (int, float))
+    confidence_available = (
+        isinstance(confidence, (int, float))
         and not isinstance(confidence, bool)
         and math.isfinite(confidence)
         and 0 <= confidence <= 1
+    )
+    # The consumer preserves unavailable confidence as None, not financial evidence.
+    structured = (
+        result.get("verdict") in {"agree", "review", "data_insufficient"}
+        and bool(result.get("summary"))
+        and (confidence is None or confidence_available)
     )
     unchanged = (
         source == original
@@ -85,6 +89,8 @@ def run_check() -> dict[str, object]:
         "passed": bool(structured and unchanged and advisory and len(attempts) == 1),
         "synthetic_input": True,
         "structured_result": structured,
+        "confidence_available": confidence_available,
+        "financial_claims_verified": False,
         "consumer_advisory": advisory,
         "deterministic_route_unchanged": unchanged,
         "consumer_attempts": len(attempts),
