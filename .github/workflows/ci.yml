@@ -48,7 +48,7 @@ jobs:
           python3 -m pip install 'quant-strategy-plugins[ai] @ git+https://github.com/QuantStrategyLab/QuantStrategyPlugins.git@6b76d512c8273deb804c0770a203558284778399'
           python3 -m pip check
           python3 -m ruff check .
-          python3 -m pytest tests ops/quant-monitor/tests -q
+          python3 -m pytest tests ops/quant-monitor/tests -q --ignore=tests/test_run_cn_index_etf_research.py
 
       - uses: actions/setup-node@v6
         with:
@@ -59,3 +59,30 @@ jobs:
           set -euo pipefail
           node --experimental-default-type=module --test cloudflare/codex-audit-proxy/tests/index.test.mjs
           node --experimental-default-type=module --test cloudflare/ai-gateway-dash/tests/index.test.mjs
+
+      - name: Install the isolated CN research dependency set
+        run: |
+          set -euo pipefail
+          python3 -m venv "${RUNNER_TEMP}/aab-cn-research"
+          "${RUNNER_TEMP}/aab-cn-research/bin/python" -m pip install pytest 'cn-equity-strategies[research] @ git+https://github.com/QuantStrategyLab/CnEquityStrategies.git@2a0c5c9aafacfbe6519fb4029ca4ac18e4996a66'
+          "${RUNNER_TEMP}/aab-cn-research/bin/python" -m pip check
+      - name: Verify the real CN caller without network or model execution
+        env:
+          TZ: UTC
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          "${RUNNER_TEMP}/aab-cn-research/bin/python" - <<'PY'
+          import socket
+          import pytest
+
+          def blocked(*args, **kwargs):
+              raise AssertionError("real socket prohibited")
+
+          socket.socket.connect = blocked
+          socket.create_connection = blocked
+          raise SystemExit(pytest.main([
+              "-q", "-p", "no:cacheprovider", "--tb=short",
+              "tests/test_run_cn_index_etf_research.py",
+          ]))
+          PY
