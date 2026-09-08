@@ -238,6 +238,7 @@ class QuotaManager:
         self._codex_account_cache: dict[str, Any] | None = None
         self._codex_account_cache_ts = 0.0
         self._codex_account_attempt_ts = 0.0
+        self._codex_research_attempt_ts = 0.0
         self._codex_account_lock = threading.Lock()
         self._openai_account_cache: dict[str, Any] | None = None
         self._openai_account_cache_ts = 0.0
@@ -551,7 +552,7 @@ class QuotaManager:
             self._records[repo] = record
             self._save_records_locked()
 
-    def _codex_account_snapshot(self, timeout_seconds: float | None = None) -> dict[str, Any] | None:
+    def _codex_account_snapshot(self, timeout_seconds: float | None = None, *, require_models: bool = False) -> dict[str, Any] | None:
         with self._codex_account_lock:
             try:
                 ttl = max(15, int(os.environ.get("CODEX_AUDIT_SERVICE_CODEX_ACCOUNT_CACHE_SECONDS", "120")))
@@ -559,12 +560,17 @@ class QuotaManager:
                 ttl = 120
             failure_ttl = min(ttl, 60)
             now = time.time()
-            if self._codex_account_cache and now - self._codex_account_cache_ts < ttl:
+            fresh = now - self._codex_account_cache_ts < (min(ttl, 180) if require_models else ttl)
+            complete = not require_models or isinstance((self._codex_account_cache or {}).get("available_models"), list)
+            if self._codex_account_cache and fresh and complete:
                 return self._codex_account_cache
-            if now - self._codex_account_attempt_ts < failure_ttl:
+            # A short dashboard request may have timed out before model/list.
+            # Allow one bounded research refresh, with its own failure cooldown.
+            attempt_key = "_codex_research_attempt_ts" if require_models else "_codex_account_attempt_ts"
+            if now - getattr(self, attempt_key, 0) < failure_ttl:
                 return None
-            self._codex_account_attempt_ts = now
-            snapshot = read_codex_rate_limits(timeout_seconds=timeout_seconds)
+            setattr(self, attempt_key, now)
+            snapshot = read_codex_rate_limits(timeout_seconds=timeout_seconds, include_models=True)
             if snapshot:
                 self._codex_account_cache = snapshot
                 self._codex_account_cache_ts = now

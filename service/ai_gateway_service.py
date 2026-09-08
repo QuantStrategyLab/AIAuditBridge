@@ -47,6 +47,7 @@ from service.contracts import (
 )
 from service.adapters.llm_adapter import DEFAULT_MAX_TOKENS, LlmAdapter, resolve_model
 from service.adapters.codex_adapter import CodexAdapter
+from service.model_resolver import resolve_codex_research_route
 from service.ai_provenance import (
     build_provenance_receipt,
     fail_closed_review_action,
@@ -263,6 +264,29 @@ def _resolve_codex_reasoning_effort(payload: dict[str, Any], task: str) -> str:
         TASK_COMPLEXITY_MEDIUM: "medium",
         TASK_COMPLEXITY_HIGH: "high",
     }[complexity]
+
+
+def _admit_codex_execute(quota: Any, repo: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Choose a Codex research route before consuming quota or starting a job."""
+    if "research_stage" in payload:
+        requested_complexity = _normalize_complexity(str(payload.get("complexity") or ""))
+        estimated = _estimate_codex_complexity(payload)
+        levels = ["low", "medium", "high"]
+        complexity = max((requested_complexity or "low", estimated), key=levels.index)
+        route = resolve_codex_research_route(
+            stage=str(payload.get("research_stage") or ""),
+            account=quota._codex_account_snapshot(require_models=True), now=time.time(), complexity=complexity,
+            requested_model=str(payload.get("model") or os.environ.get("CODEX_AUDIT_SERVICE_MODEL", "")).strip(),
+            requested_effort=str(payload.get("reasoning_effort") or os.environ.get("CODEX_AUDIT_SERVICE_REASONING_EFFORT", "")).strip(),
+        )
+        if route["action"] != "run":
+            return {"status": "deferred", "error": route["reason"], "retry_at": route["retry_at"]}
+        payload.update(model=route["model"], reasoning_effort=route["reasoning_effort"])
+        return None
+    result = quota.check(repo, "codex-cli", str(payload.get("prompt") or ""), codex_account=True)
+    if not result["allowed"]:
+        return {"status": "error", "error": result["reason"], "remaining_usd": result.get("remaining_usd", 0)}
+    return None
 
 
 # ── rate limiter (sliding window) ──────────────────────────────────────
@@ -553,6 +577,8 @@ def _public_job_payload(job: dict[str, Any]) -> dict[str, object]:
         "task": str(job.get("task") or ""),
         "task_state": job_task_state(job),
     }
+    if job.get("research_stage"):
+        payload.update({key: str(job.get(key) or "") for key in ("research_stage", "model", "reasoning_effort")})
     if job.get("status") == "succeeded":
         payload["output"] = str(job.get("output") or "")
     if job.get("status") == "failed":
@@ -1053,6 +1079,8 @@ def _job_dedupe_key(
         str(payload.get("mode") or MODE_REVIEW_ONLY),
         issue_number or prompt_hash,
     ]
+    if payload.get("research_stage"):
+        parts.extend(str(payload.get(key) or "") for key in ("research_stage", "model", "reasoning_effort"))
     return hashlib.sha256(json.dumps(parts, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
@@ -1229,6 +1257,8 @@ def _submit_job(claims: dict[str, Any], payload: dict[str, Any]) -> dict[str, ob
             "timeout_seconds": int(payload.get("timeout_seconds", 2700)),
             "dedupe_key": dedupe_key,
         }
+        if payload.get("research_stage"):
+            job.update({key: payload[key] for key in ("research_stage", "model", "reasoning_effort")})
         _write_job(job)
         _record_job_automation_run(job)
         _audit_log("job_submitted", job_id=job_id, repository=job["repository"],
@@ -1262,6 +1292,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             _json_response(self, HTTPStatus.OK, {
                 "status": health.status,
                 "uptime_seconds": health.uptime_seconds,
+                "codex_research_routing": "v1",
             })
             return
         if request_path == "/v1/ai/health":
@@ -1487,7 +1518,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
     def _handle_execute_async(self, claims: dict[str, Any], payload: dict[str, Any]) -> None:
         """POST /v1/ai/execute/jobs — async Codex execution."""
         started = time.time()
-        req = parse_execute_request(payload)
+        parse_execute_request(payload)
 
         # Security: validate source_repository against allowlist
         source_repo = str(payload.get("source_repository") or "")
@@ -1498,12 +1529,9 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
 
         # Quota check
         quota = get_quota_manager()
-        qr = quota.check(quota_repo, "codex-cli", req.prompt, codex_account=True)
-        if not qr["allowed"]:
-            _json_response(self, HTTPStatus.TOO_MANY_REQUESTS, {
-                "status": "error", "error": qr["reason"],
-                "remaining_usd": qr.get("remaining_usd", 0),
-            })
+        denial = _admit_codex_execute(quota, quota_repo, payload)
+        if denial:
+            _json_response(self, HTTPStatus.TOO_MANY_REQUESTS, denial)
             return
         quota.record_execute(quota_repo)
 
@@ -1522,12 +1550,9 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             _validate_source_repo_org(claims, source_repo)
         quota_repo = source_repo or str(claims.get("repository") or "unknown")
         quota = get_quota_manager()
-        qr = quota.check(quota_repo, "codex-cli", req.prompt, codex_account=True)
-        if not qr["allowed"]:
-            _json_response(self, HTTPStatus.TOO_MANY_REQUESTS, {
-                "status": "error", "error": qr["reason"],
-                "remaining_usd": qr.get("remaining_usd", 0),
-            })
+        denial = _admit_codex_execute(quota, quota_repo, payload)
+        if denial:
+            _json_response(self, HTTPStatus.TOO_MANY_REQUESTS, denial)
             return
         quota.record_execute(quota_repo)
         adapter = CodexAdapter()
@@ -1536,7 +1561,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         result = adapter.execute(
             prompt=req.prompt,
             sandbox=sandbox,
-            model=req.model or None,
+            model=str(payload.get("model") or "") or None,
             reasoning_effort=reasoning_effort,
             timeout=req.timeout_seconds,
         )

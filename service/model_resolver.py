@@ -226,3 +226,77 @@ __all__ = [
     "tier_for_budget",
     "tier_for_task",
 ]
+
+
+# Research routes use the execution host's Codex roster, never the API catalog.
+# These are deployment defaults, not a claim that every account has the models.
+_CODEX_RESEARCH_LEVELS = {"research_summary": 0, "drift_analysis": 1, "optimization": 2, "promotion_review": 3}
+_CODEX_RESEARCH_MODELS = ("gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-6-astra")
+_CODEX_RESEARCH_EFFORTS = ("low", "medium", "high", "xhigh")
+
+
+def resolve_codex_research_route(
+    *, stage: str, account: dict | None, now: float,
+    complexity: str = "low", requested_model: str = "", requested_effort: str = "",
+) -> dict:
+    """Choose a supported Codex route, then admit it above the quota reserve.
+
+    Complexity can raise the stage floor. Explicit selections are retained or
+    rejected, never silently replaced. Defer is a scheduling result, not a
+    failed experiment and never permission for API fallback.
+    """
+    import math
+
+    result = {"action": "defer", "provider": "codex", "reason": "research_route_unavailable", "retry_at": None}
+    if stage not in _CODEX_RESEARCH_LEVELS or complexity not in {"low", "medium", "high"}:
+        return result
+    level = max(_CODEX_RESEARCH_LEVELS[stage], {"low": 0, "medium": 1, "high": 2}[complexity])
+    model = requested_model if requested_model not in {"", "auto"} else _CODEX_RESEARCH_MODELS[level]
+    effort = requested_effort if requested_effort not in {"", "auto"} else _CODEX_RESEARCH_EFFORTS[level]
+    result.update(model=model, reasoning_effort=effort, research_stage=stage)
+    model_levels = {**dict(zip(_CODEX_RESEARCH_MODELS, range(4))),
+        "gpt-5.5": 2, "gpt-5.4-mini": 0, "gpt-5.3-codex-spark": 0}
+    if model not in model_levels:
+        return {**result, "reason": "codex_model_quota_mapping_unavailable"}
+    if model_levels[model] < level:
+        return {**result, "reason": "research_model_below_floor"}
+    if effort not in _CODEX_RESEARCH_EFFORTS or _CODEX_RESEARCH_EFFORTS.index(effort) < level:
+        return {**result, "reason": "research_effort_below_floor_or_unsupported"}
+    if not isinstance(account, dict) or account.get("status") != "available":
+        return {**result, "reason": "codex_account_unavailable"}
+    updated = account.get("updated_at")
+    if type(updated) not in (int, float) or not math.isfinite(updated) or not 0 <= now - updated <= 180:
+        return {**result, "reason": "codex_account_stale"}
+    models = account.get("available_models")
+    selected = next((item for item in models if isinstance(item, dict) and item.get("model") == model), None) if isinstance(models, list) else None
+    supported = selected.get("supported_reasoning_efforts") if selected else None
+    if not isinstance(supported, list) or effort not in supported:
+        return {**result, "reason": "codex_model_or_effort_unavailable"}
+
+    # Separate buckets cannot be added together. Unknown model families need
+    # an explicit bucket mapping before this research policy can admit them.
+    if model == "gpt-5.3-codex-spark":
+        by_id = account.get("rate_limits_by_limit_id")
+        limits = by_id.get("codex_bengalfox") if isinstance(by_id, dict) else None
+    else:
+        limits = account.get("rate_limits")
+    windows = [limits.get(key) for key in ("primary", "secondary") if limits.get(key) is not None] if isinstance(limits, dict) else []
+    if not windows:
+        return {**result, "reason": "codex_quota_unavailable"}
+    retry_at = []
+    for window in windows:
+        if not isinstance(window, dict):
+            return {**result, "reason": "codex_quota_invalid"}
+        used, duration, reset = (window.get(key) for key in ("used_percent", "window_duration_mins", "resets_at"))
+        if (type(used) not in (int, float) or not math.isfinite(used) or not 0 <= used <= 100
+                or type(duration) is not int or duration <= 0
+                or type(reset) not in (int, float) or not math.isfinite(reset) or reset <= now):
+            return {**result, "reason": "codex_quota_invalid_or_expired"}
+        # Keep 30% of the weekly account for the owner. New heavy research
+        # starts only above 50%; short windows retain 20% headroom.
+        reserve = (50 if stage == "optimization" else 30) if duration >= 10080 else 20
+        if 100 - used <= reserve:
+            retry_at.append(reset)
+    if retry_at:
+        return {**result, "reason": "codex_quota_reserved", "retry_at": max(retry_at)}
+    return {**result, "action": "run", "reason": "codex_research_admitted"}

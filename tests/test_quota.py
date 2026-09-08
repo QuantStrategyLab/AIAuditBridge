@@ -327,7 +327,7 @@ class TestQuotaManager(unittest.TestCase):
         self.assertEqual(read_snapshot.call_count, 1)
 
     def test_account_snapshot_reads_use_shared_status_timeout(self) -> None:
-        def slow_snapshot(timeout_seconds: float | None = None) -> dict[str, object]:
+        def slow_snapshot(timeout_seconds: float | None = None, **_kwargs) -> dict[str, object]:
             time.sleep(timeout_seconds or 0.25)
             return {"source": "slow", "status": "available"}
 

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import io
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.error
 from unittest.mock import patch
 
 from client.config import GatewayConfig
@@ -27,6 +29,44 @@ class _FakeResponse:
 
 
 class GatewayClientProvenanceTests(unittest.TestCase):
+    def test_research_deferral_preserves_retry_without_polling_or_breaker_failure(self) -> None:
+        client = AiGatewayClient(GatewayConfig(service_url="https://gateway.invalid"))
+        error = urllib.error.HTTPError("https://gateway.invalid", 429, "deferred", {}, io.BytesIO(json.dumps({
+            "status": "deferred", "error": "codex_quota_reserved", "retry_at": 9000,
+            "private": "must-not-propagate",
+        }).encode()))
+        with patch("client.gateway_client._fetch_oidc_token", return_value="test-token"), patch(
+            "client.gateway_client.urllib.request.urlopen", side_effect=[_FakeResponse({"codex_research_routing": "v1"}), error]
+        ) as http:
+            result = client.execute("synthetic", research_stage="optimization", reasoning_effort="high")
+        self.assertFalse(result.success)
+        self.assertEqual(result.raw["status"], "deferred")
+        self.assertEqual(result.raw["retry_at"], 9000)
+        self.assertNotIn("must-not-propagate", repr(result))
+        self.assertEqual(client._breaker.failures, 0)
+        self.assertEqual(http.call_count, 2)
+        payload = json.loads(http.call_args.args[0].data)
+        self.assertEqual(payload["research_stage"], "optimization")
+        self.assertEqual(payload["reasoning_effort"], "high")
+
+    def test_research_refuses_old_service_before_submitting_and_checks_completion_route(self):
+        cases = [
+            [_FakeResponse({"status": "ok"})],
+            [_FakeResponse({"codex_research_routing": "v1"}), _FakeResponse({"job_id": "synthetic"}),
+             _FakeResponse({"status": "succeeded", "output": "old response"})],
+        ]
+        for replies in cases:
+            client = AiGatewayClient(GatewayConfig(service_url="https://gateway.invalid"))
+            with self.subTest(replies=len(replies)), patch("client.gateway_client._fetch_oidc_token", return_value="synthetic"), patch(
+                "client.gateway_client.urllib.request.urlopen", side_effect=replies
+            ) as http, patch("client.gateway_client.time.sleep"):
+                result = client.execute("synthetic", research_stage="optimization")
+            self.assertFalse(result.success)
+            self.assertEqual(result.output, "")
+            self.assertEqual(http.call_count, len(replies))
+            if len(replies) == 1:
+                self.assertEqual(http.call_args.args[0].get_method(), "GET")
+
     def test_installed_sdk_exports_consumer_api_without_source_checkout(self) -> None:
         script = """
 import sys

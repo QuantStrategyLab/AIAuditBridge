@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Bootstrap VPS runtime: venv + QuantPlatformKit editable install.
+# Bootstrap VPS runtime without writing build metadata into source mirrors.
 set -euo pipefail
 
 ROOT="${QUANT_MONITOR_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
@@ -15,9 +15,12 @@ if [[ ! -d "$QPK_ROOT/.git" ]]; then
   git clone --depth 1 https://github.com/QuantStrategyLab/QuantPlatformKit.git "$QPK_ROOT"
 fi
 
-git -C "$QPK_ROOT" fetch origin main --quiet || true
-git -C "$QPK_ROOT" checkout main --quiet || true
-git -C "$QPK_ROOT" pull --ff-only origin main --quiet || true
+git -C "$QPK_ROOT" fetch origin main --quiet
+if [[ -n "$(git -C "$QPK_ROOT" status --porcelain --untracked-files=no)" ]]; then
+  echo "[setup] QPK tracked changes require mirror synchronization/review" >&2
+  exit 1
+fi
+git -C "$QPK_ROOT" checkout --detach --quiet origin/main
 
 if [[ ! -d "$AAB_ROOT/.git" ]]; then
   echo "[setup] AIAuditBridge missing at $AAB_ROOT" >&2
@@ -29,8 +32,13 @@ git -C "$AAB_ROOT" pull --ff-only origin main --quiet || true
 
 python3 -m venv "$VENV"
 "$VENV/bin/pip" install -U pip wheel
-"$VENV/bin/pip" install -e "$QPK_ROOT"
-# Ensure lifecycle runtime deps (editable install may skip heavy wheels on minimal VPS).
+# setuptools writes egg-info even for local non-editable installs. Build from a
+# temporary archive; common_env still imports the synchronized mirror via PYTHONPATH.
+build_root=$(mktemp -d "${TMPDIR:-/tmp}/quant-monitor-qpk.XXXXXX")
+trap 'rm -rf -- "$build_root"' EXIT
+git -C "$QPK_ROOT" archive HEAD | tar -x -C "$build_root"
+"$VENV/bin/pip" install "$build_root"
+# Ensure lifecycle runtime deps on minimal VPS.
 "$VENV/bin/pip" install numpy pandas google-cloud-storage
 
 if ! command -v gh >/dev/null 2>&1; then

@@ -92,3 +92,21 @@ bash scripts/publish_strategy_health.sh
 
 发布脚本只接受 `strategy_health_dashboard.v1`，不回退使用其他 token，也不把 token
 或原始错误写入输出。
+
+
+### 专用镜像更新与安装元数据（2026-09-08 修复）
+
+`setup_vps_runtime.sh` 现在把 QPK 的 Git archive 放到临时目录安装；运行源码仍由
+`common_env.sh` 的 `PYTHONPATH` 指向专用镜像。构建生成的 egg-info 不再写回镜像。
+
+同步只允许自动处理已确认由旧 editable 安装改写的两个**未暂存**已跟踪文件：
+`src/quant_platform_kit.egg-info/PKG-INFO` 和 `SOURCES.txt`。先完成干净替代镜像，
+再把整个旧目录（包括未跟踪文件）移动为
+`QuantPlatformKit.preserved-before-metadata-refresh`，最后放入新镜像；安装替代目录
+失败时恢复旧目录。未知/暂存修改、已有保留目录或并发同步锁均返回失败；不强制
+checkout、不 stash、不删除旧状态，也不创建第二份累计备份。
+
+这是可恢复的两次目录重命名，不是同时原子替换。意外断电/强制终止后须只读检查
+保留目录与 `.sync-strategy-repos.lock` 的实际状态，再恢复被中断的同步；不要按定时
+重试自动删除锁或备份。此次源码修复不代表 VPS 已采用：部署后仍须读回下一次正常
+监测周期及网站结果时间；不能用本地测试代替线上恢复证明。

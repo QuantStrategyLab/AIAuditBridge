@@ -9,6 +9,7 @@ Replaces:
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 import urllib.error
@@ -163,6 +164,8 @@ class AiGatewayClient:
         mode: str = "review_only",
         model: str | None = None,
         complexity: str = "",
+        research_stage: str = "",
+        reasoning_effort: str = "",
         source_repository: str | None = None,
         source_ref: str = "main",
         timeout: float | None = None,
@@ -176,12 +179,20 @@ class AiGatewayClient:
         try:
             self._breaker.before_call()
             submit_token = _fetch_oidc_token(self.config.audience)
+            if research_stage:
+                health_request = urllib.request.Request(f"{self.config.service_url}/healthz", headers=_headers(submit_token))
+                with urllib.request.urlopen(health_request, timeout=10) as response:
+                    capabilities = json.loads(response.read().decode("utf-8"))
+                if not isinstance(capabilities, dict) or capabilities.get("codex_research_routing") != "v1":
+                    return AiResult.unavailable("codex", "codex_research_routing_unavailable", failure_category="auth_or_config_failure")
             payload = json.dumps({
                 "task": task,
                 "prompt": prompt,
                 "mode": mode,
                 "model": model or self.config.default_execute_model,
                 "complexity": complexity,
+                **({"research_stage": research_stage} if research_stage else {}),
+                **({"reasoning_effort": reasoning_effort} if reasoning_effort else {}),
                 "source_repository": source_repository or self.config.source_repository,
                 "source_ref": source_ref,
                 "timeout_seconds": int(timeout),
@@ -223,9 +234,18 @@ class AiGatewayClient:
 
                 status = status_data.get("status")
                 if status == "succeeded":
+                    if research_stage and (
+                        status_data.get("research_stage") != research_stage
+                        or not isinstance(status_data.get("model"), str) or not status_data["model"].strip()
+                        or status_data.get("reasoning_effort") not in {"low", "medium", "high", "xhigh"}
+                        or ((model or self.config.default_execute_model) not in (None, "", "auto")
+                            and status_data["model"] != (model or self.config.default_execute_model))
+                        or (reasoning_effort not in ("", "auto") and status_data["reasoning_effort"] != reasoning_effort)
+                    ):
+                        return AiResult.unavailable("codex", "codex_research_route_mismatch", failure_category="patch_contract_failure")
                     self._breaker.on_success()
                     return AiResult(
-                        provider="codex", model="codex-cli", success=True,
+                        provider="codex", model=str(status_data.get("model") or "codex-cli"), success=True,
                         output=str(status_data.get("output", "")),
                         latency_seconds=time.time() - started,
                         raw=status_data,
@@ -251,9 +271,21 @@ class AiGatewayClient:
                 failure_category="transient_service_failure",
             )
         except urllib.error.HTTPError as exc:
-            self._breaker.on_failure()
             body = exc.read().decode("utf-8", errors="replace")[:500]
             if exc.code == 429:
+                try:
+                    data = json.loads(body)
+                except ValueError:
+                    data = None
+                if research_stage and isinstance(data, dict) and data.get("status") == "deferred":
+                    retry = data.get("retry_at")
+                    if type(retry) not in (int, float) or not math.isfinite(retry) or retry <= 0:
+                        retry = None
+                    # Admission deferrals are expected scheduling decisions, not
+                    # provider failures. Do not poll, retry or open the breaker.
+                    return AiResult(provider="codex", model="", success=False,
+                        error="codex_research_deferred", note="deferred",
+                        raw={"status": "deferred", "retry_at": retry, "failure_category": "quota_or_capacity_failure"})
                 category = "quota_or_capacity_failure"
             elif exc.code >= 500:
                 category = "transient_service_failure"
@@ -261,6 +293,7 @@ class AiGatewayClient:
                 category = "auth_or_config_failure"
             else:
                 category = "unknown_failure"
+            self._breaker.on_failure()
             return AiResult.unavailable(
                 "codex",
                 f"HTTP {exc.code}: {body}",
