@@ -264,6 +264,9 @@ def test_original_consumer_prompt_receives_complete_samples(monkeypatch, tmp_pat
             assert req.full_url == "https://gateway.invalid/v1/ai/execute/jobs"
             body = json.loads(req.data)
             assert body["prompt"] == expected_prompt
+            user_input = json.loads(body["prompt"].split("\n\nUSER:\n", 1)[1])
+            assert user_input["would_trade_if_enabled"] == "False"
+            assert user_input["kill_switch_active"] == ""
             assert body["model"] == "gpt-6-astra"
             assert body["mode"] == "review_only"
             assert body["timeout_seconds"] == 120
