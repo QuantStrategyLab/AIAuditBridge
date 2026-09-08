@@ -3,6 +3,11 @@ name: Codex Audit
 on:
   workflow_dispatch:
     inputs:
+      synthetic_sdk_check:
+        description: "Run one synthetic subscription SDK check instead of the monthly audit"
+        required: false
+        type: boolean
+        default: false
       source_repo:
         description: "Repository that owns the monthly review issue"
         required: true
@@ -56,11 +61,12 @@ permissions:
   id-token: write
 
 concurrency:
-  group: codex-audit-${{ github.event.client_payload.source_repo || inputs.source_repo }}-${{ github.event.client_payload.issue_number || inputs.issue_number }}
-  cancel-in-progress: true
+  group: ${{ inputs.synthetic_sdk_check && 'codex-audit-synthetic-sdk' || format('codex-audit-{0}-{1}', github.event.client_payload.source_repo || inputs.source_repo, github.event.client_payload.issue_number || inputs.issue_number) }}
+  cancel-in-progress: ${{ inputs.synthetic_sdk_check != true }}
 
 jobs:
   codex-audit:
+    if: inputs.synthetic_sdk_check != true
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -129,3 +135,33 @@ jobs:
           CODEX_AUDIT_SERVICE_URL: ${{ secrets.CODEX_AUDIT_SERVICE_URL }}
           CODEX_AUDIT_SERVICE_AUDIENCE: ${{ vars.CODEX_AUDIT_SERVICE_AUDIENCE || 'quant-codex-audit' }}
         run: python scripts/run_monthly_codex_audit.py
+
+  synthetic-sdk-check:
+    if: github.event_name == 'workflow_dispatch' && inputs.synthetic_sdk_check == true && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6.0.3
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install pinned synthetic-test consumer
+        run: >-
+          python -m pip install
+          'quant-strategy-plugins[ai] @ git+https://github.com/QuantStrategyLab/QuantStrategyPlugins.git@88a1a67d7454ac1f91a6017561e9a638aa43ca20'
+      - name: Verify one subscription request and advisory consumption
+        env:
+          CODEX_AUDIT_SERVICE_URL: ${{ secrets.CODEX_AUDIT_SERVICE_URL }}
+          CODEX_AUDIT_SERVICE_AUDIENCE: ${{ vars.CODEX_AUDIT_SERVICE_AUDIENCE || 'quant-codex-audit' }}
+          AI_GATEWAY_SOURCE_REPO: QuantStrategyLab/AIAuditBridge
+        run: |
+          set -euo pipefail
+          python scripts/verify_subscription_ai_consumer.py | tee ai-subscription-check.json
+      - name: Retain sanitized check result
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ai-subscription-check
+          path: ai-subscription-check.json
+          if-no-files-found: error
+          retention-days: 7

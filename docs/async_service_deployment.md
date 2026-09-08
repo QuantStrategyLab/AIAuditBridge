@@ -141,6 +141,28 @@ Run a manual `codex_audit.yml` dispatch against a low-risk source issue with pro
 - the source repository receives only the intended comment or PR;
 - no provider keys, origin URL, service token, or job prompt are printed in logs.
 
+### Synthetic subscription consumer check
+
+After explicit authorization and source deployment verification, dispatch the existing
+`Codex Audit` workflow on `main` with `synthetic_sdk_check=true`. The required legacy
+issue input is unused by this branch (use `0`); set `source_repo` to
+`QuantStrategyLab/AIAuditBridge`, `mode=review_only`, `provider=codex`, and
+`auto_merge=false`. This branch does not run the monthly audit or create an Issue.
+
+The existing GitHub OIDC identity is required; a dashboard token is not a write
+credential. The check installs pinned QSP and its SDK in the disposable test job,
+not the service runtime. CI uses the same consumer for offline HTTP-boundary tests.
+One fixed synthetic crisis input requests `gpt-6-astra` through the public QSP
+consumer and real SDK, with a 120-second model timeout and no API fallback or model
+retry. Reasoning effort remains the service's existing selection, not a claimed
+override. No credentials, raw model text, or market data enter the result artifact.
+
+A passed artifact proves only this synthetic structured-output/advisory path and
+unchanged deterministic controls. It does not prove the model's financial claims,
+all workflow identities, production scheduling, or trading readiness. Keep normal
+plugin AI switches unchanged. Confirm the matching service job separately; failed
+remote validation stops the attempt rather than dispatching it again.
+
 ## Self-deployment for forks
 
 Forks and third-party open-source users should deploy their own Worker, origin
