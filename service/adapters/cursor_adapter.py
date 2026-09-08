@@ -36,10 +36,12 @@ class CursorAdapter:
                     workspace / '.agents/skills/research-evidence/SKILL.md',
                     workspace / '.agents/skills/diagnosis-validation/SKILL.md',
                 ))
+                # Trust only this service-created disposable directory, never
+                # a caller checkout; tool permissions and sandbox stay separate.
                 completed = subprocess.run([
                     executable, '--disable-auto-update', '--print', '--output-format', 'json', '--mode', 'ask',
                     '--allowed-tools', '', '--exclude-workspace-context',
-                    '--sandbox', 'enabled', '--workspace', directory,
+                    '--sandbox', 'enabled', '--workspace', directory, '--trust',
                     '--model', model,
                 ], input=instructions + '\n\nTask and supplied evidence:\n' + prompt, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                     cwd=directory, timeout=timeout, check=False, env=env)
