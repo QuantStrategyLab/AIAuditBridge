@@ -45,6 +45,7 @@ jobs:
           python3 -m pip install --upgrade pip
           python3 -m pip install pytest ruff==0.15.22
           python3 -m pip install . --no-deps
+          python3 -m pip install 'quant-strategy-plugins[ai] @ git+https://github.com/QuantStrategyLab/QuantStrategyPlugins.git@88a1a67d7454ac1f91a6017561e9a638aa43ca20'
           python3 -m pip check
           python3 -m ruff check .
           python3 -m pytest tests ops/quant-monitor/tests -q
