@@ -34,6 +34,14 @@ Cursor 官方区分 Cursor Models 和 Other Models 两个消费池；第三方�
 
 当前固定 ask、sandbox enabled、禁自动更新；项目权限拒绝 Read/Shell/Write/MCP/WebFetch。额外传 `--allowed-tools "" --exclude-workspace-context`，并将规则与证据直接放入 stdin。AGENTS 和 skill 是任务指导；allowed-tools 是经 CLI 发送的服务端 no-tools 限制，不声称完整本地 OS 隔离。独立材料审查指出标准 Grep/Ls 不都消费 Read deny，原生 sandbox 默认 system read 不能描述成 workspace-only。根任务决定此最小首期可先部署 `AI_GATEWAY_CURSOR_ENABLED=false`，先验收无模型服务及目录刷新；自动启用仍须费用确认和实际 canary 的零工具调用验证。不通过不启用，不因沙箱失败改为 disabled。
 
+### 临时工作区的 headless 信任确认（2026-09-09）
+
+主任务报告首次真实 canary 退出码为 1、没有完整结果流，已停车；独立安装版 CLI 检查确认每次新建的工作区需要 headless trust。基于 `24f86b7cf02de44e3893550910f3e402986d626c` 的本地修复只在 adapter 已创建的 `TemporaryDirectory` 上增加 `--trust`，该目录同时作为唯一 `--workspace` 和进程 cwd，完成后删除。模板目录、调用者当前目录、外部仓库及父目录均不成为信任目标。
+
+不自动信任未知工作区的安全理由，是避免未经审核便接受其中的项目规则和配置。本例的目标只含服务拥有的模板与权限文件，证据经 stdin 输入，故仅对这个一次性目录明确确认信任。[官方参数文档](https://cursor.com/docs/cli/reference/parameters) 区分了 `--trust` 的工作区确认与 `--force`/`--yolo` 的命令权限；本修复不添加 force/yolo、不批准 MCP、不扩大 tools，也不取消 sandbox。ask、sandbox enabled、空 allowed-tools、deny、stdin 和环境秘密过滤保持不变。
+
+本次只完成离线启动回归，没有重跑真实模型、发布或部署。回归模拟 headless CLI 拒绝未信任的新目录，并检查连续两次调用使用不同且随后清理的服务目录。JSON 成功结果本身不证明实际模型身份或工具调用数量；此前失败的 canary 仍处于停车状态，不能以本地测试通过宣称真实执行已恢复。
+
 部署需成套安装 service、scripts/sync_model_catalog.py、ops/cursor-research/workspace，以及新 SDK；保留现有 OIDC、secret、allowlist、drop-in 和旧 release。只复制 adapter 文件不足以接通。至少验收：旧 Codex 请求兼容；未认证/未确认费用 Cursor 零启动；目录只读刷新成功及失败保留 stale；SDK 错任务或错 route 拒绝；未授权来源在准入前拒绝；一旦启动失败不切换；授权的单次合成 advisory 才能验证实际 CLI，不把离线 mock 当真实执行成功。
 
 ## 本轮离线验证
