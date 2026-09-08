@@ -68,3 +68,12 @@ forward policy、真实 calendar 摘要、固定来源摘要和 baseline 配置�
 
 
 独立 reviewer 已完成全部源码及增量审查，无未关闭 P1/P2：原 97 项、时间边界定向验证及最后实际 caller/额度延期/required CI 的 5 项均通过；包含首 session 09:24:59 允许、等于 09:25 和收盘后冻结拒绝。评审不等于真实数据或线上模型验收，发布/部署仍由主任务统一执行。
+
+
+### PR #169：主安装遗留元数据与隔离 CI（2026-09-09）
+
+远端 CI `34276709282` 的 required `test` 在 CN 专项出现 3 failed / 74 passed；安装与 `pip check` 已通过。按受测 merge HEAD `5467e9b32b8d698e895f2cbe72bf70bd9414c1ec` 在临时源码副本先实际安装本仓，生成 `ai_gateway_client.egg-info`，再用固定 CN 隔离解释器运行，三个实际 CN caller 用例同样 RED。SDK 模块真实 import 来自隔离 site-packages，但 distribution 查找先读 cwd 的生成元数据，其无 VCS `direct_url.json`，严格安装版本门正确拒绝。前次干净源码验证未重演主安装顺序，不能替代此 CI 结果。
+
+修复仅在原 required `test` 的专项步骤：用 `git archive HEAD`（保留 PR merge 的受测版本）导出唯一临时源码目录并进入该目录后运行；原主 checkout 的安装文件完整保留。专项还检查三个 distribution 路径确在隔离解释器目录内，生产 `_installed_revision` 和全部 pin、权限、时间/费用门不变。没有 skip、放松版本门或移出 required check。
+
+同一保留构建残留的临时环境，执行更新后的 CI 步骤实际 **77 passed**；归档入口逐字节等于受测 HEAD，未含 egg-info，原生成元数据字节不变。永久 CI 结构回归先 RED 后 **1 passed**，actionlint、Ruff、diffcheck 通过。RED/GREEN 日志分别为 `/tmp/aab-cn-pr169-ci-red-20260909.log`、`/tmp/aab-cn-pr169-ci-green-20260909.log`；完整远端原日志 `/tmp/aab-cn-pr169-ci-full-20260909.log`。这是本地修复验证，后续 PR CI 状态仍以实际新 run 为准。

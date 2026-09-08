@@ -72,8 +72,17 @@ jobs:
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
           PYTHONDONTWRITEBYTECODE: "1"
         run: |
+          set -euo pipefail
+          # Main-suite packaging leaves egg-info in the checkout. Test the same
+          # HEAD (including the PR merge) without those build-time metadata files.
+          cn_test_source="$(mktemp -d "${RUNNER_TEMP}/aab-cn-research-source.XXXXXX")"
+          git archive HEAD | tar -x -C "${cn_test_source}"
+          cd "${cn_test_source}"
           "${RUNNER_TEMP}/aab-cn-research/bin/python" - <<'PY'
+          import importlib.metadata
+          from pathlib import Path
           import socket
+          import sys
           import pytest
 
           def blocked(*args, **kwargs):
@@ -81,6 +90,9 @@ jobs:
 
           socket.socket.connect = blocked
           socket.create_connection = blocked
+          for package in ("cn-equity-strategies", "quant-platform-kit", "ai-gateway-client"):
+              installed = importlib.metadata.distribution(package)
+              assert Path(installed.locate_file("")).resolve().is_relative_to(Path(sys.prefix).resolve())
           raise SystemExit(pytest.main([
               "-q", "-p", "no:cacheprovider", "--tb=short",
               "tests/test_run_cn_index_etf_research.py",

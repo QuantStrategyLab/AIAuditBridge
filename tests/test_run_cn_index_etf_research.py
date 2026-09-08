@@ -673,6 +673,10 @@ def test_required_ci_runs_the_complete_cn_slice_in_an_isolated_pinned_environmen
     assert "cn-equity-strategies[research] @ git+https://github.com/QuantStrategyLab/CnEquityStrategies.git@2a0c5c9aafacfbe6519fb4029ca4ac18e4996a66" in research
     assert '"${RUNNER_TEMP}/aab-cn-research/bin/python" -m pip check' in research
     assert '"tests/test_run_cn_index_etf_research.py"' in research
+    assert 'git archive HEAD | tar -x -C "${cn_test_source}"' in research
+    assert 'cd "${cn_test_source}"' in research
+    assert research.index("git archive HEAD") < research.index('cd "${cn_test_source}"') < research.index("import socket")
+    assert 'is_relative_to(Path(sys.prefix).resolve())' in research
     assert "socket.socket.connect = blocked" in research
     assert "quant-strategy-plugins" not in research
     assert "continue-on-error" not in research and "if:" not in research
