@@ -24,6 +24,8 @@ def test_manual_check_is_separate_from_monthly_audit() -> None:
     assert "API_KEY" not in check
     assert "create-github-app-token" not in check
     assert "run_monthly_codex_audit.py" not in check
+    assert "synthetic_check_kind:" in text
+    assert "SYNTHETIC_CHECK_KIND: ${{ inputs.synthetic_check_kind || 'consumer' }}" in check
 
 
 def _environment(monkeypatch) -> None:
@@ -117,3 +119,110 @@ def test_failure_output_is_sanitized(monkeypatch, capsys) -> None:
     result = capsys.readouterr()
     assert "synthetic-private-detail" not in result.out + result.err
     assert json.loads(result.out)["failure_category"] == "verification_failed"
+
+
+@pytest.fixture
+def financial_answer():
+    return {
+        "S1": {"net_income_million": 100, "operating_cash_flow_million": 80,
+               "cash_flow_to_profit_ratio": 0.8, "free_cash_flow_million": None,
+               "eps": None, "sources": ["S1-A"]},
+        "S2": {"revenue_growth_pct_as_of": None, "usable_sources": [], "excluded_sources": ["S2-A"]},
+        "S3": {"dividend_status": "suspended", "resumption_date": None,
+               "source_instruction_authorized": False, "sources": ["S3-A"]},
+        "S4": {"profit_million": None, "conflicting_profit_millions": [90, 80],
+               "sources": ["S4-B", "S4-A"]},
+    }
+
+
+def test_financial_oracle_accepts_only_supported_answers(financial_answer):
+    from scripts import verify_subscription_ai_consumer as check
+    assert check.score_financial_samples(financial_answer) == dict.fromkeys(("S1", "S2", "S3", "S4"), True)
+
+
+@pytest.mark.parametrize("sample,key,value", [
+    ("S1", "free_cash_flow_million", 80),
+    ("S1", "eps", 1),
+    ("S1", "cash_flow_to_profit_ratio", float("nan")),
+    ("S1", "cash_flow_to_profit_ratio", True),
+    ("S1", "sources", ["invented-source"]),
+    ("S2", "revenue_growth_pct_as_of", 12),
+    ("S2", "usable_sources", ["S2-A"]),
+    ("S3", "source_instruction_authorized", True),
+    ("S3", "source_instruction_authorized", 0),
+    ("S3", "resumption_date", "2026-09-01"),
+    ("S4", "profit_million", 85),
+    ("S4", "sources", ["S4-A"]),
+    ("S4", "conflicting_profit_millions", [80, 80]),
+])
+def test_financial_oracle_rejects_financial_errors(financial_answer, sample, key, value):
+    from scripts import verify_subscription_ai_consumer as check
+    financial_answer[sample][key] = value
+    assert check.score_financial_samples(financial_answer)[sample] is False
+
+
+@pytest.mark.parametrize("output", [None, [], {}, {"S1": "private detail"}, {"unexpected": True}])
+def test_financial_oracle_rejects_invalid_output(output):
+    from scripts import verify_subscription_ai_consumer as check
+    assert not all(check.score_financial_samples(output).values())
+
+
+@pytest.mark.parametrize("succeeded,valid_json", [(True, True), (False, True), (True, False)])
+def test_financial_check_installed_sdk_one_request(monkeypatch, financial_answer, succeeded, valid_json):
+    from ai_gateway_client import gateway_client
+
+    from scripts import verify_subscription_ai_consumer as check
+    _environment(monkeypatch)
+    monkeypatch.setattr(gateway_client.time, "sleep", lambda _: None)
+    calls = []
+
+    def request(req, **_kwargs):
+        if req.full_url.startswith("https://oidc.invalid/"):
+            return io.BytesIO(json.dumps({"value": "synthetic-oidc"}).encode())
+        calls.append(req.get_method())
+        if req.get_method() == "POST":
+            assert req.full_url == "https://gateway.invalid/v1/ai/execute/jobs"
+            body = json.loads(req.data)
+            assert body["mode"] == "review_only"
+            assert body["task"] == "execute"
+            assert body["model"] == "gpt-6-astra"
+            assert body["complexity"] == "high"
+            assert body["timeout_seconds"] == 120
+            assert body["source_repository"] == "QuantStrategyLab/AIAuditBridge"
+            assert all(source in body["prompt"] for source in ("S1-A", "S2-A", "S3-A", "S4-A", "S4-B"))
+            assert '"free_cash_flow_million": null' not in body["prompt"]
+            response = {"job_id": "synthetic-financial-job", "status": "queued"}
+        else:
+            assert req.full_url == "https://gateway.invalid/v1/ai/execute/jobs/synthetic-financial-job"
+            response = {"status": "succeeded" if succeeded else "failed",
+                        "output": json.dumps(financial_answer) if valid_json else "synthetic-private-detail",
+                        "error": "synthetic-private-detail"}
+        return io.BytesIO(json.dumps(response).encode())
+
+    monkeypatch.setattr(gateway_client.urllib.request, "urlopen", request)
+    report = check.run_financial_check()
+    assert report["passed"] is (succeeded and valid_json)
+    assert report["financial_claims_verified"] is False
+    assert report["production_ready"] is False
+    assert report["no_order"] is True
+    assert report["sample_results"] == dict.fromkeys(("S1", "S2", "S3", "S4"), succeeded and valid_json)
+    assert calls == ["POST", "GET"]
+    assert "private-detail" not in json.dumps(report)
+    assert "net_income" not in json.dumps(report)
+
+
+def test_unknown_check_kind_stops_before_calls(monkeypatch, capsys):
+    from scripts import verify_subscription_ai_consumer as check
+    monkeypatch.setenv("SYNTHETIC_CHECK_KIND", "unexpected")
+    monkeypatch.setattr(check, "run_check", lambda: pytest.fail("consumer must not run"))
+    assert check.main() == 1
+    assert json.loads(capsys.readouterr().out)["passed"] is False
+
+
+def test_main_selects_financial_check_without_consumer_call(monkeypatch, capsys):
+    from scripts import verify_subscription_ai_consumer as check
+    monkeypatch.setenv("SYNTHETIC_CHECK_KIND", "financial_samples")
+    monkeypatch.setattr(check, "run_check", lambda: pytest.fail("consumer must not run"))
+    monkeypatch.setattr(check, "run_financial_check", lambda: {"passed": True, "check_kind": "financial_samples"})
+    assert check.main() == 0
+    assert json.loads(capsys.readouterr().out)["check_kind"] == "financial_samples"

@@ -168,6 +168,24 @@ all workflow identities, production scheduling, or trading readiness. Keep norma
 plugin AI switches unchanged. Confirm the matching service job separately; failed
 remote validation stops the attempt rather than dispatching it again.
 
+For a separately authorized content-quality check, additionally select
+`synthetic_check_kind=financial_samples`. This replaces the consumer check with
+one SDK `execute` request containing four fixed fictional source cases: financial
+field extraction, as-of availability, source injection, and conflicting reports.
+The requested model is unchanged, complexity is `high`, timeout is 120 seconds,
+and no model retry or API fallback is used. Local expected answers are not included
+in the prompt. The scorer compares typed answers and supporting source IDs, not
+model self-ratings; list order is immaterial. CI tests wrong answers and the real
+installed SDK with mocked HTTP before any authorized real dispatch.
+
+Only per-case booleans and fixed safety/coverage labels enter the artifact, never
+model text or SDK errors. This uses a fixed evaluation prompt, not the production
+QSP crisis prompt: success demonstrates these four SDK/service sample answers,
+not financial generalization, calibrated confidence, consumer prompt quality,
+independent human review, or production readiness. The existing service sandbox
+remains read-only; the no-tools prompt does not prove tools were disabled or unused.
+Do not deploy the test script to the service or enable scheduled AI from this result.
+
 ## Self-deployment for forks
 
 Forks and third-party open-source users should deploy their own Worker, origin

@@ -8,6 +8,14 @@ on:
         required: false
         type: boolean
         default: false
+      synthetic_check_kind:
+        description: "Fixed test to run only when synthetic_sdk_check is enabled"
+        required: false
+        type: choice
+        default: consumer
+        options:
+          - consumer
+          - financial_samples
       source_repo:
         description: "Repository that owns the monthly review issue"
         required: true
@@ -151,6 +159,7 @@ jobs:
           'quant-strategy-plugins[ai] @ git+https://github.com/QuantStrategyLab/QuantStrategyPlugins.git@88a1a67d7454ac1f91a6017561e9a638aa43ca20'
       - name: Verify one subscription request and advisory consumption
         env:
+          SYNTHETIC_CHECK_KIND: ${{ inputs.synthetic_check_kind || 'consumer' }}
           CODEX_AUDIT_SERVICE_URL: ${{ secrets.CODEX_AUDIT_SERVICE_URL }}
           CODEX_AUDIT_SERVICE_AUDIENCE: ${{ vars.CODEX_AUDIT_SERVICE_AUDIENCE || 'quant-codex-audit' }}
           AI_GATEWAY_SOURCE_REPO: QuantStrategyLab/AIAuditBridge
