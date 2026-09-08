@@ -16,12 +16,13 @@ Usage::
     # Scenario 3: multi-model review (proposal review with consensus)
     results = client.review(prompt="Review this proposal...")
 """
-from client.gateway_client import AiGatewayClient
-from client.config import GatewayConfig, ProviderConfig
-from client.errors import AiGatewayError, AuthenticationError, ServiceUnavailableError
+from .gateway_client import AiGatewayClient, AiResult
+from .config import GatewayConfig, ProviderConfig
+from .errors import AiGatewayError, AuthenticationError, ServiceUnavailableError
 
 __all__ = [
     "AiGatewayClient",
+    "AiResult",
     "GatewayConfig",
     "ProviderConfig",
     "AiGatewayError",
