@@ -157,7 +157,7 @@ jobs:
       - name: Install pinned synthetic-test consumer
         run: >-
           python -m pip install
-          'quant-strategy-plugins[ai] @ git+https://github.com/QuantStrategyLab/QuantStrategyPlugins.git@88a1a67d7454ac1f91a6017561e9a638aa43ca20'
+          'quant-strategy-plugins[ai] @ git+https://github.com/QuantStrategyLab/QuantStrategyPlugins.git@6b76d512c8273deb804c0770a203558284778399'
       - name: Verify one subscription request and advisory consumption
         env:
           SYNTHETIC_CHECK_KIND: ${{ inputs.synthetic_check_kind || 'consumer' }}
