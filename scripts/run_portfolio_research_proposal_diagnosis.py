@@ -187,6 +187,7 @@ def run_portfolio_research_proposal_diagnosis(
             prompt,
             mode="review_only",
             research_stage="drift_analysis",
+            **({"allowed_providers": list(config.research_providers)} if config.research_providers != ("codex",) else {}),
             timeout=300,
             source_repository=repository,
         )
@@ -198,21 +199,22 @@ def run_portfolio_research_proposal_diagnosis(
     # Neither expected admission deferral nor failed execution has an API fallback.
     output = ai_result.output
     raw = getattr(ai_result, "raw", None)
-    if ai_result.provider == "codex" and ai_result.success is False:
+    if (ai_result.provider in config.research_providers or (not ai_result.provider and "cursor" in config.research_providers)) and ai_result.success is False:
         if isinstance(raw, dict) and raw.get("status") == "deferred":
             retry_at = raw.get("retry_at")
             if type(retry_at) not in (int, float) or not math.isfinite(retry_at) or retry_at <= 0:
                 retry_at = None
-            summary.update(status="deferred", reason="codex_research_deferred", retry_at=retry_at)
+            summary.update(status="deferred", reason="subscription_research_deferred" if "cursor" in config.research_providers else "codex_research_deferred", retry_at=retry_at)
             return summary
-        if ai_result.error == "codex_research_routing_unavailable":
-            summary.update(status="deferred", reason="codex_research_routing_unavailable", retry_at=None)
+        if ai_result.error in {"codex_research_routing_unavailable", "subscription_research_routing_unavailable"}:
+            summary.update(status="deferred", reason=ai_result.error, retry_at=None)
             return summary
     content_available = (
-        ai_result.provider == "codex" and ai_result.success is True
+        ai_result.provider in config.research_providers and ai_result.success is True
         and isinstance(output, str) and bool(output.strip())
         and not ai_result.error and not getattr(ai_result, "note", "")
         and isinstance(raw, dict) and raw.get("status") == "succeeded"
+        and raw.get("provider", "codex") == ai_result.provider
         and raw.get("output") == output
         and raw.get("research_stage") == "drift_analysis"
         and isinstance(ai_result.model, str) and bool(ai_result.model.strip())
@@ -245,6 +247,7 @@ def run_portfolio_research_proposal_diagnosis(
             "issue_url": issue_url,
             "comment_url": comment_url,
             "research_stage": raw["research_stage"],
+            "provider": ai_result.provider,
             "model": ai_result.model,
             "reasoning_effort": raw["reasoning_effort"],
             "advisory_only": True,

@@ -96,6 +96,16 @@ class ReviewQuotaTests(TestCase):
         self.llm.complete.assert_not_called()
         self.llm.parallel_review.assert_not_called()
 
+    def test_review_verifier_accounting_ignores_untrusted_provider_field(self):
+        for supplied_provider in ("cursor", "unsupported-provider"):
+            with self.subTest(provider=supplied_provider), patch.object(self.quota, "check", return_value={"allowed": True, "cost_estimate_usd": 0}):
+                before = self.quota.status(self.repo)
+                status, _ = self.review(verifier="codex", provider=supplied_provider)
+                after = self.quota.status(self.repo)
+                self.assertEqual(status, 200)
+                self.assertEqual(after["codex_calls"], before["codex_calls"] + 1)
+                self.assertEqual(after["cursor_calls"], before["cursor_calls"])
+
     def test_exhausted_budget_blocks_all_review_providers(self) -> None:
         self.quota._daily_budget = 0
         status, _ = self.review(verifier="codex")

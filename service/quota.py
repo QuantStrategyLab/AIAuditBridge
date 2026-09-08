@@ -84,6 +84,7 @@ class QuotaRecord:
     legacy_tokens_output: int = 0
     legacy_usage_incomplete: bool = False
     legacy_unknown_cost_usd: float = 0.0
+    cursor_calls: int = 0
     codex_calls: int = 0
     total_cost_usd: float = 0.0
     api_key_cost_usd: float = 0.0
@@ -109,6 +110,8 @@ class QuotaRecord:
             "legacy_tokens_output": self.legacy_tokens_output,
             "legacy_usage_incomplete": self.legacy_usage_incomplete,
             "legacy_unknown_cost_usd": round(self.legacy_unknown_cost_usd, 4),
+            "cursor_calls": self.cursor_calls,
+            "cost_incomplete": self.cursor_calls > 0,
             "codex_calls": self.codex_calls,
             "total_cost_usd": round(self.total_cost_usd, 4),
             "api_key_cost_usd": round(self.api_key_cost_usd, 4),
@@ -177,6 +180,7 @@ class QuotaRecord:
                 d.get("legacy_usage_incomplete", False) or aggregate_tokens_are_legacy_unknown
             ),
             legacy_unknown_cost_usd=legacy_unknown_cost_usd,
+            cursor_calls=int(d.get("cursor_calls", 0)),
             codex_calls=codex_calls,
             total_cost_usd=total_cost_usd,
             api_key_cost_usd=api_key_cost_usd,
@@ -336,6 +340,7 @@ class QuotaManager:
             record.tokens_output = 0
             record.api_key_tokens_input = 0
             record.api_key_tokens_output = 0
+            record.cursor_calls = 0
             record.codex_calls = 0
             record.legacy_tokens_input = 0
             record.legacy_tokens_output = 0
@@ -538,17 +543,31 @@ class QuotaManager:
             self._records[repo] = record
             self._save_records_locked()
 
-    def record_execute(self, repo: str) -> None:
-        """Record a Codex exec call with a nominal dashboard estimate only."""
+    def cursor_usage(self) -> dict[str, Any]:
+        """Subscription-wide call allowance uses the existing persistent store."""
+        with self._lock:
+            if not self._store_available or self._store_path() is None:
+                return {"status": "unavailable"}
+            return {"status": "available", "cursor_calls": sum(
+                self._reset_if_needed(record).cursor_calls for record in self._records.values()
+            )}
+
+    def record_execute(self, repo: str, *, provider: str = "codex") -> None:
+        """Record subscription calls separately; Cursor cost is unavailable."""
+        if provider not in {"codex", "cursor"}:
+            raise ValueError("unsupported execution provider")
         cost = DEFAULT_MODEL_COSTS.get("codex-cli", {}).get("flat", 0.05)
         with self._lock:
             if repo not in self._records:
                 self._records[repo] = QuotaRecord(repo=repo)
             record = self._records[repo]
             record = self._reset_if_needed(record)
-            record.codex_calls += 1
-            record.codex_cost_usd += cost
-            record.total_cost_usd += cost
+            if provider == "cursor":
+                record.cursor_calls += 1
+            else:
+                record.codex_calls += 1
+                record.codex_cost_usd += cost
+                record.total_cost_usd += cost
             self._records[repo] = record
             self._save_records_locked()
 
@@ -657,7 +676,8 @@ class QuotaManager:
         summary = {
             "quota_source": "internal_estimate",
             "combined": {
-                "label": "API key + Codex",
+                "label": "API key + Codex (Cursor cost unavailable)",
+                "cost_incomplete": any(int(item.get("cursor_calls", 0)) > 0 for item in statuses.values()),
                 "total_cost_usd": round(total_cost, 4),
             },
             "api_key": {
@@ -667,6 +687,12 @@ class QuotaManager:
                 "tokens_input": sum(int(item.get("api_key_tokens_input", 0)) for item in statuses.values()),
                 "tokens_output": sum(int(item.get("api_key_tokens_output", 0)) for item in statuses.values()),
                 "total_cost_usd": round(api_key_cost, 4),
+            },
+            "cursor": {
+                "label": "Cursor",
+                "calls": sum(int(item.get("cursor_calls", 0)) for item in statuses.values()),
+                "total_cost_usd": None,
+                "quota_source": "unavailable",
             },
             "codex": {
                 "label": "Codex",

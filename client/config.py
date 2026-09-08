@@ -47,6 +47,7 @@ class GatewayConfig:
     audience: str = "quant-codex-audit"
     default_analyze_model: str = "claude-sonnet-4-6"
     default_execute_model: str = ""
+    research_providers: tuple[str, ...] = ("codex",)
     reviewers: tuple[ProviderConfig, ...] = field(default_factory=lambda: (ProviderConfig.claude(), ProviderConfig.gpt()))
     verifier: ProviderConfig | None = None
     timeout_analyze: float = 120.0
@@ -78,7 +79,11 @@ class GatewayConfig:
         # Verifier: Codex VPS (optional, for backtest verification)
         verifier = ProviderConfig.codex(os.environ.get("CODEX_AUDIT_SERVICE_MODEL", "").strip())
 
+        research_providers = tuple(os.environ.get("AI_GATEWAY_RESEARCH_PROVIDERS", "codex").split(","))
+        if research_providers not in (("codex",), ("cursor",), ("codex", "cursor")):
+            raise ValueError("invalid AI_GATEWAY_RESEARCH_PROVIDERS")
         return cls(
+            research_providers=research_providers,
             service_url=service_url.rstrip("/"),
             audience=audience,
             default_analyze_model=os.environ.get("DEFAULT_ANALYZE_MODEL", "claude-sonnet-4-6").strip(),

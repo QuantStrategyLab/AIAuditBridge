@@ -46,6 +46,7 @@ from service.contracts import (
     parse_review_request,
 )
 from service.adapters.llm_adapter import DEFAULT_MAX_TOKENS, LlmAdapter, resolve_model
+from service.adapters.cursor_adapter import CursorAdapter
 from service.adapters.codex_adapter import CodexAdapter
 from service.model_resolver import resolve_codex_research_route
 from service.ai_provenance import (
@@ -268,6 +269,12 @@ def _resolve_codex_reasoning_effort(payload: dict[str, Any], task: str) -> str:
 
 def _admit_codex_execute(quota: Any, repo: str, payload: dict[str, Any]) -> dict[str, Any] | None:
     """Choose a Codex research route before consuming quota or starting a job."""
+    providers = payload.get("allowed_providers", ["codex"])
+    payload["provider"] = "codex"
+    if "cursor" in providers and not payload.get("research_stage"):
+        return {"status": "deferred", "error": "cursor_research_stage_required", "retry_at": None, "execution_started": False}
+    if providers == ["cursor"]:
+        return _admit_cursor_execute(quota, repo, payload)
     if "research_stage" in payload:
         requested_complexity = _normalize_complexity(str(payload.get("complexity") or ""))
         estimated = _estimate_codex_complexity(payload)
@@ -276,16 +283,36 @@ def _admit_codex_execute(quota: Any, repo: str, payload: dict[str, Any]) -> dict
         route = resolve_codex_research_route(
             stage=str(payload.get("research_stage") or ""),
             account=quota._codex_account_snapshot(require_models=True), now=time.time(), complexity=complexity,
-            requested_model=str(payload.get("model") or os.environ.get("CODEX_AUDIT_SERVICE_MODEL", "")).strip(),
-            requested_effort=str(payload.get("reasoning_effort") or os.environ.get("CODEX_AUDIT_SERVICE_REASONING_EFFORT", "")).strip(),
+            requested_model=str(payload.get("model") or "").strip(),
+            requested_effort=str(payload.get("reasoning_effort") or "").strip(),
         )
         if route["action"] != "run":
-            return {"status": "deferred", "error": route["reason"], "retry_at": route["retry_at"]}
+            if (providers == ["codex", "cursor"]
+                and os.environ.get("AI_GATEWAY_CURSOR_FALLBACK_ENABLED", "").lower() == "true"
+                and route["reason"] in {"codex_quota_reserved", "codex_account_unavailable", "codex_account_stale"}
+                and str(payload.get("model") or "") in {"", "auto"}):
+                return _admit_cursor_execute(quota, repo, payload)
+            return {"status": "deferred", "error": route["reason"], "retry_at": route["retry_at"], "execution_started": False}
         payload.update(model=route["model"], reasoning_effort=route["reasoning_effort"])
         return None
     result = quota.check(repo, "codex-cli", str(payload.get("prompt") or ""), codex_account=True)
     if not result["allowed"]:
         return {"status": "error", "error": result["reason"], "remaining_usd": result.get("remaining_usd", 0)}
+    return None
+
+
+def _admit_cursor_execute(quota: Any, repo: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+    from service.cursor_account import cursor_research_route
+    cursor_payload = dict(payload)
+    levels = ["low", "medium", "high"]
+    cursor_payload["complexity"] = max((_normalize_complexity(str(payload.get("complexity") or "")) or "low", _estimate_codex_complexity(payload)), key=levels.index)
+    usage = quota.cursor_usage()
+    if usage.get("status") != "available":
+        return {"status": "deferred", "error": "cursor_capacity_store_unavailable", "retry_at": None, "execution_started": False}
+    route = cursor_research_route(cursor_payload, usage, now=time.time())
+    if route["action"] != "run":
+        return {"status": "deferred", "error": route["reason"], "retry_at": None, "execution_started": False}
+    payload.update({key: route[key] for key in ("provider", "model", "reasoning_effort")})
     return None
 
 
@@ -576,6 +603,7 @@ def _public_job_payload(job: dict[str, Any]) -> dict[str, object]:
         "source_repository": str(job.get("source_repository") or ""),
         "task": str(job.get("task") or ""),
         "task_state": job_task_state(job),
+        "provider": str(job.get("provider") or "codex"),
     }
     if job.get("research_stage"):
         payload.update({key: str(job.get(key) or "") for key in ("research_stage", "model", "reasoning_effort")})
@@ -1080,8 +1108,24 @@ def _job_dedupe_key(
         issue_number or prompt_hash,
     ]
     if payload.get("research_stage"):
-        parts.extend(str(payload.get(key) or "") for key in ("research_stage", "model", "reasoning_effort"))
+        parts.extend(str(payload.get(key) or "") for key in ("research_stage", "model", "reasoning_effort", "provider"))
     return hashlib.sha256(json.dumps(parts, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _request_job_dedupe_key(claims: dict[str, Any], payload: dict[str, Any]) -> str:
+    """Bind the original request before selecting a provider/model from quota."""
+    identity = {
+        "request": _job_dedupe_key(
+            {**payload, "provider": ""},
+            repository=str(claims.get("repository") or ""),
+            run_id=str(claims.get("run_id") or ""),
+            run_attempt=str(claims.get("run_attempt") or ""),
+        ),
+        "allowed_providers": payload.get("allowed_providers", ["codex"]),
+        "prompt_sha256": hashlib.sha256(str(payload.get("prompt") or "").encode()).hexdigest(),
+        **{key: payload.get(key) for key in ("research_stage", "model", "reasoning_effort", "complexity", "changed_files", "changed_lines", "sandbox", "timeout_seconds")},
+    }
+    return hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 def _classify_codex_exec_failure(text: str) -> str:
@@ -1121,7 +1165,7 @@ def _classify_failure(error: str) -> str:
     return "unknown_failure"
 
 
-def _find_active_job_by_dedupe_key(dedupe_key: str) -> dict[str, Any] | None:
+def _find_active_job_by_dedupe_key(dedupe_key: str, *, field: str = "dedupe_key") -> dict[str, Any] | None:
     if os.environ.get("CODEX_AUDIT_SERVICE_DEDUPE_JOBS", "true").strip().lower() in {"0", "false", "no", "off"}:
         return None
     for path in _job_dir().glob("*.json"):
@@ -1129,7 +1173,7 @@ def _find_active_job_by_dedupe_key(dedupe_key: str) -> dict[str, Any] | None:
             job = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             continue
-        if job.get("dedupe_key") == dedupe_key and job.get("status") in ACTIVE_JOB_STATUSES:
+        if job.get(field) == dedupe_key and job.get("status") in ACTIVE_JOB_STATUSES:
             return _mark_stale_job_failed(job)
     return None
 
@@ -1142,7 +1186,7 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
         job["updated_at"] = _now()
         _write_job(job)
         _record_job_automation_run(job)
-        adapter = CodexAdapter()
+        adapter = CursorAdapter() if payload.get("provider") == "cursor" else CodexAdapter()
         sandbox = _validate_sandbox(str(payload.get("sandbox") or ""))
         reasoning_effort = _resolve_codex_reasoning_effort(payload, str(payload.get("task") or TASK_EXECUTE))
         result = adapter.execute(
@@ -1177,6 +1221,7 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
                 "status": job["status"],
                 "task": str(job.get("task") or ""),
                 "source_repository": str(job.get("source_repository") or job.get("repository") or ""),
+                "provider": str(payload.get("provider") or "codex"),
                 "model": str(payload.get("model") or ""),
                 "reasoning_effort": str(reasoning_effort or ""),
                 "output": str(job.get("output") or ""),
@@ -1213,7 +1258,7 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
                    repository=job.get("repository"))
 
 
-def _submit_job(claims: dict[str, Any], payload: dict[str, Any]) -> dict[str, object]:
+def _submit_job(claims: dict[str, Any], payload: dict[str, Any], *, request_dedupe_key: str | None = None) -> dict[str, object]:
     _cleanup_expired_jobs()
     dedupe_key = _job_dedupe_key(
         payload,
@@ -1225,7 +1270,10 @@ def _submit_job(claims: dict[str, Any], payload: dict[str, Any]) -> dict[str, ob
     # Admission check/dedupe/cap and create must be atomic: concurrent callers can
     # otherwise both pass the unlocked checks and start duplicate jobs.
     with _JOB_WRITE_LOCK:
-        existing_job = _find_active_job_by_dedupe_key(dedupe_key)
+        existing_job = _find_active_job_by_dedupe_key(
+            request_dedupe_key or dedupe_key,
+            field="request_dedupe_key" if request_dedupe_key else "dedupe_key",
+        )
         if existing_job is not None and existing_job.get("status") in ACTIVE_JOB_STATUSES:
             public = _public_job_payload(existing_job)
             public["deduped"] = True
@@ -1254,8 +1302,10 @@ def _submit_job(claims: dict[str, Any], payload: dict[str, Any]) -> dict[str, ob
             "source_ref": str(payload.get("source_ref") or ""),
             "task": str(payload.get("task") or TASK_EXECUTE),
             "mode": str(payload.get("mode") or MODE_REVIEW_ONLY),
+            "provider": str(payload.get("provider") or "codex"),
             "timeout_seconds": int(payload.get("timeout_seconds", 2700)),
             "dedupe_key": dedupe_key,
+            "request_dedupe_key": request_dedupe_key,
         }
         if payload.get("research_stage"):
             job.update({key: payload[key] for key in ("research_stage", "model", "reasoning_effort")})
@@ -1293,6 +1343,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 "status": health.status,
                 "uptime_seconds": health.uptime_seconds,
                 "codex_research_routing": "v1",
+                "subscription_research_routing": "v1",
             })
             return
         if request_path == "/v1/ai/health":
@@ -1529,14 +1580,28 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
 
         # Quota check
         quota = get_quota_manager()
-        denial = _admit_codex_execute(quota, quota_repo, payload)
-        if denial:
-            _json_response(self, HTTPStatus.TOO_MANY_REQUESTS, denial)
-            return
-        quota.record_execute(quota_repo)
+        # Original-request dedupe precedes quota selection so an existing Codex
+        # job cannot become a second Cursor job when account capacity changes.
+        request_key = _request_job_dedupe_key(claims, payload)
+        with _JOB_WRITE_LOCK:
+            _cleanup_expired_jobs()
+            existing = _find_active_job_by_dedupe_key(request_key, field="request_dedupe_key")
+            if existing is not None and existing.get("status") in ACTIVE_JOB_STATUSES:
+                job = _public_job_payload(existing)
+                job["deduped"] = True
+                _json_response(self, HTTPStatus.ACCEPTED, job)
+                return
+            max_active = _positive_int_env("CODEX_AUDIT_SERVICE_MAX_ACTIVE_JOBS", DEFAULT_JOB_MAX_ACTIVE)
+            if _active_job_count() >= max_active:
+                raise PermissionError(f"too many active jobs: max {max_active}. Wait for existing jobs to complete.")
+            denial = _admit_codex_execute(quota, quota_repo, payload)
+            if denial:
+                _json_response(self, HTTPStatus.TOO_MANY_REQUESTS, denial)
+                return
+            quota.record_execute(quota_repo, provider=str(payload.get("provider") or "codex"))
 
-        payload.setdefault("task", TASK_EXECUTE)
-        job = _submit_job(claims, payload)
+            payload.setdefault("task", TASK_EXECUTE)
+            job = _submit_job(claims, payload, request_dedupe_key=request_key)
         get_health_monitor().record("/v1/ai/execute/jobs", time.time() - started, True)
         _json_response(self, HTTPStatus.ACCEPTED, job)
 
@@ -1550,12 +1615,14 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             _validate_source_repo_org(claims, source_repo)
         quota_repo = source_repo or str(claims.get("repository") or "unknown")
         quota = get_quota_manager()
-        denial = _admit_codex_execute(quota, quota_repo, payload)
-        if denial:
-            _json_response(self, HTTPStatus.TOO_MANY_REQUESTS, denial)
-            return
-        quota.record_execute(quota_repo)
-        adapter = CodexAdapter()
+        # Keep the subscription admission and reservation atomic across HTTP threads.
+        with _JOB_WRITE_LOCK:
+            denial = _admit_codex_execute(quota, quota_repo, payload)
+            if denial:
+                _json_response(self, HTTPStatus.TOO_MANY_REQUESTS, denial)
+                return
+            quota.record_execute(quota_repo, provider=str(payload.get("provider") or "codex"))
+        adapter = CursorAdapter() if payload.get("provider") == "cursor" else CodexAdapter()
         sandbox = _validate_sandbox(str(payload.get("sandbox") or ""))
         reasoning_effort = _resolve_codex_reasoning_effort(payload, str(payload.get("task") or TASK_EXECUTE))
         result = adapter.execute(
@@ -1567,9 +1634,12 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         )
         get_health_monitor().record("/v1/ai/execute", time.time() - started, result.success, result.error if not result.success else "")
         if result.success:
-            _json_response(self, HTTPStatus.OK, {"status": "ok", "output": result.output})
+            _json_response(self, HTTPStatus.OK, {"status": "ok", "output": result.output,
+                "provider": payload.get("provider", "codex"), "model": payload.get("model", ""),
+                "research_stage": payload.get("research_stage", ""), "reasoning_effort": reasoning_effort})
         else:
-            _json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"status": "error", "error": result.error})
+            _json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"status": "error", "error": result.error,
+                "provider": payload.get("provider", "codex")})
 
     def _handle_review(self, claims: dict[str, Any], payload: dict[str, Any]) -> None:
         """POST /v1/ai/review — multi-model parallel review + optional Codex verify.
@@ -1651,7 +1721,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         # Step 2: optional Codex verification
         codex_result = None
         if req.verifier == "codex":
-            quota.record_execute(quota_repo)
+            quota.record_execute(quota_repo, provider="codex")
             codex_result = codex.execute(
                 prompt=req.prompt,
                 sandbox=_validate_sandbox("read-only"),

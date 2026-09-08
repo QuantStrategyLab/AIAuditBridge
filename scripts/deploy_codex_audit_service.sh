@@ -200,6 +200,9 @@ install_service_package() {
   sudo rm -rf "${DEPLOY_DIR}/service"
   sudo install -d -m 0755 "${DEPLOY_DIR}/service"
   sudo cp -R service/. "${DEPLOY_DIR}/service/"
+  sudo install -d -m 0755 "${DEPLOY_DIR}/ops/cursor-research/workspace"
+  sudo cp -R ops/cursor-research/workspace/. "${DEPLOY_DIR}/ops/cursor-research/workspace/"
+  install_file "scripts/sync_model_catalog.py" "${DEPLOY_DIR}/scripts/sync_model_catalog.py" "0755"
   sudo find "${DEPLOY_DIR}/service" -type d -exec chmod 0755 {} +
   sudo find "${DEPLOY_DIR}/service" -type f -exec chmod 0644 {} +
 }
@@ -407,6 +410,7 @@ Environment=CODEX_AUDIT_SERVICE_SANDBOX=read-only
 EnvironmentFile=-${ADMIN_ENV_FILE}
 EnvironmentFile=-${SERVICE_TOKEN_ENV_FILE}
 EnvironmentFile=-${PROVIDER_ENV_FILE}
+EnvironmentFile=-/etc/codex-audit-bridge/cursor.env
 ${audit_model_line}
 ${audit_reasoning_effort_line}
 ExecStart=/usr/bin/env python3 -m service.ai_gateway_service

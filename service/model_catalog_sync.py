@@ -15,6 +15,8 @@ from typing import Any
 
 from service.model_catalog import (
     CATALOG_VERSION,
+    catalog_path,
+    catalog_update_lock,
     DEFAULT_STICKY_DAYS,
     ModelCatalog,
     ModelRecord,
@@ -325,6 +327,7 @@ def build_catalog(
         sticky_days=sticky_days,
         deprecation_misses=previous.deprecation_misses if previous else 2,
         catalog_source=catalog_source,
+        subscription_rosters=deepcopy(previous.subscription_rosters) if previous else {},
         tiers=tiers,
         models=models,
         deprecated=deprecated,
@@ -371,7 +374,7 @@ def _provider_keys_configured() -> bool:
     )
 
 
-def sync_catalog(*, output_path: str | None = None, force: bool = False) -> ModelCatalog:
+def _sync_catalog_locked(*, output_path: str | None = None, force: bool = False) -> ModelCatalog:
     from pathlib import Path
 
     from service.model_catalog import catalog_path
@@ -440,6 +443,38 @@ def sync_catalog(*, output_path: str | None = None, force: bool = False) -> Mode
         catalog = build_catalog(bootstrap_records(), catalog_source="bootstrap")
     save_catalog_atomic(catalog, target)
     return catalog
+
+
+def sync_catalog(*, output_path: str | None = None, force: bool = False) -> ModelCatalog:
+    from pathlib import Path
+    target = validate_catalog_path(Path(output_path)) if output_path else catalog_path()
+    with catalog_update_lock(target):
+        return _sync_catalog_locked(output_path=str(target), force=force)
+
+
+def discover_cursor_roster():
+    from service.cursor_account import discover_cursor_roster as discover
+    return discover()
+
+
+def sync_subscription_catalog(*, output_path: str | None = None, now: float | None = None) -> ModelCatalog:
+    """Refresh account CLI roster without querying paid API catalogs."""
+    import time
+    from pathlib import Path
+    target = validate_catalog_path(Path(output_path)) if output_path else catalog_path()
+    attempted_at = time.time() if now is None else now
+    with catalog_update_lock(target):
+        # Re-read under the same lock used by API catalog rebuilds.
+        previous = load_catalog(target) if target.is_file() else ModelCatalog(catalog_source='subscription_only')
+        discovered = discover_cursor_roster()
+        if discovered is None:
+            roster = dict(previous.subscription_rosters.get('cursor', {}))
+            roster.update(status='stale' if roster.get('models') else 'unavailable', last_refresh_attempt_at=attempted_at)
+        else:
+            roster = discovered
+        previous.subscription_rosters['cursor'] = roster
+        save_catalog_atomic(previous, target)
+        return previous
 
 
 __all__ = [

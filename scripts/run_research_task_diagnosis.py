@@ -181,6 +181,7 @@ def run_diagnosis(
                 prompt,
                 mode="review_only",
                 research_stage="drift_analysis",
+                **({"allowed_providers": list(config.research_providers)} if config.research_providers != ("codex",) else {}),
                 timeout=600,
                 source_repository=str(request["target"]["repository"]),
                 source_ref=str(request["target"]["strategy_revision"]),
@@ -195,16 +196,17 @@ def run_diagnosis(
         # This lane has no analyze/review fallback, including quota failures.
         output = ai_result.output
         raw = getattr(ai_result, "raw", None)
-        if ai_result.provider == "codex" and ai_result.success is False and isinstance(raw, dict) and raw.get("status") == "deferred":
+        if (ai_result.provider in config.research_providers or (not ai_result.provider and "cursor" in config.research_providers)) and ai_result.success is False and isinstance(raw, dict) and raw.get("status") == "deferred":
             summary["diagnoses"].append({
                 "status": "deferred", "task_id": request["task_id"], "retry_at": raw.get("retry_at"),
             })
             continue
         content_available = (
-            ai_result.provider == "codex" and ai_result.success is True
+            ai_result.provider in config.research_providers and ai_result.success is True
             and isinstance(output, str) and bool(output.strip())
             and not ai_result.error and not getattr(ai_result, "note", "")
             and isinstance(raw, dict) and raw.get("status") == "succeeded"
+            and raw.get("provider", "codex") == ai_result.provider
             and raw.get("output", output) == output
         )
         if not content_available:
