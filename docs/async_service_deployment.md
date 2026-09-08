@@ -158,7 +158,12 @@ retry. Reasoning effort remains the service's existing selection, not a claimed
 override. No credentials, raw model text, or market data enter the result artifact.
 
 A passed artifact proves only this synthetic structured-output/advisory path and
-unchanged deterministic controls. It does not prove the model's financial claims,
+unchanged deterministic controls. `structured_result` checks the normalized consumer
+contract, not the raw model schema: missing, nonnumeric, or nonfinite confidence
+remains unknown (`None`) and is allowed for advisory output. `confidence_available`
+reports whether normalized numeric confidence is available; it never supplies a
+replacement value. `financial_claims_verified` is always false, including when the
+check passes. Empty summaries still fail. It does not prove the model's financial claims,
 all workflow identities, production scheduling, or trading readiness. Keep normal
 plugin AI switches unchanged. Confirm the matching service job separately; failed
 remote validation stops the attempt rather than dispatching it again.
