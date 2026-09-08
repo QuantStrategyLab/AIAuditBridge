@@ -186,6 +186,43 @@ independent human review, or production readiness. The existing service sandbox
 remains read-only; the no-tools prompt does not prove tools were disabled or unused.
 Do not deploy the test script to the service or enable scheduled AI from this result.
 
+Select `consumer_samples` instead to exercise the original pinned QSP crisis
+consumer and its original risk-auditor prompt with the same fictional sources.
+It makes one subscription request, not an additional financial extraction call.
+The input evidence stays below the consumer's existing 2000-character limit;
+CI checks the actual outgoing prompt against the installed original message builder.
+No prompt, consumer, sandbox, provider default, or trading control is replaced.
+
+For this mode, `passed` checks transport and deterministic controls only;
+`content_quality=pending_review` must not be interpreted as financial acceptance.
+Review S1 financial definitions, S2 as-of availability, S3 untrusted instructions,
+and S4 conflicts separately as supported, incorrect, or not demonstrated.
+Absence of a mention is neither automatic failure nor proof of quality.
+The normalized verdict and nullable boolean `human_review_recommended` remain
+visible as report metadata, so a contradictory recommendation is not hidden by
+text-only review. A false recommendation is not automatically a quality failure.
+
+The public workflow never creates or uploads `ai-consumer-review.json`, nor prints
+model text. Content review requires separately authorized private readback of the
+single retained service job, bound to this workflow run; without that channel,
+stop before the model request. The local-only `write_consumer_review` helper may
+then retain normalized summary, key_risks, and data_gaps in a private local directory,
+never a full SDK response or error. Field types, existing
+size bounds, credential-like patterns, URLs/email/host paths and control characters
+are checked in memory; suspicious excerpts are wholly withheld. This is bounded
+defense, not a complete DLP guarantee or permission to use real/private inputs.
+SDK stdout/stderr and logging are discarded, not copied to the JSON report.
+The local fixed file is exclusively created with mode 0600 and never printed or
+added to a public artifact/job summary. Do not make private access depend on the
+visibility of this repository or use public CI artifacts as a review channel.
+
+`possible_truncation` is true when summary length reaches 600, either list reaches
+five items, or an item reaches 160 characters. Retained normalized text cannot prove
+the completeness or safety of omitted raw text. Withheld/insufficient evidence ends
+the quality assessment without another request. Even a supported excerpt does not
+prove generalization, tool inactivity, authoritative model identity, full pipeline
+behavior, independent human review, or production scheduling readiness.
+
 ## Self-deployment for forks
 
 Forks and third-party open-source users should deploy their own Worker, origin
