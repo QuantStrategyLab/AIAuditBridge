@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -23,6 +27,37 @@ class _FakeResponse:
 
 
 class GatewayClientProvenanceTests(unittest.TestCase):
+    def test_installed_sdk_exports_consumer_api_without_source_checkout(self) -> None:
+        script = """
+import sys
+def deny_network(event, args):
+    if event in {"socket.connect", "socket.bind", "socket.getaddrinfo"}:
+        raise PermissionError("network disabled")
+sys.addaudithook(deny_network)
+from importlib.metadata import distribution
+from ai_gateway_client import AiGatewayClient, GatewayConfig, AiResult
+client = AiGatewayClient(GatewayConfig(service_url="https://gateway.invalid"))
+result = AiResult.unavailable("codex", "synthetic_unavailable")
+assert client.config.service_url == "https://gateway.invalid"
+assert result.success is False
+assert AiGatewayClient.__module__ == "ai_gateway_client.gateway_client"
+assert GatewayConfig.__module__ == "ai_gateway_client.config"
+assert AiResult.__module__ == "ai_gateway_client.gateway_client"
+dist = distribution("ai-gateway-client")
+assert not dist.requires
+assert not any(str(path).startswith(("service/", "client/")) for path in dist.files)
+"""
+        with tempfile.TemporaryDirectory() as cwd:
+            result = subprocess.run(
+                [sys.executable, "-I", "-B", "-c", script],
+                cwd=cwd,
+                env={"PATH": os.defpath},
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_analyze_advisory_preserves_output_without_opening_breaker(self) -> None:
         response = _FakeResponse({
             "status": "advisory",

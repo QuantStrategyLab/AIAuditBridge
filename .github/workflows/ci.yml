@@ -44,6 +44,7 @@ jobs:
           set -euo pipefail
           python3 -m pip install --upgrade pip
           python3 -m pip install pytest ruff==0.15.22
+          python3 -m pip install . --no-deps
           python3 -m pip check
           python3 -m ruff check .
           python3 -m pytest tests ops/quant-monitor/tests -q
