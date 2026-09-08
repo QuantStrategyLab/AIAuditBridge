@@ -252,14 +252,17 @@ class PortfolioCodexOnlyTests(unittest.TestCase):
         review.assert_not_called()
         return summary, comment, http, client
 
-    def _completed(self, **changes):
-        return {"status": "succeeded", "output": "synthetic read-only suggestion",
+    def _admitted(self):
+        return {"job_id": "synthetic", "provider": "codex",
                 "research_stage": "drift_analysis", "model": "gpt-5.6-terra",
-                "reasoning_effort": "medium", **changes}
+                "reasoning_effort": "medium"}
+
+    def _completed(self, **changes):
+        return {**self._admitted(), "status": "succeeded", "output": "synthetic read-only suggestion", **changes}
 
     def test_real_sdk_preflights_and_executes_codex_only_then_comments_advisory(self):
         summary, comment, http, _ = self._dispatch_real_sdk([
-            {"codex_research_routing": "v1"}, {"job_id": "synthetic"}, self._completed(),
+            {"codex_research_routing": "v1"}, self._admitted(), self._completed(),
         ])
         self.assertEqual(summary["status"], "ok")
         comment.assert_called_once()
@@ -315,7 +318,7 @@ class PortfolioCodexOnlyTests(unittest.TestCase):
         ):
             with self.subTest(changes=changes):
                 summary, comment, _, _ = self._dispatch_real_sdk([
-                    {"codex_research_routing": "v1"}, {"job_id": "synthetic"}, self._completed(**changes),
+                    {"codex_research_routing": "v1"}, self._admitted(), self._completed(**changes),
                 ])
                 self.assertEqual(summary["status"], "unavailable")
                 self.assertEqual(summary["diagnoses"], [])
@@ -325,7 +328,7 @@ class PortfolioCodexOnlyTests(unittest.TestCase):
 
     def test_completion_must_match_explicit_configured_model(self):
         summary, comment, _, _ = self._dispatch_real_sdk([
-            {"codex_research_routing": "v1"}, {"job_id": "synthetic"}, self._completed(),
+            {"codex_research_routing": "v1"}, self._admitted(), self._completed(),
         ], default_execute_model="gpt-5.6-sol")
         self.assertEqual(summary["status"], "unavailable")
         comment.assert_not_called()

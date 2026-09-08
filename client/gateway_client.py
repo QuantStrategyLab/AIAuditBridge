@@ -225,12 +225,16 @@ class AiGatewayClient:
                 )
 
             admitted_route = {key: job.get(key) for key in ("provider", "research_stage", "model", "reasoning_effort")}
-            if subscription_route:
+            route_error = "subscription_research_route_mismatch" if subscription_route else "codex_research_route_mismatch"
+            if research_stage or subscription_route:
                 if (admitted_route["provider"] not in providers
                     or admitted_route["research_stage"] != research_stage
                     or not isinstance(admitted_route["model"], str) or not admitted_route["model"].strip()
-                    or admitted_route["reasoning_effort"] not in {"low", "medium", "high", "xhigh"}):
-                    return AiResult.unavailable("", "subscription_research_route_mismatch", failure_category="patch_contract_failure")
+                    or admitted_route["reasoning_effort"] not in {"low", "medium", "high", "xhigh"}
+                    or ((model or self.config.default_execute_model) not in (None, "", "auto")
+                        and admitted_route["model"] != (model or self.config.default_execute_model))
+                    or (reasoning_effort not in ("", "auto") and admitted_route["reasoning_effort"] != reasoning_effort)):
+                    return AiResult.unavailable("" if subscription_route else selected_provider, route_error, failure_category="patch_contract_failure")
                 selected_provider = admitted_route["provider"]
 
             # Poll until completion; a submitted job is never retried on another provider.
@@ -249,8 +253,8 @@ class AiGatewayClient:
                 except urllib.error.HTTPError:
                     continue
 
-                if subscription_route and (status_data.get("job_id") != job_id or any(status_data.get(key) != value for key, value in admitted_route.items())):
-                    return AiResult.unavailable(selected_provider, "subscription_research_route_mismatch", failure_category="patch_contract_failure")
+                if (research_stage or subscription_route) and (status_data.get("job_id") != job_id or any(status_data.get(key) != value for key, value in admitted_route.items())):
+                    return AiResult.unavailable(selected_provider, route_error, failure_category="patch_contract_failure")
                 status = status_data.get("status")
                 if status == "succeeded":
                     if (status_data.get("provider", "codex") not in providers

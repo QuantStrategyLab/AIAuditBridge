@@ -16,7 +16,7 @@ from service.automation_authority import (
 from service.autonomy import ACTION_ORDER
 from service.dual_review import VERDICT_DISAGREEMENT, VERDICT_FAIL, VERDICT_UNAVAILABLE
 from service.dual_review_dispatch import dispatch_dual_review_result
-from service.dual_review_orchestrator import orchestrate_from_payload
+from service.dual_review_orchestrator import RESEARCH_REVIEW_TRIGGERS, orchestrate_from_payload
 from service.dual_review_primary import (
     build_primary_prompt,
     primary_review_available,
@@ -78,11 +78,11 @@ def _build_payload(
     primary_review: dict[str, Any],
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
+        **context,
         "trigger": trigger,
         "strategy_profile": strategy_profile,
         "primary_review": primary_review,
     }
-    payload.update(context)
     return payload
 
 
@@ -113,8 +113,18 @@ def run_pipeline(
     if not _pipeline_enabled():
         return {"ok": True, "skipped": ["dual_review_gate_disabled"]}
 
+    # Context is evidence, not authority to replace the caller's control path.
+    if {"trigger", "strategy_profile", "profile", "primary_review", "secondary_review"}.intersection(context):
+        return {"ok": False, "error": "reserved_context_field"}
+    resolved_trigger = resolve_trigger({"trigger": trigger})
+    if resolved_trigger is None:
+        return {"ok": False, "error": "invalid_trigger"}
+    trigger = resolved_trigger.value
+
     if primary_review is None:
-        if not primary_review_available():
+        # Research configuration/auth failures produce an unavailable review,
+        # not the legacy optional-primary skip accepted by older callers.
+        if resolved_trigger not in RESEARCH_REVIEW_TRIGGERS and not primary_review_available():
             if _primary_skip_allowed():
                 return {"ok": True, "skipped": ["codex_primary_unconfigured"]}
             return {"ok": False, "error": "codex_primary_unconfigured"}
@@ -124,7 +134,10 @@ def run_pipeline(
             context=context,
             evidence_path=evidence_path,
         )
-        primary_review = run_codex_primary_review(prompt=prompt)
+        primary_review = run_codex_primary_review(
+            prompt=prompt,
+            **({"research_stage": "promotion_review"} if resolved_trigger in RESEARCH_REVIEW_TRIGGERS else {}),
+        )
 
     payload = _build_payload(
         trigger=trigger,

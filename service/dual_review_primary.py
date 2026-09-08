@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from pathlib import Path
 from typing import Any
 
 from client.config import GatewayConfig
 from client.gateway_client import AiGatewayClient
-from service.dual_review import VERDICT_INVALID, VERDICT_UNAVAILABLE
+from service.dual_review import VERDICT_FAIL, VERDICT_INVALID, VERDICT_PASS, VERDICT_UNAVAILABLE, extract_verdict
 from service.dual_review_secondary import parse_llm_review_output
 
 _PRIMARY_SYSTEM = (
@@ -85,8 +86,13 @@ def run_codex_primary_review(
     *,
     prompt: str,
     timeout_minutes: int | None = None,
+    research_stage: str = "",
 ) -> dict[str, Any]:
     """Call VPS Codex audit service for the primary review."""
+    if research_stage:
+        return _run_codex_research_primary_review(
+            prompt=prompt, research_stage=research_stage, timeout_minutes=timeout_minutes,
+        )
     service_url = str(os.environ.get("CODEX_AUDIT_SERVICE_URL") or "").strip()
     if not service_url:
         raise RuntimeError("CODEX_AUDIT_SERVICE_URL is not configured")
@@ -133,6 +139,59 @@ def run_codex_primary_review(
             "error": message,
         }
     return parse_primary_review_output(result.output)
+
+
+def _run_codex_research_primary_review(
+    *, prompt: str, research_stage: str, timeout_minutes: int | None,
+) -> dict[str, Any]:
+    """Research-only Codex path; legacy recovery/API review paths stay separate."""
+    def unavailable(reason: str, *, verdict: str = VERDICT_UNAVAILABLE) -> dict[str, Any]:
+        return {"source": "codex_primary", "provider": "codex", "research_stage": "promotion_review",
+                "verdict": verdict, "confidence": 0.0, "error": reason}
+
+    if research_stage != "promotion_review":
+        return unavailable("invalid_research_stage", verdict=VERDICT_INVALID)
+    if not all(os.environ.get(key, "").strip() for key in (
+        "ACTIONS_ID_TOKEN_REQUEST_URL", "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+    )):
+        return unavailable("github_oidc_required")
+    try:
+        config = GatewayConfig.from_env()
+        source_repository = config.source_repository or os.environ.get("GITHUB_REPOSITORY", "").strip()
+        if not source_repository:
+            return unavailable("source_repository_required")
+        timeout = int(timeout_minutes or os.environ.get("DUAL_REVIEW_PRIMARY_TIMEOUT_MINUTES", "15"))
+        if not 1 <= timeout <= 60:
+            return unavailable("research_primary_invalid_timeout")
+        result = AiGatewayClient(config).execute(
+            f"{_PRIMARY_SYSTEM}\n\n{prompt}", task="dual_review", mode="review_only",
+            research_stage="promotion_review", reasoning_effort="xhigh", allowed_providers=["codex"],
+            source_repository=source_repository, timeout=timeout * 60,
+        )
+    except Exception:
+        return unavailable("research_primary_unavailable")
+    raw = result.raw
+    if (result.provider == "codex" and result.success is False and isinstance(raw, dict)
+        and raw.get("status") == "deferred"):
+        retry = raw.get("retry_at")
+        if type(retry) not in (int, float) or not math.isfinite(retry) or retry <= 0:
+            retry = None
+        return {**unavailable("research_primary_deferred"), "status": "deferred", "retry_at": retry}
+    if not (
+        result.provider == "codex" and result.success is True and not result.error and not result.note
+        and isinstance(result.output, str) and result.output.strip()
+        and isinstance(raw, dict) and raw.get("status") == "succeeded" and raw.get("provider") == "codex"
+        and raw.get("research_stage") == "promotion_review" and raw.get("reasoning_effort") == "xhigh"
+        and isinstance(result.model, str) and result.model.strip() and raw.get("model") == result.model
+        and raw.get("output") == result.output
+    ):
+        return unavailable("research_primary_result_unavailable")
+    review = parse_llm_review_output(result.output, provider="codex", model=result.model)
+    if extract_verdict(review) not in {VERDICT_PASS, VERDICT_FAIL}:
+        return unavailable("research_primary_invalid_response", verdict=VERDICT_INVALID)
+    review.update(source="codex_primary", provider="codex", research_stage="promotion_review",
+                  reasoning_effort=raw["reasoning_effort"])
+    return review
 
 
 def primary_review_available() -> bool:

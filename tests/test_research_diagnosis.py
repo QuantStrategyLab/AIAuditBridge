@@ -87,9 +87,10 @@ class ResearchDiagnosisTests(unittest.TestCase):
         from client.gateway_client import AiGatewayClient
         from unittest.mock import MagicMock
         responses = []
-        for payload in ({"codex_research_routing": "v1"}, {"job_id": "synthetic-job"},
-                        {"status": "succeeded", "output": "synthetic research suggestion",
-                         "research_stage": "drift_analysis", "model": "gpt-5.6-terra", "reasoning_effort": "medium"}):
+        route = {"job_id": "synthetic-job", "provider": "codex", "research_stage": "drift_analysis",
+                 "model": "gpt-5.6-terra", "reasoning_effort": "medium"}
+        for payload in ({"codex_research_routing": "v1"}, route,
+                        {**route, "status": "succeeded", "output": "synthetic research suggestion"}):
             response = MagicMock()
             response.__enter__.return_value.read.return_value = json.dumps(payload).encode()
             responses.append(response)
