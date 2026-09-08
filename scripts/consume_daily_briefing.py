@@ -7,7 +7,7 @@ import argparse
 import json
 from pathlib import Path
 
-from service.briefing_consumer import consume_briefing_dir
+from service.briefing_consumer import consume_briefing_dir, summarize_briefing
 from service.briefing_dispatch import dispatch_briefing_result
 from service.dual_review_briefing import collect_dual_review_payloads, summarize_dual_review_runs
 from service.dual_review_dispatch import dispatch_dual_review_result
@@ -39,6 +39,7 @@ def main(argv: list[str] | None = None) -> int:
         help="Send Telegram / GitHub notifications per briefing severity",
     )
     parser.add_argument("--dry-run", action="store_true", help="Print dispatch actions without sending")
+    parser.add_argument("--ai-summary", action="store_true", help="Add an advisory subscription AI summary (requires GitHub OIDC)")
     parser.add_argument(
         "--dual-review",
         action="store_true",
@@ -55,6 +56,8 @@ def main(argv: list[str] | None = None) -> int:
     payload: dict = result.to_dict()
     if args.dispatch:
         payload["dispatch"] = dispatch_briefing_result(result, dry_run=args.dry_run)
+    if args.ai_summary:
+        payload["ai_summary"] = summarize_briefing(result, dry_run=args.dry_run)
     if args.dual_review:
         dual_results = []
         for item in collect_dual_review_payloads(report_dir):

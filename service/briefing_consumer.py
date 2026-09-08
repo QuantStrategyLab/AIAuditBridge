@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from dataclasses import dataclass, field
+from datetime import date, datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -72,6 +74,8 @@ class BriefingConsumptionResult:
     day: str
     report_dir: str
     findings: list[BriefingFinding] = field(default_factory=list)
+    # Captured during the same read as rule classification; never raw report text.
+    summary_reports: list[dict[str, Any]] = field(default_factory=list, repr=False)
 
     @property
     def action(self) -> BriefingAction:
@@ -293,6 +297,7 @@ def consume_briefing_dir(report_dir: str | Path, *, day: str = "") -> BriefingCo
     path = Path(report_dir)
     resolved_day = day or path.name
     findings: list[BriefingFinding] = []
+    summary_reports: list[dict[str, Any]] = []
 
     for file_path in sorted(path.glob("*.json")):
         if file_path.name.startswith("_"):
@@ -300,6 +305,7 @@ def consume_briefing_dir(report_dir: str | Path, *, day: str = "") -> BriefingCo
         try:
             payload = json.loads(file_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
+            summary_reports.append({})
             findings.append(
                 BriefingFinding(
                     source=file_path.name,
@@ -310,10 +316,136 @@ def consume_briefing_dir(report_dir: str | Path, *, day: str = "") -> BriefingCo
             )
             continue
         if not isinstance(payload, Mapping):
+            summary_reports.append({})
             continue
+        summary_reports.append(_summary_report(payload, source=file_path.name))
         findings.extend(_classify_report_payload(payload, source=file_path.name))
 
-    return BriefingConsumptionResult(day=resolved_day, report_dir=str(path), findings=findings)
+    return BriefingConsumptionResult(
+        day=resolved_day, report_dir=str(path), findings=findings, summary_reports=summary_reports,
+    )
+
+
+_SUMMARY_DOMAINS = ("cn_equity", "hk_equity", "us_equity", "crypto")
+_SUMMARY_STATUSES = ("healthy", "watch", "review", "critical", "unavailable", "unknown")
+
+
+def _summary_report(payload: Mapping[str, Any], *, source: str) -> dict[str, Any]:
+    """Whitelist counts and source clocks, excluding profiles, errors and free text."""
+    domain = payload.get("domain")
+    rows = payload.get("strategies")
+    if domain not in _SUMMARY_DOMAINS or source != f"{domain}.json" or not isinstance(rows, list):
+        return {}
+    try:
+        generated = datetime.fromisoformat(payload["as_of"])
+        if generated.tzinfo is None:
+            return {}
+        generated = generated.astimezone(timezone.utc)
+        counts = dict.fromkeys(_SUMMARY_STATUSES, 0)
+        observations: dict[str, int] = {}
+        for row in rows:
+            if not isinstance(row, Mapping):
+                return {}
+            observed = date.fromisoformat(row["as_of"]).isoformat()
+            observations[observed] = observations.get(observed, 0) + 1
+            status = row.get("status")
+            counts[status if status in _SUMMARY_STATUSES else "unknown"] += 1
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return {}
+    return {
+        "source": source, "domain": domain,
+        "report_generated_at": generated.isoformat(),
+        "data_ready": payload.get("ok") is True and payload.get("data_status") == "ready",
+        "strategy_counts": counts, "observation_dates": observations,
+    }
+
+
+def _summary_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def summarize_briefing(result: BriefingConsumptionResult, *, dry_run: bool = False) -> dict[str, Any]:
+    """Optional advisory text, never a notification or strategy action authority."""
+    def unavailable(reason: str) -> dict[str, Any]:
+        return {"status": "unavailable", "reason": reason, "advisory_only": True}
+
+    if dry_run:
+        return {"status": "dry_run", "advisory_only": True}
+    # A timer's static dashboard token cannot authorize /execute/jobs. Presence
+    # only enables the SDK's OIDC flow; the service still validates its claims.
+    if not all(os.environ.get(key, "").strip() for key in (
+        "ACTIONS_ID_TOKEN_REQUEST_URL", "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+    )):
+        return unavailable("github_oidc_required")
+    now = _summary_now()
+    reports = result.summary_reports
+    if not reports or any(not report or not report["data_ready"] for report in reports):
+        return unavailable("briefing_input_unavailable")
+    # Report generation is a separate clock from the strategy observations.
+    # 36 hours and 7 natural days are conservative summary limits, not a
+    # trading-calendar validation or a change to existing risk classifications.
+    for report in reports:
+        age = (now - datetime.fromisoformat(report["report_generated_at"])).total_seconds()
+        if not 0 <= age <= 36 * 3600 or any(
+            not 0 <= (now.date() - date.fromisoformat(observed)).days <= 7
+            for observed in report["observation_dates"]
+        ):
+            return unavailable("briefing_source_time_unavailable")
+    if not any(report["observation_dates"] for report in reports):
+        return unavailable("briefing_input_unavailable")
+    context = {
+        "scope": "reported_domains_only",
+        "missing_domains": [domain for domain in _SUMMARY_DOMAINS if domain not in {r["domain"] for r in reports}],
+        "reports": reports,
+        "rule_action": result.action.value,
+    }
+    prompt = (
+        "用简短中文总结以下日报计数，仅供人工参考。输入只有已加载领域，缺失领域不能视为正常。"
+        "strategy_counts 是报告中的状态数量，不是实时健康证明；report_generated_at 是生成时间，"
+        "observation_dates 才是策略观测日期，必须分别说明。缺少回测、收益、交易和晋级证据，"
+        "不得声称已验证、建议自动执行、解除告警或授予交易权限。不要添加输入之外的事实。\n"
+        + json.dumps(context, ensure_ascii=False, sort_keys=True)
+    )
+    from client.config import GatewayConfig
+    from client.gateway_client import AiGatewayClient
+
+    try:
+        config = GatewayConfig.from_env()
+    except ValueError:
+        return unavailable("ai_gateway_not_configured")
+    source_repository = config.source_repository or os.environ.get("GITHUB_REPOSITORY", "").strip()
+    if not source_repository:
+        return unavailable("source_repository_required")
+    try:
+        response = AiGatewayClient(config).execute(
+            prompt, task="daily_briefing", mode="review_only", research_stage="research_summary",
+            allowed_providers=list(config.research_providers), timeout=300, source_repository=source_repository,
+        )
+    except Exception:
+        return unavailable("summary_execution_unavailable")
+    raw = response.raw
+    if (response.success is False and isinstance(raw, dict) and raw.get("status") == "deferred"
+        and (response.provider in config.research_providers or not response.provider)):
+        retry = raw.get("retry_at")
+        if type(retry) not in (int, float) or not math.isfinite(retry) or retry <= 0:
+            retry = None
+        return {"status": "deferred", "advisory_only": True, "retry_at": retry}
+    if not (
+        response.success is True and response.provider in config.research_providers
+        and isinstance(response.output, str) and response.output.strip() and not response.error and not response.note
+        and isinstance(raw, dict) and raw.get("status") == "succeeded"
+        and raw.get("provider", "codex") == response.provider
+        and raw.get("research_stage") == "research_summary"
+        and isinstance(response.model, str) and response.model.strip() and raw.get("model") == response.model
+        and raw.get("reasoning_effort") in {"low", "medium", "high", "xhigh"}
+        and raw.get("output") == response.output
+    ):
+        return unavailable("summary_result_unavailable")
+    return {
+        "status": "available", "advisory_only": True, "text": response.output,
+        "provider": response.provider, "model": response.model, "reasoning_effort": raw["reasoning_effort"],
+        "input": context,
+    }
 
 
 def merge_findings(groups: Iterable[Iterable[BriefingFinding]]) -> list[BriefingFinding]:

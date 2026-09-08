@@ -18,7 +18,8 @@ if [[ ! -d "$AAB" ]]; then
 fi
 
 cd "$AAB"
-PYTHONPATH=. python3 scripts/consume_daily_briefing.py \
-  --report-dir "$OUT" \
-  --day "$DAY" \
-  --dispatch
+consume_args=(--report-dir "$OUT" --day "$DAY" --dispatch)
+if [[ "${QUANT_MONITOR_AI_SUMMARY:-false}" == "true" ]]; then
+  consume_args+=(--ai-summary)
+fi
+PYTHONPATH=. python3 scripts/consume_daily_briefing.py "${consume_args[@]}"
