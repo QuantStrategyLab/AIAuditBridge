@@ -23,6 +23,8 @@ class PortfolioResearchProposalWorkflowTest(unittest.TestCase):
         self.assertIn("permission-issues: write", text)
         self.assertIn("id-token: write", text)
         self.assertIn("portfolio-research-proposal-diagnosis-${{ github.run_id }}-${{ github.run_attempt }}", text)
+        self.assertNotIn("DEFAULT_ANALYZE_MODEL", text)
+        self.assertNotIn("RESEARCH_DIAGNOSIS_MODEL", text)
         self.assertNotIn("workflow_dispatch", text)
         self.assertNotIn("gcloud", text.lower())
         self.assertNotIn("broker", text.lower())

@@ -1,0 +1,11 @@
+{
+  "on_demand_disabled_verified": false,
+  "valid_until": 0,
+  "max_daily_calls": 4,
+  "models": {
+    "cursor-grok-4.6-low": {"quality_level": 0, "supported_reasoning_efforts": ["low"]},
+    "cursor-grok-4.6-medium": {"quality_level": 1, "supported_reasoning_efforts": ["medium"]},
+    "cursor-grok-4.6-high": {"quality_level": 2, "supported_reasoning_efforts": ["high"]},
+    "cursor-grok-4.6-xhigh": {"quality_level": 3, "supported_reasoning_efforts": ["xhigh"]}
+  }
+}

@@ -3,7 +3,7 @@
 
 The watcher still owns issue creation and task construction.  This dispatcher
 only consumes a task that is already cryptographically bound to P1/P2/P3
-digests, asks the existing AI gateway for a text-only assessment, then adds one
+digests, asks the existing Codex execution endpoint for a read-only assessment, then adds one
 idempotency-marked comment to the existing issue.  It cannot run an experiment
 or alter a strategy.
 """
@@ -176,40 +176,45 @@ def run_diagnosis(
                 }
             )
             continue
-        ai_result = client.analyze(
-            prompt,
-            system="You provide bounded, read-only research diagnosis only.",
-            max_tokens=1_600,
-            timeout=120,
-            source_repository=str(request["target"]["repository"]),
-        )
-        # Content availability is separate from decision authority; never change success.
+        try:
+            ai_result = client.execute(
+                prompt,
+                mode="review_only",
+                research_stage="drift_analysis",
+                **({"allowed_providers": list(config.research_providers)} if config.research_providers != ("codex",) else {}),
+                timeout=600,
+                source_repository=str(request["target"]["repository"]),
+                source_ref=str(request["target"]["strategy_revision"]),
+            )
+        except Exception:
+            summary["diagnoses"].append({
+                "status": "unavailable", "task_id": request["task_id"],
+                "error": "codex_unavailable",
+            })
+            continue
+        # Execution completion supplies research text, never promotion authority.
+        # This lane has no analyze/review fallback, including quota failures.
         output = ai_result.output
         raw = getattr(ai_result, "raw", None)
-        note = getattr(ai_result, "note", "")
-        status = raw.get("status", "ok") if isinstance(raw, dict) else "ok"
-        policy = raw.get("policy_verdict", status) if isinstance(raw, dict) else status
-        advisory = (ai_result.success is False and note == "advisory"
-                    and status == "advisory" and policy == "advisory" and isinstance(raw, dict))
-        ok = (ai_result.success is True and note == ""
-              and status == "ok" and policy in ("ok", "eligible"))
+        if (ai_result.provider in config.research_providers or (not ai_result.provider and "cursor" in config.research_providers)) and ai_result.success is False and isinstance(raw, dict) and raw.get("status") == "deferred":
+            summary["diagnoses"].append({
+                "status": "deferred", "task_id": request["task_id"], "retry_at": raw.get("retry_at"),
+            })
+            continue
         content_available = (
-            isinstance(output, str) and bool(output.strip())
-            and not ai_result.error and (raw is None or isinstance(raw, dict))
-            and (not isinstance(raw, dict) or raw.get("output", output) == output)
-            and (ok or advisory)
+            ai_result.provider in config.research_providers and ai_result.success is True
+            and isinstance(output, str) and bool(output.strip())
+            and not ai_result.error and not getattr(ai_result, "note", "")
+            and isinstance(raw, dict) and raw.get("status") == "succeeded"
+            and raw.get("provider", "codex") == ai_result.provider
+            and raw.get("output", output) == output
         )
         if not content_available:
-            summary["diagnoses"].append(
-                {
-                    "status": "unavailable",
-                    "task_id": request["task_id"],
-                    "error": _error_summary(ai_result.error),
-                }
-            )
+            summary["diagnoses"].append({
+                "status": "unavailable", "task_id": request["task_id"],
+                "error": "codex_result_unavailable",
+            })
             continue
-        if advisory:
-            output = "advisory：仅供研究讨论，不证明执行、晋级或授权。\n\n" + output
         try:
             body = format_research_diagnosis_comment(
                 request,

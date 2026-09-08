@@ -55,12 +55,17 @@ class ExecuteRequest:
     timeout_seconds: int = 2700
     source_repository: str = ""
     source_ref: str = ""
+    allowed_providers: list[str] = field(default_factory=lambda: ["codex"])
     images: list[dict[str, str]] = field(default_factory=list)
     output_schema: dict[str, str] | None = None
 
     def validate(self) -> None:
         if not self.prompt.strip():
             raise ValueError("prompt must be a non-empty string")
+        if self.allowed_providers not in (["codex"], ["cursor"], ["codex", "cursor"]):
+            raise ValueError("allowed_providers must be [codex], [cursor], or [codex, cursor]")
+        if "cursor" in self.allowed_providers and self.mode != MODE_REVIEW_ONLY:
+            raise ValueError("Cursor only supports review_only")
         if self.mode not in SUPPORTED_MODES:
             raise ValueError(f"mode must be one of {sorted(SUPPORTED_MODES)}")
         if self.timeout_seconds <= 0:
@@ -144,6 +149,7 @@ def parse_execute_request(payload: dict[str, Any]) -> ExecuteRequest:
         timeout_seconds=int(payload.get("timeout_seconds", 2700)),
         source_repository=str(payload.get("source_repository", "")),
         source_ref=str(payload.get("source_ref", "")),
+        allowed_providers=payload.get("allowed_providers", ["codex"]),
         images=images,
         output_schema=output_schema,
     )

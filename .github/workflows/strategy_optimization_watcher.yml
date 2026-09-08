@@ -256,12 +256,11 @@ jobs:
           # the runner changes its working directory or wraps this step.
           python -m scripts.run_strategy_optimization_watcher | tee data/output/strategy_optimization_watcher/result.json
 
-      - name: Run one bounded AI research diagnosis
+      - name: Run one bounded Codex-only research diagnosis
         if: steps.fetch-metrics.outputs.downloaded == 'true' && github.event_name == 'schedule'
         env:
           CODEX_AUDIT_SERVICE_URL: ${{ secrets.CODEX_AUDIT_SERVICE_URL }}
           CODEX_AUDIT_SERVICE_AUDIENCE: ${{ vars.CODEX_AUDIT_SERVICE_AUDIENCE || 'quant-codex-audit' }}
-          DEFAULT_ANALYZE_MODEL: ${{ vars.RESEARCH_DIAGNOSIS_MODEL || 'gpt-5.4-mini' }}
           RESEARCH_DIAGNOSIS_MAX_PER_RUN: "1"
         working-directory: bridge
         run: |

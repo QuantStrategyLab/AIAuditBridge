@@ -8,12 +8,46 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from service.codex_account import read_codex_rate_limits
 
 
 class TestCodexAccountRateLimits(unittest.TestCase):
+    def test_model_list_is_paginated_and_sanitized_without_generation(self) -> None:
+        proc = Mock()
+        proc.poll.return_value = 0
+        replies = [
+            {"result": {}},
+            {"result": {"rateLimits": {"primary": {"usedPercent": 14}}}},
+            {"result": {"data": [{"model": "gpt-5.6-sol", "private": "discard",
+                "supportedReasoningEfforts": [{"reasoningEffort": "high", "description": "discard"}]}], "nextCursor": "page2"}},
+            {"result": {"data": [{"model": "gpt-6-astra", "supportedReasoningEfforts": [{"reasoningEffort": "xhigh"}]}], "nextCursor": None}},
+        ]
+        with patch.dict(os.environ, {"CODEX_AUDIT_SERVICE_CODEX_ACCOUNT_USAGE": "1"}, clear=True), patch(
+            "service.codex_account.shutil.which", return_value="synthetic-codex"
+        ), patch("service.codex_account.subprocess.Popen", return_value=proc), patch(
+            "service.codex_account._read_response", side_effect=replies
+        ), patch("service.codex_account._send") as send:
+            snapshot = read_codex_rate_limits(timeout_seconds=1, include_models=True)
+        self.assertEqual(snapshot["available_models"], [
+            {"model": "gpt-5.6-sol", "supported_reasoning_efforts": ["high"]},
+            {"model": "gpt-6-astra", "supported_reasoning_efforts": ["xhigh"]},
+        ])
+        messages = [call.args[1] for call in send.call_args_list]
+        self.assertEqual([m["method"] for m in messages], [
+            "initialize", "initialized", "account/rateLimits/read", "model/list", "model/list",
+        ])
+        self.assertEqual(messages[-1]["params"]["cursor"], "page2")
+        self.assertNotIn("discard", repr(snapshot))
+
+    def test_invalid_numeric_quota_is_never_normalized_to_available_capacity(self) -> None:
+        from service.codex_account import _window
+
+        for value in (True, float("inf"), float("nan"), "14", -0.1, 100.1):
+            with self.subTest(value=value):
+                self.assertIsNone(_window({"usedPercent": value})["used_percent"])
+
     def test_disabled_by_default(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             self.assertIsNone(read_codex_rate_limits(timeout_seconds=1))

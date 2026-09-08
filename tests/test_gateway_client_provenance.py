@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import io
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.error
 from unittest.mock import patch
 
 from client.config import GatewayConfig
@@ -27,6 +29,108 @@ class _FakeResponse:
 
 
 class GatewayClientProvenanceTests(unittest.TestCase):
+    def test_codex_research_freezes_admitted_identity_on_every_poll(self):
+        route = {"job_id": "submitted-job", "provider": "codex", "research_stage": "promotion_review",
+                 "model": "gpt-6-astra", "reasoning_effort": "xhigh"}
+        mutations = {"job_id": "different-job", "provider": "cursor", "research_stage": "optimization",
+                     "model": "gpt-5.6-sol", "reasoning_effort": "high"}
+        for status in ("running", "succeeded"):
+            for field, value in mutations.items():
+                first_poll = {**route, "status": status, "output": "private-marker", field: value}
+                replies = [_FakeResponse({"codex_research_routing": "v1"}), _FakeResponse(route),
+                           _FakeResponse(first_poll), _FakeResponse({**route, "status": "succeeded", "output": "synthetic"})]
+                client = AiGatewayClient(GatewayConfig(service_url="https://synthetic.invalid"))
+                with self.subTest(status=status, field=field), patch(
+                    "client.gateway_client._fetch_oidc_token", return_value="synthetic",
+                ), patch("client.gateway_client.time.sleep"), patch(
+                    "client.gateway_client.urllib.request.urlopen", side_effect=replies,
+                ) as http:
+                    result = client.execute("synthetic", research_stage="promotion_review")
+                    self.assertFalse(result.success)
+                    self.assertEqual(http.call_count, 3)
+                    self.assertNotIn("private-marker", repr(result))
+
+    def test_research_refuses_incomplete_or_conflicting_admission_before_polling(self):
+        route = {"job_id": "submitted-job", "provider": "codex", "research_stage": "promotion_review",
+                 "model": "gpt-6-astra", "reasoning_effort": "xhigh"}
+        mutations = ({"provider": "cursor"}, {"research_stage": "optimization"}, {"model": ""},
+                     {"model": "gpt-5.6-sol"}, {"reasoning_effort": "high"}, {"reasoning_effort": None})
+        for mutation in mutations:
+            replies = [_FakeResponse({"codex_research_routing": "v1"}), _FakeResponse({**route, **mutation}),
+                       _FakeResponse({**route, "status": "succeeded", "output": "synthetic"})]
+            client = AiGatewayClient(GatewayConfig(service_url="https://synthetic.invalid"))
+            with self.subTest(mutation=mutation), patch("client.gateway_client._fetch_oidc_token", return_value="synthetic"), patch(
+                "client.gateway_client.time.sleep",
+            ), patch("client.gateway_client.urllib.request.urlopen", side_effect=replies) as http:
+                result = client.execute("synthetic", research_stage="promotion_review", model="gpt-6-astra", reasoning_effort="xhigh")
+                self.assertFalse(result.success)
+                self.assertEqual(http.call_count, 2)
+
+    def test_codex_research_accepts_same_running_and_completed_job(self):
+        route = {"job_id": "submitted-job", "provider": "codex", "research_stage": "promotion_review",
+                 "model": "gpt-6-astra", "reasoning_effort": "xhigh"}
+        replies = [_FakeResponse({"codex_research_routing": "v1"}), _FakeResponse(route),
+                   _FakeResponse({**route, "status": "running"}),
+                   _FakeResponse({**route, "status": "succeeded", "output": "synthetic"})]
+        client = AiGatewayClient(GatewayConfig(service_url="https://synthetic.invalid"))
+        with patch("client.gateway_client._fetch_oidc_token", return_value="synthetic"), patch(
+            "client.gateway_client.time.sleep",
+        ), patch("client.gateway_client.urllib.request.urlopen", side_effect=replies):
+            result = client.execute("synthetic", research_stage="promotion_review")
+        self.assertTrue(result.success)
+        self.assertEqual(result.raw["job_id"], "submitted-job")
+
+    def test_nonresearch_execute_keeps_legacy_receipt_compatibility(self):
+        replies = [_FakeResponse({"job_id": "legacy-job"}), _FakeResponse({"status": "succeeded", "output": "legacy"})]
+        client = AiGatewayClient(GatewayConfig(service_url="https://synthetic.invalid"))
+        with patch("client.gateway_client._fetch_oidc_token", return_value="synthetic"), patch(
+            "client.gateway_client.time.sleep",
+        ), patch("client.gateway_client.urllib.request.urlopen", side_effect=replies) as http:
+            result = client.execute("synthetic")
+        self.assertTrue(result.success)
+        self.assertEqual(http.call_count, 2)
+
+    def test_research_deferral_preserves_retry_without_polling_or_breaker_failure(self) -> None:
+        client = AiGatewayClient(GatewayConfig(service_url="https://gateway.invalid"))
+        error = urllib.error.HTTPError("https://gateway.invalid", 429, "deferred", {}, io.BytesIO(json.dumps({
+            "status": "deferred", "error": "codex_quota_reserved", "retry_at": 9000,
+            "private": "must-not-propagate",
+        }).encode()))
+        with patch("client.gateway_client._fetch_oidc_token", return_value="test-token"), patch(
+            "client.gateway_client.urllib.request.urlopen", side_effect=[_FakeResponse({"codex_research_routing": "v1"}), error]
+        ) as http:
+            result = client.execute("synthetic", research_stage="optimization", reasoning_effort="high")
+        self.assertFalse(result.success)
+        self.assertEqual(result.raw["status"], "deferred")
+        self.assertEqual(result.raw["retry_at"], 9000)
+        self.assertNotIn("must-not-propagate", repr(result))
+        self.assertEqual(client._breaker.failures, 0)
+        self.assertEqual(http.call_count, 2)
+        payload = json.loads(http.call_args.args[0].data)
+        self.assertEqual(payload["research_stage"], "optimization")
+        self.assertEqual(payload["reasoning_effort"], "high")
+
+    def test_research_refuses_old_service_before_submitting_and_checks_completion_route(self):
+        route = {"job_id": "synthetic", "provider": "codex", "research_stage": "optimization",
+                 "model": "gpt-5.6-sol", "reasoning_effort": "high"}
+        cases = [
+            [_FakeResponse({"status": "ok"})],
+            [_FakeResponse({"codex_research_routing": "v1"}), _FakeResponse({"job_id": "synthetic"})],
+            [_FakeResponse({"codex_research_routing": "v1"}), _FakeResponse(route),
+             _FakeResponse({"status": "succeeded", "output": "old response"})],
+        ]
+        for replies in cases:
+            client = AiGatewayClient(GatewayConfig(service_url="https://gateway.invalid"))
+            with self.subTest(replies=len(replies)), patch("client.gateway_client._fetch_oidc_token", return_value="synthetic"), patch(
+                "client.gateway_client.urllib.request.urlopen", side_effect=replies
+            ) as http, patch("client.gateway_client.time.sleep"):
+                result = client.execute("synthetic", research_stage="optimization")
+            self.assertFalse(result.success)
+            self.assertEqual(result.output, "")
+            self.assertEqual(http.call_count, len(replies))
+            if len(replies) == 1:
+                self.assertEqual(http.call_args.args[0].get_method(), "GET")
+
     def test_installed_sdk_exports_consumer_api_without_source_checkout(self) -> None:
         script = """
 import sys

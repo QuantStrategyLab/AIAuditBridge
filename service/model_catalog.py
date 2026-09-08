@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import fcntl
+import threading
+from contextlib import contextmanager
 import os
 import re
 import tempfile
@@ -65,6 +68,24 @@ def validate_catalog_path(path: Path) -> Path:
     return resolved
 
 
+_CATALOG_WRITE_LOCK = threading.RLock()
+
+
+@contextmanager
+def catalog_update_lock(path: Path):
+    """Serialize complete read/modify/write cycles across API and CLI refreshes."""
+    target = validate_catalog_path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with _CATALOG_WRITE_LOCK:
+        descriptor = os.open(str(target) + '.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(descriptor, 'a') as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                yield target
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
 def seed_catalog_path() -> Path:
     return _DEFAULT_REPO_CATALOG
 
@@ -118,6 +139,7 @@ class ModelCatalog:
     deprecation_misses: int = DEFAULT_DEPRECATION_MISSES
     catalog_source: str = "live"
     last_sync_attempt_at: str = ""
+    subscription_rosters: dict[str, dict[str, Any]] = field(default_factory=dict)
     tiers: dict[str, TierAssignment] = field(default_factory=dict)
     models: dict[str, ModelRecord] = field(default_factory=dict)
     deprecated: list[str] = field(default_factory=list)
@@ -134,6 +156,7 @@ class ModelCatalog:
             "deprecation_misses": self.deprecation_misses,
             "catalog_source": self.catalog_source,
             "last_sync_attempt_at": self.last_sync_attempt_at,
+            "subscription_rosters": self.subscription_rosters,
             "tiers": {name: assignment.to_dict() for name, assignment in self.tiers.items()},
             "models": {model_id: record.to_dict() for model_id, record in self.models.items()},
             "deprecated": list(self.deprecated),
@@ -181,6 +204,7 @@ class ModelCatalog:
             deprecation_misses=int(payload.get("deprecation_misses") or DEFAULT_DEPRECATION_MISSES),
             catalog_source=str(payload.get("catalog_source") or "live"),
             last_sync_attempt_at=str(payload.get("last_sync_attempt_at") or ""),
+            subscription_rosters=dict(payload.get("subscription_rosters") or {}),
             tiers=tiers,
             models=models,
             deprecated=[str(item) for item in (payload.get("deprecated") or [])],

@@ -12,6 +12,7 @@ from service.dual_review import (
     VERDICT_DISAGREEMENT,
     VERDICT_FAIL,
     VERDICT_PASS,
+    VERDICT_UNAVAILABLE,
     DualReviewTrigger,
     compare_reviews,
     compare_three_reviews,
@@ -27,6 +28,9 @@ from service.model_router import route_model
 
 SecondaryReviewer = Callable[["DualReviewRequest"], dict[str, Any]]
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+RESEARCH_REVIEW_TRIGGERS = frozenset({
+    DualReviewTrigger.PROMOTION, DualReviewTrigger.HIT_RATE, DualReviewTrigger.DRIFT,
+})
 
 
 @dataclass(frozen=True)
@@ -116,9 +120,13 @@ def default_secondary_reviewer(request: DualReviewRequest) -> dict[str, Any]:
 
 def resolve_secondary_reviewer(
     explicit: SecondaryReviewer | None,
+    *,
+    trigger: DualReviewTrigger | None = None,
 ) -> SecondaryReviewer:
     if explicit is not None:
         return explicit
+    if trigger in RESEARCH_REVIEW_TRIGGERS:
+        return unavailable_research_secondary
     mode = str(os.environ.get("DUAL_REVIEW_SECONDARY_MODE", "dual_api")).strip().lower()
     if mode == "stub":
         return default_secondary_reviewer
@@ -127,14 +135,34 @@ def resolve_secondary_reviewer(
     return dual_api_secondary_reviewer
 
 
+def unavailable_research_secondary(_request: DualReviewRequest) -> dict[str, Any]:
+    """Required reviewer slots, not fabricated votes or a paid fallback."""
+    return {
+        "mode": "research_secondary_unavailable",
+        **{reviewer: {
+            "source": "not_executed", "executed": False,
+            "verdict": VERDICT_UNAVAILABLE, "confidence": 0.0,
+            "error": "independent_research_reviewer_not_configured",
+        } for reviewer in ("gpt", "claude")},
+    }
+
+
 def orchestrate_dual_review(
     request: DualReviewRequest,
     *,
     secondary_reviewer: SecondaryReviewer | None = None,
 ) -> DualReviewResult:
     """Run primary confidence gate, optional secondary review, and reconciliation."""
-    reviewer = resolve_secondary_reviewer(secondary_reviewer)
-    route = route_model("dual_review")
+    reviewer = resolve_secondary_reviewer(secondary_reviewer, trigger=request.trigger)
+    if request.trigger in RESEARCH_REVIEW_TRIGGERS:
+        # Report actual primary execution metadata, not an unused API tier.
+        route = {"task_type": "dual_review", "research_stage": "promotion_review"}
+        for field in ("provider", "model", "reasoning_effort"):
+            value = request.primary_review.get(field)
+            if isinstance(value, str) and value:
+                route[field] = value
+    else:
+        route = route_model("dual_review")
     result = DualReviewResult(
         trigger=request.trigger,
         strategy_profile=request.strategy_profile,
@@ -176,6 +204,8 @@ def orchestrate_dual_review(
             secondary["claude"],
             require_all_reviewers=requires_mandatory_multi_review(request.trigger),
         )
+        if secondary.get("mode") == "research_secondary_unavailable":
+            comparison["mode"] = "research_secondary_unavailable"
     else:
         legacy = secondary.get("legacy") if isinstance(secondary, dict) else None
         compare_target = legacy if isinstance(legacy, dict) else secondary

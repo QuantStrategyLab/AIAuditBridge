@@ -277,5 +277,79 @@ class ModelResolverTests(unittest.TestCase):
             self.assertEqual(second["model"], "gpt-5.4")
 
 
+class CodexResearchRoutingTests(unittest.TestCase):
+    @staticmethod
+    def account():
+        return {
+            "status": "available", "updated_at": 1000,
+            "rate_limits": {"primary": {"used_percent": 10, "window_duration_mins": 10080, "resets_at": 9000}},
+            "available_models": [{"model": model, "supported_reasoning_efforts": ["low", "medium", "high", "xhigh"]}
+                for model in ("gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-6-astra")],
+        }
+
+    def route(self, stage="drift_analysis", **kwargs):
+        from service.model_resolver import resolve_codex_research_route
+        return resolve_codex_research_route(stage=stage, account=kwargs.pop("account", self.account()), now=1000, **kwargs)
+
+    def test_stage_selects_model_and_effort_without_api_catalog(self):
+        for stage, model, effort in (
+            ("research_summary", "gpt-5.6-luna", "low"),
+            ("drift_analysis", "gpt-5.6-terra", "medium"),
+            ("optimization", "gpt-5.6-sol", "high"),
+            ("promotion_review", "gpt-6-astra", "xhigh"),
+        ):
+            with self.subTest(stage=stage), patch("service.model_resolver._load_or_sync_catalog", side_effect=AssertionError("no API catalog")):
+                result = self.route(stage)
+                self.assertEqual((result["action"], result["model"], result["reasoning_effort"]), ("run", model, effort))
+                self.assertEqual(result["provider"], "codex")
+
+    def test_complexity_can_raise_but_never_lower_stage_floor(self):
+        self.assertEqual(self.route("research_summary", complexity="high")["model"], "gpt-5.6-sol")
+        self.assertEqual(self.route("promotion_review", complexity="low")["reasoning_effort"], "xhigh")
+
+    def test_low_quota_defers_instead_of_using_smaller_model_or_api(self):
+        account = self.account()
+        account["rate_limits"]["primary"]["used_percent"] = 65
+        result = self.route("optimization", account=account)
+        self.assertEqual(result["action"], "defer")
+        self.assertEqual(result["retry_at"], 9000)
+        self.assertEqual(result["model"], "gpt-5.6-sol")
+        self.assertEqual(self.route("research_summary", account=account)["action"], "run")
+        account["rate_limits"]["primary"]["used_percent"] = 75
+        self.assertEqual(self.route("research_summary", account=account)["action"], "defer")
+
+    def test_short_window_is_independent_and_missing_window_is_not_zero(self):
+        account = self.account()
+        account["rate_limits"]["secondary"] = {"used_percent": 85, "window_duration_mins": 300, "resets_at": 2000}
+        self.assertEqual(self.route(account=account)["retry_at"], 2000)
+        account["rate_limits"]["secondary"] = None
+        self.assertEqual(self.route(account=account)["action"], "run")
+
+    def test_invalid_stale_or_missing_account_never_runs(self):
+        for field, value in (("updated_at", 0), ("status", "unavailable"), ("available_models", []), ("rate_limits", {})):
+            account = self.account()
+            account[field] = value
+            with self.subTest(field=field):
+                self.assertEqual(self.route(account=account)["action"], "defer")
+        for used in (True, float("nan"), -1, 101):
+            account = self.account()
+            account["rate_limits"]["primary"]["used_percent"] = used
+            self.assertEqual(self.route(account=account)["action"], "defer")
+        self.assertEqual(self.route(account=None)["action"], "defer")
+
+    def test_selection_respects_explicit_model_and_supported_effort(self):
+        result = self.route(requested_model="gpt-6-astra", requested_effort="high")
+        self.assertEqual((result["model"], result["reasoning_effort"]), ("gpt-6-astra", "high"))
+        self.assertEqual(self.route("promotion_review", requested_effort="low")["action"], "defer")
+        self.assertEqual(self.route(requested_model="unavailable-model")["action"], "defer")
+        account = self.account()
+        account["available_models"][-1]["supported_reasoning_efforts"] = ["low"]
+        self.assertEqual(self.route("promotion_review", account=account)["action"], "defer")
+
+    def test_explicit_light_model_cannot_bypass_research_stage_floor(self):
+        self.assertEqual(self.route("promotion_review", requested_model="gpt-5.6-luna", requested_effort="xhigh")["action"], "defer")
+        self.assertEqual(self.route("optimization", requested_model="gpt-5.6-terra", requested_effort="high")["action"], "defer")
+
+
 if __name__ == "__main__":
     unittest.main()

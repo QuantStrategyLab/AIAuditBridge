@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import select
 import shutil
@@ -21,22 +22,21 @@ def _bool_env(name: str, default: bool = False) -> bool:
 
 
 def _int_or_none(value: Any) -> int | None:
-    try:
-        return int(value) if value is not None else None
-    except (TypeError, ValueError):
-        return None
+    return value if type(value) is int else None
 
 
-def _remaining_percent(used_percent: int | None) -> int | None:
+def _remaining_percent(used_percent: float | None) -> float | None:
     if used_percent is None:
         return None
     return max(0, min(100, 100 - used_percent))
 
 
-def _window(raw: Any) -> dict[str, int | None] | None:
+def _window(raw: Any) -> dict[str, int | float | None] | None:
     if not isinstance(raw, dict):
         return None
-    used_percent = _int_or_none(raw.get("usedPercent"))
+    used_percent = raw.get("usedPercent")
+    if type(used_percent) not in (int, float) or not math.isfinite(used_percent) or not 0 <= used_percent <= 100:
+        used_percent = None
     return {
         "used_percent": used_percent,
         "remaining_percent": _remaining_percent(used_percent),
@@ -101,7 +101,39 @@ def _read_response(proc: subprocess.Popen[str], response_id: int, deadline: floa
     raise TimeoutError(f"codex app-server response {response_id} timed out")
 
 
-def read_codex_rate_limits(timeout_seconds: float | None = None) -> dict[str, Any] | None:
+def _read_models(proc: subprocess.Popen[str], deadline: float) -> list[dict[str, Any]] | None:
+    """Read only model metadata, with bounded pagination; never generate text."""
+    models = []
+    cursor = None
+    seen = set()
+    for request_id in range(3, 13):
+        params: dict[str, Any] = {"limit": 100, "includeHidden": False}
+        if cursor:
+            params["cursor"] = cursor
+        _send(proc, {"method": "model/list", "id": request_id, "params": params})
+        result = _read_response(proc, request_id, deadline).get("result")
+        if not isinstance(result, dict) or not isinstance(result.get("data"), list):
+            return None
+        for item in result["data"]:
+            if not isinstance(item, dict) or item.get("hidden") is True:
+                continue
+            model, efforts = item.get("model"), item.get("supportedReasoningEfforts")
+            if not isinstance(model, str) or not model or not isinstance(efforts, list):
+                continue
+            models.append({"model": model, "supported_reasoning_efforts": [
+                effort["reasoningEffort"] for effort in efforts
+                if isinstance(effort, dict) and isinstance(effort.get("reasoningEffort"), str)
+            ]})
+        cursor = result.get("nextCursor")
+        if cursor is None:
+            return models
+        if not isinstance(cursor, str) or not cursor or cursor in seen:
+            return None
+        seen.add(cursor)
+    return None
+
+
+def read_codex_rate_limits(timeout_seconds: float | None = None, *, include_models: bool = False) -> dict[str, Any] | None:
     """Return a sanitized Codex account rate-limit snapshot, or None when disabled/unavailable."""
     if not _bool_env("CODEX_AUDIT_SERVICE_CODEX_ACCOUNT_USAGE", False):
         return None
@@ -147,13 +179,19 @@ def read_codex_rate_limits(timeout_seconds: float | None = None) -> dict[str, An
         primary = limits_by_id.get("codex") or _rate_limit(result.get("rateLimits"))
         if not primary:
             return None
-        return {
+        snapshot = {
             "source": "codex_app_server",
             "status": "available",
             "updated_at": int(time.time()),
             "rate_limits": primary,
             "rate_limits_by_limit_id": limits_by_id or None,
         }
+        if include_models:
+            try:
+                snapshot["available_models"] = _read_models(proc, deadline)
+            except (OSError, RuntimeError, TimeoutError, TypeError, ValueError):
+                snapshot["available_models"] = None
+        return snapshot
     except (OSError, RuntimeError, TimeoutError, TypeError, ValueError):
         return None
     finally:

@@ -10,6 +10,57 @@ from service.quota import QuotaManager
 
 
 class AiGatewayExecuteTelemetryTests(unittest.TestCase):
+    def test_research_refreshes_partial_or_stale_dashboard_snapshot_once(self):
+        for updated, models in ((1000, None), (819, [{"model": "gpt-5.6-sol"}])):
+            quota = QuotaManager()
+            quota._codex_account_cache = {"status": "available", "updated_at": updated, "available_models": models}
+            quota._codex_account_cache_ts = updated
+            quota._codex_account_attempt_ts = updated
+            fresh = {"status": "available", "updated_at": 1000, "available_models": [{"model": "gpt-5.6-sol"}]}
+            with self.subTest(updated=updated), patch.dict(gateway.os.environ, {"CODEX_AUDIT_SERVICE_CODEX_ACCOUNT_CACHE_SECONDS": "3600"}), patch(
+                "service.quota.time.time", return_value=1000
+            ), patch("service.quota.read_codex_rate_limits", return_value=fresh) as read:
+                self.assertEqual(quota._codex_account_snapshot(require_models=True), fresh)
+                self.assertEqual(quota._codex_account_snapshot(require_models=True), fresh)
+                read.assert_called_once()
+
+    def test_research_routes_select_supported_model_and_defer_before_provider(self) -> None:
+        account = {"status": "available", "updated_at": 1000,
+            "rate_limits": {"primary": {"used_percent": 10, "window_duration_mins": 10080, "resets_at": 9000}},
+            "available_models": [{"model": "gpt-5.6-sol", "supported_reasoning_efforts": ["high"]}]}
+        for method in ("_handle_execute_async", "_handle_execute_sync"):
+            for used in (10, 65):
+                quota = QuotaManager()
+                account["rate_limits"]["primary"]["used_percent"] = used
+                payload = {"prompt": "synthetic", "mode": "review_only", "research_stage": "optimization"}
+                with (
+                    self.subTest(method=method, used=used),
+                    patch.dict(gateway.os.environ, {}, clear=True),
+                    patch.object(gateway.time, "time", return_value=1000),
+                    patch.object(quota, "_codex_account_snapshot", return_value=account),
+                    patch.object(quota, "record_execute") as record,
+                    patch.object(gateway, "get_quota_manager", return_value=quota),
+                    patch.object(gateway, "get_health_monitor"),
+                    patch.object(gateway, "_json_response") as response,
+                    patch.object(gateway, "_submit_job", return_value={"job_id": "synthetic"}) as submit,
+                    patch.object(gateway, "CodexAdapter") as adapter,
+                ):
+                    adapter.return_value.execute.return_value = SimpleNamespace(success=True, output="synthetic", error="")
+                    getattr(gateway.AiGatewayRequestHandler, method)(object(), {"repository": "Synthetic/caller"}, payload)
+                    if used == 65:
+                        self.assertEqual(response.call_args.args[1], 429)
+                        self.assertEqual(response.call_args.args[2]["status"], "deferred")
+                        self.assertEqual(response.call_args.args[2]["retry_at"], 9000)
+                        submit.assert_not_called()
+                        adapter.assert_not_called()
+                        record.assert_not_called()
+                    else:
+                        self.assertIn(response.call_args.args[1], (200, 202))
+                        selected = submit.call_args.args[1] if method.endswith("async") else adapter.return_value.execute.call_args.kwargs
+                        self.assertEqual(selected["model"], "gpt-5.6-sol")
+                        self.assertEqual(selected["reasoning_effort"], "high")
+                        record.assert_called_once()
+
     def test_exhausted_subscription_rejects_both_execute_routes_before_submission(self) -> None:
         quota = QuotaManager()
         account = {"status": "available", "rate_limits": {"primary": {"used_percent": 100}}}

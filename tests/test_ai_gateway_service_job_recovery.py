@@ -43,6 +43,15 @@ class AiGatewayJobRecoveryTests(unittest.TestCase):
 
 
 class AiGatewayJobAdmissionTests(unittest.TestCase):
+    def test_research_model_or_effort_upgrade_cannot_reuse_weaker_job(self) -> None:
+        payload = {"prompt": "synthetic", "research_stage": "drift_analysis", "model": "gpt-5.6-terra", "reasoning_effort": "medium"}
+        def key(value):
+            return gateway._job_dedupe_key(value, repository="Synthetic/repo", run_id="1", run_attempt="1")
+        for field, value in (("model", "gpt-6-astra"), ("reasoning_effort", "high"), ("research_stage", "promotion_review")):
+            with self.subTest(field=field):
+                self.assertNotEqual(key(payload), key({**payload, field: value}))
+        self.assertEqual(key(payload), key(dict(payload)))
+
     def test_concurrent_submit_dedupes_under_admission_mutex(self) -> None:
         import concurrent.futures
 
