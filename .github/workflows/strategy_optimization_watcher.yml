@@ -170,7 +170,7 @@ jobs:
 
           # Restrict to the canonical branch so we never consume metrics from a
           # feature-branch or PR workflow run.
-          mapfile -t RUN_IDS < <(gh run list --repo "${SOURCE_REPO}" --workflow "${SOURCE_WORKFLOW_FILE}" --branch "${SOURCE_REF}" --status success --limit 2 --json databaseId --jq '.[].databaseId')
+          mapfile -t RUN_IDS < <(gh run list --repo "${SOURCE_REPO}" --workflow "${SOURCE_WORKFLOW_FILE}" --branch "${SOURCE_REF}" --status success --limit 5 --json databaseId --jq '.[].databaseId')
 
           if [ "${#RUN_IDS[@]}" -eq 0 ]; then
             echo "No successful source run on ${SOURCE_REF} in ${SOURCE_REPO} — metrics not available yet"
@@ -204,17 +204,13 @@ jobs:
             exit 0
           fi
           current_run_id="${RUN_IDS[0]}"
-          baseline_run_id="${RUN_IDS[1]}"
-          for run_id in "${current_run_id}" "${baseline_run_id}"; do
-            if ! gh run download "${run_id}" --repo "${SOURCE_REPO}" --dir "source/data/output/_artifacts/${run_id}" 2>/dev/null; then
-              echo "Artifact download from run ${run_id} failed"
-              echo "downloaded=false" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-          done
+          if ! gh run download "${current_run_id}" --repo "${SOURCE_REPO}" --dir "source/data/output/_artifacts/${current_run_id}" 2>/dev/null; then
+            echo "Artifact download from run ${current_run_id} failed"
+            echo "downloaded=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           current_file=$(find "source/data/output/_artifacts/${current_run_id}" -name "${METRICS_FILENAME}" -type f -print -quit)
-          baseline_file=$(find "source/data/output/_artifacts/${baseline_run_id}" -name "${METRICS_FILENAME}" -type f -print -quit)
-          if [ -z "${current_file}" ] || [ -z "${baseline_file}" ]; then
+          if [ -z "${current_file}" ]; then
             echo "Comparable ${METRICS_FILENAME} artifacts are not available yet"
             terminal_file=$(find "source/data/output/_artifacts/${current_run_id}" -name "p1-status.json" -type f -print -quit)
             if [ -n "${terminal_file}" ]; then
@@ -229,15 +225,47 @@ jobs:
             echo "downloaded=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+
+          baseline_candidates=()
+          for run_id in "${RUN_IDS[@]:1}"; do
+            if ! gh run download "${run_id}" --repo "${SOURCE_REPO}" --dir "source/data/output/_artifacts/${run_id}" 2>/dev/null; then
+              echo "Artifact download from run ${run_id} failed"
+              echo "downloaded=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            baseline_file=$(find "source/data/output/_artifacts/${run_id}" -name "${METRICS_FILENAME}" -type f -print -quit)
+            if [ -n "${baseline_file}" ]; then
+              baseline_candidates+=(--baseline-candidate "${run_id}" "${baseline_file}")
+            fi
+          done
+          if [ "${#baseline_candidates[@]}" -eq 0 ]; then
+            echo "No earlier strategy performance observations are available yet"
+            echo "downloaded=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          PYTHONPATH=bridge python - "${GITHUB_WORKSPACE}/source" "${METRICS_PATH}" <<'PY'
+          import sys
+
+          from scripts.run_strategy_optimization_watcher import resolve_input_path
+
+          output = resolve_input_path(source_root=sys.argv[1], metrics_path=sys.argv[2])
+          if output is None:
+              raise SystemExit("invalid strategy metrics output path")
+          output.unlink(missing_ok=True)
+          PY
           python bridge/scripts/build_strategy_watcher_artifact_payload.py \
             --current "${current_file}" \
-            --baseline "${baseline_file}" \
+            "${baseline_candidates[@]}" \
             --source-repository "${SOURCE_REPO}" \
             --workflow-file "${SOURCE_WORKFLOW_FILE}" \
             --current-run-id "${current_run_id}" \
-            --baseline-run-id "${baseline_run_id}" \
             --output "source/${METRICS_PATH}"
-          echo "Built comparable watcher payload from ${baseline_run_id} and ${current_run_id}"
+          if [ ! -f "source/${METRICS_PATH}" ]; then
+            echo "No earlier comparable strategy performance observation is available yet"
+            echo "downloaded=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Built comparable watcher payload for current run ${current_run_id}"
           echo "downloaded=true" >> "$GITHUB_OUTPUT"
 
       - name: Run Strategy Optimization Watcher
