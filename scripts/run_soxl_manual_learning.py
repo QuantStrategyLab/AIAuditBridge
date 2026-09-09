@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import re
@@ -41,6 +42,17 @@ EXPECTED_REF = "refs/heads/main"
 EXPECTED_EVENT = "workflow_dispatch"
 SAFE_REASON = re.compile(r"[a-z0-9_]{1,64}\Z")
 WATCHER_MARKER_PREFIX = "qsl-soxl-watcher-learning:v1"
+DEVELOPMENT_SUMMARY_SHA256 = "89418d4e13efa9379f91c522ccbe084e2cbf180ba343103d5b73fb7cdbb955a8"
+VALIDATION_QPK_REVISION = "7363011d56926d39f4fffeb036e511391114e39f"
+VALIDATION_CONSUMER_REVISION = "b68b4a81ccdab7b61042fcf98df0189dfe539ef4"
+VALIDATION_FOLDS = [
+    dict(zip(("train_start", "train_end", "test_start", "test_end"), boundaries, strict=True))
+    for boundaries in (
+        ("2022-12-28", "2023-06-30", "2023-07-03", "2023-12-29"),
+        ("2024-01-02", "2024-06-28", "2024-07-01", "2024-12-31"),
+        ("2025-01-02", "2025-02-28", "2025-03-03", "2025-07-31"),
+    )
+]
 
 
 class ManualLearningError(ValueError):
@@ -724,19 +736,192 @@ def run_manual_learning(
     return artifact
 
 
+def _summary_digest(value: object) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+
+
+def _strict_validation_summary(value: object, gate: Callable[..., tuple[bool, str]]) -> dict[str, Any]:
+    from dataclasses import fields
+    from quant_platform_kit.strategy_lifecycle.contracts import BacktestValidationIdentity, OptimizationProposal
+
+    profile = "soxl_soxx_three_asset_mid_weight_learning_v1"
+    if (
+        not isinstance(value, Mapping) or value.get("status") != "PROMOTION_BACKTEST_RUNS_BUILT"
+        or value.get("stage") != "promotion_validation"
+        or any(value.get(key) is not True for key in ("learning_only", "no_order", "size_zero_required"))
+        or value.get("promotion_eligible") is not False
+        or value.get("live_authority_granted") is not False
+    ):
+        raise ManualLearningError("validation_result_invalid")
+    raw_proposal = value.get("proposal")
+    method = f"bounded_development_tradeoff:sha256:{DEVELOPMENT_SUMMARY_SHA256}"
+    if (
+        not isinstance(raw_proposal, Mapping)
+        or raw_proposal.get("strategy_profile") != profile or raw_proposal.get("domain") != "us_equity"
+        or raw_proposal.get("current_params") != {"blend_gate_mid_soxl_weight": 0.65}
+        or raw_proposal.get("proposed_params") != {"blend_gate_mid_soxl_weight": 0.55}
+        or raw_proposal.get("optimization_method") != method
+        or raw_proposal.get("recommendation") != "research_candidate"
+        or raw_proposal.get("walk_forward_passed") is not False
+    ):
+        raise ManualLearningError("validation_proposal_invalid")
+    proposal = OptimizationProposal(
+        strategy_profile=profile, domain="us_equity", current_params=raw_proposal["current_params"],
+        proposed_params=raw_proposal["proposed_params"], optimization_method=method,
+        recommendation="research_candidate", search_iterations=3,
+    )
+    safe_runs: dict[str, list[dict[str, Any]]] = {}
+    metric_keys = ("cagr", "sharpe_ratio", "max_drawdown", "volatility", "total_return")
+    result_keys = (*metric_keys, "strategy_profile", "domain", "param_set_id", "params", "start_date", "end_date", "observation_count", "source_revision", "cost_model", "cost_inputs")
+    for role, weight in (("baseline", 0.65), ("candidate", 0.55)):
+        runs = value.get(f"{role}_promotion_runs")
+        if not isinstance(runs, list) or len(runs) != len(COST_BPS):
+            raise ManualLearningError("validation_result_invalid")
+        safe_runs[role] = []
+        for run, cost in zip(runs, COST_BPS, strict=True):
+            if not isinstance(run, Mapping):
+                raise ManualLearningError("validation_result_invalid")
+            passed, _ = gate(proposal, {
+                "status": "PASS", "orchestrator": "BacktestOrchestrator", "protocol": "purged_walk_forward.v1",
+                "locked_independent_oos": {"locked": True, "independent": True, "reused_for_selection": False},
+                "promotion_run": run,
+            })
+            if not passed:
+                raise ManualLearningError("strict_backtest_gate_rejected")
+            if (
+                run.get("source_revision") != UES_REVISION
+                or run.get("locked_oos_start") != "2025-08-04" or run.get("locked_oos_end") != "2026-08-04"
+                or run.get("folds") != VALIDATION_FOLDS
+                or run.get("purge_days") != 1 or run.get("embargo_days") != 1
+                or run.get("cost_model") != {"model_id": f"all_in_per_side_{cost:g}bps", "commission_bps": 0.0, "slippage_bps": cost, "market_impact_bps": 0.0}
+                or not isinstance(run.get("fold_results"), list) or len(run["fold_results"]) != 3
+            ):
+                raise ManualLearningError("validation_result_invalid")
+            safe_results = []
+            windows = [(fold["test_start"], fold["test_end"]) for fold in run["folds"]]
+            windows.append((run["locked_oos_start"], run["locked_oos_end"]))
+            for index, (result, (start, end)) in enumerate(zip([*run["fold_results"], run.get("locked_oos_result")], windows, strict=True)):
+                suffix = f"_wf{index}" if index < 3 else "_locked_oos"
+                result_id = f"soxl-three-asset-{DEVELOPMENT_SUMMARY_SHA256}-{role}-cost-{cost:g}{suffix}"
+                if (
+                    not isinstance(result, Mapping) or result.get("strategy_profile") != profile
+                    or result.get("domain") != "us_equity"
+                    or result.get("params") != {"blend_gate_mid_soxl_weight": weight}
+                    or result.get("source_revision") != UES_REVISION
+                    or result.get("param_set_id") != result_id
+                    or result.get("cost_model") != run["cost_model"]["model_id"]
+                    or result.get("cost_inputs") != {key: run["cost_model"][key] for key in ("commission_bps", "slippage_bps", "market_impact_bps")}
+                    or not isinstance(result.get("observation_count"), int) or isinstance(result["observation_count"], bool)
+                    or result["observation_count"] < 2
+                    or result.get("start_date") != start or result.get("end_date") != end
+                    or any(isinstance(result.get(key), bool) or not isinstance(result.get(key), (int, float)) or not math.isfinite(result[key]) for key in metric_keys)
+                ):
+                    raise ManualLearningError("validation_result_invalid")
+                identity = result.get("validation_identity")
+                expected_identity = {
+                    "protocol": "purged_walk_forward.v1", "fold_id": result_id,
+                    "fold_role": "test" if index < 3 else "locked_oos",
+                    "train_start": VALIDATION_FOLDS[index]["train_start"] if index < 3 else None,
+                    "train_end": VALIDATION_FOLDS[index]["train_end"] if index < 3 else None,
+                    "test_start": start, "test_end": end,
+                    "locked_oos_start": "2025-08-04", "locked_oos_end": "2026-08-04",
+                    "purge_days": 1, "embargo_days": 1,
+                }
+                if identity != expected_identity:
+                    raise ManualLearningError("validation_result_invalid")
+                safe_results.append({
+                    **{key: result.get(key) for key in result_keys},
+                    "validation_identity": {field.name: identity.get(field.name) for field in fields(BacktestValidationIdentity)},
+                })
+            safe_runs[role].append({
+                **{key: run[key] for key in ("strategy_profile", "domain", "folds", "locked_oos_start", "locked_oos_end", "purge_days", "embargo_days", "source_revision", "cost_model")},
+                "fold_results": safe_results[:3], "locked_oos_result": safe_results[3],
+            })
+    comparisons = []
+    for baseline, candidate, cost in zip(safe_runs["baseline"], safe_runs["candidate"], COST_BPS, strict=True):
+        b, c = baseline["locked_oos_result"], candidate["locked_oos_result"]
+        comparisons.append({
+            "cost_bps": cost, "baseline_max_drawdown": b["max_drawdown"], "candidate_max_drawdown": c["max_drawdown"],
+            "baseline_cagr": b["cagr"], "candidate_cagr": c["cagr"],
+            "baseline_sharpe": b["sharpe_ratio"], "candidate_sharpe": c["sharpe_ratio"],
+            "cagr_retention": c["cagr"] / b["cagr"] if b["cagr"] > 0 else None,
+            "sharpe_retention": c["sharpe_ratio"] / b["sharpe_ratio"] if b["sharpe_ratio"] > 0 else None,
+        })
+    return {
+        "proposal": proposal.to_dict(), "baseline_promotion_runs": safe_runs["baseline"],
+        "candidate_promotion_runs": safe_runs["candidate"], "oos_comparison": comparisons,
+        "strict_backtest_gate": {"status": "passed", "checks": 6, "qpk_revision": VALIDATION_QPK_REVISION},
+        "human_quality_decision_required": True,
+    }
+
+
+def run_manual_validation(
+    *, development_summary: Path, manifest_sha256: str, root: Path, consumer_source: Path,
+    ues_source: Path, context: Mapping[str, str], command_runner: Callable[[list[str]], Any] | None = None,
+    progress_writer: Callable[[Mapping[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    _validate_authority(context)
+    try:
+        if development_summary.is_symlink() or development_summary.stat().st_size > 1_048_576:
+            raise ValueError
+        if _summary_digest(json.loads(development_summary.read_text())) != DEVELOPMENT_SUMMARY_SHA256:
+            raise ValueError
+    except (OSError, ValueError, TypeError):
+        raise ManualLearningError("validation_development_source_invalid") from None
+    try:
+        from quant_platform_kit.strategy_lifecycle.research_promotion_cycle import enforce_promotion_backtest_gates
+    except ImportError:
+        raise ManualLearningError("strict_validation_runtime_unavailable") from None
+    required = (root / "binding.json", root / "manifest.json", root / "bars.json", consumer_source / "scripts/run_soxl_three_asset_learning.py", consumer_source / "config/soxl_soxx_core_only_p2_v3.json")
+    if (
+        re.fullmatch(r"[0-9a-f]{64}", manifest_sha256) is None
+        or any(path.is_symlink() or not path.is_file() for path in required)
+        or not (consumer_source / ".venv/bin/python").is_file()
+        or ues_source.is_symlink() or not ues_source.is_dir()
+    ):
+        raise ManualLearningError("source_or_input_unavailable")
+    artifact = _safe_base(context, (0.65, 0.55), manifest_sha256)
+    artifact.update(operation="soxl_validation", status="parked", development_summary_sha256=DEVELOPMENT_SUMMARY_SHA256)
+    artifact["consumer_source"]["revision"] = VALIDATION_CONSUMER_REVISION
+    artifact.update(numeric_execution={"status": "started"}, research_executed=None)
+    if progress_writer is not None:
+        progress_writer(dict(artifact))
+    command = _numeric_command(root, consumer_source, ues_source, ())
+    command.extend(("--promotion-validation-development-summary", str(development_summary)))
+    runner = command_runner or (lambda argv: subprocess.run(argv, capture_output=True, text=True, timeout=1200, check=False))
+    try:
+        completed = runner(command)
+    except (OSError, subprocess.SubprocessError):
+        artifact.update(failure_stage="numeric_outcome_unknown", numeric_execution={"status": "outcome_unknown"})
+        return artifact
+    if getattr(completed, "returncode", None) != 0:
+        artifact.update(failure_stage="numeric_execution_failed", numeric_execution={"status": "failed"})
+        return artifact
+    try:
+        safe = _strict_validation_summary(json.loads(completed.stdout), enforce_promotion_backtest_gates)
+    except (AttributeError, TypeError, ValueError, KeyError):
+        artifact.update(failure_stage="validation_result_invalid", numeric_execution={"status": "outcome_unknown"})
+        return artifact
+    artifact.update(safe)
+    artifact.update(status="accepted", research_executed=True, numeric_execution={"status": "succeeded"})
+    return artifact
+
+
 def _write(path: Path, value: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
 
 
-def initialize_record(path: Path, context: Mapping[str, str]) -> None:
+def initialize_record(path: Path, context: Mapping[str, str], *, operation: str = "soxl_learning") -> None:
     """Write the bound terminal placeholder before setup or remote reads begin."""
     _validate_authority(context)
+    if operation not in {"soxl_learning", "soxl_validation"}:
+        raise ManualLearningError("manual_operation_invalid")
     _write(
         path,
         {
             "schema_version": ARTIFACT_SCHEMA,
-            "operation": "soxl_learning",
+            "operation": operation,
             "status": "parked",
             "failure_stage": "setup_incomplete",
             "authority": {
@@ -759,6 +944,7 @@ def initialize_record(path: Path, context: Mapping[str, str]) -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--parameter-grid")
+    parser.add_argument("--development-summary", type=Path)
     parser.add_argument("--manifest-sha256")
     parser.add_argument("--root", type=Path)
     parser.add_argument("--consumer-source", type=Path)
@@ -810,30 +996,42 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps({"status": result["status"], "operation": "soxl_watcher_learning"}, sort_keys=True))
         return 0 if result["status"] == "accepted" else 2
     manual_required = (
-        args.parameter_grid, args.manifest_sha256, args.root, args.consumer_source,
+        args.manifest_sha256, args.root, args.consumer_source,
         args.ues_source, args.output, args.repository, args.ref, args.event_name,
         args.actor, args.run_id, args.run_attempt,
     )
     if any(value is None for value in manual_required):
         parser.error("manual mode requires the original bounded input and authority arguments")
+    if args.development_summary is None and args.parameter_grid is None:
+        parser.error("manual learning requires a parameter grid")
+    if args.development_summary is not None and args.parameter_grid is not None:
+        parser.error("selected validation cannot accept a parameter grid")
     context = {key: getattr(args, key) for key in ("repository", "ref", "event_name", "actor", "run_id", "run_attempt")}
+    operation = "soxl_validation" if args.development_summary is not None else "soxl_learning"
     try:
-        result = run_manual_learning(
-            parameter_grid=args.parameter_grid, manifest_sha256=args.manifest_sha256,
-            root=args.root, consumer_source=args.consumer_source, ues_source=args.ues_source,
-            context=context, progress_writer=lambda value: _write(args.output, value),
-        )
+        if args.development_summary is not None:
+            result = run_manual_validation(
+                development_summary=args.development_summary, manifest_sha256=args.manifest_sha256,
+                root=args.root, consumer_source=args.consumer_source, ues_source=args.ues_source,
+                context=context, progress_writer=lambda value: _write(args.output, value),
+            )
+        else:
+            result = run_manual_learning(
+                parameter_grid=args.parameter_grid, manifest_sha256=args.manifest_sha256,
+                root=args.root, consumer_source=args.consumer_source, ues_source=args.ues_source,
+                context=context, progress_writer=lambda value: _write(args.output, value),
+            )
         exit_code = 0 if result["status"] == "accepted" else 2
     except ManualLearningError as exc:
         result = {
-            "schema_version": ARTIFACT_SCHEMA, "operation": "soxl_learning",
+            "schema_version": ARTIFACT_SCHEMA, "operation": operation,
             "status": "parked", "failure_stage": str(exc), "research_executed": False,
             "learning_only": True, "no_order": True, "size_zero_required": True,
             "promotion_eligible": False,
         }
         exit_code = 2
     _write(args.output, result)
-    print(json.dumps({"status": result["status"], "operation": "soxl_learning"}, sort_keys=True))
+    print(json.dumps({"status": result["status"], "operation": operation}, sort_keys=True))
     return exit_code
 
 

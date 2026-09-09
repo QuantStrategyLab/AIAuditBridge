@@ -11,6 +11,7 @@ on:
         options:
           - readback
           - soxl_learning
+          - soxl_validation
       blend_gate_mid_soxl_weights:
         description: Reviewed baseline and up to two bounded learning values
         required: true
@@ -26,27 +27,36 @@ concurrency:
 
 jobs:
   readback:
-    if: github.repository == 'QuantStrategyLab/AIAuditBridge' && github.ref == 'refs/heads/main' && (inputs.operation != 'soxl_learning' || github.run_attempt == 1)
+    if: github.repository == 'QuantStrategyLab/AIAuditBridge' && github.ref == 'refs/heads/main' && (inputs.operation == 'readback' || github.run_attempt == 1)
     runs-on: [self-hosted, codex-vps]
-    timeout-minutes: ${{ inputs.operation == 'soxl_learning' && 35 || 10 }}
+    timeout-minutes: ${{ inputs.operation != 'readback' && 35 || 10 }}
     permissions:
       contents: read
       id-token: write
+      actions: read
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
 
-      - name: Initialize the sanitized learning record
-        if: inputs.operation == 'soxl_learning'
+      - name: Set bounded validation temporary paths
+        env:
+          VALIDATION_CONTROL_ENV: ${{ runner.temp }}/aab-soxl-validation-control-${{ github.run_id }}-${{ github.run_attempt }}
+          DEVELOPMENT_SOURCE_ROOT: ${{ runner.temp }}/aab-soxl-validation-source-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          printf 'VALIDATION_CONTROL_ENV=%s\nDEVELOPMENT_SOURCE_ROOT=%s\n' "$VALIDATION_CONTROL_ENV" "$DEVELOPMENT_SOURCE_ROOT" >> "$GITHUB_ENV"
+
+      - name: Initialize the sanitized research record
+        if: inputs.operation != 'readback'
         env:
           LEARNING_OUTPUT: ${{ runner.temp }}/aab-soxl-learning-${{ github.run_id }}-${{ github.run_attempt }}/summary.json
+          OPERATION: ${{ inputs.operation }}
         run: |
           set -euo pipefail
           umask 077
           mkdir -m 700 "$(dirname "$LEARNING_OUTPUT")"
-          python3 -c 'import os; from pathlib import Path; from scripts.run_soxl_manual_learning import initialize_record; initialize_record(Path(os.environ["LEARNING_OUTPUT"]), {"repository": os.environ["GITHUB_REPOSITORY"], "ref": os.environ["GITHUB_REF"], "event_name": os.environ["GITHUB_EVENT_NAME"], "actor": os.environ["GITHUB_ACTOR"], "run_id": os.environ["GITHUB_RUN_ID"], "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"]})'
+          python3 -c 'import os; from pathlib import Path; from scripts.run_soxl_manual_learning import initialize_record; initialize_record(Path(os.environ["LEARNING_OUTPUT"]), {"repository": os.environ["GITHUB_REPOSITORY"], "ref": os.environ["GITHUB_REF"], "event_name": os.environ["GITHUB_EVENT_NAME"], "actor": os.environ["GITHUB_ACTOR"], "run_id": os.environ["GITHUB_RUN_ID"], "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"]}, operation=os.environ["OPERATION"])'
 
       - name: Checkout the frozen original P1 validator
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -57,16 +67,16 @@ jobs:
           persist-credentials: false
 
       - name: Checkout the bounded learning consumer
-        if: inputs.operation == 'soxl_learning'
+        if: inputs.operation != 'readback'
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           repository: QuantStrategyLab/UsEquitySnapshotPipelines
-          ref: b03ecbe4e0a7a0de22f298499f867a7039e4b60a
+          ref: ${{ inputs.operation == 'soxl_validation' && 'b68b4a81ccdab7b61042fcf98df0189dfe539ef4' || 'b03ecbe4e0a7a0de22f298499f867a7039e4b60a' }}
           path: consumer-source
           persist-credentials: false
 
       - name: Checkout the frozen strategy runtime
-        if: inputs.operation == 'soxl_learning'
+        if: inputs.operation != 'readback'
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           repository: QuantStrategyLab/UsEquityStrategies
@@ -87,12 +97,12 @@ jobs:
           env -u UV_PYTHON -u VIRTUAL_ENV uv sync --locked --no-dev --no-editable --python 3.11
 
       - name: Install the bounded learning consumer runtime
-        if: inputs.operation == 'soxl_learning'
+        if: inputs.operation != 'readback'
         working-directory: consumer-source
         run: env -u UV_PYTHON -u VIRTUAL_ENV uv sync --locked --no-dev --no-editable --python 3.11
 
       - name: Install the frozen strategy runtime
-        if: inputs.operation == 'soxl_learning'
+        if: inputs.operation != 'readback'
         working-directory: ues-source
         env:
           UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/aab-soxl-ues-env-${{ github.run_id }}-${{ github.run_attempt }}
@@ -100,6 +110,37 @@ jobs:
           env -u UV_PYTHON -u VIRTUAL_ENV uv sync --locked --no-dev --no-editable --python 3.11
           rm -rf -- build
           test -z "$(git status --porcelain --untracked-files=all)"
+
+      - name: Checkout the published strict gate
+        if: inputs.operation == 'soxl_validation'
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          repository: QuantStrategyLab/QuantPlatformKit
+          ref: 7363011d56926d39f4fffeb036e511391114e39f
+          path: validation-gate-source
+          persist-credentials: false
+
+      - name: Install the isolated strict gate
+        if: inputs.operation == 'soxl_validation'
+        run: |
+          set -euo pipefail
+          python3 -m venv "$VALIDATION_CONTROL_ENV"
+          "$VALIDATION_CONTROL_ENV/bin/python" -m pip install --quiet --no-deps ./validation-gate-source
+          "$VALIDATION_CONTROL_ENV/bin/python" -c 'from quant_platform_kit.strategy_lifecycle.research_promotion_cycle import enforce_promotion_backtest_gates; from scripts.run_soxl_manual_learning import run_manual_validation'
+
+      - name: Read the original completed development summary
+        if: inputs.operation == 'soxl_validation'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -m 700 "$DEVELOPMENT_SOURCE_ROOT"
+          if ! gh run download 34376283866 --repo QuantStrategyLab/AIAuditBridge --name soxl-manual-learning-34376283866-1 --dir "$DEVELOPMENT_SOURCE_ROOT" > "$DEVELOPMENT_SOURCE_ROOT/download.log" 2>&1; then
+            echo '{"status":"parked","failure_stage":"development_summary_unavailable"}'
+            exit 1
+          fi
+          DEVELOPMENT_SUMMARY="$DEVELOPMENT_SOURCE_ROOT/summary.json" "$VALIDATION_CONTROL_ENV/bin/python" -c 'import json, os; from pathlib import Path; from scripts.run_soxl_manual_learning import _summary_digest, DEVELOPMENT_SUMMARY_SHA256; p=Path(os.environ["DEVELOPMENT_SUMMARY"]); assert not p.is_symlink() and p.stat().st_size <= 1048576; assert _summary_digest(json.loads(p.read_text())) == DEVELOPMENT_SUMMARY_SHA256'
 
       # Direct federation grants only object reads on the fixed P1 root below.
       # The provider additionally binds numeric repo/owner IDs, main and this workflow.
@@ -262,10 +303,25 @@ jobs:
               --actor "$GITHUB_ACTOR" \
               --run-id "$GITHUB_RUN_ID" \
               --run-attempt "$GITHUB_RUN_ATTEMPT"
+          elif [ "$OPERATION" = "soxl_validation" ]; then
+            cd "$GITHUB_WORKSPACE"
+            UV_PROJECT_ENVIRONMENT="$UES_ENV_ROOT" "$VALIDATION_CONTROL_ENV/bin/python" -m scripts.run_soxl_manual_learning \
+              --development-summary "$DEVELOPMENT_SOURCE_ROOT/summary.json" \
+              --manifest-sha256 "$EXPECTED_MANIFEST_SHA256" \
+              --root "$READBACK_ROOT/root" \
+              --consumer-source "$CONSUMER_SOURCE" \
+              --ues-source "$UES_SOURCE" \
+              --output "$LEARNING_OUTPUT" \
+              --repository "$GITHUB_REPOSITORY" \
+              --ref "$GITHUB_REF" \
+              --event-name "$GITHUB_EVENT_NAME" \
+              --actor "$GITHUB_ACTOR" \
+              --run-id "$GITHUB_RUN_ID" \
+              --run-attempt "$GITHUB_RUN_ATTEMPT"
           fi
 
-      - name: Upload the sanitized learning record
-        if: always() && inputs.operation == 'soxl_learning'
+      - name: Upload the sanitized research record
+        if: always() && inputs.operation != 'readback'
         uses: actions/upload-artifact@v7
         with:
           name: soxl-manual-learning-${{ github.run_id }}-${{ github.run_attempt }}
@@ -279,4 +335,4 @@ jobs:
           READBACK_ROOT: ${{ runner.temp }}/aab-research-input-${{ github.run_id }}-${{ github.run_attempt }}
           LEARNING_OUTPUT_ROOT: ${{ runner.temp }}/aab-soxl-learning-${{ github.run_id }}-${{ github.run_attempt }}
           UES_ENV_ROOT: ${{ runner.temp }}/aab-soxl-ues-env-${{ github.run_id }}-${{ github.run_attempt }}
-        run: rm -rf -- "$READBACK_ROOT" "$LEARNING_OUTPUT_ROOT" "$UES_ENV_ROOT"
+        run: rm -rf -- "$READBACK_ROOT" "$LEARNING_OUTPUT_ROOT" "$UES_ENV_ROOT" "$VALIDATION_CONTROL_ENV" "$DEVELOPMENT_SOURCE_ROOT"
