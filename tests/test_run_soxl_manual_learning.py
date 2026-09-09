@@ -349,18 +349,31 @@ def test_gateway_auth_accepts_only_the_exact_manual_workflow_on_main() -> None:
         "QuantStrategyLab/AIAuditBridge/.github/workflows/"
         "research_input_readback.yml@refs/heads/main"
     )
+    deploy_text = Path("scripts/deploy_codex_audit_service.sh").read_text()
+    ops_text = Path(".github/workflows/vps_codex_service_ops.yml").read_text()
+    deploy_prefix = (
+        'ALLOWED_JOB_WORKFLOW_REFS="${CODEX_AUDIT_SERVICE_ALLOWED_JOB_WORKFLOW_REFS:-'
+    )
+    deploy_line = next(line for line in deploy_text.splitlines() if line.startswith(deploy_prefix))
+    deployed_job_refs = deploy_line.removeprefix(deploy_prefix).removesuffix('}"')
+    ops_prefix = "CODEX_AUDIT_SERVICE_ALLOWED_JOB_WORKFLOW_REFS: "
+    ops_line = next(line.strip() for line in ops_text.splitlines() if line.strip().startswith(ops_prefix))
+    assert deployed_job_refs == ops_line.removeprefix(ops_prefix)
+
     payload = {
         "aud": "quant-codex-audit",
         "iss": codex_audit_service.GITHUB_OIDC_ISSUER,
         "exp": int(time.time()) + 300,
         "repository": "QuantStrategyLab/AIAuditBridge",
         "workflow_ref": workflow_ref,
+        "job_workflow_ref": workflow_ref,
         "ref": "refs/heads/main",
         "repository_visibility": "public",
     }
     env = {
         "CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES": "QuantStrategyLab/AIAuditBridge",
         "CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS": workflow_ref,
+        "CODEX_AUDIT_SERVICE_ALLOWED_JOB_WORKFLOW_REFS": deployed_job_refs,
         "CODEX_AUDIT_SERVICE_ALLOWED_REFS": "refs/heads/main",
         "CODEX_AUDIT_SERVICE_ALLOWED_DIRECT_REPOSITORIES": "QuantStrategyLab/AIAuditBridge",
         "CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORY_VISIBILITIES": "public",
@@ -384,5 +397,11 @@ def test_gateway_auth_accepts_only_the_exact_manual_workflow_on_main() -> None:
             return codex_audit_service._verify_github_oidc("header.payload.signature")
 
     assert verify(payload)["workflow_ref"] == workflow_ref
+    assert verify({key: value for key, value in payload.items() if key != "job_workflow_ref"})[
+        "workflow_ref"
+    ] == workflow_ref
+    with pytest.raises(PermissionError, match="job workflow ref .* not allowed"):
+        verify(payload | {"job_workflow_ref": workflow_ref.replace("refs/heads/main", "refs/heads/other")})
+    other_ref = workflow_ref.replace("refs/heads/main", "refs/heads/other")
     with pytest.raises(PermissionError, match="workflow_ref .* not allowed"):
-        verify(payload | {"workflow_ref": workflow_ref.replace("refs/heads/main", "refs/heads/other")})
+        verify(payload | {"workflow_ref": other_ref, "job_workflow_ref": other_ref, "ref": "refs/heads/other"})
