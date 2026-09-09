@@ -28,6 +28,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import Mapping
 from collections import Counter
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -114,6 +115,16 @@ DEFAULT_MAX_REQUEST_BYTES = 2_000_000
 DEFAULT_JOB_TTL_SECONDS = 86_400
 DEFAULT_JOB_MAX_ACTIVE = 10
 ACTIVE_JOB_STATUSES = frozenset({"queued", "running"})
+REUSABLE_RESEARCH_JOB_STATUSES = frozenset({"queued", "running", "succeeded", "failed"})
+REQUEST_AUTHORITY_FIELDS = (
+    "repository",
+    "run_id",
+    "run_attempt",
+    "actor",
+    "ref",
+    "workflow_ref",
+    "job_workflow_ref",
+)
 WRITE_AUTH_METHODS = frozenset({"github_oidc", "none"})
 TRUSTED_AUTOMATION_PROOF_PATH_ENV = "CODEX_AUDIT_SERVICE_TRUSTED_AUTOMATION_PROOF_PATH"
 DASHBOARD_REPOSITORIES_ENV = "CODEX_AUDIT_SERVICE_DASHBOARD_REPOSITORIES"
@@ -1114,6 +1125,7 @@ def _job_dedupe_key(
 
 def _request_job_dedupe_key(claims: dict[str, Any], payload: dict[str, Any]) -> str:
     """Bind the original request before selecting a provider/model from quota."""
+    authority = _request_authority(claims)
     identity = {
         "request": _job_dedupe_key(
             {**payload, "provider": ""},
@@ -1121,11 +1133,47 @@ def _request_job_dedupe_key(claims: dict[str, Any], payload: dict[str, Any]) -> 
             run_id=str(claims.get("run_id") or ""),
             run_attempt=str(claims.get("run_attempt") or ""),
         ),
+        "authority": authority,
         "allowed_providers": payload.get("allowed_providers", ["codex"]),
         "prompt_sha256": hashlib.sha256(str(payload.get("prompt") or "").encode()).hexdigest(),
         **{key: payload.get(key) for key in ("research_stage", "model", "reasoning_effort", "complexity", "changed_files", "changed_lines", "sandbox", "timeout_seconds")},
     }
     return hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _request_authority(claims: Mapping[str, Any]) -> dict[str, str]:
+    return {key: str(claims.get(key) or "") for key in REQUEST_AUTHORITY_FIELDS}
+
+
+def _validate_reusable_research_job(
+    job: Mapping[str, Any],
+    *,
+    claims: Mapping[str, Any],
+    payload: Mapping[str, Any],
+) -> None:
+    """Fail closed when a persisted result does not match its exact caller/task."""
+    authority = _request_authority(claims)
+    if job.get("request_authority") != authority:
+        raise PermissionError("persisted research job authority does not match request")
+    for field in ("repository", "run_id", "run_attempt", "actor"):
+        if str(job.get(field) or "") != authority[field]:
+            raise PermissionError("persisted research job authority does not match request")
+    expected = {
+        "source_repository": str(payload.get("source_repository") or ""),
+        "source_ref": str(payload.get("source_ref") or ""),
+        "task": str(payload.get("task") or TASK_EXECUTE),
+        "mode": str(payload.get("mode") or MODE_REVIEW_ONLY),
+        "research_stage": str(payload.get("research_stage") or ""),
+    }
+    if any(str(job.get(key) or "") != value for key, value in expected.items()):
+        raise PermissionError("persisted research job task identity does not match request")
+    providers = payload.get("allowed_providers", ["codex"])
+    if not isinstance(providers, list) or str(job.get("provider") or "") not in providers:
+        raise PermissionError("persisted research job route does not match request")
+    for field in ("model", "reasoning_effort"):
+        requested = str(payload.get(field) or "")
+        if requested not in {"", "auto"} and str(job.get(field) or "") != requested:
+            raise PermissionError("persisted research job route does not match request")
 
 
 def _classify_codex_exec_failure(text: str) -> str:
@@ -1165,17 +1213,35 @@ def _classify_failure(error: str) -> str:
     return "unknown_failure"
 
 
-def _find_active_job_by_dedupe_key(dedupe_key: str, *, field: str = "dedupe_key") -> dict[str, Any] | None:
+def _find_job_by_dedupe_key(
+    dedupe_key: str,
+    *,
+    field: str = "dedupe_key",
+    statuses: frozenset[str] = ACTIVE_JOB_STATUSES,
+) -> dict[str, Any] | None:
     if os.environ.get("CODEX_AUDIT_SERVICE_DEDUPE_JOBS", "true").strip().lower() in {"0", "false", "no", "off"}:
         return None
+    candidates: list[dict[str, Any]] = []
     for path in _job_dir().glob("*.json"):
         try:
             job = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             continue
-        if job.get(field) == dedupe_key and job.get("status") in ACTIVE_JOB_STATUSES:
-            return _mark_stale_job_failed(job)
-    return None
+        if job.get(field) != dedupe_key or job.get("status") not in statuses:
+            continue
+        job = _mark_stale_job_failed(job)
+        if job.get("status") in statuses:
+            candidates.append(job)
+    if not candidates:
+        return None
+    return min(
+        candidates,
+        key=lambda job: (
+            0 if job.get("status") in ACTIVE_JOB_STATUSES else 1,
+            float(job.get("created_at") or 0),
+            str(job.get("job_id") or ""),
+        ),
+    )
 
 
 def _run_job(job_id: str, payload: dict[str, Any]) -> None:
@@ -1270,7 +1336,7 @@ def _submit_job(claims: dict[str, Any], payload: dict[str, Any], *, request_dedu
     # Admission check/dedupe/cap and create must be atomic: concurrent callers can
     # otherwise both pass the unlocked checks and start duplicate jobs.
     with _JOB_WRITE_LOCK:
-        existing_job = _find_active_job_by_dedupe_key(
+        existing_job = _find_job_by_dedupe_key(
             request_dedupe_key or dedupe_key,
             field="request_dedupe_key" if request_dedupe_key else "dedupe_key",
         )
@@ -1298,6 +1364,7 @@ def _submit_job(claims: dict[str, Any], payload: dict[str, Any], *, request_dedu
             "run_id": str(claims.get("run_id") or ""),
             "run_attempt": str(claims.get("run_attempt") or ""),
             "actor": str(claims.get("actor") or ""),
+            "request_authority": _request_authority(claims),
             "source_repository": str(payload.get("source_repository") or ""),
             "source_ref": str(payload.get("source_ref") or ""),
             "task": str(payload.get("task") or TASK_EXECUTE),
@@ -1585,8 +1652,23 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         request_key = _request_job_dedupe_key(claims, payload)
         with _JOB_WRITE_LOCK:
             _cleanup_expired_jobs()
-            existing = _find_active_job_by_dedupe_key(request_key, field="request_dedupe_key")
-            if existing is not None and existing.get("status") in ACTIVE_JOB_STATUSES:
+            reusable_statuses = (
+                REUSABLE_RESEARCH_JOB_STATUSES
+                if payload.get("research_stage")
+                else ACTIVE_JOB_STATUSES
+            )
+            existing = _find_job_by_dedupe_key(
+                request_key,
+                field="request_dedupe_key",
+                statuses=reusable_statuses,
+            )
+            if existing is not None:
+                if payload.get("research_stage"):
+                    _validate_reusable_research_job(
+                        existing,
+                        claims=claims,
+                        payload=payload,
+                    )
                 job = _public_job_payload(existing)
                 job["deduped"] = True
                 _json_response(self, HTTPStatus.ACCEPTED, job)
