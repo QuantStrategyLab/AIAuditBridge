@@ -80,6 +80,21 @@ class StrategyOptimizationWatcherWorkflowTest(unittest.TestCase):
         self.assertIn("RESEARCH_TASK_SYNC_STATUS=NOT_CONFIGURED", text)
         self.assertNotIn("/api/switch", text)
 
+    def test_exact_soxl_task_hands_off_only_sanitized_artifacts_to_vps_consumer(self) -> None:
+        text = WORKFLOW_PATH.read_text(encoding="utf-8")
+        self.assertIn("soxl-watcher-learning-ready", text)
+        self.assertIn("needs.strategy-optimization-watcher.outputs.soxl_learning_ready == 'true'", text)
+        self.assertIn("vars.SOXL_WATCHER_GCP_WIF_PROVIDER != ''", text)
+        self.assertIn("vars.SOXL_WATCHER_GCP_PROJECT_ID != ''", text)
+        self.assertLess(text.index("vars.SOXL_WATCHER_GCP_WIF_PROVIDER != ''"), text.index("runs-on: [self-hosted, codex-vps]"))
+        self.assertIn("runs-on: [self-hosted, codex-vps]", text)
+        self.assertIn("python -m scripts.run_soxl_manual_learning --watcher-result", text)
+        self.assertIn("strategy-optimization-watcher-${{ github.run_id }}", text)
+        self.assertIn("GH_TOKEN: ${{ steps.source_app_token.outputs.token || github.token }}", text)
+        self.assertIn("soxl-p1-p3/${P1_MANIFEST_SHA256}", text)
+        self.assertIn("--body-file", Path(__file__).resolve().parents[1].joinpath("scripts/run_soxl_manual_learning.py").read_text())
+        self.assertNotIn("bars.json=${{ needs.", text)
+
 
 if __name__ == "__main__":
     unittest.main()

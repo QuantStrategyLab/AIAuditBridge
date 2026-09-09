@@ -8,12 +8,24 @@ import json
 import math
 import re
 import subprocess
+from urllib.parse import urlparse
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 from client.config import GatewayConfig
 from client.gateway_client import AiGatewayClient
+from service.research_diagnosis import build_research_diagnosis_request, marker_for_research_diagnosis
+from service.research_task import (
+    SOXL_WATCHER_CANDIDATE_ID,
+    SOXL_WATCHER_CONSUMER_REVISION,
+    SOXL_WATCHER_P2_CONFIG_SHA256,
+    SOXL_WATCHER_PARAMETER_BOUNDS_SHA256,
+    SOXL_WATCHER_QPK_REVISION,
+    SOXL_WATCHER_STRATEGY_REPOSITORY,
+    SOXL_WATCHER_UES_REVISION,
+    validate_strategy_diagnosis_task,
+)
 
 ADVICE_SCHEMA = "qsl.soxl-manual-learning-advice.v1"
 ARTIFACT_SCHEMA = "qsl.soxl-manual-learning-run.v1"
@@ -28,6 +40,7 @@ EXPECTED_REPOSITORY = "QuantStrategyLab/AIAuditBridge"
 EXPECTED_REF = "refs/heads/main"
 EXPECTED_EVENT = "workflow_dispatch"
 SAFE_REASON = re.compile(r"[a-z0-9_]{1,64}\Z")
+WATCHER_MARKER_PREFIX = "qsl-soxl-watcher-learning:v1"
 
 
 class ManualLearningError(ValueError):
@@ -212,8 +225,7 @@ def _sanitize_numeric(value: object, values: Sequence[float], manifest_sha256: s
         not isinstance(source, Mapping)
         or source.get("repository") != "QuantStrategyLab/UsEquityStrategies"
         or source.get("revision") != UES_REVISION
-        or not isinstance(source.get("quant_platform_kit_revision"), str)
-        or re.fullmatch(r"[0-9a-f]{40}", source["quant_platform_kit_revision"]) is None
+        or source.get("quant_platform_kit_revision") != SOXL_WATCHER_QPK_REVISION
         or not isinstance(source.get("uv_lock_sha256"), str)
         or re.fullmatch(r"[0-9a-f]{64}", source["uv_lock_sha256"]) is None
     ):
@@ -268,6 +280,370 @@ def _sanitize_numeric(value: object, values: Sequence[float], manifest_sha256: s
         for key in ("repository", "revision", "quant_platform_kit_revision", "uv_lock_sha256")
     }
     return safe, safe_source, digest
+
+
+def _issue_number(repository: str, issue_url: str) -> str:
+    parsed = urlparse(issue_url)
+    parts = parsed.path.strip("/").split("/")
+    if (
+        parsed.scheme != "https" or parsed.netloc != "github.com"
+        or len(parts) != 4 or "/".join(parts[:2]) != repository
+        or parts[2] != "issues" or not parts[3].isdigit()
+    ):
+        raise ManualLearningError("watcher_issue_invalid")
+    return parts[3]
+
+
+def read_issue_comments(repository: str, issue_url: str) -> list[dict[str, Any]]:
+    completed = subprocess.run(
+        ["gh", "api", "--paginate", "--slurp", f"repos/{repository}/issues/{_issue_number(repository, issue_url)}/comments?per_page=100"],
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    if completed.returncode:
+        raise ManualLearningError("watcher_comments_unavailable")
+    try:
+        value = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise ManualLearningError("watcher_comments_unavailable") from exc
+    if not isinstance(value, list) or any(not isinstance(page, list) for page in value):
+        raise ManualLearningError("watcher_comments_unavailable")
+    comments = [item for page in value for item in page]
+    if any(not isinstance(item, dict) for item in comments):
+        raise ManualLearningError("watcher_comments_unavailable")
+    return comments
+
+
+def write_issue_comment(repository: str, issue_url: str, body: str) -> str:
+    completed = subprocess.run(
+        ["gh", "issue", "comment", issue_url, "--repo", repository, "--body-file", "-"],
+        input=body, capture_output=True, text=True, timeout=30, check=False,
+    )
+    if completed.returncode:
+        raise ManualLearningError("watcher_comment_write_failed")
+    return completed.stdout.strip()
+
+
+def _trusted_comment_bodies(comments: object, github_app_id: str) -> list[str]:
+    if not github_app_id.isdigit() or int(github_app_id) <= 0:
+        raise ManualLearningError("watcher_comment_identity_invalid")
+    if not isinstance(comments, list):
+        raise ManualLearningError("watcher_comments_unavailable")
+    bodies: list[str] = []
+    for comment in comments:
+        if not isinstance(comment, Mapping):
+            raise ManualLearningError("watcher_comments_unavailable")
+        app = comment.get("performed_via_github_app")
+        if isinstance(app, Mapping) and app.get("id") == int(github_app_id) and isinstance(comment.get("body"), str):
+            bodies.append(comment["body"])
+    return bodies
+
+
+def watcher_learning_comment(
+    task: Mapping[str, Any], *, phase: str, status: str,
+    numeric_result_sha256: str = "", numeric_summary: object = None,
+    numeric_source_identity: object = None, failure_stage: str | None = None,
+) -> str:
+    verified = validate_strategy_diagnosis_task(task)
+    if phase not in {"started", "terminal"} or status not in {"started", "accepted", "failed"}:
+        raise ManualLearningError("watcher_stage_invalid")
+    if phase == "started" and status != "started":
+        raise ManualLearningError("watcher_stage_invalid")
+    if phase == "terminal" and status == "started":
+        raise ManualLearningError("watcher_stage_invalid")
+    if failure_stage not in {None, "pre_numeric_failed", "numeric_execution_failed"}:
+        raise ManualLearningError("watcher_stage_invalid")
+    if status == "failed" and failure_stage is None:
+        failure_stage = "numeric_execution_failed"
+    if status != "failed" and failure_stage is not None:
+        raise ManualLearningError("watcher_stage_invalid")
+    if numeric_result_sha256 and re.fullmatch(r"[0-9a-f]{64}", numeric_result_sha256) is None:
+        raise ManualLearningError("numeric_result_invalid")
+    marker = ":".join(
+        (
+            WATCHER_MARKER_PREFIX, phase, verified["task_sha256"],
+            SOXL_WATCHER_PARAMETER_BOUNDS_SHA256, SOXL_WATCHER_CONSUMER_REVISION,
+        )
+    )
+    record = {
+        "task_id": verified["task_id"], "task_sha256": verified["task_sha256"],
+        "parameter_bounds_sha256": SOXL_WATCHER_PARAMETER_BOUNDS_SHA256,
+        "consumer_revision": SOXL_WATCHER_CONSUMER_REVISION,
+        "strategy_revision": SOXL_WATCHER_UES_REVISION,
+        "status": status, "numeric_result_sha256": numeric_result_sha256 or None,
+        "numeric_summary": numeric_summary,
+        "numeric_source_identity": numeric_source_identity,
+        "failure_stage": failure_stage,
+        "learning_only": True, "no_order": True, "promotion_eligible": False,
+    }
+    return f"<!-- {marker} -->\n`{canonical_json(record)}`"
+
+
+def canonical_json(value: object) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+
+
+def _marker(task: Mapping[str, Any], phase: str) -> str:
+    return ":".join(
+        (WATCHER_MARKER_PREFIX, phase, str(task["task_sha256"]),
+         SOXL_WATCHER_PARAMETER_BOUNDS_SHA256, SOXL_WATCHER_CONSUMER_REVISION)
+    )
+
+
+def _terminal_from_comments(task: Mapping[str, Any], bodies: Sequence[str]) -> dict[str, Any] | None:
+    marker = f"<!-- {_marker(task, 'terminal')} -->"
+    candidates = [body for body in bodies if body.startswith(marker)]
+    if not candidates:
+        return None
+    if any(not body.startswith(marker + "\n`") or not body.endswith("`") for body in candidates):
+        raise ManualLearningError("watcher_terminal_invalid")
+    parsed: list[dict[str, Any]] = []
+    for body in candidates:
+        try:
+            value = json.loads(body[len(marker) + 2 : -1])
+        except json.JSONDecodeError as exc:
+            raise ManualLearningError("watcher_terminal_invalid") from exc
+        expected = {
+            "task_id", "task_sha256", "parameter_bounds_sha256", "consumer_revision",
+            "strategy_revision", "status", "numeric_result_sha256", "learning_only",
+            "numeric_summary", "numeric_source_identity", "failure_stage", "no_order", "promotion_eligible",
+        }
+        if not isinstance(value, dict) or set(value) != expected:
+            raise ManualLearningError("watcher_terminal_invalid")
+        if (
+            value["task_id"] != task["task_id"] or value["task_sha256"] != task["task_sha256"]
+            or value["parameter_bounds_sha256"] != SOXL_WATCHER_PARAMETER_BOUNDS_SHA256
+            or value["consumer_revision"] != SOXL_WATCHER_CONSUMER_REVISION
+            or value["strategy_revision"] != SOXL_WATCHER_UES_REVISION
+            or value["status"] not in {"accepted", "failed"}
+            or value["failure_stage"] not in {None, "pre_numeric_failed", "numeric_execution_failed"}
+            or (value["status"] == "accepted" and value["failure_stage"] is not None)
+            or (value["status"] == "failed" and value["failure_stage"] is None)
+            or value["learning_only"] is not True or value["no_order"] is not True
+            or value["promotion_eligible"] is not False
+            or (value["status"] == "accepted" and re.fullmatch(r"[0-9a-f]{64}", str(value["numeric_result_sha256"] or "")) is None)
+        ):
+            raise ManualLearningError("watcher_terminal_invalid")
+        if value["status"] == "accepted":
+            raw_results = []
+            if not isinstance(value["numeric_summary"], list):
+                raise ManualLearningError("watcher_terminal_invalid")
+            for item in value["numeric_summary"]:
+                if not isinstance(item, Mapping):
+                    raise ManualLearningError("watcher_terminal_invalid")
+                raw_results.append({
+                    "schema_version": REPLAY_SCHEMA, "status": "SUCCESS",
+                    "parameter_override": item.get("parameter_override"),
+                    "cost_bps": item.get("cost_bps"),
+                    "backtest_result": item.get("backtest_result"),
+                    "output_sha256": item.get("output_sha256"),
+                })
+            reconstructed = {
+                "schema_version": NUMERIC_SCHEMA, "status": "SUCCESS",
+                "learning_only": True, "no_order": True, "size_zero_required": True,
+                "promotion_eligible": False, "research_executed": True,
+                "development_cutoff": DEVELOPMENT_CUTOFF,
+                "p1_identity": {"input_manifest_sha256": task["evidence"]["p1_input_digest"]},
+                "source_identity": value["numeric_source_identity"],
+                "parameter_key": "blend_gate_mid_soxl_weight", "trial_count": 3,
+                "cost_bps": list(COST_BPS), "results": raw_results,
+                "result_sha256": value["numeric_result_sha256"],
+            }
+            safe, source, digest = _sanitize_numeric(
+                reconstructed, (0.65, 0.6, 0.55), task["evidence"]["p1_input_digest"],
+            )
+            value["numeric_summary"] = safe
+            value["numeric_source_identity"] = source
+            value["numeric_result_sha256"] = digest
+        elif value["numeric_summary"] is not None or value["numeric_source_identity"] is not None or value["numeric_result_sha256"] is not None:
+            raise ManualLearningError("watcher_terminal_invalid")
+        parsed.append(value)
+    if any(value != parsed[0] for value in parsed[1:]):
+        raise ManualLearningError("watcher_terminal_conflict")
+    return parsed[0]
+
+
+def _watcher_context(
+    watcher_result: Mapping[str, Any], diagnosis_result: Mapping[str, Any],
+    *, github_app_id: str,
+    read_comments: Callable[[str, str], list[dict[str, Any]]],
+) -> dict[str, Any]:
+    snapshot = watcher_result.get("research_task_source_snapshot")
+    issues = watcher_result.get("issues")
+    if not isinstance(snapshot, Mapping) or snapshot.get("data_status") != "ready" or not isinstance(issues, list):
+        raise ManualLearningError("watcher_task_unavailable")
+    tasks = snapshot.get("tasks")
+    if not isinstance(tasks, list) or len(tasks) != 1 or not isinstance(tasks[0], Mapping):
+        raise ManualLearningError("watcher_task_unavailable")
+    task = validate_strategy_diagnosis_task(tasks[0])
+    if (
+        task["target"] != {
+            "candidate_id": SOXL_WATCHER_CANDIDATE_ID, "candidate_kind": "individual",
+            "domain": "us_equity", "repository": SOXL_WATCHER_STRATEGY_REPOSITORY,
+            "strategy_revision": SOXL_WATCHER_UES_REVISION,
+        }
+        or task["evidence"]["p2_config_digest"] != SOXL_WATCHER_P2_CONFIG_SHA256
+        or task["experiment"]["parameter_bounds_sha256"] != SOXL_WATCHER_PARAMETER_BOUNDS_SHA256
+    ):
+        raise ManualLearningError("watcher_task_not_executable")
+    event_key = task["task_id"].removeprefix("watcher-")
+    matching = [
+        issue for issue in issues if isinstance(issue, Mapping)
+        and isinstance(issue.get("task"), Mapping) and issue["task"].get("event_key") == event_key
+        and issue.get("repo") == "QuantStrategyLab/UsEquitySnapshotPipelines"
+        and isinstance(issue.get("url") or issue.get("existing_url"), str)
+    ]
+    if len(matching) != 1:
+        raise ManualLearningError("watcher_issue_unavailable")
+    repository = str(matching[0]["repo"])
+    issue_url = str(matching[0].get("url") or matching[0].get("existing_url"))
+    _issue_number(repository, issue_url)
+    bodies = _trusted_comment_bodies(read_comments(repository, issue_url), github_app_id)
+    if not isinstance(diagnosis_result.get("diagnoses"), list):
+        raise ManualLearningError("watcher_diagnosis_unavailable")
+    diagnosis_marker = marker_for_research_diagnosis(build_research_diagnosis_request(task))
+    if not any(body.startswith(diagnosis_marker) for body in bodies):
+        raise ManualLearningError("watcher_diagnosis_unavailable")
+    terminal = _terminal_from_comments(task, bodies)
+    started = any(body.startswith(f"<!-- {_marker(task, 'started')} -->\n") for body in bodies)
+    return {"task": task, "repository": repository, "issue_url": issue_url, "terminal": terminal, "started": started}
+
+
+def prepare_watcher_learning(
+    watcher_result: Mapping[str, Any], diagnosis_result: Mapping[str, Any], *, github_app_id: str,
+    read_comments: Callable[[str, str], list[dict[str, Any]]] = read_issue_comments,
+) -> dict[str, Any]:
+    try:
+        context = _watcher_context(
+            watcher_result, diagnosis_result, github_app_id=github_app_id, read_comments=read_comments,
+        )
+    except (ManualLearningError, OSError, ValueError, subprocess.SubprocessError):
+        return {"status": "parked", "ready": False}
+    if context["terminal"] is not None:
+        return {"status": "reused", "ready": False}
+    if context["started"]:
+        return {"status": "parked", "ready": False, "failure_stage": "numeric_outcome_unknown"}
+    task = context["task"]
+    return {
+        "status": "ready", "ready": True, "p1_manifest_sha256": task["evidence"]["p1_input_digest"],
+        "producer_revision": task["evidence"]["producer_revision"],
+    }
+
+
+def _watcher_base(task: Mapping[str, Any], manifest_sha256: str) -> dict[str, Any]:
+    return {
+        "schema_version": ARTIFACT_SCHEMA, "operation": "soxl_watcher_learning",
+        "source": "watcher_event_independent_learning", "status": "parked",
+        "task_id": task["task_id"], "task_sha256": task["task_sha256"],
+        "experiment": {"parameter_bounds_sha256": SOXL_WATCHER_PARAMETER_BOUNDS_SHA256},
+        "parameter_key": "blend_gate_mid_soxl_weight", "parameter_values": [0.65, 0.6, 0.55],
+        "cost_bps": list(COST_BPS), "development_cutoff": DEVELOPMENT_CUTOFF,
+        "input_identity": {"manifest_sha256": manifest_sha256, "member_count": 4},
+        "consumer_source": {"repository": "QuantStrategyLab/UsEquitySnapshotPipelines", "revision": SOXL_WATCHER_CONSUMER_REVISION},
+        "learning_only": True, "no_order": True, "size_zero_required": True,
+        "promotion_eligible": False, "research_executed": False,
+    }
+
+
+def record_watcher_pre_numeric_failure(
+    *, watcher_result: Mapping[str, Any], diagnosis_result: Mapping[str, Any], github_app_id: str,
+    read_comments: Callable[[str, str], list[dict[str, Any]]] = read_issue_comments,
+    write_comment: Callable[[str, str, str], str] = write_issue_comment,
+) -> dict[str, Any]:
+    context = _watcher_context(
+        watcher_result, diagnosis_result, github_app_id=github_app_id, read_comments=read_comments,
+    )
+    if context["terminal"] is not None:
+        return {"status": "reused"}
+    if context["started"]:
+        raise ManualLearningError("numeric_outcome_unknown")
+    write_comment(
+        context["repository"], context["issue_url"],
+        watcher_learning_comment(
+            context["task"], phase="terminal", status="failed", failure_stage="pre_numeric_failed",
+        ),
+    )
+    return {"status": "failed", "failure_stage": "pre_numeric_failed"}
+
+
+def run_watcher_learning(
+    *, watcher_result: Mapping[str, Any], diagnosis_result: Mapping[str, Any], manifest_sha256: str,
+    root: Path, consumer_source: Path, ues_source: Path, github_app_id: str,
+    read_comments: Callable[[str, str], list[dict[str, Any]]] = read_issue_comments,
+    write_comment: Callable[[str, str, str], str] = write_issue_comment,
+    command_runner: Callable[[list[str]], Any] | None = None,
+) -> dict[str, Any]:
+    try:
+        context = _watcher_context(watcher_result, diagnosis_result, github_app_id=github_app_id, read_comments=read_comments)
+    except ManualLearningError as exc:
+        return {"status": "parked", "failure_stage": str(exc), "research_executed": False,
+                "learning_only": True, "no_order": True, "size_zero_required": True, "promotion_eligible": False}
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return {"status": "parked", "failure_stage": "watcher_comments_unavailable", "research_executed": False,
+                "learning_only": True, "no_order": True, "size_zero_required": True, "promotion_eligible": False}
+    task = context["task"]
+    artifact = _watcher_base(task, manifest_sha256)
+    if manifest_sha256 != task["evidence"]["p1_input_digest"]:
+        artifact["failure_stage"] = "input_identity_invalid"
+        return artifact
+    terminal = context["terminal"]
+    if terminal is not None:
+        artifact["status"] = "accepted" if terminal["status"] == "accepted" else "parked"
+        artifact["research_executed"] = terminal["status"] == "accepted"
+        artifact["numeric_execution"] = {"status": "reused"}
+        artifact["numeric_result_sha256"] = terminal["numeric_result_sha256"]
+        if terminal["status"] == "failed":
+            artifact["failure_stage"] = terminal["failure_stage"]
+        if terminal["status"] == "accepted":
+            artifact["numeric_summary"] = terminal["numeric_summary"]
+            artifact["numeric_source_identity"] = terminal["numeric_source_identity"]
+        return artifact
+    if context["started"]:
+        artifact.update(failure_stage="numeric_outcome_unknown", research_executed=None, numeric_execution={"status": "outcome_unknown"})
+        return artifact
+    required = (
+        root / "binding.json", root / "manifest.json", root / "bars.json",
+        consumer_source / "scripts/run_soxl_three_asset_learning.py",
+        consumer_source / "config/soxl_soxx_core_only_p2_v3.json",
+    )
+    if any(path.is_symlink() or not path.is_file() for path in required) or not (consumer_source / ".venv/bin/python").is_file() or not ues_source.is_dir():
+        artifact["failure_stage"] = "source_or_input_unavailable"
+        return artifact
+    try:
+        write_comment(context["repository"], context["issue_url"], watcher_learning_comment(task, phase="started", status="started"))
+    except (ManualLearningError, OSError, subprocess.SubprocessError):
+        artifact["failure_stage"] = "watcher_comment_write_failed"
+        return artifact
+    artifact.update(research_executed=None, numeric_execution={"status": "started"})
+    runner = command_runner or (lambda argv: subprocess.run(argv, capture_output=True, text=True, timeout=1200, check=False))
+    try:
+        completed = runner(_numeric_command(root, consumer_source, ues_source, (0.65, 0.6, 0.55)))
+    except (OSError, subprocess.SubprocessError):
+        artifact.update(failure_stage="numeric_outcome_unknown", numeric_execution={"status": "outcome_unknown"})
+        return artifact
+    if getattr(completed, "returncode", None) != 0:
+        artifact.update(failure_stage="numeric_execution_failed", numeric_execution={"status": "failed"})
+        try:
+            write_comment(context["repository"], context["issue_url"], watcher_learning_comment(task, phase="terminal", status="failed"))
+        except (ManualLearningError, OSError, subprocess.SubprocessError):
+            artifact["failure_stage"] = "numeric_outcome_unknown"
+            artifact["numeric_execution"] = {"status": "outcome_unknown"}
+        return artifact
+    try:
+        safe, source, digest = _sanitize_numeric(json.loads(completed.stdout), (0.65, 0.6, 0.55), manifest_sha256)
+        write_comment(
+            context["repository"], context["issue_url"],
+            watcher_learning_comment(
+                task, phase="terminal", status="accepted", numeric_result_sha256=digest,
+                numeric_summary=safe, numeric_source_identity=source,
+            ),
+        )
+    except (AttributeError, TypeError, json.JSONDecodeError, ManualLearningError, OSError, subprocess.SubprocessError):
+        artifact.update(failure_stage="numeric_outcome_unknown", numeric_execution={"status": "outcome_unknown"})
+        return artifact
+    artifact.update(status="accepted", research_executed=True, numeric_summary=safe,
+                    numeric_source_identity=source, numeric_result_sha256=digest,
+                    numeric_execution={"status": "succeeded"})
+    return artifact
 
 
 def run_manual_learning(
@@ -382,19 +758,64 @@ def initialize_record(path: Path, context: Mapping[str, str]) -> None:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--parameter-grid", required=True)
-    parser.add_argument("--manifest-sha256", required=True)
-    parser.add_argument("--root", required=True, type=Path)
-    parser.add_argument("--consumer-source", required=True, type=Path)
-    parser.add_argument("--ues-source", required=True, type=Path)
-    parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--repository", required=True)
-    parser.add_argument("--ref", required=True)
-    parser.add_argument("--event-name", required=True)
-    parser.add_argument("--actor", required=True)
-    parser.add_argument("--run-id", required=True)
-    parser.add_argument("--run-attempt", required=True)
+    parser.add_argument("--parameter-grid")
+    parser.add_argument("--manifest-sha256")
+    parser.add_argument("--root", type=Path)
+    parser.add_argument("--consumer-source", type=Path)
+    parser.add_argument("--ues-source", type=Path)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--repository")
+    parser.add_argument("--ref")
+    parser.add_argument("--event-name")
+    parser.add_argument("--actor")
+    parser.add_argument("--run-id")
+    parser.add_argument("--run-attempt")
+    parser.add_argument("--watcher-result", type=Path)
+    parser.add_argument("--diagnosis-result", type=Path)
+    parser.add_argument("--github-app-id")
+    parser.add_argument("--watcher-preflight", action="store_true")
+    parser.add_argument("--watcher-record-pre-numeric-failure", action="store_true")
     args = parser.parse_args(argv)
+    if args.watcher_result is not None:
+        if args.diagnosis_result is None or not args.github_app_id:
+            parser.error("watcher mode requires --diagnosis-result and --github-app-id")
+        watcher_result = json.loads(args.watcher_result.read_text(encoding="utf-8"))
+        diagnosis_result = json.loads(args.diagnosis_result.read_text(encoding="utf-8"))
+        if args.watcher_preflight:
+            result = prepare_watcher_learning(
+                watcher_result, diagnosis_result, github_app_id=args.github_app_id,
+            )
+            print(canonical_json(result))
+            return 0
+        if args.watcher_record_pre_numeric_failure:
+            try:
+                result = record_watcher_pre_numeric_failure(
+                    watcher_result=watcher_result, diagnosis_result=diagnosis_result,
+                    github_app_id=args.github_app_id,
+                )
+            except (ManualLearningError, OSError, ValueError, subprocess.SubprocessError):
+                print(canonical_json({"status": "parked", "failure_stage": "watcher_failure_record_unavailable"}))
+                return 2
+            print(canonical_json(result))
+            return 0 if result["status"] in {"failed", "reused"} else 2
+        if any(value is None for value in (args.manifest_sha256, args.root, args.consumer_source, args.ues_source, args.output)):
+            parser.error("watcher execution requires manifest, source, root and output paths")
+        result = run_watcher_learning(
+            watcher_result=watcher_result, diagnosis_result=diagnosis_result,
+            manifest_sha256=args.manifest_sha256, root=args.root,
+            consumer_source=args.consumer_source, ues_source=args.ues_source,
+            github_app_id=args.github_app_id,
+        )
+        _write(args.output, result)
+        print(json.dumps({"status": result["status"], "operation": "soxl_watcher_learning"}, sort_keys=True))
+        return 0 if result["status"] == "accepted" else 2
+    manual_required = (
+        args.parameter_grid, args.manifest_sha256, args.root, args.consumer_source,
+        args.ues_source, args.output, args.repository, args.ref, args.event_name,
+        args.actor, args.run_id, args.run_attempt,
+    )
+    if any(value is None for value in manual_required):
+        parser.error("manual mode requires the original bounded input and authority arguments")
     context = {key: getattr(args, key) for key in ("repository", "ref", "event_name", "actor", "run_id", "run_attempt")}
     try:
         result = run_manual_learning(
