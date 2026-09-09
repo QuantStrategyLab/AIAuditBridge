@@ -198,17 +198,27 @@ def test_validator_rejection_outputs_only_the_fixed_safe_category(
     assert "accepted" not in output
 
 
-def test_workflow_keeps_frozen_source_main_identity_and_no_research_execution() -> None:
+def test_workflow_keeps_readback_default_and_bounds_manual_learning() -> None:
     text = workflow_text()
 
     assert "github.ref == 'refs/heads/main'" in text
+    assert "inputs.operation != 'soxl_learning' || github.run_attempt == 1" in text
+    assert "default: readback" in text
+    assert "- soxl_learning" in text
     assert "repository: QuantStrategyLab/UsEquitySnapshotPipelines" in text
     assert "ref: ca61b82c2a508a1cc81fb5831294ba9835ac41c2" in text
+    assert "ref: b03ecbe4e0a7a0de22f298499f867a7039e4b60a" in text
+    assert "ref: 7756fe32585e85cf1d09a163203a02e3eee39fe1" in text
     assert "uv sync --locked --no-dev --no-editable --python 3.11" in text
     assert text.index("name: Install the frozen validator runtime") < text.index(
         "name: Authenticate for this research input only"
     )
     assert "trap cleanup EXIT" in text
     assert "if: always()" in text
-    assert "upload-artifact" not in text
+    assert "if: always() && inputs.operation == 'soxl_learning'" in text
+    assert "python3 -m scripts.run_soxl_manual_learning" in text
+    assert 'UV_PROJECT_ENVIRONMENT="$UES_ENV_ROOT" python3 -m scripts.run_soxl_manual_learning' in text
+    assert text.index("uv run --no-sync python") < text.index(
+        'UV_PROJECT_ENVIRONMENT="$UES_ENV_ROOT" python3 -m scripts.run_soxl_manual_learning'
+    )
     assert "run_soxl_core_only_p3_evidence" not in text
