@@ -235,3 +235,29 @@ def test_selected_validation_uses_original_evidence_and_an_isolated_strict_gate(
     assert "inputs.operation == 'readback' || github.run_attempt == 1" in text
     assert "actions: read" in text
     assert text.index("Install the isolated strict gate") < text.index("Authenticate for this research input only")
+
+
+def test_validation_result_can_be_published_without_rerunning_research():
+    text = workflow_text()
+
+    assert "- publish_validation" in text
+    assert "validation_run_id:" in text
+    assert "Publish an existing validation result" in text
+    assert 'gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${source_run_id}"' in text
+    assert 'value.get("workflow_id") != 353970093' in text
+    assert 'value.get("path") != ".github/workflows/research_input_readback.yml"' in text
+    assert 'value.get("run_attempt") != 1' in text
+    assert "gh run download" in text
+    assert "--control-plane-source-from-summary" in text
+    assert "QSL_CONTROL_PLANE_SYNC_URL" in text
+    assert "secrets.CONTROL_PLANE_SYNC_TOKEN" in text
+    assert "/api/internal/sync-control-plane-source" in text
+    assert "CONTROL_PLANE_SYNC_STATUS=NOT_CONFIGURED" in text
+    assert "--retry" not in text[text.index("name: Publish validation result to the read-only control plane"):]
+    assert "urllib.request.Request" in text
+    assert "NoRedirect" in text
+    assert 'endpoint_base.scheme != "https"' in text
+    assert "OUTCOME_UNKNOWN_NO_RETRY" in text
+    assert '--header "Authorization: Bearer' not in text
+    assert "/api/internal/sync-research-promotion-ticket" not in text
+    assert "inputs.operation != 'publish_validation'" in text

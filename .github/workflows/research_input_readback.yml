@@ -12,10 +12,15 @@ on:
           - readback
           - soxl_learning
           - soxl_validation
+          - publish_validation
       blend_gate_mid_soxl_weights:
         description: Reviewed baseline and up to two bounded learning values
         required: true
         default: '0.65,0.60,0.55'
+        type: string
+      validation_run_id:
+        description: Existing successful soxl_validation run to publish without rerunning research
+        required: false
         type: string
 
 permissions:
@@ -27,7 +32,7 @@ concurrency:
 
 jobs:
   readback:
-    if: github.repository == 'QuantStrategyLab/AIAuditBridge' && github.ref == 'refs/heads/main' && (inputs.operation == 'readback' || github.run_attempt == 1)
+    if: github.repository == 'QuantStrategyLab/AIAuditBridge' && github.ref == 'refs/heads/main' && inputs.operation != 'publish_validation' && (inputs.operation == 'readback' || github.run_attempt == 1)
     runs-on: [self-hosted, codex-vps]
     timeout-minutes: ${{ inputs.operation != 'readback' && 35 || 10 }}
     permissions:
@@ -336,3 +341,168 @@ jobs:
           LEARNING_OUTPUT_ROOT: ${{ runner.temp }}/aab-soxl-learning-${{ github.run_id }}-${{ github.run_attempt }}
           UES_ENV_ROOT: ${{ runner.temp }}/aab-soxl-ues-env-${{ github.run_id }}-${{ github.run_attempt }}
         run: rm -rf -- "$READBACK_ROOT" "$LEARNING_OUTPUT_ROOT" "$UES_ENV_ROOT" "$VALIDATION_CONTROL_ENV" "$DEVELOPMENT_SOURCE_ROOT"
+
+  publish-validation-result:
+    name: Publish an existing validation result
+    needs: [readback]
+    if: always() && github.repository == 'QuantStrategyLab/AIAuditBridge' && github.ref == 'refs/heads/main' && github.run_attempt == 1 && (inputs.operation == 'publish_validation' || (inputs.operation == 'soxl_validation' && needs.readback.result == 'success'))
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Verify the source run identity
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OPERATION: ${{ inputs.operation }}
+          REQUESTED_RUN_ID: ${{ inputs.validation_run_id }}
+        run: |
+          set -euo pipefail
+          source_run_id="$GITHUB_RUN_ID"
+          if [ "$OPERATION" = "publish_validation" ]; then
+            source_run_id="$REQUESTED_RUN_ID"
+          fi
+          if [[ ! "$source_run_id" =~ ^[0-9]+$ ]]; then
+            echo 'VALIDATION_CONTROL_PLANE_STATUS=SOURCE_RUN_INVALID' >> "$GITHUB_STEP_SUMMARY"
+            exit 2
+          fi
+          metadata="$RUNNER_TEMP/validation-run.json"
+          gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${source_run_id}" > "$metadata"
+          python3 - "$metadata" "$GITHUB_OUTPUT" "$source_run_id" "$OPERATION" <<'PY_RUN'
+          import json
+          import re
+          import sys
+
+          value = json.load(open(sys.argv[1], encoding="utf-8"))
+          run_id, operation = sys.argv[3], sys.argv[4]
+          if (
+              str(value.get("id")) != run_id
+              or value.get("workflow_id") != 353970093
+              or value.get("path") != ".github/workflows/research_input_readback.yml"
+              or value.get("run_attempt") != 1
+              or value.get("event") != "workflow_dispatch"
+              or value.get("head_branch") != "main"
+              or not re.fullmatch(r"[0-9a-f]{40}", str(value.get("head_sha") or ""))
+              or not isinstance(value.get("updated_at"), str)
+              or not value["updated_at"].endswith("Z")
+              or (operation == "publish_validation" and (value.get("status") != "completed" or value.get("conclusion") != "success"))
+          ):
+              raise SystemExit("validation source run identity is invalid")
+          with open(sys.argv[2], "a", encoding="utf-8") as target:
+              target.write(f"run_id={run_id}\n")
+              target.write(f"source_revision={value['head_sha']}\n")
+              target.write(f"computed_at={value['updated_at']}\n")
+          PY_RUN
+
+      - name: Download the current validation record
+        if: inputs.operation == 'soxl_validation'
+        uses: actions/download-artifact@v7
+        with:
+          name: soxl-manual-learning-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/validation-result
+
+      - name: Download the existing validation record
+        if: inputs.operation == 'publish_validation'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ steps.source.outputs.run_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/validation-result"
+          gh run download "$SOURCE_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name "soxl-manual-learning-${SOURCE_RUN_ID}-1" \
+            --dir "$RUNNER_TEMP/validation-result"
+
+      - name: Build the read-only validation source snapshot
+        env:
+          SOURCE_RUN_ID: ${{ steps.source.outputs.run_id }}
+          SOURCE_REVISION: ${{ steps.source.outputs.source_revision }}
+          SOURCE_COMPUTED_AT: ${{ steps.source.outputs.computed_at }}
+        run: |
+          set -euo pipefail
+          python3 -m scripts.run_soxl_manual_learning \
+            --control-plane-source-from-summary "$RUNNER_TEMP/validation-result/summary.json" \
+            --run-id "$SOURCE_RUN_ID" \
+            --source-revision "$SOURCE_REVISION" \
+            --computed-at "$SOURCE_COMPUTED_AT" \
+            --output "$RUNNER_TEMP/validation-result/control-plane-source.json"
+
+      - name: Publish validation result to the read-only control plane
+        env:
+          CONTROL_PLANE_SYNC_URL: ${{ vars.QSL_CONTROL_PLANE_SYNC_URL }}
+          CONTROL_PLANE_SYNC_TOKEN: ${{ secrets.CONTROL_PLANE_SYNC_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CONTROL_PLANE_SYNC_URL:-}" ] || [ -z "${CONTROL_PLANE_SYNC_TOKEN:-}" ]; then
+            echo 'CONTROL_PLANE_SYNC_STATUS=NOT_CONFIGURED' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          python3 - "$RUNNER_TEMP/validation-result/control-plane-source.json" "$GITHUB_STEP_SUMMARY" <<'PY_RESPONSE'
+          import json
+          import os
+          import sys
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+          endpoint_base = urllib.parse.urlsplit(os.environ["CONTROL_PLANE_SYNC_URL"])
+          if (
+              endpoint_base.scheme != "https"
+              or not endpoint_base.netloc
+              or endpoint_base.username is not None
+              or endpoint_base.password is not None
+              or endpoint_base.query
+              or endpoint_base.fragment
+              or endpoint_base.path.rstrip("/")
+          ):
+              raise SystemExit("control-plane destination is invalid")
+          endpoint = urllib.parse.urlunsplit((
+              "https", endpoint_base.netloc,
+              "/api/internal/sync-control-plane-source", "", "",
+          ))
+          body = open(sys.argv[1], "rb").read()
+
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, request, fp, code, message, headers, new_url):
+                  return None
+
+          request = urllib.request.Request(
+              endpoint,
+              data=body,
+              method="POST",
+              headers={
+                  "Authorization": "Bearer " + os.environ["CONTROL_PLANE_SYNC_TOKEN"],
+                  "Content-Type": "application/json",
+                  "Accept": "application/json",
+                  "User-Agent": "QuantStrategyLab-AIAuditBridge-ValidationResult/1",
+              },
+          )
+          try:
+              with urllib.request.build_opener(NoRedirect).open(request, timeout=30) as opened:
+                  if int(opened.status) < 200 or int(opened.status) >= 300:
+                      raise ValueError
+                  raw_response = opened.read(65537)
+                  if len(raw_response) > 65536:
+                      raise ValueError
+              response = json.loads(raw_response.decode("utf-8"))
+          except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError, ValueError, UnicodeError, json.JSONDecodeError):
+              with open(sys.argv[2], "a", encoding="utf-8") as summary:
+                  summary.write("CONTROL_PLANE_SYNC_STATUS=OUTCOME_UNKNOWN_NO_RETRY\n")
+              raise SystemExit(2) from None
+          if (
+              not isinstance(response, dict)
+              or response.get("ok") is not True
+              or response.get("source_id") != "aiaudit.soxl_manual_validation"
+              or response.get("schema_version") != "qsl_control_plane_source_snapshot.v1"
+              or response.get("candidate_count") != 1
+              or response.get("generated_at") != json.loads(body)["generated_at"]
+          ):
+              raise SystemExit("unexpected control-plane source response")
+          PY_RESPONSE
+          echo 'CONTROL_PLANE_SYNC_STATUS=PUBLISHED' >> "$GITHUB_STEP_SUMMARY"

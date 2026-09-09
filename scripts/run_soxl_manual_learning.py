@@ -9,6 +9,7 @@ import json
 import math
 import re
 import subprocess
+from datetime import datetime, timezone
 from urllib.parse import urlparse
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
@@ -53,6 +54,8 @@ VALIDATION_FOLDS = [
         ("2025-01-02", "2025-02-28", "2025-03-03", "2025-07-31"),
     )
 ]
+CONTROL_PLANE_SOURCE_SCHEMA = "qsl_control_plane_source_snapshot.v1"
+CONTROL_PLANE_SOURCE_ID = "aiaudit.soxl_manual_validation"
 
 
 class ManualLearningError(ValueError):
@@ -907,6 +910,132 @@ def run_manual_validation(
     return artifact
 
 
+def _utc_timestamp(value: object) -> datetime:
+    if not isinstance(value, str) or not value.endswith("Z"):
+        raise ManualLearningError("validation_control_plane_source_invalid")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        raise ManualLearningError("validation_control_plane_source_invalid") from None
+    if parsed.utcoffset() is None or parsed.utcoffset().total_seconds() != 0:
+        raise ManualLearningError("validation_control_plane_source_invalid")
+    return parsed
+
+
+def build_validation_control_plane_source(
+    artifact: Mapping[str, Any], *, expected_run_id: str, source_revision: str,
+    computed_at: str, published_at: str,
+) -> dict[str, Any]:
+    """Project one completed validation into the existing read-only console contract."""
+    authority = artifact.get("authority")
+    input_identity = artifact.get("input_identity")
+    consumer_source = artifact.get("consumer_source")
+    strict_gate = artifact.get("strict_backtest_gate")
+    numeric_execution = artifact.get("numeric_execution")
+    proposal = artifact.get("proposal")
+    comparisons = artifact.get("oos_comparison")
+    manifest_sha256 = input_identity.get("manifest_sha256") if isinstance(input_identity, Mapping) else None
+    if (
+        not expected_run_id.isdigit()
+        or re.fullmatch(r"[0-9a-f]{40}", source_revision) is None
+        or artifact.get("schema_version") != ARTIFACT_SCHEMA
+        or artifact.get("operation") != "soxl_validation"
+        or artifact.get("status") != "accepted"
+        or artifact.get("development_summary_sha256") != DEVELOPMENT_SUMMARY_SHA256
+        or artifact.get("learning_only") is not True
+        or artifact.get("no_order") is not True
+        or artifact.get("size_zero_required") is not True
+        or artifact.get("promotion_eligible") is not False
+        or artifact.get("research_executed") is not True
+        or artifact.get("human_quality_decision_required") is not True
+        or not isinstance(authority, Mapping)
+        or authority.get("repository") != EXPECTED_REPOSITORY
+        or authority.get("ref") != EXPECTED_REF
+        or authority.get("event_name") != EXPECTED_EVENT
+        or str(authority.get("run_id") or "") != expected_run_id
+        or authority.get("run_attempt") != 1
+        or not isinstance(input_identity, Mapping)
+        or input_identity.get("member_count") != 4
+        or not isinstance(manifest_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", manifest_sha256) is None
+        or not isinstance(consumer_source, Mapping)
+        or consumer_source.get("repository") != "QuantStrategyLab/UsEquitySnapshotPipelines"
+        or consumer_source.get("revision") != VALIDATION_CONSUMER_REVISION
+        or strict_gate != {"status": "passed", "checks": 6, "qpk_revision": VALIDATION_QPK_REVISION}
+        or numeric_execution != {"status": "succeeded"}
+        or not isinstance(proposal, Mapping)
+        or proposal.get("strategy_profile") != "soxl_soxx_three_asset_mid_weight_learning_v1"
+        or proposal.get("domain") != "us_equity"
+        or proposal.get("current_params") != {"blend_gate_mid_soxl_weight": 0.65}
+        or proposal.get("proposed_params") != {"blend_gate_mid_soxl_weight": 0.55}
+        or proposal.get("recommendation") != "research_candidate"
+        or proposal.get("search_iterations") != 3
+        or not isinstance(comparisons, list)
+        or len(comparisons) != 3
+    ):
+        raise ManualLearningError("validation_control_plane_source_invalid")
+
+    improvements: list[float] = []
+    cagr_retentions: list[float] = []
+    for row, expected_cost in zip(comparisons, COST_BPS, strict=True):
+        if not isinstance(row, Mapping) or row.get("cost_bps") != expected_cost:
+            raise ManualLearningError("validation_control_plane_source_invalid")
+        keys = (
+            "baseline_max_drawdown", "candidate_max_drawdown", "baseline_cagr",
+            "candidate_cagr", "baseline_sharpe", "candidate_sharpe",
+            "cagr_retention", "sharpe_retention",
+        )
+        if any(isinstance(row.get(key), bool) or not isinstance(row.get(key), (int, float))
+               or not math.isfinite(row[key]) for key in keys):
+            raise ManualLearningError("validation_control_plane_source_invalid")
+        baseline_cagr = float(row["baseline_cagr"])
+        expected_retention = float(row["candidate_cagr"]) / baseline_cagr if baseline_cagr > 0 else None
+        if expected_retention is None or not math.isclose(float(row["cagr_retention"]), expected_retention, rel_tol=1e-12):
+            raise ManualLearningError("validation_control_plane_source_invalid")
+        improvements.append((float(row["baseline_max_drawdown"]) - float(row["candidate_max_drawdown"])) * 100)
+        cagr_retentions.append(float(row["cagr_retention"]) * 100)
+
+    observed = _utc_timestamp(computed_at)
+    published = _utc_timestamp(published_at)
+    age_seconds = round((published - observed).total_seconds())
+    if age_seconds < 0 or age_seconds > 315_360_000:
+        raise ManualLearningError("validation_control_plane_source_invalid")
+    reason = (
+        "严格验证完成；5/10/15 基点费用下，回撤改善 "
+        + "/".join(f"{value:.4f}" for value in improvements)
+        + " 个百分点，年化收益保留 "
+        + "/".join(f"{value:.2f}%" for value in cagr_retentions)
+        + "；结果保留，尚未进入模拟观察。"
+    )
+    if len(reason) > 240:
+        raise ManualLearningError("validation_control_plane_source_invalid")
+    return {
+        "schema_version": CONTROL_PLANE_SOURCE_SCHEMA,
+        "source_id": CONTROL_PLANE_SOURCE_ID,
+        "generated_at": computed_at,
+        "computed_at": computed_at,
+        "data_status": "ready",
+        "candidates": [{
+            "candidate_id": f"soxl_three_asset_mid_weight_validation_{expected_run_id}",
+            "candidate_kind": "individual",
+            "domain": "us_equity",
+            "lifecycle": {"stage": "P3", "status": "parked"},
+            "evidence": {
+                "p1_input_digest": manifest_sha256,
+                "p2_config_digest": None,
+                "p3_evidence_id": expected_run_id,
+                "source_revision": source_revision,
+            },
+            "recommendation": {"code": "park", "reason": reason},
+            "freshness": {
+                "status": "fresh" if age_seconds <= 36 * 60 * 60 else "stale",
+                "age_seconds": age_seconds,
+            },
+        }],
+        "errors": [],
+    }
+
+
 def _write(path: Path, value: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
@@ -961,7 +1090,33 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--github-app-id")
     parser.add_argument("--watcher-preflight", action="store_true")
     parser.add_argument("--watcher-record-pre-numeric-failure", action="store_true")
+    parser.add_argument("--control-plane-source-from-summary", type=Path)
+    parser.add_argument("--source-revision")
+    parser.add_argument("--computed-at")
     args = parser.parse_args(argv)
+    if args.control_plane_source_from_summary is not None:
+        if any(value is None for value in (args.output, args.run_id, args.source_revision, args.computed_at)):
+            parser.error("control-plane source mode requires output, run ID, source revision, and computed timestamp")
+        try:
+            source = args.control_plane_source_from_summary
+            if source.is_symlink() or source.stat().st_size > 4 * 1024 * 1024:
+                raise ValueError
+            artifact = json.loads(source.read_text(encoding="utf-8"))
+            if not isinstance(artifact, Mapping):
+                raise ValueError
+            result = build_validation_control_plane_source(
+                artifact,
+                expected_run_id=args.run_id,
+                source_revision=args.source_revision,
+                computed_at=args.computed_at,
+                published_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            )
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            print(json.dumps({"status": "parked", "reason": "validation_control_plane_source_invalid"}, sort_keys=True))
+            return 2
+        _write(args.output, result)
+        print(json.dumps({"status": "accepted", "operation": "publish_validation"}, sort_keys=True))
+        return 0
     if args.watcher_result is not None:
         if args.diagnosis_result is None or not args.github_app_id:
             parser.error("watcher mode requires --diagnosis-result and --github-app-id")

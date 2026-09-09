@@ -751,6 +751,92 @@ def test_selected_validation_uses_strict_gate_and_reports_tradeoff_without_ai(pa
     assert progress[0]["numeric_execution"]["status"] == "started"
 
 
+def accepted_validation_artifact():
+    from quant_platform_kit.strategy_lifecycle.research_promotion_cycle import enforce_promotion_backtest_gates
+    from scripts import run_soxl_manual_learning as module
+
+    artifact = module._safe_base(context(), (0.65, 0.55), "a" * 64)
+    artifact.update(
+        operation="soxl_validation",
+        status="accepted",
+        development_summary_sha256=module.DEVELOPMENT_SUMMARY_SHA256,
+        numeric_execution={"status": "succeeded"},
+        research_executed=True,
+    )
+    artifact["consumer_source"]["revision"] = module.VALIDATION_CONSUMER_REVISION
+    artifact["authority"]["run_id"] = "34407783620"
+    artifact.update(
+        module._strict_validation_summary(
+            promotion_validation_result(), enforce_promotion_backtest_gates
+        )
+    )
+    return artifact
+
+
+def test_selected_validation_builds_parked_read_only_control_plane_source():
+    from scripts import run_soxl_manual_learning as module
+
+    result = module.build_validation_control_plane_source(
+        accepted_validation_artifact(),
+        expected_run_id="34407783620",
+        source_revision="e" * 40,
+        computed_at="2026-09-09T22:18:54Z",
+        published_at="2026-09-10T06:00:00Z",
+    )
+
+    assert result["schema_version"] == "qsl_control_plane_source_snapshot.v1"
+    assert result["source_id"] == "aiaudit.soxl_manual_validation"
+    assert result["generated_at"] == "2026-09-09T22:18:54Z"
+    assert result["computed_at"] == "2026-09-09T22:18:54Z"
+    assert result["errors"] == []
+    candidate = result["candidates"][0]
+    assert candidate["candidate_id"] == "soxl_three_asset_mid_weight_validation_34407783620"
+    assert candidate["lifecycle"] == {"stage": "P3", "status": "parked"}
+    assert candidate["recommendation"]["code"] == "park"
+    assert "5/10/15 基点" in candidate["recommendation"]["reason"]
+    assert "年化收益保留" in candidate["recommendation"]["reason"]
+    assert candidate["evidence"] == {
+        "p1_input_digest": "a" * 64,
+        "p2_config_digest": None,
+        "p3_evidence_id": "34407783620",
+        "source_revision": "e" * 40,
+    }
+    assert candidate["freshness"] == {"status": "fresh", "age_seconds": 27666}
+    serialized = json.dumps(result)
+    assert "awaiting_human" not in serialized
+    assert "owner_live_decision" not in serialized
+
+
+@pytest.mark.parametrize(
+    "path,replacement",
+    [
+        (("status",), "parked"),
+        (("promotion_eligible",), True),
+        (("human_quality_decision_required",), False),
+        (("strict_backtest_gate", "status"), "failed"),
+        (("authority", "repository"), "Other/repo"),
+        (("authority", "run_id"), "999"),
+    ],
+)
+def test_control_plane_source_rejects_untrusted_validation_summary(path, replacement):
+    from scripts import run_soxl_manual_learning as module
+
+    artifact = accepted_validation_artifact()
+    target = artifact
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = replacement
+
+    with pytest.raises(module.ManualLearningError, match="validation_control_plane_source_invalid"):
+        module.build_validation_control_plane_source(
+            artifact,
+            expected_run_id="34407783620",
+            source_revision="e" * 40,
+            computed_at="2026-09-09T22:18:54Z",
+            published_at="2026-09-10T06:00:00Z",
+        )
+
+
 def test_selected_validation_rejects_changed_source_before_execution(paths, tmp_path):
     from scripts import run_soxl_manual_learning as module
     summary = tmp_path / "development.json"
