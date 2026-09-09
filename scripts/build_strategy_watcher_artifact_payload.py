@@ -9,7 +9,7 @@ import math
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 
 SCHEMA_VERSION = "strategy_performance.v2"
@@ -183,14 +183,63 @@ def build_strategy_watcher_artifact_payload(
     }
 
 
+def select_strategy_watcher_artifact_payload(
+    *,
+    observations: Sequence[tuple[object, object]],
+    source_repository: object,
+    workflow_file: object,
+) -> dict[str, object] | None:
+    """Keep the newest observation and select its nearest comparable baseline."""
+    if not 1 <= len(observations) <= 5:
+        raise StrategyWatcherArtifactError("expected one to five strategy observations")
+    if not isinstance(source_repository, str) or not _REPOSITORY.fullmatch(source_repository):
+        raise StrategyWatcherArtifactError("invalid source repository")
+    if not isinstance(workflow_file, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+\.ya?ml", workflow_file):
+        raise StrategyWatcherArtifactError("invalid workflow file")
+
+    current_run_id, current_artifact = observations[0]
+    if not isinstance(current_run_id, str) or not current_run_id.isdigit():
+        raise StrategyWatcherArtifactError("invalid workflow run id")
+    current = _performance_artifact(current_artifact, expected_repository=source_repository)
+    current_identity = tuple(current[key] for key in ("strategy_profile", "candidate_kind", "domain"))
+    current_generated_at = _timestamp(current["generated_at"], "current generated_at")
+
+    for baseline_run_id, baseline_artifact in observations[1:]:
+        if not isinstance(baseline_run_id, str) or not baseline_run_id.isdigit():
+            raise StrategyWatcherArtifactError("invalid workflow run id")
+        baseline = _performance_artifact(baseline_artifact, expected_repository=source_repository)
+        baseline_identity = tuple(baseline[key] for key in ("strategy_profile", "candidate_kind", "domain"))
+        if baseline_identity != current_identity:
+            continue
+        if _timestamp(baseline["generated_at"], "baseline generated_at") >= current_generated_at:
+            continue
+        if baseline["as_of"] >= current["as_of"]:
+            continue
+        return build_strategy_watcher_artifact_payload(
+            current_artifact=current,
+            baseline_artifact=baseline,
+            source_repository=source_repository,
+            workflow_file=workflow_file,
+            current_run_id=current_run_id,
+            baseline_run_id=baseline_run_id,
+        )
+    return None
+
+
 def _arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--current", required=True, type=Path)
-    parser.add_argument("--baseline", required=True, type=Path)
+    parser.add_argument("--baseline", type=Path)
+    parser.add_argument(
+        "--baseline-candidate",
+        action="append",
+        nargs=2,
+        metavar=("RUN_ID", "PATH"),
+    )
     parser.add_argument("--source-repository", required=True)
     parser.add_argument("--workflow-file", required=True)
     parser.add_argument("--current-run-id", required=True)
-    parser.add_argument("--baseline-run-id", required=True)
+    parser.add_argument("--baseline-run-id")
     parser.add_argument("--output", required=True, type=Path)
     return parser.parse_args()
 
@@ -204,14 +253,31 @@ def _read_json(path: Path) -> object:
 
 def main() -> None:
     args = _arguments()
-    payload = build_strategy_watcher_artifact_payload(
-        current_artifact=_read_json(args.current),
-        baseline_artifact=_read_json(args.baseline),
-        source_repository=args.source_repository,
-        workflow_file=args.workflow_file,
-        current_run_id=args.current_run_id,
-        baseline_run_id=args.baseline_run_id,
-    )
+    if args.baseline_candidate:
+        if args.baseline is not None or args.baseline_run_id is not None:
+            raise StrategyWatcherArtifactError("cannot mix baseline modes")
+        observations = [(args.current_run_id, _read_json(args.current))]
+        observations.extend(
+            (run_id, _read_json(Path(path))) for run_id, path in args.baseline_candidate
+        )
+        payload = select_strategy_watcher_artifact_payload(
+            observations=observations,
+            source_repository=args.source_repository,
+            workflow_file=args.workflow_file,
+        )
+        if payload is None:
+            return
+    else:
+        if args.baseline is None or args.baseline_run_id is None:
+            raise StrategyWatcherArtifactError("baseline artifact is required")
+        payload = build_strategy_watcher_artifact_payload(
+            current_artifact=_read_json(args.current),
+            baseline_artifact=_read_json(args.baseline),
+            source_repository=args.source_repository,
+            workflow_file=args.workflow_file,
+            current_run_id=args.current_run_id,
+            baseline_run_id=args.baseline_run_id,
+        )
     args.output.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False), encoding="utf-8")
 
 
