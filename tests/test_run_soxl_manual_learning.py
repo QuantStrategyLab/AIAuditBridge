@@ -16,7 +16,12 @@ from scripts.run_soxl_manual_learning import (
     initialize_record,
     parse_parameter_grid,
     run_manual_learning,
+    run_watcher_learning,
+    read_issue_comments,
+    record_watcher_pre_numeric_failure,
+    write_issue_comment,
 )
+from service.research_task import SOXL_WATCHER_PARAMETER_BOUNDS_SHA256, build_strategy_diagnosis_task
 
 
 UES_REVISION = "7756fe32585e85cf1d09a163203a02e3eee39fe1"
@@ -142,6 +147,223 @@ def numeric_result() -> dict[str, object]:
         "results": rows,
         "result_sha256": "b" * 64,
     }
+
+
+def watcher_inputs() -> tuple[dict[str, object], dict[str, object]]:
+    task = build_strategy_diagnosis_task(
+        event_key="123456789abc", created_at="2026-09-10T00:00:00Z",
+        candidate_id="soxl_soxx_core_only_p2_v3", candidate_kind="individual",
+        domain="us_equity", strategy_repository="QuantStrategyLab/UsEquityStrategies",
+        evidence={"p1_input_digest": "0" * 64, "p2_config_digest": "ff8fa0acf4f175a7c40c3e1e6a3304ea2748b6b81c3797342085a4df3810ab4d", "p3_evidence_id": "c" * 64, "strategy_revision": UES_REVISION, "producer_revision": "e" * 40},
+    )
+    result = {
+        "research_task_source_snapshot": {"data_status": "ready", "tasks": [task]},
+        "issues": [{"repo": "QuantStrategyLab/UsEquitySnapshotPipelines", "url": "https://github.com/QuantStrategyLab/UsEquitySnapshotPipelines/issues/1", "task": {"event_key": "123456789abc", "trigger": {}}}],
+    }
+    diagnosis = {"diagnoses": [{"status": "diagnosed", "task_id": task["task_id"], "task_sha256": task["task_sha256"], "issue_url": "https://github.com/QuantStrategyLab/UsEquitySnapshotPipelines/issues/1"}]}
+    return result, diagnosis
+
+
+def trusted_comment(body: str) -> dict[str, object]:
+    return {"body": body, "performed_via_github_app": {"id": 42}}
+
+
+def trusted_diagnosis_comment(watcher: dict[str, object]) -> dict[str, object]:
+    task = watcher["research_task_source_snapshot"]["tasks"][0]
+    marker = __import__("service.research_diagnosis", fromlist=["marker_for_research_diagnosis"]).marker_for_research_diagnosis(__import__("service.research_diagnosis", fromlist=["build_research_diagnosis_request"]).build_research_diagnosis_request(task))
+    return trusted_comment(marker + "\ntrusted diagnosis")
+
+
+def test_watcher_learning_runs_synthetic_subprocess_stub_once_and_writes_bound_terminal(
+    paths: dict[str, Path],
+) -> None:
+    watcher, diagnosis = watcher_inputs()
+    script = paths["consumer"] / "scripts/run_soxl_three_asset_learning.py"
+    script.write_text("import json\nprint(json.dumps(" + repr(numeric_result()) + "))\n")
+    comments: list[str] = []
+    artifact = run_watcher_learning(
+        watcher_result=watcher, diagnosis_result=diagnosis, manifest_sha256="0" * 64,
+        root=paths["root"], consumer_source=paths["consumer"], ues_source=paths["ues"],
+        github_app_id="42", read_comments=lambda *_: [trusted_diagnosis_comment(watcher)],
+        write_comment=lambda _repo, _url, body: comments.append(body) or "comment",
+    )
+    assert artifact["status"] == "accepted"
+    assert artifact["source"] == "watcher_event_independent_learning"
+    assert artifact["promotion_eligible"] is False
+    assert artifact["experiment"]["parameter_bounds_sha256"] == SOXL_WATCHER_PARAMETER_BOUNDS_SHA256
+    assert len(artifact["numeric_summary"]) == 9
+    assert len(comments) == 2
+    assert ":started:" in comments[0] and ":terminal:" in comments[1]
+
+
+@pytest.mark.parametrize("state", ["old_null", "not_diagnosed", "started", "failed"])
+def test_watcher_learning_non_executable_or_terminal_state_never_calls_numeric(state: str, paths: dict[str, Path]) -> None:
+    watcher, diagnosis = watcher_inputs()
+    task = watcher["research_task_source_snapshot"]["tasks"][0]
+    comments: list[dict[str, object]] = []
+    if state == "old_null":
+        from service.research_task import calculate_task_sha256
+        task["experiment"]["parameter_bounds_sha256"] = None
+        task["task_sha256"] = calculate_task_sha256(task)
+    elif state == "not_diagnosed":
+        diagnosis = {"diagnoses": [{"status": "deferred", "task_id": task["task_id"]}]}
+    else:
+        diagnosis = {"status": "skipped", "diagnoses": []}
+        phase = "started" if state == "started" else "terminal"
+        body = __import__("scripts.run_soxl_manual_learning", fromlist=["watcher_learning_comment"]).watcher_learning_comment(task, phase=phase, status="failed" if state == "failed" else "started")
+        comments = [trusted_comment(body), trusted_comment(__import__("service.research_diagnosis", fromlist=["marker_for_research_diagnosis"]).marker_for_research_diagnosis(__import__("service.research_diagnosis", fromlist=["build_research_diagnosis_request"]).build_research_diagnosis_request(task)))]
+    calls: list[list[str]] = []
+    artifact = run_watcher_learning(
+        watcher_result=watcher, diagnosis_result=diagnosis, manifest_sha256="0" * 64,
+        root=paths["root"], consumer_source=paths["consumer"], ues_source=paths["ues"], github_app_id="42",
+        read_comments=lambda *_: comments, write_comment=lambda *_: "comment",
+        command_runner=lambda argv: calls.append(argv),
+    )
+    assert artifact["status"] in {"parked", "rejected"}
+    assert calls == []
+
+
+def test_watcher_learning_reuses_trusted_terminal_when_current_diagnosis_is_skipped(paths: dict[str, Path]) -> None:
+    watcher, _ = watcher_inputs()
+    task = watcher["research_task_source_snapshot"]["tasks"][0]
+    diagnosis_marker = __import__("service.research_diagnosis", fromlist=["marker_for_research_diagnosis"]).marker_for_research_diagnosis(__import__("service.research_diagnosis", fromlist=["build_research_diagnosis_request"]).build_research_diagnosis_request(task))
+    raw = numeric_result()
+    safe = [
+        {key: item[key] for key in ("parameter_override", "cost_bps", "backtest_result", "output_sha256")}
+        for item in raw["results"]
+    ]
+    terminal = __import__("scripts.run_soxl_manual_learning", fromlist=["watcher_learning_comment"]).watcher_learning_comment(
+        task, phase="terminal", status="accepted", numeric_result_sha256="b" * 64,
+        numeric_summary=safe, numeric_source_identity={key: raw["source_identity"][key] for key in ("repository", "revision", "quant_platform_kit_revision", "uv_lock_sha256")},
+    )
+    artifact = run_watcher_learning(
+        watcher_result=watcher, diagnosis_result={"status": "skipped", "diagnoses": []}, manifest_sha256="0" * 64,
+        root=paths["root"], consumer_source=paths["consumer"], ues_source=paths["ues"], github_app_id="42",
+        read_comments=lambda *_: [trusted_comment(diagnosis_marker), trusted_comment(terminal)],
+        write_comment=lambda *_: (_ for _ in ()).throw(AssertionError("must reuse")),
+        command_runner=lambda _argv: (_ for _ in ()).throw(AssertionError("must not run")),
+    )
+    assert artifact["status"] == "accepted"
+    assert artifact["numeric_execution"] == {"status": "reused"}
+    assert len(artifact["numeric_summary"]) == 9
+
+
+def test_watcher_learning_rejects_unreadable_or_untrusted_comment_history(paths: dict[str, Path]) -> None:
+    watcher, diagnosis = watcher_inputs()
+    task = watcher["research_task_source_snapshot"]["tasks"][0]
+    diagnosis_marker = __import__("service.research_diagnosis", fromlist=["marker_for_research_diagnosis"]).marker_for_research_diagnosis(__import__("service.research_diagnosis", fromlist=["build_research_diagnosis_request"]).build_research_diagnosis_request(task))
+    for active_diagnosis, reader in (
+        (diagnosis, lambda *_: (_ for _ in ()).throw(OSError("private failure"))),
+        ({"status": "skipped", "diagnoses": []}, lambda *_: [{"body": diagnosis_marker, "performed_via_github_app": {"id": 7}}]),
+    ):
+        calls: list[list[str]] = []
+        artifact = run_watcher_learning(
+            watcher_result=watcher, diagnosis_result=active_diagnosis, manifest_sha256="0" * 64,
+            root=paths["root"], consumer_source=paths["consumer"], ues_source=paths["ues"],
+            github_app_id="42", read_comments=reader, write_comment=lambda *_: "comment",
+            command_runner=lambda argv: calls.append(argv),
+        )
+        assert artifact["status"] == "parked"
+        assert calls == []
+        assert "private failure" not in json.dumps(artifact)
+
+
+def test_comment_reader_slurps_and_flattens_every_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    pages = [[{"body": f"comment-{index}"} for index in range(100)], [{"body": "comment-100"}]]
+    observed: list[list[str]] = []
+
+    def run(argv: list[str], **_kwargs: object) -> SimpleNamespace:
+        observed.append(argv)
+        return SimpleNamespace(returncode=0, stdout=json.dumps(pages), stderr="")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    comments = read_issue_comments(
+        "QuantStrategyLab/UsEquitySnapshotPipelines",
+        "https://github.com/QuantStrategyLab/UsEquitySnapshotPipelines/issues/123",
+    )
+    assert len(comments) == 101
+    assert "--paginate" in observed[0] and "--slurp" in observed[0]
+
+
+def test_multiline_comment_uses_body_file_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
+    observed: dict[str, object] = {}
+
+    def run(argv: list[str], **kwargs: object) -> SimpleNamespace:
+        observed.update(argv=argv, **kwargs)
+        return SimpleNamespace(returncode=0, stdout="comment-url", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    assert write_issue_comment(
+        "QuantStrategyLab/UsEquitySnapshotPipelines",
+        "https://github.com/QuantStrategyLab/UsEquitySnapshotPipelines/issues/123",
+        "line one\nline two",
+    ) == "comment-url"
+    assert observed["argv"][-2:] == ["--body-file", "-"]
+    assert observed["input"] == "line one\nline two"
+
+
+def test_known_pre_numeric_failure_writes_terminal_and_prevents_future_execution(paths: dict[str, Path]) -> None:
+    watcher, diagnosis = watcher_inputs()
+    written: list[str] = []
+    result = record_watcher_pre_numeric_failure(
+        watcher_result=watcher, diagnosis_result=diagnosis, github_app_id="42",
+        read_comments=lambda *_: [trusted_diagnosis_comment(watcher)], write_comment=lambda _repo, _url, body: written.append(body) or "comment",
+    )
+    assert result == {"status": "failed", "failure_stage": "pre_numeric_failed"}
+    assert len(written) == 1 and ":terminal:" in written[0]
+    task = watcher["research_task_source_snapshot"]["tasks"][0]
+    diagnosis_marker = __import__("service.research_diagnosis", fromlist=["marker_for_research_diagnosis"]).marker_for_research_diagnosis(__import__("service.research_diagnosis", fromlist=["build_research_diagnosis_request"]).build_research_diagnosis_request(task))
+    calls: list[list[str]] = []
+    artifact = run_watcher_learning(
+        watcher_result=watcher, diagnosis_result={"status": "skipped", "diagnoses": []}, manifest_sha256="0" * 64,
+        root=paths["root"], consumer_source=paths["consumer"], ues_source=paths["ues"], github_app_id="42",
+        read_comments=lambda *_: [trusted_comment(diagnosis_marker), trusted_comment(written[0])],
+        write_comment=lambda *_: "comment", command_runner=lambda argv: calls.append(argv),
+    )
+    assert artifact["failure_stage"] == "pre_numeric_failed"
+    assert artifact["numeric_execution"] == {"status": "reused"}
+    assert calls == []
+
+
+def test_malformed_exact_terminal_is_rejected_without_replay(paths: dict[str, Path]) -> None:
+    watcher, _ = watcher_inputs()
+    task = watcher["research_task_source_snapshot"]["tasks"][0]
+    diagnosis_marker = __import__("service.research_diagnosis", fromlist=["marker_for_research_diagnosis"]).marker_for_research_diagnosis(__import__("service.research_diagnosis", fromlist=["build_research_diagnosis_request"]).build_research_diagnosis_request(task))
+    prefix = __import__("scripts.run_soxl_manual_learning", fromlist=["_marker"])._marker(task, "terminal")
+    calls: list[list[str]] = []
+    artifact = run_watcher_learning(
+        watcher_result=watcher, diagnosis_result={"status": "skipped", "diagnoses": []}, manifest_sha256="0" * 64,
+        root=paths["root"], consumer_source=paths["consumer"], ues_source=paths["ues"], github_app_id="42",
+        read_comments=lambda *_: [trusted_comment(diagnosis_marker), trusted_comment(f"<!-- {prefix} --> malformed")],
+        write_comment=lambda *_: "comment", command_runner=lambda argv: calls.append(argv),
+    )
+    assert artifact["status"] == "parked"
+    assert artifact["failure_stage"] == "watcher_terminal_invalid"
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.com/QuantStrategyLab/UsEquitySnapshotPipelines/issues/1",
+        "https://github.com/QuantStrategyLab/OtherRepository/issues/1",
+        "https://github.com/QuantStrategyLab/UsEquitySnapshotPipelines/pull/1",
+    ],
+)
+def test_watcher_learning_rejects_issue_outside_exact_source_repository(url: str, paths: dict[str, Path]) -> None:
+    watcher, diagnosis = watcher_inputs()
+    watcher["issues"][0]["url"] = url
+    diagnosis["diagnoses"][0]["issue_url"] = url
+    calls: list[list[str]] = []
+    artifact = run_watcher_learning(
+        watcher_result=watcher, diagnosis_result=diagnosis, manifest_sha256="0" * 64,
+        root=paths["root"], consumer_source=paths["consumer"], ues_source=paths["ues"], github_app_id="42",
+        read_comments=lambda *_: [], write_comment=lambda *_: "comment",
+        command_runner=lambda argv: calls.append(argv),
+    )
+    assert artifact["status"] == "parked"
+    assert artifact["failure_stage"] == "watcher_issue_invalid"
+    assert calls == []
 
 
 def test_parameter_grid_requires_unique_bounded_baseline() -> None:

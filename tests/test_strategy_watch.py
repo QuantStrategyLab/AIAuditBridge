@@ -13,9 +13,51 @@ from service.strategy_watch import (
     resolve_strategy_watch_repository,
     watcher_issue_key,
 )
+from service.research_task import SOXL_WATCHER_PARAMETER_BOUNDS_SHA256, validate_strategy_diagnosis_task
 
 
 class StrategyWatchTest(unittest.TestCase):
+
+    def test_exact_soxl_v3_task_binds_the_fixed_learning_experiment(self) -> None:
+        finding = evaluate_strategy_watch(
+            {
+                "repo": "QuantStrategyLab/UsEquitySnapshotPipelines",
+                "strategy_profile": "soxl_soxx_core_only_p2_v3",
+                "candidate_kind": "individual",
+                "domain": "us_equity",
+                "schema_version": "strategy_performance.v2",
+                "metrics_kind": "performance",
+                "generated_at": "2026-09-10T00:00:00Z",
+                "current_metrics": {"sharpe": 0.5, "cagr": 0.1, "calmar": 0.7, "win_rate": 0.52, "max_dd": 0.12},
+                "baseline_metrics": {"sharpe": 1.0, "cagr": 0.2, "calmar": 1.0, "win_rate": 0.58, "max_dd": 0.08},
+                "research_task_evidence": {
+                    "p1_input_digest": "a" * 64,
+                    "p2_config_digest": "ff8fa0acf4f175a7c40c3e1e6a3304ea2748b6b81c3797342085a4df3810ab4d",
+                    "p3_evidence_id": "c" * 64,
+                    "strategy_revision": "7756fe32585e85cf1d09a163203a02e3eee39fe1",
+                    "producer_revision": "e" * 40,
+                },
+            }
+        )[0]
+
+        task = validate_strategy_diagnosis_task(__import__("service.strategy_watch", fromlist=["finding_to_research_task"]).finding_to_research_task(finding))
+        repeated = validate_strategy_diagnosis_task(__import__("service.strategy_watch", fromlist=["finding_to_research_task"]).finding_to_research_task(finding))
+        self.assertEqual(task["experiment"]["parameter_bounds_sha256"], SOXL_WATCHER_PARAMETER_BOUNDS_SHA256)
+        self.assertEqual(task["task_id"], repeated["task_id"])
+        self.assertEqual(task["task_sha256"], repeated["task_sha256"])
+
+    def test_old_null_bounds_soxl_task_remains_valid_but_non_executable(self) -> None:
+        from service.research_task import build_strategy_diagnosis_task, calculate_task_sha256
+
+        task = build_strategy_diagnosis_task(
+            event_key="123456789abc", created_at="2026-09-10T00:00:00Z",
+            candidate_id="soxl_soxx_core_only_p2_v3", candidate_kind="individual",
+            domain="us_equity", strategy_repository="QuantStrategyLab/UsEquityStrategies",
+            evidence={"p1_input_digest": "a" * 64, "p2_config_digest": "ff8fa0acf4f175a7c40c3e1e6a3304ea2748b6b81c3797342085a4df3810ab4d", "p3_evidence_id": "c" * 64, "strategy_revision": "7756fe32585e85cf1d09a163203a02e3eee39fe1", "producer_revision": "e" * 40},
+        )
+        task["experiment"]["parameter_bounds_sha256"] = None
+        task["task_sha256"] = calculate_task_sha256(task)
+        self.assertIsNone(validate_strategy_diagnosis_task(task)["experiment"]["parameter_bounds_sha256"])
 
     def test_deferred_research_input_creates_issue_only_data_finding(self) -> None:
         finding = build_research_input_unavailable_finding(

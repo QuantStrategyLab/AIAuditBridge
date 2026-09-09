@@ -46,6 +46,9 @@ jobs:
   strategy-optimization-watcher:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    outputs:
+      soxl_learning_ready: ${{ steps.soxl-watcher-learning-ready.outputs.ready }}
+      soxl_p1_manifest_sha256: ${{ steps.soxl-watcher-learning-ready.outputs.p1_manifest_sha256 }}
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
       SOURCE_REPO: ${{ github.event.inputs.source_repo || vars.STRATEGY_WATCH_SOURCE_REPO || 'QuantStrategyLab/CryptoLivePoolPipelines' }}
@@ -285,8 +288,10 @@ jobs:
           python -m scripts.run_strategy_optimization_watcher | tee data/output/strategy_optimization_watcher/result.json
 
       - name: Run one bounded Codex-only research diagnosis
+        id: research-diagnosis
         if: steps.fetch-metrics.outputs.downloaded == 'true' && github.event_name == 'schedule'
         env:
+          GH_TOKEN: ${{ steps.source_app_token.outputs.token || github.token }}
           CODEX_AUDIT_SERVICE_URL: ${{ secrets.CODEX_AUDIT_SERVICE_URL }}
           CODEX_AUDIT_SERVICE_AUDIENCE: ${{ vars.CODEX_AUDIT_SERVICE_AUDIENCE || 'quant-codex-audit' }}
           RESEARCH_DIAGNOSIS_MAX_PER_RUN: "1"
@@ -297,6 +302,33 @@ jobs:
             --input data/output/strategy_optimization_watcher/result.json \
             --max-per-run "${RESEARCH_DIAGNOSIS_MAX_PER_RUN}" \
             | tee data/output/strategy_optimization_watcher/research-diagnosis.json
+
+      - name: Resolve exact SOXL watcher learning handoff
+        id: soxl-watcher-learning-ready
+        if: github.event.schedule == '23 6 * * *' && steps.fetch-metrics.outputs.downloaded == 'true'
+        env:
+          GH_TOKEN: ${{ steps.source_app_token.outputs.token || github.token }}
+          SOURCE_GITHUB_APP_ID: ${{ vars.CROSS_REPO_GITHUB_APP_ID }}
+        working-directory: bridge
+        run: |
+          set -euo pipefail
+          output=data/output/strategy_optimization_watcher/soxl-watcher-learning-ready.json
+          python -m scripts.run_soxl_manual_learning \
+            --watcher-result data/output/strategy_optimization_watcher/result.json \
+            --diagnosis-result data/output/strategy_optimization_watcher/research-diagnosis.json \
+            --github-app-id "$SOURCE_GITHUB_APP_ID" \
+            --watcher-preflight | tee "$output"
+          python - "$output" "$GITHUB_OUTPUT" <<'PY'
+          import json
+          import sys
+
+          value = json.load(open(sys.argv[1], encoding="utf-8"))
+          ready = value.get("ready") is True
+          with open(sys.argv[2], "a", encoding="utf-8") as target:
+              target.write(f"ready={'true' if ready else 'false'}\n")
+              if ready:
+                  target.write(f"p1_manifest_sha256={value['p1_manifest_sha256']}\n")
+          PY
 
       - name: Extract bounded research task source snapshot
         if: success()
@@ -355,3 +387,258 @@ jobs:
           name: strategy-optimization-watcher-${{ github.run_id }}
           path: bridge/data/output/strategy_optimization_watcher/
           if-no-files-found: warn
+
+  soxl-watcher-learning:
+    needs: strategy-optimization-watcher
+    if: >-
+      needs.strategy-optimization-watcher.outputs.soxl_learning_ready == 'true' &&
+      github.repository == 'QuantStrategyLab/AIAuditBridge' &&
+      github.ref == 'refs/heads/main' &&
+      github.event_name == 'schedule' &&
+      vars.SOXL_WATCHER_GCP_WIF_PROVIDER != '' &&
+      vars.SOXL_WATCHER_GCP_PROJECT_ID != ''
+    runs-on: [self-hosted, codex-vps]
+    timeout-minutes: 35
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    env:
+      P1_MANIFEST_SHA256: ${{ needs.strategy-optimization-watcher.outputs.soxl_p1_manifest_sha256 }}
+      LEARNING_ROOT: ${{ github.workspace }}/.aab-soxl-watcher-learning-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Check dedicated scheduled research identity configuration
+        id: research-identity
+        env:
+          WIF_PROVIDER: ${{ vars.SOXL_WATCHER_GCP_WIF_PROVIDER }}
+          GCP_PROJECT_ID: ${{ vars.SOXL_WATCHER_GCP_PROJECT_ID }}
+        run: |
+          set -euo pipefail
+          if [ -n "${WIF_PROVIDER:-}" ] && [ -n "${GCP_PROJECT_ID:-}" ]; then
+            echo 'configured=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'configured=false' >> "$GITHUB_OUTPUT"
+            echo 'SOXL_WATCHER_LEARNING_STATUS=PARKED_IDENTITY_NOT_CONFIGURED' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Checkout Bridge
+        if: steps.research-identity.outputs.configured == 'true'
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          path: bridge
+          persist-credentials: false
+
+      - name: Download sanitized watcher handoff
+        if: steps.research-identity.outputs.configured == 'true'
+        uses: actions/download-artifact@v8
+        with:
+          name: strategy-optimization-watcher-${{ github.run_id }}
+          path: watcher-handoff
+
+      - name: Create source issue token
+        id: source-app-token
+        if: steps.research-identity.outputs.configured == 'true'
+        uses: actions/create-github-app-token@v3.2.0
+        with:
+          app-id: ${{ vars.CROSS_REPO_GITHUB_APP_ID }}
+          private-key: ${{ secrets.CROSS_REPO_GITHUB_APP_PRIVATE_KEY }}
+          owner: QuantStrategyLab
+          repositories: UsEquitySnapshotPipelines
+          permission-issues: write
+
+      - name: Initialize sanitized watcher learning terminal
+        if: steps.research-identity.outputs.configured == 'true'
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$LEARNING_ROOT"
+          chmod 700 "$LEARNING_ROOT"
+          printf '%s\n' '{"schema_version":"qsl.soxl-manual-learning-run.v1","operation":"soxl_watcher_learning","status":"parked","failure_stage":"setup_incomplete","research_executed":false,"learning_only":true,"no_order":true,"size_zero_required":true,"promotion_eligible":false}' > "$LEARNING_ROOT/summary.json"
+
+      - name: Checkout bounded learning consumer
+        if: steps.research-identity.outputs.configured == 'true'
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          repository: QuantStrategyLab/UsEquitySnapshotPipelines
+          ref: b03ecbe4e0a7a0de22f298499f867a7039e4b60a
+          path: consumer-source
+          persist-credentials: false
+
+      - name: Checkout frozen strategy runtime
+        if: steps.research-identity.outputs.configured == 'true'
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          repository: QuantStrategyLab/UsEquityStrategies
+          ref: 7756fe32585e85cf1d09a163203a02e3eee39fe1
+          path: ues-source
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        if: steps.research-identity.outputs.configured == 'true'
+        with:
+          python-version: '3.11'
+
+      - name: Install frozen numeric runtimes
+        if: steps.research-identity.outputs.configured == 'true'
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet 'uv==0.11.19'
+          cd consumer-source
+          env -u UV_PYTHON -u VIRTUAL_ENV uv sync --locked --no-dev --no-editable --python 3.11
+          cd ../ues-source
+          UV_PROJECT_ENVIRONMENT="$LEARNING_ROOT/ues-env" env -u UV_PYTHON -u VIRTUAL_ENV uv sync --locked --no-dev --no-editable --python 3.11
+          rm -rf -- build
+          test -z "$(git status --porcelain --untracked-files=all)"
+
+      - name: Authenticate for task-bound immutable P1 read only
+        if: steps.research-identity.outputs.configured == 'true'
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+        with:
+          project_id: ${{ vars.SOXL_WATCHER_GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ vars.SOXL_WATCHER_GCP_WIF_PROVIDER }}
+          create_credentials_file: true
+          export_environment_variables: true
+          cleanup_credentials: true
+
+      - name: Read and verify exact four-member P1 root
+        if: steps.research-identity.outputs.configured == 'true'
+        env:
+          CLOUDSDK_CORE_DISABLE_PROMPTS: '1'
+          CLOUDSDK_CORE_DISABLE_USAGE_REPORTING: 'true'
+        run: |
+          set -euo pipefail
+          umask 077
+          root="$LEARNING_ROOT/p1-root"
+          completion="$LEARNING_ROOT/p1-complete.json"
+          source="gs://qsl-runtime-logs-shared/soxl-p1-p3/${P1_MANIFEST_SHA256}"
+          mkdir -p "$root"
+          chmod 700 "$LEARNING_ROOT" "$root"
+          SOURCE="$source" ROOT="$root" COMPLETION="$completion" python3 - <<'PY'
+          import json
+          import os
+          import stat
+          import subprocess
+          from pathlib import Path
+
+          def fail(reason):
+              print(json.dumps({"status": "unavailable", "reason": reason}))
+              raise SystemExit(1)
+
+          credential = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
+          override = os.environ.get("CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE", "")
+          try:
+              credential_path = Path(credential)
+              if not credential or override != credential or credential_path.is_symlink() or not credential_path.is_file():
+                  fail("temporary_identity_invalid")
+              if json.loads(credential_path.read_text())["type"] != "external_account":
+                  fail("temporary_identity_invalid")
+          except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+              fail("temporary_identity_invalid")
+
+          source = os.environ["SOURCE"].rstrip("/") + "/"
+          members = {
+              "binding.json": (Path(os.environ["ROOT"]) / "binding.json", 1024 * 1024),
+              "bars.json": (Path(os.environ["ROOT"]) / "bars.json", 32 * 1024 * 1024),
+              "manifest.json": (Path(os.environ["ROOT"]) / "manifest.json", 1024 * 1024),
+              "p1-complete.json": (Path(os.environ["COMPLETION"]), 1024 * 1024),
+          }
+          sizes = {}
+          for name, (_, maximum) in members.items():
+              try:
+                  result = subprocess.run(
+                      ["gcloud", "storage", "objects", "describe", source + name, "--raw", "--format=json"],
+                      capture_output=True, text=True, timeout=30, check=False,
+                  )
+              except (OSError, subprocess.SubprocessError):
+                  fail("p1_metadata_unavailable")
+              if result.returncode:
+                  fail("p1_metadata_unavailable")
+              try:
+                  size = int(json.loads(result.stdout)["size"])
+              except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                  fail("p1_metadata_invalid")
+              if size <= 0 or size > maximum:
+                  fail("p1_member_size_invalid")
+              sizes[name] = size
+          if sum(sizes.values()) > 35 * 1024 * 1024:
+              fail("p1_read_budget_exceeded")
+          for name, (destination, _) in members.items():
+              try:
+                  result = subprocess.run(
+                      ["gcloud", "storage", "cp", "--quiet", source + name, str(destination)],
+                      capture_output=True, text=True, timeout=60, check=False,
+                  )
+              except (OSError, subprocess.SubprocessError):
+                  fail("p1_object_read_unavailable")
+              if result.returncode:
+                  fail("p1_object_read_unavailable")
+              try:
+                  item = destination.lstat()
+              except OSError:
+                  fail("p1_object_read_invalid")
+              if not stat.S_ISREG(item.st_mode) or item.st_size != sizes[name]:
+                  fail("p1_object_read_invalid")
+          PY
+          ROOT="$root" COMPLETION="$completion" EXPECTED_MANIFEST_SHA256="$P1_MANIFEST_SHA256" \
+            consumer-source/.venv/bin/python - <<'PY'
+          import os
+          from pathlib import Path
+          try:
+              from us_equity_snapshot_pipelines.lifecycle.soxl_core_only_p1_publisher import (
+                  verify_soxl_core_only_input_root,
+                  verify_soxl_core_only_p1_remote_completion,
+              )
+              root = Path(os.environ["ROOT"])
+              expected = os.environ["EXPECTED_MANIFEST_SHA256"]
+              if verify_soxl_core_only_input_root(root) != expected:
+                  raise ValueError
+              if verify_soxl_core_only_p1_remote_completion(root, Path(os.environ["COMPLETION"])) != expected:
+                  raise ValueError
+          except Exception:
+              print('{"status":"unavailable","reason":"p1_validation_failed"}')
+              raise SystemExit(1) from None
+          PY
+
+      - name: Run task-bound SOXL watcher learning consumer
+        if: steps.research-identity.outputs.configured == 'true'
+        env:
+          GH_TOKEN: ${{ steps.source-app-token.outputs.token }}
+          UV_PROJECT_ENVIRONMENT: ${{ env.LEARNING_ROOT }}/ues-env
+        working-directory: bridge
+        run: |
+          set -euo pipefail
+          python -m scripts.run_soxl_manual_learning --watcher-result \
+            ../watcher-handoff/result.json \
+            --diagnosis-result ../watcher-handoff/research-diagnosis.json \
+            --github-app-id "${{ vars.CROSS_REPO_GITHUB_APP_ID }}" \
+            --manifest-sha256 "$P1_MANIFEST_SHA256" \
+            --root "$LEARNING_ROOT/p1-root" \
+            --consumer-source "$GITHUB_WORKSPACE/consumer-source" \
+            --ues-source "$GITHUB_WORKSPACE/ues-source" \
+            --output "$LEARNING_ROOT/summary.json"
+
+      - name: Record known pre-numeric failure for this exact task
+        if: failure() && steps.research-identity.outputs.configured == 'true'
+        env:
+          GH_TOKEN: ${{ steps.source-app-token.outputs.token }}
+        working-directory: bridge
+        run: |
+          set -euo pipefail
+          python -m scripts.run_soxl_manual_learning \
+            --watcher-result ../watcher-handoff/result.json \
+            --diagnosis-result ../watcher-handoff/research-diagnosis.json \
+            --github-app-id "${{ vars.CROSS_REPO_GITHUB_APP_ID }}" \
+            --watcher-record-pre-numeric-failure
+
+      - name: Upload sanitized watcher learning terminal
+        if: always() && steps.research-identity.outputs.configured == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: soxl-watcher-learning-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.LEARNING_ROOT }}/summary.json
+          if-no-files-found: error
+          retention-days: 35
+
+      - name: Remove watcher learning workspace
+        if: always()
+        run: rm -rf -- "$LEARNING_ROOT"
