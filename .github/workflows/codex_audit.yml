@@ -209,7 +209,9 @@ jobs:
           PYTHONDONTWRITEBYTECODE: "1"
         run: |
           set -euo pipefail
-          report_day="$(date -u +%F)"
+          # Use the latest 22:30 UTC report slot, including runs delayed past midnight.
+          # Missing/invalid reports still fail in the existing consumer; no older fallback.
+          report_day="$(python3 -c 'from datetime import datetime, timedelta, timezone; print((datetime.now(timezone.utc) - timedelta(hours=22, minutes=30)).date())')"
           report_root=/home/ubuntu/quant-monitor-runtime/AIAuditBridge/ops/quant-monitor/data/daily-reports
           python3 -m scripts.consume_daily_briefing \
             --report-dir "$report_root/$report_day" --day "$report_day" \
