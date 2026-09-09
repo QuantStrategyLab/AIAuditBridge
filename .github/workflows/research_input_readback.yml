@@ -1,0 +1,92 @@
+name: VPS Research Input Readback
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vps-research-input-readback
+  cancel-in-progress: false
+
+jobs:
+  readback:
+    if: github.repository == 'QuantStrategyLab/AIAuditBridge' && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, codex-vps]
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      # Direct federation grants only object reads on the fixed P1 root below.
+      # The provider additionally binds numeric repo/owner IDs, main and this workflow.
+      # No service-account key, user ADC, daemon credential or AI invocation is used.
+      - name: Authenticate for this research input only
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          project_id: interactivebrokersquant
+          workload_identity_provider: projects/303168642265/locations/global/workloadIdentityPools/github-actions/providers/aab-research-input
+          create_credentials_file: true
+          export_environment_variables: true
+          cleanup_credentials: true
+
+      - name: Read completion marker metadata without downloading research data
+        env:
+          CLOUDSDK_CORE_DISABLE_PROMPTS: '1'
+          CLOUDSDK_CORE_DISABLE_USAGE_REPORTING: 'true'
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          from datetime import datetime
+          from pathlib import Path
+
+          def fail(reason):
+              print(json.dumps({'status': 'unavailable', 'reason': reason}))
+              raise SystemExit(1)
+
+          # Never silently fall back to the VPS user's pre-existing ADC.
+          credential = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS', '')
+          override = os.environ.get('CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE', '')
+          if not credential or override != credential:
+              fail('temporary_identity_missing')
+          try:
+              path = Path(credential)
+              if path.is_symlink() or not path.is_file():
+                  fail('temporary_identity_invalid')
+              if json.loads(path.read_text())['type'] != 'external_account':
+                  fail('temporary_identity_invalid')
+          except (OSError, ValueError, KeyError):
+              fail('temporary_identity_invalid')
+
+          root = 'gs://qsl-runtime-logs-shared/soxl-p1-p3/06ce97ad581fdc465896ef324ce16ac65f2695af95ec18ce27238bdd71032f74/'
+          try:
+              result = subprocess.run(
+                  ['gcloud', 'storage', 'objects', 'describe', root + 'p1-complete.json', '--raw', '--format=json'],
+                  capture_output=True, text=True, timeout=30, check=False,
+              )
+          except (OSError, subprocess.TimeoutExpired):
+              fail('metadata_read_unavailable')
+          if result.returncode:
+              fail('metadata_read_unavailable')
+          try:
+              metadata = json.loads(result.stdout)
+              size = int(metadata['size'])
+              created_at = datetime.fromisoformat(metadata['timeCreated'].replace('Z', '+00:00'))
+              if size <= 0 or created_at.utcoffset() is None:
+                  fail('metadata_invalid')
+          except (KeyError, ValueError, TypeError, AttributeError):
+              fail('metadata_invalid')
+          print(json.dumps({
+              'status': 'available', 'identity': 'github_oidc',
+              'size': size, 'created_at': created_at.isoformat(),
+              'metadata_only': True, 'research_executed': False,
+          }))
+          PY
