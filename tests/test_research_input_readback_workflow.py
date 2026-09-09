@@ -202,12 +202,12 @@ def test_workflow_keeps_readback_default_and_bounds_manual_learning() -> None:
     text = workflow_text()
 
     assert "github.ref == 'refs/heads/main'" in text
-    assert "inputs.operation != 'soxl_learning' || github.run_attempt == 1" in text
+    assert "inputs.operation == 'readback' || github.run_attempt == 1" in text
     assert "default: readback" in text
     assert "- soxl_learning" in text
     assert "repository: QuantStrategyLab/UsEquitySnapshotPipelines" in text
     assert "ref: ca61b82c2a508a1cc81fb5831294ba9835ac41c2" in text
-    assert "ref: b03ecbe4e0a7a0de22f298499f867a7039e4b60a" in text
+    assert "|| 'b03ecbe4e0a7a0de22f298499f867a7039e4b60a'" in text
     assert "ref: 7756fe32585e85cf1d09a163203a02e3eee39fe1" in text
     assert "uv sync --locked --no-dev --no-editable --python 3.11" in text
     assert text.index("name: Install the frozen validator runtime") < text.index(
@@ -215,10 +215,23 @@ def test_workflow_keeps_readback_default_and_bounds_manual_learning() -> None:
     )
     assert "trap cleanup EXIT" in text
     assert "if: always()" in text
-    assert "if: always() && inputs.operation == 'soxl_learning'" in text
+    assert "if: always() && inputs.operation != 'readback'" in text
     assert "python3 -m scripts.run_soxl_manual_learning" in text
     assert 'UV_PROJECT_ENVIRONMENT="$UES_ENV_ROOT" python3 -m scripts.run_soxl_manual_learning' in text
     assert text.index("uv run --no-sync python") < text.index(
         'UV_PROJECT_ENVIRONMENT="$UES_ENV_ROOT" python3 -m scripts.run_soxl_manual_learning'
     )
     assert "run_soxl_core_only_p3_evidence" not in text
+
+
+def test_selected_validation_uses_original_evidence_and_an_isolated_strict_gate():
+    text = workflow_text()
+    assert "- soxl_validation" in text
+    assert "QuantStrategyLab/QuantPlatformKit" in text
+    assert "7363011d56926d39f4fffeb036e511391114e39f" in text
+    assert "soxl-manual-learning-34376283866-1" in text
+    assert "--development-summary" in text
+    assert '"$VALIDATION_CONTROL_ENV/bin/python" -m scripts.run_soxl_manual_learning' in text
+    assert "inputs.operation == 'readback' || github.run_attempt == 1" in text
+    assert "actions: read" in text
+    assert text.index("Install the isolated strict gate") < text.index("Authenticate for this research input only")

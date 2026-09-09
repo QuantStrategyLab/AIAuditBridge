@@ -627,3 +627,169 @@ def test_gateway_auth_accepts_only_the_exact_manual_workflow_on_main() -> None:
     other_ref = workflow_ref.replace("refs/heads/main", "refs/heads/other")
     with pytest.raises(PermissionError, match="workflow_ref .* not allowed"):
         verify(payload | {"workflow_ref": other_ref, "job_workflow_ref": other_ref, "ref": "refs/heads/other"})
+
+
+def promotion_validation_result() -> dict[str, object]:
+    from datetime import date
+    from quant_platform_kit.strategy_lifecycle.contracts import (
+        BacktestResult, BacktestValidationIdentity, OptimizationProposal, PromotionBacktestRun,
+        PromotionCostModel, PurgedWalkForwardFold,
+    )
+    from scripts import run_soxl_manual_learning as module
+
+    profile = "soxl_soxx_three_asset_mid_weight_learning_v1"
+    folds = tuple(PurgedWalkForwardFold(*map(date.fromisoformat, item)) for item in (
+        ("2022-12-28", "2023-06-30", "2023-07-03", "2023-12-29"),
+        ("2024-01-02", "2024-06-28", "2024-07-01", "2024-12-31"),
+        ("2025-01-02", "2025-02-28", "2025-03-03", "2025-07-31"),
+    ))
+    proposal = OptimizationProposal(
+        strategy_profile=profile, domain="us_equity",
+        current_params={"blend_gate_mid_soxl_weight": 0.65},
+        proposed_params={"blend_gate_mid_soxl_weight": 0.55},
+        recommendation="research_candidate", search_iterations=3,
+        optimization_method=f"bounded_development_tradeoff:sha256:{module.DEVELOPMENT_SUMMARY_SHA256}",
+    )
+
+    def runs(weight, role):
+        result = []
+        for cost in (5.0, 10.0, 15.0):
+            def metrics(start, end, fold=None):
+                suffix = f"_wf{folds.index(fold)}" if fold else "_locked_oos"
+                result_id = f"soxl-three-asset-{module.DEVELOPMENT_SUMMARY_SHA256}-{role}-cost-{cost:g}{suffix}"
+                return BacktestResult(
+                    strategy_profile=profile, domain="us_equity",
+                    param_set_id=result_id,
+                    params={"blend_gate_mid_soxl_weight": weight},
+                    cagr=weight / 2, max_drawdown=weight / 3, sharpe_ratio=1.1,
+                    total_return=weight / 2, volatility=0.2, observation_count=100,
+                    start_date=start, end_date=end, source_revision=UES_REVISION,
+                    cost_model=f"all_in_per_side_{cost:g}bps",
+                    cost_inputs={"commission_bps": 0.0, "slippage_bps": cost, "market_impact_bps": 0.0},
+                    validation_identity=BacktestValidationIdentity(
+                        protocol="purged_walk_forward.v1", fold_id=result_id,
+                        fold_role="test" if fold else "locked_oos",
+                        train_start=fold.train_start if fold else None,
+                        train_end=fold.train_end if fold else None,
+                        test_start=start, test_end=end,
+                        locked_oos_start=date(2025, 8, 4), locked_oos_end=date(2026, 8, 4),
+                        purge_days=1, embargo_days=1,
+                    ),
+                )
+            result.append(PromotionBacktestRun(
+                strategy_profile=profile, domain="us_equity", folds=folds,
+                fold_results=tuple(metrics(fold.test_start, fold.test_end, fold) for fold in folds),
+                locked_oos_result=metrics(date(2025, 8, 4), date(2026, 8, 4)),
+                locked_oos_start=date(2025, 8, 4), locked_oos_end=date(2026, 8, 4),
+                purge_days=1, embargo_days=1, source_revision=UES_REVISION,
+                cost_model=PromotionCostModel(model_id=f"all_in_per_side_{cost:g}bps", commission_bps=0.0, slippage_bps=cost, market_impact_bps=0.0),
+            ).to_dict())
+        return result
+
+    return {
+        "status": "PROMOTION_BACKTEST_RUNS_BUILT", "stage": "promotion_validation",
+        "learning_only": True, "no_order": True, "size_zero_required": True,
+        "live_authority_granted": False,
+        "promotion_eligible": False, "proposal": proposal.to_dict(),
+        "baseline_promotion_runs": runs(0.65, "baseline"),
+        "candidate_promotion_runs": runs(0.55, "candidate"),
+    }
+
+
+@pytest.mark.parametrize("path,replacement", [
+    (("baseline_promotion_runs", 0, "folds", 0, "train_start"), "2022-12-29"),
+    (("baseline_promotion_runs", 0, "purge_days"), 2),
+    (("baseline_promotion_runs", 0, "fold_results", 0, "validation_identity", "train_start"), "2022-12-29"),
+    (("live_authority_granted",), True),
+    (("proposal", "walk_forward_passed"), True),
+    (("candidate_promotion_runs", 0, "locked_oos_result", "param_set_id"), lambda value: value + "-unbound"),
+    (("candidate_promotion_runs", 0, "locked_oos_result", "cost_model"), "different-cost"),
+    (("candidate_promotion_runs", 0, "locked_oos_result", "cost_inputs", "slippage_bps"), 999.0),
+])
+def test_selected_validation_rejects_conflicting_plan_or_evidence(path, replacement):
+    from quant_platform_kit.strategy_lifecycle.research_promotion_cycle import enforce_promotion_backtest_gates
+    from scripts import run_soxl_manual_learning as module
+    value = promotion_validation_result()
+    target = value
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = replacement(target[path[-1]]) if callable(replacement) else replacement
+    with pytest.raises(module.ManualLearningError):
+        module._strict_validation_summary(value, enforce_promotion_backtest_gates)
+
+
+def test_selected_validation_uses_strict_gate_and_reports_tradeoff_without_ai(paths, tmp_path, monkeypatch):
+    from scripts import run_soxl_manual_learning as module
+    summary = tmp_path / "development.json"
+    summary.write_text('{"synthetic":true}')
+    monkeypatch.setattr(module, "DEVELOPMENT_SUMMARY_SHA256", module._summary_digest(json.loads(summary.read_text())))
+    result = promotion_validation_result()
+    result["private_extra"] = "must-not-be-published"
+    calls = []
+    progress = []
+
+    def run(argv):
+        calls.append(argv)
+        return SimpleNamespace(returncode=0, stdout=json.dumps(result))
+
+    with patch.object(module.AiGatewayClient, "execute", side_effect=AssertionError("validation must not call AI")):
+        output = module.run_manual_validation(
+            development_summary=summary, manifest_sha256="a" * 64, root=paths["root"],
+            consumer_source=paths["consumer"], ues_source=paths["ues"], context=context(),
+            command_runner=run, progress_writer=progress.append,
+        )
+    assert len(calls) == 1
+    assert "--promotion-validation-development-summary" in calls[0]
+    assert "--blend-gate-mid-soxl-weight" not in calls[0]
+    assert output["status"] == "accepted"
+    assert output["strict_backtest_gate"]["status"] == "passed"
+    assert output["promotion_eligible"] is False
+    assert output["human_quality_decision_required"] is True
+    assert output["candidate_promotion_runs"][0]["locked_oos_result"]["validation_identity"]["protocol"] == "purged_walk_forward.v1"
+    assert all(row["candidate_max_drawdown"] < row["baseline_max_drawdown"] for row in output["oos_comparison"])
+    assert "must-not-be-published" not in json.dumps(output)
+    assert progress[0]["numeric_execution"]["status"] == "started"
+
+
+def test_selected_validation_rejects_changed_source_before_execution(paths, tmp_path):
+    from scripts import run_soxl_manual_learning as module
+    summary = tmp_path / "development.json"
+    summary.write_text('{"changed":true}')
+    with pytest.raises(ManualLearningError, match="validation_development_source_invalid"):
+        module.run_manual_validation(
+            development_summary=summary, manifest_sha256="a" * 64, root=paths["root"],
+            consumer_source=paths["consumer"], ues_source=paths["ues"], context=context(),
+            command_runner=lambda _: pytest.fail("changed source must not execute"),
+        )
+
+
+@pytest.mark.parametrize("failure", ["short_oos", "changed_candidate", "nan_metrics", "timeout"])
+def test_selected_validation_parks_failures_without_retry(paths, tmp_path, monkeypatch, failure):
+    from scripts import run_soxl_manual_learning as module
+    summary = tmp_path / "development.json"
+    summary.write_text('{"synthetic":true}')
+    monkeypatch.setattr(module, "DEVELOPMENT_SUMMARY_SHA256", module._summary_digest(json.loads(summary.read_text())))
+    result = promotion_validation_result()
+    candidate = result["candidate_promotion_runs"][0]
+    if failure == "short_oos":
+        candidate["locked_oos_end"] = "2026-07-31"
+    elif failure == "changed_candidate":
+        candidate["locked_oos_result"]["params"]["blend_gate_mid_soxl_weight"] = 0.5
+    elif failure == "nan_metrics":
+        candidate["locked_oos_result"]["cagr"] = float("nan")
+    calls = []
+
+    def run(argv):
+        calls.append(argv)
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired("synthetic", 1)
+        return SimpleNamespace(returncode=0, stdout=json.dumps(result))
+
+    output = module.run_manual_validation(
+        development_summary=summary, manifest_sha256="a" * 64, root=paths["root"],
+        consumer_source=paths["consumer"], ues_source=paths["ues"], context=context(), command_runner=run,
+    )
+    assert len(calls) == 1
+    assert output["status"] == "parked"
+    assert output["promotion_eligible"] is False
+    assert "oos_comparison" not in output
