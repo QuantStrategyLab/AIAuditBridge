@@ -8,3 +8,4 @@ tmp/
 *.log
 
 *.prev
+gha-creds-*.json
