@@ -1,0 +1,52 @@
+{
+  "enabled": false,
+  "candidate_id": "cn_index_etf_tactical_rotation",
+  "domain": "cn_equity",
+  "code_revision": "2a0c5c9aafacfbe6519fb4029ca4ac18e4996a66",
+  "qpk_revision": "b5654244aa5d08bce2b4b4f931436268d57216df",
+  "sdk_revision": "60bd64a2ae059a082614181eeb845b46df395523",
+  "research_identity": {
+    "code_revision": null,
+    "input_revision": null,
+    "param_space_revision": null,
+    "cost_model_revision": null,
+    "validator_revision": null
+  },
+  "drift": {"path": null, "source_revision": null},
+  "inputs": {
+    "development": {"path": null, "manifest_sha256": null},
+    "validation": {"path": null, "manifest_sha256": null}
+  },
+  "plan": {
+    "development_start": null,
+    "development_end": null,
+    "folds": [],
+    "locked_oos_start": null,
+    "locked_oos_end": null,
+    "purge_days": null,
+    "embargo_days": null
+  },
+  "execution_config": {
+    "initial_cash": 1000000.0,
+    "minimum_commission": 5.0,
+    "cash_reserve_ratio": 0.02,
+    "max_previous_volume_participation": 0.01,
+    "lot_size": 100
+  },
+  "cost_model": {
+    "model_id": "cn_index_etf.next_open.v1",
+    "commission_bps": 3.0,
+    "slippage_bps": 5.0,
+    "market_impact_bps": 0.0
+  },
+  "shadow": {
+    "forward_policy": null,
+    "observation_path": null,
+    "calendar_path": null,
+    "calendar_sha256": null,
+    "baseline_id": null,
+    "frozen_dependency_digests": null,
+    "retry_after_seconds": 86400
+  },
+  "console": null
+}

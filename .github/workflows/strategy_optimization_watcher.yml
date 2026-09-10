@@ -47,6 +47,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
+      source_repo: ${{ env.SOURCE_REPO }}
+      dry_run: ${{ env.STRATEGY_WATCH_DRY_RUN }}
       soxl_learning_ready: ${{ steps.soxl-watcher-learning-ready.outputs.ready }}
       soxl_p1_manifest_sha256: ${{ steps.soxl-watcher-learning-ready.outputs.p1_manifest_sha256 }}
     env:
@@ -642,3 +644,54 @@ jobs:
       - name: Remove watcher learning workspace
         if: always()
         run: rm -rf -- "$LEARNING_ROOT"
+
+  cn-index-etf-research:
+    needs: strategy-optimization-watcher
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      vars.CN_INDEX_ETF_RESEARCH_ENABLED == 'true' &&
+      needs.strategy-optimization-watcher.outputs.source_repo == 'QuantStrategyLab/CnEquitySnapshotPipelines' &&
+      needs.strategy-optimization-watcher.outputs.dry_run == 'false'
+    runs-on: [self-hosted, codex-vps]
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    concurrency:
+      group: cn-index-etf-research-vps
+      cancel-in-progress: false
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      CODEX_AUDIT_SERVICE_URL: ${{ secrets.CODEX_AUDIT_SERVICE_URL }}
+      CODEX_AUDIT_SERVICE_AUDIENCE: ${{ vars.CODEX_AUDIT_SERVICE_AUDIENCE || 'quant-codex-audit' }}
+      AI_GATEWAY_RESEARCH_PROVIDERS: codex
+    steps:
+      - name: Checkout approved Bridge job
+        uses: actions/checkout@v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Read this workflow's verified watcher artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: strategy-optimization-watcher-${{ github.run_id }}
+          path: data/input/cn-index-etf-watcher
+
+      - name: Run the policy-bound CN research job
+        run: |
+          set -euo pipefail
+          mkdir -p data/output/cn-index-etf-research
+          /opt/codex-cn-index-etf-research/venv/bin/python \
+            -m scripts.run_cn_index_etf_research \
+            --watcher-result data/input/cn-index-etf-watcher/result.json \
+            > data/output/cn-index-etf-research/result.json
+
+      - name: Upload sanitized research status
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: cn-index-etf-research-${{ github.run_id }}
+          path: data/output/cn-index-etf-research/result.json
+          if-no-files-found: warn
+          retention-days: 7

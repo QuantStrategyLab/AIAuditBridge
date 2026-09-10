@@ -49,7 +49,7 @@ jobs:
           python3 -m pip install 'quant-platform-kit @ git+https://github.com/QuantStrategyLab/QuantPlatformKit.git@7363011d56926d39f4fffeb036e511391114e39f'
           python3 -m pip check
           python3 -m ruff check .
-          python3 -m pytest tests ops/quant-monitor/tests -q
+          python3 -m pytest tests ops/quant-monitor/tests -q --ignore=tests/test_run_cn_index_etf_research.py
 
       - uses: actions/setup-node@v6
         with:
@@ -60,3 +60,42 @@ jobs:
           set -euo pipefail
           node --experimental-default-type=module --test cloudflare/codex-audit-proxy/tests/index.test.mjs
           node --experimental-default-type=module --test cloudflare/ai-gateway-dash/tests/index.test.mjs
+
+      - name: Install the isolated CN research dependency set
+        run: |
+          set -euo pipefail
+          python3 -m venv "${RUNNER_TEMP}/aab-cn-research"
+          "${RUNNER_TEMP}/aab-cn-research/bin/python" -m pip install pytest 'cn-equity-strategies[research] @ git+https://github.com/QuantStrategyLab/CnEquityStrategies.git@2a0c5c9aafacfbe6519fb4029ca4ac18e4996a66'
+          "${RUNNER_TEMP}/aab-cn-research/bin/python" -m pip check
+      - name: Verify the real CN caller without network or model execution
+        env:
+          TZ: UTC
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          set -euo pipefail
+          # Main-suite packaging leaves egg-info in the checkout. Test the same
+          # HEAD (including the PR merge) without those build-time metadata files.
+          cn_test_source="$(mktemp -d "${RUNNER_TEMP}/aab-cn-research-source.XXXXXX")"
+          git archive HEAD | tar -x -C "${cn_test_source}"
+          cd "${cn_test_source}"
+          "${RUNNER_TEMP}/aab-cn-research/bin/python" - <<'PY'
+          import importlib.metadata
+          from pathlib import Path
+          import socket
+          import sys
+          import pytest
+
+          def blocked(*args, **kwargs):
+              raise AssertionError("real socket prohibited")
+
+          socket.socket.connect = blocked
+          socket.create_connection = blocked
+          for package in ("cn-equity-strategies", "quant-platform-kit", "ai-gateway-client"):
+              installed = importlib.metadata.distribution(package)
+              assert Path(installed.locate_file("")).resolve().is_relative_to(Path(sys.prefix).resolve())
+          raise SystemExit(pytest.main([
+              "-q", "-p", "no:cacheprovider", "--tb=short",
+              "tests/test_run_cn_index_etf_research.py",
+          ]))
+          PY
