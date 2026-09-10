@@ -21,6 +21,27 @@ _ALERT_STATE_RELATIVE_PATH = Path("data/alert-state/health_cycle.json")
 _ARTIFACT_STATUS_RELATIVE_PATH = Path("data/lifecycle-artifacts/status.json")
 _ARTIFACT_STATUS_SCHEMA = "quant_monitor_lifecycle_artifact_status.v1"
 _SAFE_TOKEN = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,99}$")
+_OPERATIONAL_ERROR_CODES = frozenset({
+    "artifact_sync_status_unavailable",
+    "artifact_sync_unexpected",
+    "consumer_path_conflict",
+    "drift_data_unavailable",
+    "github_api_invalid",
+    "github_api_unavailable",
+    "monitor_data_unavailable",
+    "trusted_artifact_unavailable",
+})
+_OPERATIONAL_ERROR_TYPES = frozenset({
+    "FileNotFoundError",
+    "JSONDecodeError",
+    "KeyError",
+    "LifecycleArtifactError",
+    "OSError",
+    "RuntimeError",
+    "TypeError",
+    "ValueError",
+})
+_OPERATIONAL_DIAGNOSIS_SOURCE_REPOSITORY = "QuantStrategyLab/AIAuditBridge"
 
 
 def _collect_drift_results(run_drift_detection, *, domains=DOMAINS):
@@ -162,39 +183,203 @@ def _alert_state_path(root: Path) -> Path:
     return root / _ALERT_STATE_RELATIVE_PATH
 
 
-def _is_duplicate_alert(root: Path, fingerprint: str) -> bool:
+def _load_alert_state(root: Path) -> dict[str, Any]:
     try:
         payload = json.loads(_alert_state_path(root).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return False
+        return {}
     if not isinstance(payload, dict):
-        return False
-    return str(payload.get("fingerprint") or "") == fingerprint
+        return {}
+    return payload
 
 
-def _record_alert(root: Path, fingerprint: str) -> None:
+def _write_alert_state(root: Path, payload: dict[str, Any]) -> None:
     path = _alert_state_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = path.with_suffix(".tmp")
     temp_path.write_text(
-        json.dumps(
-            {
-                "schema_version": "quant_monitor_alert_state.v1",
-                "fingerprint": fingerprint,
-            },
-            sort_keys=True,
-        )
-        + "\n",
+        json.dumps(payload, sort_keys=True) + "\n",
         encoding="utf-8",
     )
     temp_path.replace(path)
 
 
+def _is_duplicate_alert(root: Path, fingerprint: str) -> bool:
+    return str(_load_alert_state(root).get("fingerprint") or "") == fingerprint
+
+
+def _record_alert(root: Path, fingerprint: str) -> None:
+    try:
+        payload = _load_operational_diagnosis_state(root)
+    except OSError:
+        return
+    payload.update(
+        schema_version="quant_monitor_alert_state.v1",
+        fingerprint=fingerprint,
+    )
+    _write_alert_state(root, payload)
+
+
 def _clear_alert(root: Path) -> None:
+    try:
+        payload = _load_operational_diagnosis_state(root)
+    except OSError:
+        return
+    payload.pop("fingerprint", None)
+    if payload.get("operational_diagnosis_attempts"):
+        payload["schema_version"] = "quant_monitor_alert_state.v1"
+        _write_alert_state(root, payload)
+        return
     try:
         _alert_state_path(root).unlink()
     except FileNotFoundError:
         pass
+
+
+def _operational_diagnosis_attempted(root: Path, fingerprint: str) -> bool:
+    attempts = _load_operational_diagnosis_state(root).get("operational_diagnosis_attempts")
+    return isinstance(attempts, list) and fingerprint in attempts
+
+
+def _load_operational_diagnosis_state(root: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(_alert_state_path(root).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, json.JSONDecodeError) as exc:
+        raise OSError("operational diagnosis state is unavailable") from exc
+    if not isinstance(payload, dict):
+        raise OSError("operational diagnosis state is unavailable")
+    attempts = payload.get("operational_diagnosis_attempts", [])
+    if not isinstance(attempts, list) or any(
+        not isinstance(item, str) or not re.fullmatch(r"[0-9a-f]{64}", item)
+        for item in attempts
+    ):
+        raise OSError("operational diagnosis state is unavailable")
+    return payload
+
+
+def _record_operational_diagnosis_attempt(root: Path, fingerprint: str) -> None:
+    payload = _load_operational_diagnosis_state(root)
+    attempts = payload.get("operational_diagnosis_attempts")
+    if not isinstance(attempts, list):
+        attempts = []
+    if fingerprint not in attempts:
+        attempts.append(fingerprint)
+    payload.update(
+        schema_version="quant_monitor_alert_state.v1",
+        operational_diagnosis_attempts=attempts,
+    )
+    _write_alert_state(root, payload)
+
+
+def _forget_operational_diagnosis_attempt(root: Path, fingerprint: str) -> None:
+    payload = _load_operational_diagnosis_state(root)
+    attempts = payload.get("operational_diagnosis_attempts")
+    if not isinstance(attempts, list):
+        return
+    payload["operational_diagnosis_attempts"] = [item for item in attempts if item != fingerprint]
+    _write_alert_state(root, payload)
+
+
+def _operational_diagnosis_prompt(data_errors: list[dict[str, str]]) -> str:
+    incidents: list[dict[str, str]] = []
+    for error in data_errors:
+        domain = str(error.get("domain") or "")
+        if domain not in DOMAINS:
+            continue
+        code = str(error.get("code") or "")
+        error_type = str(error.get("error_type") or "")
+        incidents.append(
+            {
+                "code": code if code in _OPERATIONAL_ERROR_CODES else "artifact_sync_status_unavailable",
+                "domain": domain,
+                "error_type": error_type if error_type in _OPERATIONAL_ERROR_TYPES else "RuntimeError",
+            }
+        )
+    incidents.sort(key=lambda item: (item["domain"], item["code"], item["error_type"]))
+    payload = json.dumps({"incidents": incidents}, sort_keys=True, separators=(",", ":"))
+    return (
+        "Diagnose these sanitized quant-monitor data availability incidents. "
+        "Use repository evidence read-only. Return likely cause, evidence to inspect, and safe next checks. "
+        "Do not place orders, access accounts, change files, create patches, publish, deploy, or notify.\n"
+        + payload
+    )
+
+
+def _operational_diagnosis_fingerprint(data_errors: list[dict[str, str]]) -> str:
+    identities = [
+        f"data_error:{error.get('domain', '')}:{error.get('code', '')}:{error.get('error_type', '')}"
+        for error in data_errors
+    ]
+    return _alert_fingerprint(identities)
+
+
+def _run_operational_diagnosis(
+    root: Path,
+    data_errors: list[dict[str, str]],
+    fingerprint: str,
+    *,
+    config_loader=None,
+    client_factory=None,
+) -> dict[str, Any]:
+    if not data_errors:
+        return {"status": "skipped", "reason": "no_data_errors"}
+    if not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+        return {"status": "rejected", "reason": "invalid_fingerprint"}
+    try:
+        if _operational_diagnosis_attempted(root, fingerprint):
+            return {"status": "skipped", "reason": "already_attempted"}
+    except OSError:
+        return {"status": "deferred", "reason": "dedupe_state_unavailable"}
+
+    if config_loader is None and not (
+        (os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL") and os.environ.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN"))
+        or os.environ.get("CODEX_AUDIT_SERVICE_TOKEN", "").strip()
+    ):
+        return {"status": "deferred", "reason": "ai_gateway_not_configured"}
+    try:
+        if config_loader is None:
+            from client.config import GatewayConfig
+
+            config_loader = GatewayConfig.from_env
+        if client_factory is None:
+            from client.gateway_client import AiGatewayClient
+
+            client_factory = AiGatewayClient
+        config = config_loader()
+        client = client_factory(config)
+    except (ImportError, OSError, RuntimeError, ValueError):
+        return {"status": "deferred", "reason": "ai_gateway_not_configured"}
+    try:
+        _record_operational_diagnosis_attempt(root, fingerprint)
+    except OSError:
+        return {"status": "deferred", "reason": "dedupe_state_unavailable"}
+    try:
+        result = client.execute(
+            _operational_diagnosis_prompt(data_errors),
+            task="operational_data_diagnosis",
+            mode="review_only",
+            sandbox="read-only",
+            research_stage="drift_analysis",
+            allowed_providers=["codex"],
+            source_repository=_OPERATIONAL_DIAGNOSIS_SOURCE_REPOSITORY,
+            source_ref="main",
+            timeout=600,
+        )
+    except Exception:
+        return {"status": "unavailable", "reason": "codex_outcome_unknown"}
+
+    raw = result.raw if isinstance(getattr(result, "raw", None), dict) else {}
+    if raw.get("status") == "deferred":
+        try:
+            _forget_operational_diagnosis_attempt(root, fingerprint)
+        except OSError:
+            return {"status": "unavailable", "reason": "dedupe_state_unavailable"}
+        return {"status": "deferred", "reason": "capacity_unavailable"}
+    if result.success is True and raw.get("status") == "succeeded" and raw.get("job_id"):
+        return {"status": "succeeded", "job_id": str(raw["job_id"])}
+    return {"status": "unavailable", "reason": "codex_result_unavailable"}
 
 
 def _build_monitoring_findings(
@@ -400,6 +585,12 @@ def main() -> int:
     else:
         _clear_alert(root)
 
+    operational_diagnosis = _run_operational_diagnosis(
+        root,
+        data_errors,
+        _operational_diagnosis_fingerprint(data_errors),
+    )
+
     summary = {
         "as_of": datetime.now(timezone.utc).isoformat(),
         "domains": list(DOMAINS),
@@ -408,6 +599,7 @@ def main() -> int:
         "telegram_sent": telegram_sent,
         "duplicate_alert_suppressed": duplicate_alert_suppressed,
         "data_errors": data_errors,
+        "operational_diagnosis": operational_diagnosis,
         "snapshot_count": sum(len(rows) for rows in snapshot_results.values()),
         "optimization_findings": len(monitoring_findings),
         "optimization_issues_created": len(

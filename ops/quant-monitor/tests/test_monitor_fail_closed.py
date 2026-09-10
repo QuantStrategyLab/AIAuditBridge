@@ -180,6 +180,209 @@ class MonitorFailClosedTests(unittest.TestCase):
             HEALTH_CYCLE._clear_alert(root)
             self.assertFalse(HEALTH_CYCLE._is_duplicate_alert(root, fingerprint))
 
+    def test_operational_diagnosis_is_persistently_attempted_once_per_data_error(self) -> None:
+        calls: list[tuple[str, dict[str, object]]] = []
+
+        class Client:
+            def execute(self, prompt: str, **kwargs):
+                calls.append((prompt, kwargs))
+                return types.SimpleNamespace(
+                    success=True,
+                    output="diagnosed",
+                    error="",
+                    raw={"status": "succeeded", "job_id": "job-1"},
+                )
+
+        errors = [{
+            "domain": "us_equity",
+            "code": "monitor_data_unavailable",
+            "error_type": "RuntimeError",
+            "error": "secret /tmp/source.csv 2026-09-10 price=42",
+        }]
+        fingerprint = HEALTH_CYCLE._alert_fingerprint(
+            ["data_error:us_equity:monitor_data_unavailable:RuntimeError"]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = HEALTH_CYCLE._run_operational_diagnosis(
+                root,
+                errors,
+                fingerprint,
+                config_loader=lambda: object(),
+                client_factory=lambda _config: Client(),
+            )
+            HEALTH_CYCLE._clear_alert(root)
+            second = HEALTH_CYCLE._run_operational_diagnosis(
+                root,
+                errors,
+                fingerprint,
+                config_loader=lambda: object(),
+                client_factory=lambda _config: Client(),
+            )
+
+        self.assertEqual(first["status"], "succeeded")
+        self.assertEqual(first["job_id"], "job-1")
+        self.assertEqual(second, {"status": "skipped", "reason": "already_attempted"})
+        self.assertEqual(len(calls), 1)
+        prompt, kwargs = calls[0]
+        self.assertIn('"domain":"us_equity"', prompt)
+        self.assertIn('"code":"monitor_data_unavailable"', prompt)
+        self.assertNotIn("secret", prompt)
+        self.assertNotIn("/tmp", prompt)
+        self.assertNotIn("2026-09-10", prompt)
+        self.assertNotIn("price", prompt)
+        self.assertEqual(kwargs["mode"], "review_only")
+        self.assertEqual(kwargs["sandbox"], "read-only")
+        self.assertEqual(kwargs["allowed_providers"], ["codex"])
+        self.assertEqual(kwargs["research_stage"], "drift_analysis")
+
+    def test_operational_diagnosis_defers_without_consuming_fingerprint(self) -> None:
+        calls = 0
+
+        class Client:
+            def execute(self, _prompt: str, **_kwargs):
+                nonlocal calls
+                calls += 1
+                return types.SimpleNamespace(
+                    success=False,
+                    output="",
+                    error="codex_research_deferred",
+                    raw={"status": "deferred", "retry_at": None},
+                )
+
+        errors = [{
+            "domain": "crypto",
+            "code": "drift_data_unavailable",
+            "error_type": "ValueError",
+        }]
+        fingerprint = HEALTH_CYCLE._alert_fingerprint(
+            ["data_error:crypto:drift_data_unavailable:ValueError"]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for _ in range(2):
+                result = HEALTH_CYCLE._run_operational_diagnosis(
+                    root,
+                    errors,
+                    fingerprint,
+                    config_loader=lambda: object(),
+                    client_factory=lambda _config: Client(),
+                )
+
+        self.assertEqual(result, {"status": "deferred", "reason": "capacity_unavailable"})
+        self.assertEqual(calls, 2)
+
+    def test_operational_diagnosis_requires_real_data_errors_and_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.assertEqual(
+                HEALTH_CYCLE._run_operational_diagnosis(
+                    root,
+                    [],
+                    "0" * 64,
+                    config_loader=lambda: (_ for _ in ()).throw(AssertionError("must not configure")),
+                ),
+                {"status": "skipped", "reason": "no_data_errors"},
+            )
+            self.assertEqual(
+                HEALTH_CYCLE._run_operational_diagnosis(
+                    root,
+                    [{"domain": "crypto", "code": "drift_data_unavailable", "error_type": "ValueError"}],
+                    "1" * 64,
+                    config_loader=lambda: (_ for _ in ()).throw(ValueError("missing private config")),
+                ),
+                {"status": "deferred", "reason": "ai_gateway_not_configured"},
+            )
+
+    def test_operational_diagnosis_stops_when_persisted_state_is_unreadable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_path = HEALTH_CYCLE._alert_state_path(root)
+            state_path.parent.mkdir(parents=True)
+            state_path.write_text("not-json", encoding="utf-8")
+            # main records a successfully sent Telegram alert before it runs AI.
+            HEALTH_CYCLE._record_alert(root, "alert-fingerprint")
+            self.assertEqual(state_path.read_text(), "not-json")
+            result = HEALTH_CYCLE._run_operational_diagnosis(
+                root,
+                [{"domain": "crypto", "code": "drift_data_unavailable", "error_type": "ValueError"}],
+                "2" * 64,
+                config_loader=lambda: (_ for _ in ()).throw(AssertionError("must not configure")),
+            )
+
+        self.assertEqual(result, {"status": "deferred", "reason": "dedupe_state_unavailable"})
+
+    def test_operational_diagnosis_keeps_unknown_or_auth_failed_attempt(self) -> None:
+        for raw in ({"failure_category": "auth_or_config_failure"}, {}):
+            calls = []
+            class Client:
+                def execute(self, _prompt, **_kwargs):
+                    calls.append(True)
+                    return types.SimpleNamespace(success=False, raw=raw)
+            with self.subTest(raw=raw), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                for _ in range(2):
+                    HEALTH_CYCLE._run_operational_diagnosis(
+                        root,
+                        [{"domain": "crypto", "code": "drift_data_unavailable", "error_type": "ValueError"}],
+                        "5" * 64,
+                        config_loader=lambda: object(),
+                        client_factory=lambda _config: Client(),
+                    )
+                self.assertEqual(len(calls), 1)
+
+    def test_operational_diagnosis_rejects_malformed_attempt_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_path = HEALTH_CYCLE._alert_state_path(root)
+            state_path.parent.mkdir(parents=True)
+            state_path.write_text(json.dumps({"operational_diagnosis_attempts": "unknown"}))
+            result = HEALTH_CYCLE._run_operational_diagnosis(
+                root, [{"domain": "crypto"}], "6" * 64,
+                config_loader=lambda: (_ for _ in ()).throw(AssertionError("must not configure")),
+            )
+            self.assertEqual(result["reason"], "dedupe_state_unavailable")
+
+    def test_operational_diagnosis_does_not_submit_when_attempt_cannot_be_persisted(self) -> None:
+        class Client:
+            def execute(self, _prompt: str, **_kwargs):
+                raise AssertionError("must not submit")
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            HEALTH_CYCLE,
+            "_write_alert_state",
+            side_effect=OSError("private disk failure"),
+        ):
+            result = HEALTH_CYCLE._run_operational_diagnosis(
+                Path(tmp),
+                [{"domain": "crypto", "code": "drift_data_unavailable", "error_type": "ValueError"}],
+                "4" * 64,
+                config_loader=lambda: object(),
+                client_factory=lambda _config: Client(),
+            )
+
+        self.assertEqual(result, {"status": "deferred", "reason": "dedupe_state_unavailable"})
+
+    def test_operational_diagnosis_requires_runtime_credentials_before_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ,
+            {
+                "CODEX_AUDIT_SERVICE_URL": "https://gateway.invalid",
+                "CODEX_AUDIT_SERVICE_TOKEN": "",
+                "ACTIONS_ID_TOKEN_REQUEST_URL": "",
+                "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "",
+            },
+        ):
+            root = Path(tmp)
+            result = HEALTH_CYCLE._run_operational_diagnosis(
+                root,
+                [{"domain": "crypto", "code": "drift_data_unavailable", "error_type": "ValueError"}],
+                "3" * 64,
+            )
+
+        self.assertEqual(result, {"status": "deferred", "reason": "ai_gateway_not_configured"})
+        self.assertFalse(HEALTH_CYCLE._operational_diagnosis_attempted(root, "3" * 64))
+
     def test_health_cycle_builds_issue_only_monitoring_finding(self) -> None:
         findings = HEALTH_CYCLE._build_monitoring_findings(
             [
