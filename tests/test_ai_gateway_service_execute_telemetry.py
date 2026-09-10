@@ -32,6 +32,20 @@ class AiGatewayExecuteTelemetryTests(unittest.TestCase):
                 if change.get("status") == "surprise":
                     self.assertEqual(metadata["diagnosis_status"], "unknown")
 
+    def test_historical_rehearsal_ledger_uses_same_bounded_projection(self):
+        base = {"job_id": "r" * 32, "task": "historical_operational_diagnosis_rehearsal",
+                "source_repository": "QuantStrategyLab/AIAuditBridge", "mode": "review_only",
+                "provider": "codex", "research_stage": "drift_analysis",
+                "status": "succeeded", "output": "历史演练建议" * 100, "error": "private-error"}
+        with patch.object(gateway, "_automation_control_snapshot", return_value={}), patch.object(
+            gateway, "get_automation_run_ledger"
+        ) as ledger:
+            gateway._record_job_automation_run(base)
+        metadata = ledger.return_value.record.call_args.kwargs["metadata"]
+        self.assertEqual(metadata["diagnosis_status"], "succeeded")
+        self.assertEqual(metadata["diagnosis_summary"], base["output"][:500])
+        self.assertNotIn("private-error", repr(metadata))
+
     def test_research_refreshes_partial_or_stale_dashboard_snapshot_once(self):
         for updated, models in ((1000, None), (819, [{"model": "gpt-5.6-sol"}])):
             quota = QuotaManager()

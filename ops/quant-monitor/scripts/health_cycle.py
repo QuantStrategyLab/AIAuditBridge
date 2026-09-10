@@ -42,6 +42,15 @@ _OPERATIONAL_ERROR_TYPES = frozenset({
     "ValueError",
 })
 _OPERATIONAL_DIAGNOSIS_SOURCE_REPOSITORY = "QuantStrategyLab/AIAuditBridge"
+_HISTORICAL_DIAGNOSIS_REHEARSAL_TASK = "historical_operational_diagnosis_rehearsal"
+_HISTORICAL_DIAGNOSIS_REHEARSAL_CASE = "static_token_write_guard_source_audit_v1"
+_NON_OIDC_CREDENTIAL_ENV = (
+    "ANTHROPIC_API_KEY",
+    "CODEX_API_KEY",
+    "CODEX_AUDIT_SERVICE_TOKEN",
+    "CURSOR_API_KEY",
+    "OPENAI_API_KEY",
+)
 
 
 def _collect_drift_results(run_drift_detection, *, domains=DOMAINS):
@@ -313,6 +322,82 @@ def _operational_diagnosis_fingerprint(data_errors: list[dict[str, str]]) -> str
         for error in data_errors
     ]
     return _alert_fingerprint(identities)
+
+
+def _historical_diagnosis_rehearsal_prompt() -> str:
+    evidence = {
+        "case_id": _HISTORICAL_DIAGNOSIS_REHEARSAL_CASE,
+        "evidence_kind": "source_code_audit_of_pr_180_and_181",
+        "facts": [
+            "static dashboard tokens are not authorized for write requests",
+            "a dashboard caller cannot claim QuantStrategyLab/AIAuditBridge as its source repository",
+        ],
+        "observed_request": False,
+    }
+    return (
+        "This is a historical engineering diagnosis rehearsal based only on a source-code audit. "
+        "No real HTTP 403 request was observed. Explain why the guarded request should be rejected, "
+        "identify the approved GitHub OIDC route, and give read-only verification steps that do not "
+        "weaken authentication. Answer in Simplified Chinese in about 300 Chinese characters or fewer, "
+        "covering the cause, correct OIDC route, and safe verification steps. Do not access accounts, "
+        "place orders, change files, create patches, publish, deploy, or notify.\n"
+        + json.dumps(evidence, sort_keys=True, separators=(",", ":"))
+    )
+
+
+def run_historical_diagnosis_rehearsal(
+    *,
+    config_loader=None,
+    client_factory=None,
+) -> dict[str, Any]:
+    """Run the fixed source-audit rehearsal once under the workflow's OIDC authority."""
+    if (
+        os.environ.get("GITHUB_REPOSITORY") != _OPERATIONAL_DIAGNOSIS_SOURCE_REPOSITORY
+        or os.environ.get("GITHUB_REF") != "refs/heads/main"
+        or os.environ.get("GITHUB_EVENT_NAME") != "workflow_dispatch"
+    ):
+        return {"status": "rejected", "reason": "invalid_workflow_context"}
+    if os.environ.get("GITHUB_RUN_ATTEMPT") != "1":
+        return {"status": "rejected", "reason": "invalid_workflow_attempt"}
+    if not (
+        os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL")
+        and os.environ.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
+    ):
+        return {"status": "rejected", "reason": "github_oidc_required"}
+    if any(os.environ.get(name) for name in _NON_OIDC_CREDENTIAL_ENV):
+        return {"status": "rejected", "reason": "non_oidc_credentials_rejected"}
+    try:
+        if config_loader is None:
+            from client.config import GatewayConfig
+
+            config_loader = GatewayConfig.from_env
+        if client_factory is None:
+            from client.gateway_client import AiGatewayClient
+
+            client_factory = AiGatewayClient
+        client = client_factory(config_loader())
+    except (ImportError, OSError, RuntimeError, ValueError):
+        return {"status": "deferred", "reason": "ai_gateway_not_configured"}
+    try:
+        result = client.execute(
+            _historical_diagnosis_rehearsal_prompt(),
+            task=_HISTORICAL_DIAGNOSIS_REHEARSAL_TASK,
+            mode="review_only",
+            sandbox="read-only",
+            research_stage="drift_analysis",
+            allowed_providers=["codex"],
+            source_repository=_OPERATIONAL_DIAGNOSIS_SOURCE_REPOSITORY,
+            source_ref="main",
+            timeout=600,
+        )
+    except Exception:
+        return {"status": "unavailable", "reason": "codex_outcome_unknown"}
+    raw = result.raw if isinstance(getattr(result, "raw", None), dict) else {}
+    if raw.get("status") == "deferred":
+        return {"status": "deferred", "reason": "capacity_unavailable"}
+    if result.success is True and raw.get("status") == "succeeded" and raw.get("job_id"):
+        return {"status": "succeeded", "job_id": str(raw["job_id"])}
+    return {"status": "unavailable", "reason": "codex_result_unavailable"}
 
 
 def _run_operational_diagnosis(
@@ -654,6 +739,10 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--diagnose-static-token-guard-rehearsal"]:
+        result = run_historical_diagnosis_rehearsal()
+        print(json.dumps(result))
+        sys.exit(0 if result["status"] in {"succeeded", "deferred"} else 2)
     if sys.argv[1:] == ["--diagnose-latest"]:
         result = diagnose_latest_cycle(Path(os.environ["QUANT_MONITOR_ROOT"]))
         print(json.dumps(result))

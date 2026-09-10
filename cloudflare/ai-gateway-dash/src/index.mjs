@@ -19,7 +19,10 @@ const STATE_COOKIE_NAME = "dash_oauth_state";
 const COOKIE_MAX_AGE = 86400; // 24h
 const SESSION_SECRET_LENGTH = 32;
 const DIAGNOSIS_JOB_ID_PATTERN = /^[A-Za-z0-9_-]{32}$/;
-const DIAGNOSIS_TASK = "operational_data_diagnosis";
+const DIAGNOSIS_TASKS = new Map([
+  ["operational_data_diagnosis", "operational"],
+  ["historical_operational_diagnosis_rehearsal", "historical_rehearsal"],
+]);
 const DIAGNOSIS_SOURCE_REPOSITORY = "QuantStrategyLab/AIAuditBridge";
 const DIAGNOSIS_MAX_RESPONSE_BYTES = 1_000_000;
 const DASHBOARD_API_ROUTES = new Set([
@@ -205,7 +208,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       <article class="card span-4"><div class="card-body"><div class="card-head"><h2>访问范围</h2><span class="updated">内部</span></div><div class="empty"><div><strong>组织成员可见</strong><span>所有数据仅限 QuantStrategyLab 组织成员访问，严禁外泄。</span></div></div></div></article>
       <article class="card span-6"><div class="card-body"><div class="card-head"><h2>自治决策 · 7 天</h2><span class="updated" id="autonomy-updated">更新: —</span></div><div id="autonomy"></div></div></article>
       <article class="card span-6"><div class="card-body"><div class="card-head"><h2>人工审计队列</h2><span class="updated" id="human-audit-updated">更新: —</span></div><div id="human-audit"></div></div></article>
-      <article class="card span-12"><div class="card-body"><div class="card-head"><h2>数据故障诊断</h2><span class="updated" id="diagnoses-updated">更新: —</span></div><div id="diagnoses"></div></div></article>
+      <article class="card span-12"><div class="card-body"><div class="card-head"><h2>诊断记录</h2><span class="updated" id="diagnoses-updated">更新: —</span></div><div id="diagnoses"></div></div></article>
       <article class="card span-12"><div class="card-body"><div class="card-head"><h2>最近变更 · 7 天</h2><span class="updated" id="changes-updated">更新: —</span></div><div class="table-wrap" id="changes"></div></div></article>
     </section>
   </main>
@@ -255,7 +258,8 @@ function renderQuota(q){setUpdated("quota-updated");const target=document.getEle
 function renderEffectiveness(e){setUpdated("effectiveness-updated");const target=document.getElementById("effectiveness"),evaluated=Number(e.evaluated)||0,pending=Number(e.pending)||0,total=Number(e.total_changes)||evaluated+pending,rate=Number(e.improvement_rate)||0;clear(target);if(!total){empty(target,"暂无有效性样本","最近 90 天没有登记可评估的变更；有变更完成并回填评估后，这里会显示改善率。");return}if(!evaluated){append(target,append(el("div","metric-line"),el("div","big blue","待评估"),el("span","delta info",fmtNum(total)+" 条")),append(el("div",""),statRow("已登记",total,"info"),statRow("待评估",pending,"warn"),statRow("改善率","评估后生成","info")));return}append(target,append(el("div","metric-line"),el("div","big blue",fmtPct(rate)),el("span","delta "+(rate>0.7?"ok":rate>0.4?"warn":"info"),"改善率")),append(el("div",""),statRow("已评估",evaluated,"info"),statRow("改善",e.improved||0,"ok"),statRow("退化",e.degraded||0,"err"),statRow("持平",e.neutral||0,""),statRow("待评估",pending,"info")))}
 function renderShadow(items){setUpdated("shadow-updated");const target=document.getElementById("shadow"),total=items.reduce((sum,item)=>sum+(Number(item.disagreement_count)||0),0);clear(target);if(!items.length){empty(target,"无活跃分歧","AI 影子审计与确定性路由当前没有待复核分歧；有异常累积时会在这里提示。");return}append(target,append(el("div","metric-line"),el("div","big violet",fmtNum(total)),el("span","delta warn","待复核")));for(const d of items.slice(0,5)){const row=el("div","stat-row"),value=el("span","stat-value warn");append(value,badge("warn",(d.disagreement_count||0)+"x"),document.createTextNode(" "+(d.ai_verdict||"")));append(row,el("span","stat-label",d.plugin||d.repo||"shadow"),value);target.appendChild(row)}}
 function diagnosisStatusText(status){return status==="reviewed"||status==="succeeded"?"诊断完成":status==="queued"?"等待诊断":status==="running"?"诊断中":status==="failed"||status==="blocked"?"诊断未完成":"状态未知"}
-function renderDiagnoses(data){setUpdated("diagnoses-updated");const target=document.getElementById("diagnoses"),items=Array.isArray(data.diagnoses)?data.diagnoses:[];clear(target);if(!items.length){empty(target,"暂无数据故障诊断","尚无诊断记录。出现数据故障后，会在此显示处理进度和建议。");return}for(const item of items.slice(0,20)){const box=el("div","diagnosis-item"),line=el("div","diagnosis-line"),meta=el("div",""),output=el("pre","diagnosis-output","诊断完成仅提供建议，不授予修改、发布或交易权限。"),button=el("button","diagnosis-button","查看结果");output.hidden=true;button.type="button";append(meta,el("div","",diagnosisStatusText(item.status)),el("div","diagnosis-meta",item.updated_at?new Date(Number(item.updated_at)*1000).toLocaleString():"时间未知"));button.addEventListener("click",async()=>{output.hidden=false;output.textContent="正在读取诊断结果…";try{const detail=await fetchJSON("/diagnoses/"+encodeURIComponent(item.job_id)),diagnosis=detail.diagnosis||{};output.textContent=diagnosis.output||diagnosis.message||"诊断结果不可用"}catch(e){output.textContent="诊断结果暂不可用"}});append(line,meta,button);append(box,line,output);target.appendChild(box)}}
+function renderDiagnosisItems(target,items,emptyTitle,emptyText){if(!items.length){empty(target,emptyTitle,emptyText);return}for(const item of items.slice(0,20)){const box=el("div","diagnosis-item"),line=el("div","diagnosis-line"),meta=el("div",""),output=el("pre","diagnosis-output","诊断完成仅提供建议，不授予修改、发布或交易权限。"),button=el("button","diagnosis-button","查看结果");output.hidden=true;button.type="button";append(meta,el("div","",diagnosisStatusText(item.status)),el("div","diagnosis-meta",item.updated_at?new Date(Number(item.updated_at)*1000).toLocaleString():"时间未知"));button.addEventListener("click",async()=>{output.hidden=false;output.textContent="正在读取诊断结果…";try{const detail=await fetchJSON("/diagnoses/"+encodeURIComponent(item.job_id)),diagnosis=detail.diagnosis||{};output.textContent=diagnosis.output||diagnosis.message||"诊断结果不可用"}catch(e){output.textContent="诊断结果暂不可用"}});append(line,meta,button);append(box,line,output);target.appendChild(box)}}
+function renderDiagnoses(data){setUpdated("diagnoses-updated");const target=document.getElementById("diagnoses"),items=Array.isArray(data.diagnoses)?data.diagnoses:[],operational=items.filter(i=>i.kind==="operational"),rehearsals=items.filter(i=>i.kind==="historical_rehearsal"),operationalSection=el("section",""),rehearsalSection=el("section","");clear(target);append(operationalSection,el("h3","","数据故障诊断"));renderDiagnosisItems(operationalSection,operational,"暂无数据故障诊断","尚无生产数据故障诊断记录。");append(rehearsalSection,el("h3","","历史故障诊断演练"));renderDiagnosisItems(rehearsalSection,rehearsals,"暂无历史演练","尚未运行明确标记的历史故障诊断演练。");append(target,operationalSection,rehearsalSection)}
 function effectText(effect){return effect==="improved"?"改善":effect==="degraded"?"退化":effect==="neutral"?"持平":effect==="pending"?"待评估":effect||"待评估"}
 function actionText(action){return action==="auto_merge"?"自动合并":action==="auto_pr"?"自动 PR":action==="auto_notify"?"自动通知":action==="escalate"?"升级人工":action==="manual"?"人工处理":action||"变更"}
 function riskText(risk){return risk==="critical"?"关键":risk==="high"?"高":risk==="medium"?"中":risk==="low"?"低":risk||"未知"}
@@ -547,11 +551,15 @@ function isOperationalDiagnosisRun(run, expectedId = "") {
   const runId = String(run.run_id || "");
   return DIAGNOSIS_JOB_ID_PATTERN.test(runId)
     && (!expectedId || runId === expectedId)
-    && run.task_name === DIAGNOSIS_TASK
+    && DIAGNOSIS_TASKS.has(run.task_name)
     && metadata && typeof metadata === "object" && !Array.isArray(metadata)
     && metadata.origin === "service_job"
     && metadata.source_repository === DIAGNOSIS_SOURCE_REPOSITORY
     && metadata.mode === "review_only";
+}
+
+function diagnosisKind(run) {
+  return DIAGNOSIS_TASKS.get(run.task_name) || "unknown";
 }
 
 function diagnosisListItem(run) {
@@ -560,6 +568,7 @@ function diagnosisListItem(run) {
     job_id: String(run.run_id),
     status: ["queued", "running", "succeeded", "failed"].includes(status) ? status : "unknown",
     updated_at: Number.isFinite(Number(run.updated_at)) ? Number(run.updated_at) : 0,
+    kind: diagnosisKind(run),
   };
 }
 
@@ -590,6 +599,7 @@ async function diagnosisDetail(env, jobId) {
     status,
     updated_at: Number.isFinite(Number(run.updated_at)) ? Number(run.updated_at) : 0,
     advisory: true,
+    kind: diagnosisKind(run),
   };
   if (status === "succeeded" && typeof metadata.diagnosis_summary === "string" && metadata.diagnosis_summary.trim()) {
     diagnosis.output = metadata.diagnosis_summary.slice(0, 500);

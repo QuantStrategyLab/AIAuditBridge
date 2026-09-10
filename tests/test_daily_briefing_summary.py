@@ -205,6 +205,28 @@ def test_daily_job_uses_existing_oidc_workflow_and_only_exports_summary():
     assert "path: daily-ai-summary.json" in job
 
 
+def test_historical_diagnosis_rehearsal_is_manual_oidc_codex_only():
+    workflow = Path(__file__).resolve().parents[1] / ".github/workflows/codex_audit.yml"
+    text = workflow.read_text()
+    job = text.split("\n  historical-diagnosis-rehearsal:\n", 1)[1]
+    assert "github.event_name == 'workflow_dispatch'" in job
+    assert "inputs.historical_diagnosis_rehearsal == true" in job
+    assert "github.ref == 'refs/heads/main'" in job
+    assert "GITHUB_RUN_ATTEMPT" in job and '"1"' in job
+    assert "permissions:\n      contents: read\n      id-token: write" in job
+    assert "AI_GATEWAY_RESEARCH_PROVIDERS: codex" in job
+    assert "--diagnose-static-token-guard-rehearsal" in job
+    assert "cancel-in-progress:" in text
+    assert "inputs.historical_diagnosis_rehearsal != true" in text.split("\n\njobs:", 1)[0]
+    assert "CODEX_AUDIT_SERVICE_TOKEN" not in job
+    assert "OPENAI_API_KEY" not in job and "ANTHROPIC_API_KEY" not in job
+    assert "schedule" not in job.split("\n  ", 1)[0]
+    daily_job = text.split("\n  daily-summary:\n", 1)[1].split("\n  operational-diagnosis:", 1)[0]
+    operational_job = text.split("\n  operational-diagnosis:\n", 1)[1].split("\n  historical-diagnosis-rehearsal:", 1)[0]
+    assert "inputs.historical_diagnosis_rehearsal != true" in daily_job
+    assert "inputs.historical_diagnosis_rehearsal != true" in operational_job
+
+
 @pytest.mark.parametrize("kind", ["old_service", "quota", "failed", "wrong_route", "wrong_job"])
 def test_real_sdk_unavailable_or_deferred_does_not_fallback_or_leak(report, kind):
     path, _ = report
