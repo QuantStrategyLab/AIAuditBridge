@@ -334,8 +334,7 @@ def _run_operational_diagnosis(
         return {"status": "deferred", "reason": "dedupe_state_unavailable"}
 
     if config_loader is None and not (
-        (os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL") and os.environ.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN"))
-        or os.environ.get("CODEX_AUDIT_SERVICE_TOKEN", "").strip()
+        os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL") and os.environ.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
     ):
         return {"status": "deferred", "reason": "ai_gateway_not_configured"}
     try:
@@ -380,6 +379,41 @@ def _run_operational_diagnosis(
     if result.success is True and raw.get("status") == "succeeded" and raw.get("job_id"):
         return {"status": "succeeded", "job_id": str(raw["job_id"])}
     return {"status": "unavailable", "reason": "codex_result_unavailable"}
+
+
+def diagnose_latest_cycle(root: Path, *, now: datetime | None = None) -> dict[str, Any]:
+    """Consume the newest saved cycle only; never run collection or replay old incidents."""
+    try:
+        paths = sorted((root / "data/health").glob("cycle_*.json"))
+        if not paths or paths[-1].stat().st_size > 1024 * 1024:
+            raise ValueError("latest cycle unavailable")
+        payload = json.loads(paths[-1].read_text(encoding="utf-8"))
+        if not isinstance(payload, dict) or payload.get("domains") != list(DOMAINS):
+            raise ValueError("invalid cycle")
+        as_of = datetime.fromisoformat(payload["as_of"].replace("Z", "+00:00"))
+        if as_of.tzinfo is None:
+            raise ValueError("cycle time must include timezone")
+        age = (now or datetime.now(timezone.utc)) - as_of
+        if age < -timedelta(minutes=5) or age > timedelta(hours=2):
+            raise ValueError("cycle is not current")
+        errors = payload.get("data_errors")
+        if not isinstance(errors, list) or len(errors) > 100:
+            raise ValueError("invalid errors")
+        for error in errors:
+            if (not isinstance(error, dict) or error.get("domain") not in DOMAINS
+                    or error.get("code") not in _OPERATIONAL_ERROR_CODES
+                    or error.get("error_type") not in _OPERATIONAL_ERROR_TYPES):
+                raise ValueError("invalid error classification")
+        # Pass only fixed categories, never fields added to a saved incident.
+        errors = [{key: error[key] for key in ("domain", "code", "error_type")} for error in errors]
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return {"status": "rejected", "reason": "latest_cycle_unavailable"}
+    if not errors:
+        return {"status": "skipped", "reason": "no_data_errors"}
+    # Workflow concurrency serializes this consumer; monitor alert state has a separate owner.
+    return _run_operational_diagnosis(
+        root / "data/diagnosis-consumer", errors, _operational_diagnosis_fingerprint(errors)
+    )
 
 
 def _build_monitoring_findings(
@@ -620,4 +654,10 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--diagnose-latest"]:
+        result = diagnose_latest_cycle(Path(os.environ["QUANT_MONITOR_ROOT"]))
+        print(json.dumps(result))
+        sys.exit(0 if result["status"] in {"succeeded", "skipped", "deferred"} else 2)
+    if sys.argv[1:]:
+        sys.exit("Unsupported arguments")
     sys.exit(main())
