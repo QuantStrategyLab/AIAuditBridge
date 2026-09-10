@@ -25,6 +25,49 @@ DAILY_BRIEFING = _load_script("daily_briefing_builder")
 
 
 class MonitorFailClosedTests(unittest.TestCase):
+    def test_latest_cycle_diagnosis_rejects_invalid_or_stale_without_fallback(self):
+        now = HEALTH_CYCLE.datetime(2026, 9, 10, 4, tzinfo=HEALTH_CYCLE.timezone.utc)
+        valid = {"as_of": "2026-09-10T03:50:00+00:00", "domains": list(HEALTH_CYCLE.DOMAINS),
+                 "data_errors": [{"domain": "crypto", "code": "drift_data_unavailable", "error_type": "ValueError"}]}
+        variants = ["invalid", {**valid, "as_of": "2026-09-09T00:00:00+00:00"},
+                    {**valid, "as_of": "2026-09-10T05:00:00+00:00"},
+                    {**valid, "as_of": "2026-09-10T03:50:00"}, {**valid, "data_errors": None},
+                    {**valid, "data_errors": [{"domain": "unknown"}]}, {**valid, "domains": []}]
+        for latest in variants:
+            with self.subTest(latest=latest), tempfile.TemporaryDirectory() as tmp, mock.patch.object(HEALTH_CYCLE, "_run_operational_diagnosis") as run:
+                root = Path(tmp)
+                health = root / "data/health"
+                health.mkdir(parents=True)
+                (health / "cycle_20260910T035000Z.json").write_text(json.dumps(valid))
+                (health / "cycle_20260910T035100Z.json").write_text(json.dumps(latest))
+                result = HEALTH_CYCLE.diagnose_latest_cycle(root, now=now)
+                self.assertEqual(result["status"], "rejected")
+                run.assert_not_called()
+
+    def test_latest_cycle_consumer_uses_isolated_state_and_existing_diagnosis(self):
+        now = HEALTH_CYCLE.datetime(2026, 9, 10, 4, tzinfo=HEALTH_CYCLE.timezone.utc)
+        errors = [{"domain": "crypto", "code": "drift_data_unavailable", "error_type": "ValueError"}]
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(HEALTH_CYCLE, "_run_operational_diagnosis", return_value={"status": "succeeded"}) as run:
+            root = Path(tmp)
+            health = root / "data/health"
+            health.mkdir(parents=True)
+            path = health / "cycle_20260910T035000Z.json"
+            payload = {"as_of": "2026-09-10T03:50:00+00:00", "domains": list(HEALTH_CYCLE.DOMAINS), "data_errors": errors}
+            path.write_text(json.dumps(payload))
+            self.assertEqual(HEALTH_CYCLE.diagnose_latest_cycle(root, now=now)["status"], "succeeded")
+            self.assertEqual(run.call_args.args, (root / "data/diagnosis-consumer", errors, HEALTH_CYCLE._operational_diagnosis_fingerprint(errors)))
+            run.reset_mock()
+            payload["data_errors"] = []
+            path.write_text(json.dumps(payload))
+            self.assertEqual(HEALTH_CYCLE.diagnose_latest_cycle(root, now=now), {"status": "skipped", "reason": "no_data_errors"})
+            run.assert_not_called()
+
+    def test_static_dashboard_token_cannot_submit_diagnosis(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"CODEX_AUDIT_SERVICE_TOKEN": "synthetic-readonly", "CODEX_AUDIT_SERVICE_URL": "https://invalid"}, clear=True), mock.patch.object(HEALTH_CYCLE, "_record_operational_diagnosis_attempt") as record:
+            result = HEALTH_CYCLE._run_operational_diagnosis(Path(tmp), [{"domain": "crypto"}], "3" * 64)
+            self.assertEqual(result, {"status": "deferred", "reason": "ai_gateway_not_configured"})
+            record.assert_not_called()
+
     def test_health_cycle_collects_drift_errors_without_aborting(self) -> None:
         def unavailable(_domain):
             raise RuntimeError("sensitive path must not escape")

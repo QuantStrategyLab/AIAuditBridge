@@ -878,6 +878,18 @@ def _record_job_automation_run(job: dict[str, Any]) -> None:
             "mode": str(job.get("mode") or ""),
             "failure_category": str(job.get("failure_category") or ""),
         }
+        if (
+            task_name == "operational_data_diagnosis"
+            and job.get("source_repository") == "QuantStrategyLab/AIAuditBridge"
+            and job.get("mode") == "review_only"
+            and job.get("provider") == "codex"
+            and job.get("research_stage") == "drift_analysis"
+        ):
+            status = job.get("status")
+            metadata["diagnosis_status"] = status if status in ("queued", "running", "succeeded", "failed") else "unknown"
+            output = job.get("output")
+            if status == "succeeded" and isinstance(output, str) and output.strip():
+                metadata["diagnosis_summary"] = output[:500]
         control = _automation_control_snapshot(
             repo,
             task_name=task_name,
