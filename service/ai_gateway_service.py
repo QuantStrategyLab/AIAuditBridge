@@ -879,7 +879,10 @@ def _record_job_automation_run(job: dict[str, Any]) -> None:
             "failure_category": str(job.get("failure_category") or ""),
         }
         if (
-            task_name == "operational_data_diagnosis"
+            task_name in {
+                "operational_data_diagnosis",
+                "historical_operational_diagnosis_rehearsal",
+            }
             and job.get("source_repository") == "QuantStrategyLab/AIAuditBridge"
             and job.get("mode") == "review_only"
             and job.get("provider") == "codex"

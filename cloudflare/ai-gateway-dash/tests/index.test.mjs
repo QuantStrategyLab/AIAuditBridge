@@ -179,6 +179,8 @@ test("diagnosis list exposes only bounded AIAuditBridge operational jobs", async
         metadata: { origin: "service_job", source_repository: "QuantStrategyLab/Other", mode: "review_only", private: "do-not-leak" } },
       { run_id: "C".repeat(32), task_name: "other", task_state: "failed", updated_at: 30,
         metadata: { origin: "service_job", source_repository: "QuantStrategyLab/AIAuditBridge", mode: "review_only" } },
+      { run_id: "R".repeat(32), task_name: "historical_operational_diagnosis_rehearsal", task_state: "reviewed", updated_at: 11,
+        metadata: { origin: "service_job", source_repository: "QuantStrategyLab/AIAuditBridge", mode: "review_only", diagnosis_status: "succeeded" } },
     ] } });
   });
   const response = await worker.fetch(
@@ -189,8 +191,9 @@ test("diagnosis list exposes only bounded AIAuditBridge operational jobs", async
   assert.deepEqual(await response.json(), {
     status: "ok",
     diagnoses: [
-      { job_id: validId, status: "succeeded", updated_at: 10 },
-      { job_id: "F".repeat(32), status: "unknown", updated_at: 9 },
+      { job_id: "R".repeat(32), status: "succeeded", updated_at: 11, kind: "historical_rehearsal" },
+      { job_id: validId, status: "succeeded", updated_at: 10, kind: "operational" },
+      { job_id: "F".repeat(32), status: "unknown", updated_at: 9, kind: "operational" },
     ],
   });
 });
@@ -215,7 +218,7 @@ test("diagnosis detail verifies ledger and job identity before exposing successf
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), {
     status: "ok",
-    diagnosis: { job_id: jobId, status: "succeeded", updated_at: 40, output, advisory: true },
+    diagnosis: { job_id: jobId, status: "succeeded", updated_at: 40, output, advisory: true, kind: "operational" },
   });
 
   const html = await worker.fetch(
@@ -224,8 +227,26 @@ test("diagnosis detail verifies ledger and job identity before exposing successf
   );
   const body = await html.text();
   assert.match(body, /数据故障诊断/);
+  assert.match(body, /历史故障诊断演练/);
   assert.match(body, /diagnosis-output/);
   assert.match(body, /textContent/);
+});
+
+test("historical diagnosis rehearsal detail remains separate and read only", async (t) => {
+  const jobId = "H".repeat(32);
+  const dashboard = await authenticatedDashboard(t, async () => Response.json({ status: "ok", run: {
+    run_id: jobId, task_name: "historical_operational_diagnosis_rehearsal", task_state: "reviewed", updated_at: 60,
+    metadata: { origin: "service_job", source_repository: "QuantStrategyLab/AIAuditBridge", mode: "review_only",
+      diagnosis_status: "succeeded", diagnosis_summary: "<script>历史演练摘要</script>" },
+  } }));
+  const response = await worker.fetch(
+    new Request("https://dash.example/api/diagnoses/" + jobId, { headers: { Cookie: dashboard.cookie } }),
+    dashboard.env,
+  );
+  assert.deepEqual(await response.json(), { status: "ok", diagnosis: {
+    job_id: jobId, status: "succeeded", updated_at: 60, advisory: true,
+    kind: "historical_rehearsal", output: "<script>历史演练摘要</script>",
+  } });
 });
 
 test("diagnosis detail hides mismatched, running, failed, missing, and upstream error data", async (t) => {

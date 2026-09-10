@@ -11,6 +11,11 @@ on:
         required: false
         type: boolean
         default: false
+      historical_diagnosis_rehearsal:
+        description: "Run the fixed static-token guard source-audit rehearsal once"
+        required: false
+        type: boolean
+        default: false
       daily_summary:
         description: "Summarize existing VPS daily reports only (requires AI_DAILY_SUMMARY_ENABLED)"
         required: false
@@ -83,12 +88,12 @@ permissions:
   id-token: write
 
 concurrency:
-  group: ${{ (github.event_name == 'schedule' || inputs.daily_summary || inputs.operational_diagnosis) && 'codex-audit-daily-summary' || inputs.synthetic_sdk_check && 'codex-audit-synthetic-sdk' || format('codex-audit-{0}-{1}', github.event.client_payload.source_repo || inputs.source_repo, github.event.client_payload.issue_number || inputs.issue_number) }}
-  cancel-in-progress: ${{ github.event_name != 'schedule' && inputs.daily_summary != true && inputs.synthetic_sdk_check != true && inputs.operational_diagnosis != true }}
+  group: ${{ inputs.historical_diagnosis_rehearsal && 'codex-audit-historical-diagnosis-rehearsal' || (github.event_name == 'schedule' || inputs.daily_summary || inputs.operational_diagnosis) && 'codex-audit-daily-summary' || inputs.synthetic_sdk_check && 'codex-audit-synthetic-sdk' || format('codex-audit-{0}-{1}', github.event.client_payload.source_repo || inputs.source_repo, github.event.client_payload.issue_number || inputs.issue_number) }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' && inputs.daily_summary != true && inputs.synthetic_sdk_check != true && inputs.operational_diagnosis != true && inputs.historical_diagnosis_rehearsal != true }}
 
 jobs:
   codex-audit:
-    if: github.event_name != 'schedule' && inputs.daily_summary != true && inputs.synthetic_sdk_check != true && inputs.operational_diagnosis != true
+    if: github.event_name != 'schedule' && inputs.daily_summary != true && inputs.synthetic_sdk_check != true && inputs.operational_diagnosis != true && inputs.historical_diagnosis_rehearsal != true
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -159,7 +164,7 @@ jobs:
         run: python scripts/run_monthly_codex_audit.py
 
   synthetic-sdk-check:
-    if: github.event_name == 'workflow_dispatch' && inputs.synthetic_sdk_check == true && inputs.daily_summary != true && inputs.operational_diagnosis != true && github.ref == 'refs/heads/main'
+    if: github.event_name == 'workflow_dispatch' && inputs.synthetic_sdk_check == true && inputs.daily_summary != true && inputs.operational_diagnosis != true && inputs.historical_diagnosis_rehearsal != true && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -192,6 +197,7 @@ jobs:
   daily-summary:
     if: >-
       github.ref == 'refs/heads/main' && vars.AI_DAILY_SUMMARY_ENABLED == 'true' &&
+      inputs.historical_diagnosis_rehearsal != true &&
       (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.daily_summary == true))
     runs-on:
       - self-hosted
@@ -233,6 +239,7 @@ jobs:
   operational-diagnosis:
     if: >-
       github.ref == 'refs/heads/main' && vars.AI_OPERATIONAL_DIAGNOSIS_ENABLED == 'true' &&
+      inputs.historical_diagnosis_rehearsal != true &&
       (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.operational_diagnosis == true))
     runs-on:
       - self-hosted
@@ -262,5 +269,43 @@ jobs:
         with:
           name: operational-diagnosis
           path: operational-diagnosis.json
+          if-no-files-found: error
+          retention-days: 7
+
+  historical-diagnosis-rehearsal:
+    if: >-
+      github.event_name == 'workflow_dispatch' && inputs.historical_diagnosis_rehearsal == true &&
+      github.ref == 'refs/heads/main'
+    runs-on:
+      - self-hosted
+      - codex-vps
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout approved Bridge revision
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Diagnose the fixed historical auth-guard case
+        env:
+          CODEX_AUDIT_SERVICE_URL: ${{ secrets.CODEX_AUDIT_SERVICE_URL }}
+          CODEX_AUDIT_SERVICE_AUDIENCE: ${{ vars.CODEX_AUDIT_SERVICE_AUDIENCE || 'quant-codex-audit' }}
+          AI_GATEWAY_SOURCE_REPO: QuantStrategyLab/AIAuditBridge
+          AI_GATEWAY_RESEARCH_PROVIDERS: codex
+          PYTHONPATH: .
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          set -euo pipefail
+          test "${GITHUB_RUN_ATTEMPT}" = "1"
+          python3 ops/quant-monitor/scripts/health_cycle.py \
+            --diagnose-static-token-guard-rehearsal > historical-diagnosis-rehearsal.json
+      - name: Retain sanitized rehearsal outcome only
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: historical-diagnosis-rehearsal
+          path: historical-diagnosis-rehearsal.json
           if-no-files-found: error
           retention-days: 7
