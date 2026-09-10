@@ -1,5 +1,13 @@
 # CN 指数 ETF 的受控研究作业
 
+## 2026-09-10 原分支集成收口
+
+将已提交的 d366e08 与主线 2958e31 合并，保留主线 SOXL outputs/job 及主 suite 的 QPK736 安装；CN job 追加在原 SOXL job 后，使用自己的原固定依赖环境。专项服务测试适配主线已存在的 `_find_job_by_dedupe_key`，不改变生产去重逻辑。原四文件未提交 forward 草稿未纳入。
+
+新建 Python 3.12.13 隔离环境并安装下面原 CN/QPK/SDK 精确版本，`pip check` 通过。合并时旧测试的 job 范围及服务函数名假设实际失败；保留原工作流顺序并更新测试引用后，CN 专项及两个 watcher 测试文件组合 **104 passed**，socket connect/create_connection 被阻断。actionlint、Ruff、diff-check 通过。远端 CI、部署及真实数据结果另行记录，不以本段测试代替。
+
+本片维持默认关闭。数据来源、留存及复权材料尚未核验，不采集或以旧 CSV 冒充严格输入。原 QPK b565 pin 早于后续多日 shadow progress 修复，完整前向观察部署仍未完成；本片不更新全部 pin 或恢复独立 forward 草稿。研究票据的接受/拒绝沿原 QPK pull/reconcile，均不授予交易权限，也不为旧 SOXL V7 拼接新票据。
+
 本片从 AAB `dfccd5e21fa5e5ed0c3d226845ee988bdbab572a` 接续。源码验证、依赖采用、生产部署和真实研究周期分别验收；下列接线不代表已有真实数据或 shadow 成功。
 
 ## 实际入口和权限

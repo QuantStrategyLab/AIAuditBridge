@@ -46,6 +46,7 @@ jobs:
           python3 -m pip install pytest ruff==0.15.22
           python3 -m pip install . --no-deps
           python3 -m pip install 'quant-strategy-plugins[ai] @ git+https://github.com/QuantStrategyLab/QuantStrategyPlugins.git@6b76d512c8273deb804c0770a203558284778399'
+          python3 -m pip install 'quant-platform-kit @ git+https://github.com/QuantStrategyLab/QuantPlatformKit.git@7363011d56926d39f4fffeb036e511391114e39f'
           python3 -m pip check
           python3 -m ruff check .
           python3 -m pytest tests ops/quant-monitor/tests -q --ignore=tests/test_run_cn_index_etf_research.py

@@ -128,6 +128,95 @@ class StrategyWatcherArtifactPayloadTest(unittest.TestCase):
                 baseline_run_id="123455",
             )
 
+    def test_selects_earlier_distinct_cutoff_without_replacing_latest_current(self) -> None:
+        current = self._artifact(
+            generated_at="2026-08-20T04:00:00Z", as_of="2026-08-18", sharpe=0.8
+        )
+        repeated_cutoff = self._artifact(
+            generated_at="2026-08-19T04:00:00Z", as_of="2026-08-18", sharpe=0.9
+        )
+        other_identity = self._artifact(
+            generated_at="2026-08-18T05:00:00Z", as_of="2026-08-17"
+        )
+        other_identity["strategy_profile"] = "other"
+        later_generation = self._artifact(
+            generated_at="2026-08-21T04:00:00Z", as_of="2026-08-17"
+        )
+        earlier_cutoff = self._artifact(
+            generated_at="2026-08-18T04:00:00Z", as_of="2026-08-17", sharpe=1.0
+        )
+
+        payload = module.select_strategy_watcher_artifact_payload(
+            observations=[
+                ("123456", current),
+                ("123455", repeated_cutoff),
+                ("123454", other_identity),
+                ("123453", later_generation),
+                ("123452", earlier_cutoff),
+            ],
+            source_repository="QuantStrategyLab/UsEquitySnapshotPipelines",
+            workflow_file="soxl-p1-p3-daily-research.yml",
+        )
+
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        self.assertEqual(payload["current_metrics"]["sharpe"], 0.8)
+        self.assertEqual(payload["baseline_metrics"]["sharpe"], 1.0)
+        self.assertTrue(payload["source"].endswith(":123452-123456"))
+
+        current["authority"] = {
+            "research_only": True,
+            "no_order": False,
+            "p4_p5_p6_authorized": False,
+        }
+        with self.assertRaisesRegex(module.StrategyWatcherArtifactError, "research-only"):
+            module.select_strategy_watcher_artifact_payload(
+                observations=[
+                    ("123456", current),
+                    ("123455", repeated_cutoff),
+                    ("123454", other_identity),
+                    ("123453", later_generation),
+                    ("123452", earlier_cutoff),
+                ],
+                source_repository="QuantStrategyLab/UsEquitySnapshotPipelines",
+                workflow_file="soxl-p1-p3-daily-research.yml",
+            )
+
+    def test_selection_is_unavailable_without_an_earlier_comparable_cutoff(self) -> None:
+        current = self._artifact(
+            generated_at="2026-08-20T04:00:00Z", as_of="2026-08-18"
+        )
+        repeated_cutoff = self._artifact(
+            generated_at="2026-08-19T04:00:00Z", as_of="2026-08-18"
+        )
+
+        self.assertIsNone(
+            module.select_strategy_watcher_artifact_payload(
+                observations=[("123456", current), ("123455", repeated_cutoff)],
+                source_repository="QuantStrategyLab/UsEquitySnapshotPipelines",
+                workflow_file="soxl-p1-p3-daily-research.yml",
+            )
+        )
+
+        other_identity = self._artifact(
+            generated_at="2026-08-18T04:00:00Z", as_of="2026-08-17"
+        )
+        other_identity["strategy_profile"] = "other"
+        self.assertIsNone(
+            module.select_strategy_watcher_artifact_payload(
+                observations=[("123456", current), ("123454", other_identity)],
+                source_repository="QuantStrategyLab/UsEquitySnapshotPipelines",
+                workflow_file="soxl-p1-p3-daily-research.yml",
+            )
+        )
+
+        with self.assertRaisesRegex(module.StrategyWatcherArtifactError, "one to five"):
+            module.select_strategy_watcher_artifact_payload(
+                observations=[("123456", current)] * 6,
+                source_repository="QuantStrategyLab/UsEquitySnapshotPipelines",
+                workflow_file="soxl-p1-p3-daily-research.yml",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -29,6 +29,25 @@ survive Worker cold starts and edge isolate changes. When `DASHBOARD_SESSION_KV`
 - `quota` shows remaining Codex window percentage when available; GPT/Claude rows come from Admin Usage/Cost APIs and may omit cost when the provider does not return it.
 - Dashboard visibility does not change approval boundaries: high-risk changes, policy changes, secrets, and live-trading decisions still require human review.
 
+## Operational data diagnosis
+
+`/api/diagnoses` and `/api/diagnoses/<job_id>` are session-protected, read-only
+projections of AIAuditBridge operational diagnosis ledger records. Only the explicit
+job status and up to 500 characters of successful advisory output are shown; no
+job polling, prompts, error details, or action endpoints are exposed. The service
+must include `QuantStrategyLab/AIAuditBridge` in
+`CODEX_AUDIT_SERVICE_DASHBOARD_REPOSITORIES` for this read access.
+
+Submission uses the existing `Codex Audit` workflow's GitHub OIDC identity, never
+the dashboard's static token. `AI_OPERATIONAL_DIAGNOSIS_ENABLED=true` enables the
+operational job on its existing daily schedule or a manual
+`operational_diagnosis=true` dispatch. It reads only the latest VPS cycle, rejects
+missing/invalid or over-two-hour-old input, and skips healthy cycles. Incident
+fingerprints are stored separately from monitor alert state. An uncertain outcome
+is not resubmitted automatically; capacity deferrals may be tried on a later run.
+The model remains Codex only, read-only and quota gated. Empty results and healthy
+skips do not establish successful diagnosis of a real incident.
+
 ## Deploy
 
 ```bash

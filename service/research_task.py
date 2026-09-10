@@ -25,6 +25,21 @@ _TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 _CANDIDATE_KINDS = frozenset({"individual", "portfolio", "plugin"})
 _DOMAINS = frozenset({"us_equity", "hk_equity", "cn_equity", "crypto"})
 _EVIDENCE_FIELDS = frozenset({"p1_input_digest", "p2_config_digest", "p3_evidence_id", "strategy_revision", "producer_revision"})
+SOXL_WATCHER_CANDIDATE_ID = "soxl_soxx_core_only_p2_v3"
+SOXL_WATCHER_STRATEGY_REPOSITORY = "QuantStrategyLab/UsEquityStrategies"
+SOXL_WATCHER_UES_REVISION = "7756fe32585e85cf1d09a163203a02e3eee39fe1"
+SOXL_WATCHER_P2_CONFIG_SHA256 = "ff8fa0acf4f175a7c40c3e1e6a3304ea2748b6b81c3797342085a4df3810ab4d"
+SOXL_WATCHER_CONSUMER_REVISION = "b03ecbe4e0a7a0de22f298499f867a7039e4b60a"
+SOXL_WATCHER_QPK_REVISION = "3acab1923a97b805b077c85c6c19657be0143bac"
+SOXL_WATCHER_PARAMETER_BOUNDS = {
+    "parameter_key": "blend_gate_mid_soxl_weight",
+    "parameter_values": [0.65, 0.60, 0.55],
+    "cost_bps": [5.0, 10.0, 15.0],
+    "development_cutoff": "2025-07-31",
+    "consumer_revision": SOXL_WATCHER_CONSUMER_REVISION,
+    "strategy_revision": SOXL_WATCHER_UES_REVISION,
+    "quant_platform_kit_revision": SOXL_WATCHER_QPK_REVISION,
+}
 
 
 class ResearchTaskError(ValueError):
@@ -36,6 +51,25 @@ def canonical_json(value: object) -> str:
         return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
     except (TypeError, ValueError) as exc:
         raise ResearchTaskError("research task must use finite JSON values") from exc
+
+
+SOXL_WATCHER_PARAMETER_BOUNDS_SHA256 = hashlib.sha256(
+    canonical_json(SOXL_WATCHER_PARAMETER_BOUNDS).encode("utf-8")
+).hexdigest()
+
+
+def _is_exact_soxl_watcher_target(
+    *, candidate_id: object, candidate_kind: object, domain: object,
+    strategy_repository: object, evidence: Mapping[str, str],
+) -> bool:
+    return (
+        candidate_id == SOXL_WATCHER_CANDIDATE_ID
+        and candidate_kind == "individual"
+        and domain == "us_equity"
+        and strategy_repository == SOXL_WATCHER_STRATEGY_REPOSITORY
+        and evidence.get("strategy_revision") == SOXL_WATCHER_UES_REVISION
+        and evidence.get("p2_config_digest") == SOXL_WATCHER_P2_CONFIG_SHA256
+    )
 
 
 def calculate_task_sha256(payload: Mapping[str, Any]) -> str:
@@ -108,6 +142,14 @@ def build_strategy_diagnosis_task(
     if not isinstance(strategy_repository, str) or not _REPOSITORY.fullmatch(strategy_repository):
         raise ResearchTaskError("strategy repository is invalid")
     verified_evidence = _evidence(evidence)
+    parameter_bounds_sha256 = (
+        SOXL_WATCHER_PARAMETER_BOUNDS_SHA256
+        if _is_exact_soxl_watcher_target(
+            candidate_id=candidate, candidate_kind=candidate_kind, domain=domain,
+            strategy_repository=strategy_repository, evidence=verified_evidence,
+        )
+        else None
+    )
     task: dict[str, Any] = {
         "schema": SCHEMA,
         "task_id": f"watcher-{event_key}",
@@ -130,7 +172,7 @@ def build_strategy_diagnosis_task(
         "experiment": {
             "objective": "diagnose_degradation",
             "hypothesis": "A verified P3 observation crossed a degradation threshold; diagnose it with one bounded offline comparison without changing active parameters.",
-            "parameter_bounds_sha256": None,
+            "parameter_bounds_sha256": parameter_bounds_sha256,
             "max_runs": 1,
             "max_wall_seconds": 3600,
         },
@@ -216,11 +258,21 @@ def validate_strategy_diagnosis_task(value: Mapping[str, Any]) -> dict[str, Any]
     }
     if not isinstance(experiment, Mapping) or set(experiment) != expected_experiment:
         raise ResearchTaskError("research task experiment is incomplete")
+    parameter_bounds_sha256 = experiment.get("parameter_bounds_sha256")
+    exact_soxl_target = _is_exact_soxl_watcher_target(
+        candidate_id=candidate_id, candidate_kind=candidate_kind, domain=domain,
+        strategy_repository=repository, evidence=evidence,
+    )
+    if parameter_bounds_sha256 is not None:
+        _sha256(parameter_bounds_sha256, "experiment.parameter_bounds_sha256")
     if (
         experiment.get("objective") != "diagnose_degradation"
         or experiment.get("hypothesis")
         != "A verified P3 observation crossed a degradation threshold; diagnose it with one bounded offline comparison without changing active parameters."
-        or experiment.get("parameter_bounds_sha256") is not None
+        or parameter_bounds_sha256 not in (
+            {None, SOXL_WATCHER_PARAMETER_BOUNDS_SHA256}
+            if exact_soxl_target else {None}
+        )
         or experiment.get("max_runs") != 1
         or experiment.get("max_wall_seconds") != 3600
     ):
@@ -267,6 +319,14 @@ def validate_strategy_diagnosis_task(value: Mapping[str, Any]) -> dict[str, Any]
 __all__ = [
     "ResearchTaskError",
     "SCHEMA",
+    "SOXL_WATCHER_CANDIDATE_ID",
+    "SOXL_WATCHER_CONSUMER_REVISION",
+    "SOXL_WATCHER_P2_CONFIG_SHA256",
+    "SOXL_WATCHER_QPK_REVISION",
+    "SOXL_WATCHER_PARAMETER_BOUNDS",
+    "SOXL_WATCHER_PARAMETER_BOUNDS_SHA256",
+    "SOXL_WATCHER_STRATEGY_REPOSITORY",
+    "SOXL_WATCHER_UES_REVISION",
     "build_strategy_diagnosis_task",
     "calculate_task_sha256",
     "validate_strategy_diagnosis_task",

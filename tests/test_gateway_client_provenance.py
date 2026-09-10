@@ -80,6 +80,21 @@ class GatewayClientProvenanceTests(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual(result.raw["job_id"], "submitted-job")
 
+    def test_execute_sends_explicit_sandbox_when_requested(self):
+        route = {"job_id": "submitted-job", "provider": "codex", "research_stage": "drift_analysis",
+                 "model": "gpt-5.6-sol", "reasoning_effort": "medium"}
+        replies = [_FakeResponse({"codex_research_routing": "v1"}), _FakeResponse(route),
+                   _FakeResponse({**route, "status": "succeeded", "output": "synthetic"})]
+        client = AiGatewayClient(GatewayConfig(service_url="https://synthetic.invalid"))
+        with patch("client.gateway_client._fetch_oidc_token", return_value="synthetic"), patch(
+            "client.gateway_client.time.sleep",
+        ), patch("client.gateway_client.urllib.request.urlopen", side_effect=replies) as http:
+            result = client.execute("synthetic", research_stage="drift_analysis", sandbox="read-only")
+
+        self.assertTrue(result.success)
+        submitted = json.loads(http.call_args_list[1].args[0].data)
+        self.assertEqual(submitted["sandbox"], "read-only")
+
     def test_nonresearch_execute_keeps_legacy_receipt_compatibility(self):
         replies = [_FakeResponse({"job_id": "legacy-job"}), _FakeResponse({"status": "succeeded", "output": "legacy"})]
         client = AiGatewayClient(GatewayConfig(service_url="https://synthetic.invalid"))

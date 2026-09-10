@@ -43,6 +43,13 @@ class StrategyOptimizationWatcherWorkflowTest(unittest.TestCase):
         self.assertIn("soxl_soxx_trend_income", text)
         self.assertIn("python -m scripts.run_research_task_diagnosis", text)
         self.assertIn("Two completed observations are required", text)
+        self.assertIn("--limit 5", text)
+        self.assertIn('current_run_id="${RUN_IDS[0]}"', text)
+        self.assertIn("--baseline-candidate", text)
+        self.assertNotIn('baseline_run_id="${RUN_IDS[1]}"', text)
+        self.assertIn('terminal_file=$(find "source/data/output/_artifacts/${current_run_id}"', text)
+        self.assertIn("resolve_input_path(source_root=sys.argv[1], metrics_path=sys.argv[2])", text)
+        self.assertNotIn('rm -f "source/${METRICS_PATH}"', text)
         self.assertIn("path: source", text)
         self.assertIn("STRATEGY_WATCH_SOURCE_ROOT: ${{ github.workspace }}/source", text)
         self.assertIn("STRATEGY_WATCH_METRICS_PATH: ${{ env.METRICS_PATH }}", text)
@@ -72,6 +79,21 @@ class StrategyOptimizationWatcherWorkflowTest(unittest.TestCase):
         self.assertIn("/api/internal/sync-research-task-source", text)
         self.assertIn("RESEARCH_TASK_SYNC_STATUS=NOT_CONFIGURED", text)
         self.assertNotIn("/api/switch", text)
+
+    def test_exact_soxl_task_hands_off_only_sanitized_artifacts_to_vps_consumer(self) -> None:
+        text = WORKFLOW_PATH.read_text(encoding="utf-8")
+        self.assertIn("soxl-watcher-learning-ready", text)
+        self.assertIn("needs.strategy-optimization-watcher.outputs.soxl_learning_ready == 'true'", text)
+        self.assertIn("vars.SOXL_WATCHER_GCP_WIF_PROVIDER != ''", text)
+        self.assertIn("vars.SOXL_WATCHER_GCP_PROJECT_ID != ''", text)
+        self.assertLess(text.index("vars.SOXL_WATCHER_GCP_WIF_PROVIDER != ''"), text.index("runs-on: [self-hosted, codex-vps]"))
+        self.assertIn("runs-on: [self-hosted, codex-vps]", text)
+        self.assertIn("python -m scripts.run_soxl_manual_learning --watcher-result", text)
+        self.assertIn("strategy-optimization-watcher-${{ github.run_id }}", text)
+        self.assertIn("GH_TOKEN: ${{ steps.source_app_token.outputs.token || github.token }}", text)
+        self.assertIn("soxl-p1-p3/${P1_MANIFEST_SHA256}", text)
+        self.assertIn("--body-file", Path(__file__).resolve().parents[1].joinpath("scripts/run_soxl_manual_learning.py").read_text())
+        self.assertNotIn("bars.json=${{ needs.", text)
 
 
 if __name__ == "__main__":

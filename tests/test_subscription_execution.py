@@ -264,6 +264,212 @@ def test_repeated_active_request_preserves_original_job_route_and_single_reserva
         assert cursor.call_count == (1 if first_provider == 'cursor' else 0)
 
 
+@pytest.mark.parametrize('terminal_status', ['succeeded', 'failed'])
+def test_repeated_research_request_reuses_persisted_terminal_before_quota(tmp_path, terminal_status):
+    from service.quota import QuotaManager
+
+    claims = {
+        'repository': 'Synthetic/caller',
+        'run_id': 'run-1',
+        'run_attempt': '1',
+        'actor': 'researcher',
+        'ref': 'refs/heads/main',
+        'workflow_ref': 'Synthetic/caller/.github/workflows/research.yml@refs/heads/main',
+        'job_workflow_ref': 'Synthetic/caller/.github/workflows/research.yml@refs/heads/main',
+    }
+    request = {
+        'prompt': 'same bounded task',
+        'mode': 'review_only',
+        'research_stage': 'optimization',
+        'allowed_providers': ['codex'],
+    }
+    request_key = gateway._request_job_dedupe_key(claims, request)
+    existing = {
+        'job_id': 'p' * 24,
+        'status': terminal_status,
+        'created_at': 1000,
+        'updated_at': 1001,
+        'expires_at': 9999,
+        'repository': claims['repository'],
+        'run_id': claims['run_id'],
+        'run_attempt': claims['run_attempt'],
+        'actor': claims['actor'],
+        'request_authority': {key: claims[key] for key in (
+            'repository', 'run_id', 'run_attempt', 'actor', 'ref', 'workflow_ref', 'job_workflow_ref'
+        )},
+        'request_dedupe_key': request_key,
+        'source_repository': '',
+        'source_ref': '',
+        'task': 'execute',
+        'mode': 'review_only',
+        'provider': 'codex',
+        'research_stage': 'optimization',
+        'model': 'gpt-5.6-sol',
+        'reasoning_effort': 'high',
+        'output': 'bounded result',
+        'failure_category': 'unknown_failure',
+        'error': 'sanitized failure',
+    }
+    quota = QuotaManager()
+    with patch.dict('os.environ', {
+        'CODEX_AUDIT_SERVICE_JOB_DIR': str(tmp_path / 'jobs'),
+        'CODEX_AUDIT_SERVICE_QUOTA_STORE': str(tmp_path / 'quota.json'),
+    }, clear=True), patch.object(gateway.time, 'time', return_value=2000):
+        gateway._write_job(existing)
+        with patch.object(gateway, 'get_quota_manager', return_value=quota), patch.object(
+            gateway, '_admit_codex_execute'
+        ) as admission, patch.object(quota, 'record_execute') as record, patch.object(
+            gateway, '_submit_job'
+        ) as submit, patch.object(gateway, '_json_response') as response:
+            gateway.AiGatewayRequestHandler._handle_execute_async(object(), claims, dict(request))
+
+    admission.assert_not_called()
+    record.assert_not_called()
+    submit.assert_not_called()
+    assert response.call_args.args[1] == 202
+    body = response.call_args.args[2]
+    assert body['job_id'] == 'p' * 24
+    assert body['status'] == terminal_status
+    assert body['deduped'] is True
+
+
+@pytest.mark.parametrize('mismatch', ['authority', 'task', 'route'])
+def test_matching_terminal_key_with_mismatched_persisted_identity_fails_closed(tmp_path, mismatch):
+    from service.quota import QuotaManager
+
+    claims = {
+        'repository': 'Synthetic/caller', 'run_id': 'run-1', 'run_attempt': '1',
+        'actor': 'researcher', 'ref': 'refs/heads/main',
+        'workflow_ref': 'Synthetic/caller/.github/workflows/research.yml@refs/heads/main',
+        'job_workflow_ref': 'Synthetic/caller/.github/workflows/research.yml@refs/heads/main',
+    }
+    request = {'prompt': 'bounded task', 'mode': 'review_only', 'research_stage': 'optimization'}
+    job = {
+        'job_id': 'm' * 24, 'status': 'succeeded', 'created_at': 1000,
+        'updated_at': 1001, 'expires_at': 9999,
+        'repository': claims['repository'], 'run_id': claims['run_id'],
+        'run_attempt': claims['run_attempt'], 'actor': claims['actor'],
+        'request_authority': gateway._request_authority(claims),
+        'request_dedupe_key': gateway._request_job_dedupe_key(claims, request),
+        'source_repository': '', 'source_ref': '', 'task': 'execute',
+        'mode': 'review_only', 'provider': 'codex', 'research_stage': 'optimization',
+        'model': 'gpt-5.6-sol', 'reasoning_effort': 'high', 'output': 'bounded result',
+    }
+    if mismatch == 'authority':
+        job['request_authority'] = dict(job['request_authority'], actor='different')
+    elif mismatch == 'task':
+        job['research_stage'] = 'drift_analysis'
+    else:
+        job['provider'] = 'cursor'
+    quota = QuotaManager()
+    with patch.dict('os.environ', {
+        'CODEX_AUDIT_SERVICE_JOB_DIR': str(tmp_path / 'jobs'),
+        'CODEX_AUDIT_SERVICE_QUOTA_STORE': str(tmp_path / 'quota.json'),
+    }, clear=True), patch.object(gateway.time, 'time', return_value=2000):
+        gateway._write_job(job)
+        with patch.object(gateway, 'get_quota_manager', return_value=quota), patch.object(
+            gateway, '_admit_codex_execute'
+        ) as admission, patch.object(quota, 'record_execute') as record, patch.object(
+            gateway, '_submit_job'
+        ) as submit:
+            with pytest.raises(PermissionError, match='persisted research job'):
+                gateway.AiGatewayRequestHandler._handle_execute_async(object(), claims, dict(request))
+
+    admission.assert_not_called()
+    record.assert_not_called()
+    submit.assert_not_called()
+
+
+@pytest.mark.parametrize('difference', ['run_id', 'actor', 'workflow_ref', 'prompt'])
+def test_terminal_reuse_requires_same_authority_and_request(tmp_path, difference):
+    from service.quota import QuotaManager
+
+    claims = {
+        'repository': 'Synthetic/caller', 'run_id': 'run-1', 'run_attempt': '1',
+        'actor': 'researcher', 'ref': 'refs/heads/main',
+        'workflow_ref': 'Synthetic/caller/.github/workflows/research.yml@refs/heads/main',
+        'job_workflow_ref': 'Synthetic/caller/.github/workflows/research.yml@refs/heads/main',
+    }
+    request = {'prompt': 'bounded task', 'mode': 'review_only', 'research_stage': 'optimization'}
+    stored_key = gateway._request_job_dedupe_key(claims, request)
+    changed_claims = dict(claims)
+    changed_request = dict(request)
+    if difference == 'prompt':
+        changed_request['prompt'] = 'different bounded task'
+    else:
+        changed_claims[difference] = 'different'
+    quota = QuotaManager()
+    with patch.dict('os.environ', {
+        'CODEX_AUDIT_SERVICE_JOB_DIR': str(tmp_path / 'jobs'),
+        'CODEX_AUDIT_SERVICE_QUOTA_STORE': str(tmp_path / 'quota.json'),
+    }, clear=True), patch.object(gateway.time, 'time', return_value=2000):
+        gateway._write_job({
+            'job_id': 'o' * 24, 'status': 'succeeded', 'created_at': 1000,
+            'updated_at': 1001, 'expires_at': 9999, 'request_dedupe_key': stored_key,
+        })
+        with patch.object(gateway, 'get_quota_manager', return_value=quota), patch.object(
+            gateway, '_admit_codex_execute', return_value=None
+        ) as admission, patch.object(quota, 'record_execute') as record, patch.object(
+            gateway, '_submit_job', return_value={'job_id': 'new-job'}
+        ) as submit, patch.object(gateway, 'get_health_monitor'), patch.object(
+            gateway, '_json_response'
+        ) as response:
+            gateway.AiGatewayRequestHandler._handle_execute_async(
+                object(), changed_claims, changed_request
+            )
+
+    admission.assert_called_once()
+    record.assert_called_once()
+    submit.assert_called_once()
+    assert response.call_args.args[2]['job_id'] == 'new-job'
+
+
+def test_expired_or_recovered_terminal_has_explicit_reuse_semantics(tmp_path):
+    from service.quota import QuotaManager
+
+    claims = {'repository': 'Synthetic/caller', 'run_id': 'run-1', 'run_attempt': '1'}
+    request = {'prompt': 'bounded task', 'mode': 'review_only', 'research_stage': 'optimization'}
+    request_key = gateway._request_job_dedupe_key(claims, request)
+    quota = QuotaManager()
+    with patch.dict('os.environ', {
+        'CODEX_AUDIT_SERVICE_JOB_DIR': str(tmp_path / 'jobs'),
+        'CODEX_AUDIT_SERVICE_QUOTA_STORE': str(tmp_path / 'quota.json'),
+    }, clear=True), patch.object(gateway.time, 'time', return_value=2000):
+        gateway._write_job({
+            'job_id': 'e' * 24, 'status': 'succeeded', 'created_at': 900,
+            'updated_at': 901, 'expires_at': 1999, 'request_dedupe_key': request_key,
+        })
+        gateway._write_job({
+            'job_id': 'r' * 24, 'status': 'running', 'created_at': 1000,
+            'updated_at': 1001, 'expires_at': 9999, 'timeout_seconds': 2700,
+            'request_dedupe_key': request_key,
+            'repository': claims['repository'], 'run_id': claims['run_id'],
+            'run_attempt': claims['run_attempt'], 'actor': '',
+            'request_authority': gateway._request_authority(claims),
+            'source_repository': '', 'source_ref': '', 'task': 'execute',
+            'mode': 'review_only', 'provider': 'codex',
+            'research_stage': 'optimization', 'model': 'gpt-5.6-sol',
+            'reasoning_effort': 'high',
+        })
+        with patch.object(gateway, '_record_job_automation_run'), patch.object(gateway, '_audit_log'):
+            assert gateway._recover_orphaned_jobs() == 1
+        with patch.object(gateway, 'get_quota_manager', return_value=quota), patch.object(
+            gateway, '_admit_codex_execute'
+        ) as admission, patch.object(quota, 'record_execute') as record, patch.object(
+            gateway, '_submit_job'
+        ) as submit, patch.object(gateway, '_json_response') as response:
+            gateway.AiGatewayRequestHandler._handle_execute_async(object(), claims, dict(request))
+
+    admission.assert_not_called()
+    record.assert_not_called()
+    submit.assert_not_called()
+    body = response.call_args.args[2]
+    assert body['job_id'] == 'r' * 24
+    assert body['status'] == 'failed'
+    assert body['deduped'] is True
+    assert not (tmp_path / 'jobs' / f"{'e' * 24}.json").exists()
+
+
 def test_original_request_identity_binds_route_inputs_and_ignores_claimed_provider():
     claims = {'repository': 'Synthetic/caller', 'run_id': '1'}
     payload = {'prompt': 'synthetic', 'research_stage': 'drift_analysis', 'allowed_providers': ['codex', 'cursor']}

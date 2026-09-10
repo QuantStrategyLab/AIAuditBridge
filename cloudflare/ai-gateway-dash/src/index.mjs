@@ -18,6 +18,13 @@ const COOKIE_NAME = "dash_session";
 const STATE_COOKIE_NAME = "dash_oauth_state";
 const COOKIE_MAX_AGE = 86400; // 24h
 const SESSION_SECRET_LENGTH = 32;
+const DIAGNOSIS_JOB_ID_PATTERN = /^[A-Za-z0-9_-]{32}$/;
+const DIAGNOSIS_TASKS = new Map([
+  ["operational_data_diagnosis", "operational"],
+  ["historical_operational_diagnosis_rehearsal", "historical_rehearsal"],
+]);
+const DIAGNOSIS_SOURCE_REPOSITORY = "QuantStrategyLab/AIAuditBridge";
+const DIAGNOSIS_MAX_RESPONSE_BYTES = 1_000_000;
 const DASHBOARD_API_ROUTES = new Set([
   "/v1/ai/health",
   "/v1/ai/org-health",
@@ -178,7 +185,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   .actions{display:flex;align-items:center;gap:14px;color:var(--muted);font-size:13px}.status-pill{display:inline-flex;align-items:center;gap:8px;padding:8px 13px;border-radius:999px;font-weight:760;border:1px solid transparent}.status-pill.ok{background:var(--green-bg);color:#b7f7ca;border-color:rgba(34,197,94,.28)}.status-pill.warn{background:var(--amber-bg);color:#fde68a;border-color:rgba(245,158,11,.28)}.status-pill.err{background:var(--red-bg);color:#fecaca;border-color:rgba(248,113,113,.28)}.pulse{width:8px;height:8px;border-radius:50%;display:inline-block}.pulse.ok{background:var(--green);box-shadow:0 0 14px var(--green)}.pulse.warn{background:var(--amber);box-shadow:0 0 14px var(--amber)}.pulse.err{background:var(--red);box-shadow:0 0 14px var(--red)}.user{display:flex;align-items:center;gap:8px;padding-left:14px;border-left:1px solid rgba(148,163,184,.13)}.user img{display:none;width:28px;height:28px;border-radius:50%;background:var(--panel2);border:1px solid rgba(148,163,184,.22)}.logout{display:inline-flex;align-items:center;padding:8px 11px;border:1px solid rgba(148,163,184,.17);border-radius:11px;color:#d7e2f1;text-decoration:none}.logout:hover{border-color:rgba(147,197,253,.38);color:#fff}
   main{width:min(1260px,100%);margin:0 auto;padding:22px 28px 24px}.grid{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:14px}.card{position:relative;min-height:220px;background:linear-gradient(180deg,rgba(16,29,49,.88),rgba(9,18,32,.92));border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow);overflow:hidden}.card:before{content:"";position:absolute;inset:0 0 auto;height:1px;background:linear-gradient(90deg,transparent,rgba(96,165,250,.45),transparent)}.card-body{position:relative;display:flex;flex-direction:column;min-height:inherit;height:100%;padding:20px}.card-body>.card-head+*{flex:1;min-height:0}.span-6{grid-column:span 6}.span-4{grid-column:span 4}.span-8{grid-column:span 8}.span-12{grid-column:span 12}.card-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:16px}.card h2{font-size:18px;color:#fff;letter-spacing:-.035em}.updated{font-size:12px;color:var(--muted2);white-space:nowrap}.loading{display:grid;place-items:center;height:100%;min-height:132px;color:var(--muted)}.spinner{width:40px;height:40px;border-radius:50%;border:4px solid rgba(59,130,246,.18);border-top-color:#60a5fa;animation:spin 1s linear infinite;margin:0 auto 14px}@keyframes spin{to{transform:rotate(360deg)}}.loading strong{display:block;text-align:center;margin-bottom:8px;color:#fff}.loading span{display:block;text-align:center;font-size:13px;color:var(--muted)}
   .stat-row{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;padding:10px 0;border-bottom:1px solid rgba(148,163,184,.08);font-size:13px}.stat-row:last-child{border-bottom:none}.stat-label{min-width:0;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.stat-value{max-width:68%;color:#e8f0fb;font-weight:740;font-variant-numeric:tabular-nums;text-align:right;line-height:1.45;overflow-wrap:anywhere}.stat-value.ok{color:#86efac}.stat-value.warn{color:#fde68a}.stat-value.err{color:#fecaca}.stat-value.info{color:#93c5fd}.big{font-size:42px;font-weight:820;letter-spacing:-.06em;line-height:1;color:#fff;font-variant-numeric:tabular-nums}.big.blue{color:#60a5fa}.big.violet{color:#a78bfa}.subtle{color:var(--muted2);font-size:12px;margin-top:12px;line-height:1.6}.metric-line{display:flex;align-items:flex-end;gap:12px;margin-bottom:18px}.delta{display:inline-flex;align-items:center;padding:5px 9px;border-radius:999px;font-size:12px;font-weight:760}.delta.ok{background:var(--green-bg);color:#86efac}.delta.warn{background:var(--amber-bg);color:#fde68a}.delta.err{background:var(--red-bg);color:#fecaca}.delta.info{background:var(--blue-bg);color:#bfdbfe}
-  .quota-section{display:grid;gap:8px;padding-top:14px;margin-top:14px;border-top:1px solid rgba(148,163,184,.08)}.quota-section:first-child{padding-top:0;margin-top:0;border-top:none}.section-title{color:#c8d7ea;font-size:12px;font-weight:780;letter-spacing:.08em;text-transform:uppercase}.quota-list{display:grid;gap:13px}.quota-item{display:grid;grid-template-columns:minmax(160px,1fr) minmax(160px,260px) 82px;gap:16px;align-items:center}.quota-name{font-size:13px;font-weight:760;color:#e4edf9}.quota-meta{margin-top:3px;color:var(--muted2);font-size:12px;font-variant-numeric:tabular-nums}.bar{height:8px;border-radius:999px;background:rgba(148,163,184,.13);overflow:hidden}.bar-fill{height:100%;border-radius:999px;transition:width .7s cubic-bezier(.4,0,.2,1)}.bar-fill.ok{background:linear-gradient(90deg,#22c55e,#2dd4bf)}.bar-fill.warn{background:linear-gradient(90deg,#f59e0b,#f97316)}.bar-fill.err{background:linear-gradient(90deg,#f87171,#fb7185)}.bar-label{text-align:right;color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums}.badge{display:inline-flex;align-items:center;justify-content:center;padding:4px 9px;border-radius:8px;font-size:11px;font-weight:760;white-space:nowrap}.badge-ok{background:var(--green-bg);color:#86efac}.badge-warn{background:var(--amber-bg);color:#fde68a}.badge-err{background:var(--red-bg);color:#fecaca}.badge-info{background:var(--blue-bg);color:#bfdbfe}.badge-violet{background:var(--violet-bg);color:#ddd6fe}
+  .quota-section{display:grid;gap:8px;padding-top:14px;margin-top:14px;border-top:1px solid rgba(148,163,184,.08)}.quota-section:first-child{padding-top:0;margin-top:0;border-top:none}.section-title{color:#c8d7ea;font-size:12px;font-weight:780;letter-spacing:.08em;text-transform:uppercase}.quota-list{display:grid;gap:13px}.quota-item{display:grid;grid-template-columns:minmax(160px,1fr) minmax(160px,260px) 82px;gap:16px;align-items:center}.quota-name{font-size:13px;font-weight:760;color:#e4edf9}.quota-meta{margin-top:3px;color:var(--muted2);font-size:12px;font-variant-numeric:tabular-nums}.bar{height:8px;border-radius:999px;background:rgba(148,163,184,.13);overflow:hidden}.bar-fill{height:100%;border-radius:999px;transition:width .7s cubic-bezier(.4,0,.2,1)}.bar-fill.ok{background:linear-gradient(90deg,#22c55e,#2dd4bf)}.bar-fill.warn{background:linear-gradient(90deg,#f59e0b,#f97316)}.bar-fill.err{background:linear-gradient(90deg,#f87171,#fb7185)}.bar-label{text-align:right;color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums}.badge{display:inline-flex;align-items:center;justify-content:center;padding:4px 9px;border-radius:8px;font-size:11px;font-weight:760;white-space:nowrap}.badge-ok{background:var(--green-bg);color:#86efac}.badge-warn{background:var(--amber-bg);color:#fde68a}.badge-err{background:var(--red-bg);color:#fecaca}.badge-info{background:var(--blue-bg);color:#bfdbfe}.badge-violet{background:var(--violet-bg);color:#ddd6fe}.diagnosis-item{padding:12px 0;border-bottom:1px solid rgba(148,163,184,.08)}.diagnosis-item:last-child{border-bottom:none}.diagnosis-line{display:flex;align-items:center;justify-content:space-between;gap:12px}.diagnosis-meta{color:var(--muted2);font-size:12px}.diagnosis-button{padding:6px 10px;border:1px solid rgba(147,197,253,.28);border-radius:9px;background:var(--blue-bg);color:#bfdbfe;cursor:pointer}.diagnosis-output{margin-top:10px;padding:12px;border-radius:10px;background:rgba(5,9,20,.55);color:#d8e3f1;white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.65 "SFMono-Regular","JetBrains Mono",ui-monospace,monospace}
   table{width:100%;border-collapse:collapse;font-size:12px}thead th{padding:0 10px 11px 0;text-align:left;color:var(--muted2);font-size:11px;font-weight:760;text-transform:uppercase;letter-spacing:.08em}tbody td{padding:11px 10px 11px 0;border-top:1px solid rgba(148,163,184,.08);vertical-align:middle;color:#d8e3f1}.mono{font-family:"SFMono-Regular","JetBrains Mono",ui-monospace,monospace;font-size:11px}.table-wrap{overflow:auto}.empty{display:grid;place-items:center;height:100%;min-height:132px;text-align:center;color:var(--muted2);font-size:13px}.empty strong{display:block;color:#d7e2f1;font-size:15px;margin-bottom:7px}.panel-error{display:grid;place-items:center;height:100%;min-height:132px;padding:16px;border:1px solid rgba(248,113,113,.22);border-radius:14px;background:rgba(248,113,113,.07);text-align:center;color:#fca5a5;font-size:13px}.panel-error strong{display:block;color:#fee2e2;font-size:15px;margin-bottom:7px}.panel-error span{overflow-wrap:anywhere}.toast{position:fixed;top:18px;right:18px;max-width:420px;background:rgba(127,29,29,.88);border:1px solid rgba(248,113,113,.42);color:#fecaca;padding:12px 15px;border-radius:14px;font-size:13px;display:none;z-index:100;box-shadow:0 18px 50px rgba(0,0,0,.35)}footer{display:flex;justify-content:space-between;gap:16px;padding:18px 28px;border-top:1px solid rgba(148,163,184,.10);color:var(--muted3);font-size:12px}
   @media(max-width:980px){.span-4,.span-6,.span-8{grid-column:span 12}.quota-item{grid-template-columns:1fr}.bar-label{text-align:left}.topbar,.actions{align-items:flex-start;flex-direction:column}.user{padding-left:0;border-left:none}}
   @media(max-width:640px){main{padding:16px}.topbar{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:start;gap:14px 18px;padding:16px}.brand{grid-column:1;grid-row:1;align-items:flex-start;flex-direction:column;gap:8px}.actions{display:contents}.actions>.status-pill{grid-column:2;grid-row:1;justify-self:end}.actions>span:nth-child(2){grid-column:1;grid-row:2;align-self:center;color:var(--muted2)}.actions>.user{grid-column:2;grid-row:2;justify-self:end;padding-left:0;border-left:none}.card-body{padding:17px}.stat-row{display:grid;grid-template-columns:1fr;gap:5px}.stat-label{white-space:normal}.stat-value{max-width:100%;text-align:left}.big{font-size:34px}footer{flex-direction:column}.card{min-height:190px}}
@@ -201,6 +208,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       <article class="card span-4"><div class="card-body"><div class="card-head"><h2>访问范围</h2><span class="updated">内部</span></div><div class="empty"><div><strong>组织成员可见</strong><span>所有数据仅限 QuantStrategyLab 组织成员访问，严禁外泄。</span></div></div></div></article>
       <article class="card span-6"><div class="card-body"><div class="card-head"><h2>自治决策 · 7 天</h2><span class="updated" id="autonomy-updated">更新: —</span></div><div id="autonomy"></div></div></article>
       <article class="card span-6"><div class="card-body"><div class="card-head"><h2>人工审计队列</h2><span class="updated" id="human-audit-updated">更新: —</span></div><div id="human-audit"></div></div></article>
+      <article class="card span-12"><div class="card-body"><div class="card-head"><h2>诊断记录</h2><span class="updated" id="diagnoses-updated">更新: —</span></div><div id="diagnoses"></div></div></article>
       <article class="card span-12"><div class="card-body"><div class="card-head"><h2>最近变更 · 7 天</h2><span class="updated" id="changes-updated">更新: —</span></div><div class="table-wrap" id="changes"></div></div></article>
     </section>
   </main>
@@ -227,7 +235,7 @@ function badge(kind,text){return el("span","badge badge-"+kind,text)}
 function loading(title,text){return '<div class="loading"><div><div class="spinner"></div><strong>'+title+'</strong><span>'+text+'</span></div></div>'}
 function progressClass(p){return p>80?"err":p>50?"warn":"ok"}
 async function fetchJSON(path){const r=await fetch(API+path);let data=null;try{data=await r.json()}catch(e){}if(!r.ok||data&&data.status==="error"){if(path==="/v1/ai/org-health"&&r.status===503&&data&&data.status==="unavailable")return data;const detail=data&&data.error?": "+data.error:"";throw new Error(path+": "+r.status+detail)}if(!data)throw new Error(path+": invalid JSON");return data}
-async function refresh(){const requests=[["/v1/ai/health","health","服务健康加载失败",renderHealth],["/v1/ai/org-health","org-health","组织健康加载失败",renderOrgHealth],["/v1/ai/quota","quota","配额消耗加载失败",d=>renderQuota(d.quota||d)],["/v1/ai/changes/effectiveness?days=90","effectiveness","有效性报告加载失败",d=>renderEffectiveness(d.report||d)],["/v1/ai/feedback/shadow","shadow","影子审计分歧加载失败",d=>renderShadow(d.disagreements||[])],["/v1/ai/changes?days=7","changes","最近变更加载失败",d=>renderChangePanels(d.changes||[])]],results=await Promise.allSettled(requests.map(r=>fetchJSON(r[0]))),failures=[];results.forEach((result,i)=>{const item=requests[i];try{if(result.status==="fulfilled")item[3](result.value);else throw result.reason}catch(e){failures.push(publicErrorMessage(e));if(item[1]==="changes"){panelError("autonomy","自治决策加载失败",e);panelError("human-audit","人工审计队列加载失败",e)}panelError(item[1],item[2],e)}});document.getElementById("last-refresh").textContent=new Date().toLocaleTimeString();if(failures.length){setStatus("error");showToast("API: "+failures.slice(0,2).join("；"))}}
+async function refresh(){const requests=[["/v1/ai/health","health","服务健康加载失败",renderHealth],["/v1/ai/org-health","org-health","组织健康加载失败",renderOrgHealth],["/v1/ai/quota","quota","配额消耗加载失败",d=>renderQuota(d.quota||d)],["/v1/ai/changes/effectiveness?days=90","effectiveness","有效性报告加载失败",d=>renderEffectiveness(d.report||d)],["/v1/ai/feedback/shadow","shadow","影子审计分歧加载失败",d=>renderShadow(d.disagreements||[])],["/v1/ai/changes?days=7","changes","最近变更加载失败",d=>renderChangePanels(d.changes||[])],["/diagnoses","diagnoses","数据故障诊断加载失败",renderDiagnoses]],results=await Promise.allSettled(requests.map(r=>fetchJSON(r[0]))),failures=[];results.forEach((result,i)=>{const item=requests[i];try{if(result.status==="fulfilled")item[3](result.value);else throw result.reason}catch(e){failures.push(publicErrorMessage(e));if(item[1]==="changes"){panelError("autonomy","自治决策加载失败",e);panelError("human-audit","人工审计队列加载失败",e)}panelError(item[1],item[2],e)}});document.getElementById("last-refresh").textContent=new Date().toLocaleTimeString();if(failures.length){setStatus("error");showToast("API: "+failures.slice(0,2).join("；"))}}
 function healthReasonText(r){const path=r.path||"endpoint";if(r.reason==="error_rate")return path+" 错误率 "+fmtPct(r.value||0)+" ≥ "+fmtPct(r.threshold||0);if(r.reason==="p95_latency_ms")return path+" P95 "+fmtNum(r.value||0)+" ms ≥ "+fmtNum(r.threshold||0)+" ms";return path+" "+(r.reason||"degraded")}
 function renderHealth(h){setStatus(h.status||"unknown");setUpdated("health-updated");const target=document.getElementById("health"),endpoints=h.endpoints||[],reasons=h.degradation_reasons||[],statusEndpoints=endpoints.filter(i=>i.latency_profile!=="background_job"),backgroundEndpoints=endpoints.filter(i=>i.latency_profile==="background_job"),total=endpoints.reduce((s,i)=>s+(Number(i.total)||0),0),errors=endpoints.reduce((s,i)=>s+(Number(i.errors)||0),0),p95=Math.max(0,...statusEndpoints.map(i=>Number(i.p95_ms)||0)),backgroundP95=Math.max(0,...backgroundEndpoints.map(i=>Number(i.p95_ms)||0)),details=el("div","");append(details,statRow("接口数量",endpoints.length,"info"),statRow("总请求",fmtNum(total),""),statRow("错误",fmtNum(errors),errors?"err":"ok"),statRow("在线接口 P95",fmtNum(p95)+" ms",p95>30000?"err":p95>10000?"warn":"ok"));if(backgroundP95)append(details,statRow("后台任务 P95",fmtNum(backgroundP95)+" ms","info"));if(reasons.length){reasons.slice(0,3).forEach((reason,i)=>append(details,statRow(i?"降级原因 "+(i+1):"降级原因",healthReasonText(reason),clsStatus(reason.severity||h.status))));if(reasons.length>3)append(details,statRow("更多原因","+"+fmtNum(reasons.length-3),"warn"))}else if(h.last_error&&h.last_error.message){append(details,statRow("最近错误",String(h.last_error.message).slice(0,80),"warn"))}clear(target);append(target,append(el("div","metric-line"),el("div","big ",statusText(h.status||"unknown")),el("span","delta "+clsStatus(h.status||"unknown"),fmtNum(Math.round((h.uptime_seconds||0)/3600))+" h")),details)}
 function orgReasonText(reason){return reason==="latest_run_in_progress"?"最新 workflow 运行中":reason==="no_workflow_runs"?"暂无 workflow run":reason==="github_api_error"?"GitHub API 读取失败":String(reason||"需要关注").replaceAll("_"," ")}
@@ -249,6 +257,9 @@ function quotaSection(title,node){return append(el("section","quota-section"),el
 function renderQuota(q){setUpdated("quota-updated");const target=document.getElementById("quota"),repos=q.repos||{},repoCount=Object.keys(repos).length,summary=q.summary||null,account=summary&&summary.codex_account&&summary.codex_account.status==="available"?summary.codex_account:null,openai=summary&&summary.openai_account&&summary.openai_account.status==="available"?summary.openai_account:null,anthropic=summary&&summary.anthropic_account&&summary.anthropic_account.status==="available"?summary.anthropic_account:null,hasSummaryUsage=summary&&(account||openai||anthropic||quotaHasUsage(summary.combined)||quotaHasUsage(summary.api_key)||quotaHasUsage(summary.codex)||quotaHasUsage(summary.legacy_unknown));clear(target);if(summary&&(repoCount||hasSummaryUsage)){if(openai||anthropic||account){const provider=el("div","");if(openai)append(provider,providerAccountRow("GPT API 账户",openai,"completions"),providerCostRow("GPT 组织成本",openai.organization_costs,openai.window_days));if(anthropic)append(provider,providerAccountRow("Claude API 账户",anthropic,"messages"),providerCostRow("Claude 成本",anthropic.costs,anthropic.window_days));if(account)append(provider,codexAccountRow(account));target.appendChild(quotaSection("实时账户用量",provider))}const internal=el("div","");append(internal,quotaTotalRow("内部合计估算",summary.combined||{}),quotaUsageRow("本服务 API Key 估算",summary.api_key||{}),quotaUsageRow("本服务 Codex 估算",summary.codex||{}));if(quotaHasUsage(summary.legacy_unknown))append(internal,quotaUsageRow("历史未拆分",summary.legacy_unknown||{},"未归属"));target.appendChild(quotaSection("内部成本估算",internal));if(repoCount){const list=el("div","quota-list");appendRepoQuotaRows(list,repos);target.appendChild(quotaSection("仓库日预算",list))}target.appendChild(el("div","subtle","实时账户用量来自 GPT/Claude Admin Usage 与本机 Codex rate-limit 快照；成本暂不可用表示对应 Cost API 未返回金额，不代表没有用量。内部成本估算仅统计本服务记录的 API Key/Codex 调用，不等同于云厂商账单。"));return}if(!repoCount){empty(target,"暂无用量","当前窗口内没有记录到配额消耗。API Key 与 Codex 均无用量记录。");return}const list=el("div","quota-list");appendRepoQuotaRows(list,repos);target.appendChild(list)}
 function renderEffectiveness(e){setUpdated("effectiveness-updated");const target=document.getElementById("effectiveness"),evaluated=Number(e.evaluated)||0,pending=Number(e.pending)||0,total=Number(e.total_changes)||evaluated+pending,rate=Number(e.improvement_rate)||0;clear(target);if(!total){empty(target,"暂无有效性样本","最近 90 天没有登记可评估的变更；有变更完成并回填评估后，这里会显示改善率。");return}if(!evaluated){append(target,append(el("div","metric-line"),el("div","big blue","待评估"),el("span","delta info",fmtNum(total)+" 条")),append(el("div",""),statRow("已登记",total,"info"),statRow("待评估",pending,"warn"),statRow("改善率","评估后生成","info")));return}append(target,append(el("div","metric-line"),el("div","big blue",fmtPct(rate)),el("span","delta "+(rate>0.7?"ok":rate>0.4?"warn":"info"),"改善率")),append(el("div",""),statRow("已评估",evaluated,"info"),statRow("改善",e.improved||0,"ok"),statRow("退化",e.degraded||0,"err"),statRow("持平",e.neutral||0,""),statRow("待评估",pending,"info")))}
 function renderShadow(items){setUpdated("shadow-updated");const target=document.getElementById("shadow"),total=items.reduce((sum,item)=>sum+(Number(item.disagreement_count)||0),0);clear(target);if(!items.length){empty(target,"无活跃分歧","AI 影子审计与确定性路由当前没有待复核分歧；有异常累积时会在这里提示。");return}append(target,append(el("div","metric-line"),el("div","big violet",fmtNum(total)),el("span","delta warn","待复核")));for(const d of items.slice(0,5)){const row=el("div","stat-row"),value=el("span","stat-value warn");append(value,badge("warn",(d.disagreement_count||0)+"x"),document.createTextNode(" "+(d.ai_verdict||"")));append(row,el("span","stat-label",d.plugin||d.repo||"shadow"),value);target.appendChild(row)}}
+function diagnosisStatusText(status){return status==="reviewed"||status==="succeeded"?"诊断完成":status==="queued"?"等待诊断":status==="running"?"诊断中":status==="failed"||status==="blocked"?"诊断未完成":"状态未知"}
+function renderDiagnosisItems(target,items,emptyTitle,emptyText){if(!items.length){empty(target,emptyTitle,emptyText);return}for(const item of items.slice(0,20)){const box=el("div","diagnosis-item"),line=el("div","diagnosis-line"),meta=el("div",""),output=el("pre","diagnosis-output","诊断完成仅提供建议，不授予修改、发布或交易权限。"),button=el("button","diagnosis-button","查看结果");output.hidden=true;button.type="button";append(meta,el("div","",diagnosisStatusText(item.status)),el("div","diagnosis-meta",item.updated_at?new Date(Number(item.updated_at)*1000).toLocaleString():"时间未知"));button.addEventListener("click",async()=>{output.hidden=false;output.textContent="正在读取诊断结果…";try{const detail=await fetchJSON("/diagnoses/"+encodeURIComponent(item.job_id)),diagnosis=detail.diagnosis||{};output.textContent=diagnosis.output||diagnosis.message||"诊断结果不可用"}catch(e){output.textContent="诊断结果暂不可用"}});append(line,meta,button);append(box,line,output);target.appendChild(box)}}
+function renderDiagnoses(data){setUpdated("diagnoses-updated");const target=document.getElementById("diagnoses"),items=Array.isArray(data.diagnoses)?data.diagnoses:[],operational=items.filter(i=>i.kind==="operational"),rehearsals=items.filter(i=>i.kind==="historical_rehearsal"),operationalSection=el("section",""),rehearsalSection=el("section","");clear(target);append(operationalSection,el("h3","","数据故障诊断"));renderDiagnosisItems(operationalSection,operational,"暂无数据故障诊断","尚无生产数据故障诊断记录。");append(rehearsalSection,el("h3","","历史故障诊断演练"));renderDiagnosisItems(rehearsalSection,rehearsals,"暂无历史演练","尚未运行明确标记的历史故障诊断演练。");append(target,operationalSection,rehearsalSection)}
 function effectText(effect){return effect==="improved"?"改善":effect==="degraded"?"退化":effect==="neutral"?"持平":effect==="pending"?"待评估":effect||"待评估"}
 function actionText(action){return action==="auto_merge"?"自动合并":action==="auto_pr"?"自动 PR":action==="auto_notify"?"自动通知":action==="escalate"?"升级人工":action==="manual"?"人工处理":action||"变更"}
 function riskText(risk){return risk==="critical"?"关键":risk==="high"?"高":risk==="medium"?"中":risk==="low"?"低":risk||"未知"}
@@ -261,7 +272,7 @@ function renderChanges(items){setUpdated("changes-updated");const target=documen
 function safeExternalUrl(value){try{const u=new URL(value);return u.protocol==="https:"?u.toString():""}catch(e){return ""}}
 function safeAvatarUrl(value){try{const u=new URL(value);return u.protocol==="https:"?u.toString():""}catch(e){return ""}}
 async function loadUser(){try{const r=await fetch("/api/user");if(r.ok){const u=await r.json(),img=document.getElementById("avatar"),avatar=safeAvatarUrl(u.avatar_url);document.getElementById("username").textContent=u.login||"";if(avatar){img.src=avatar;img.style.display="block"}else{img.removeAttribute("src");img.style.display="none"}}}catch(e){}}
-document.getElementById("health").innerHTML=loading("加载中…","正在获取服务健康数据");document.getElementById("org-health").innerHTML=loading("加载中…","正在获取组织健康数据");document.getElementById("quota").innerHTML=loading("加载中…","正在获取配额消耗数据");document.getElementById("effectiveness").innerHTML=loading("加载中…","正在获取有效性报告");document.getElementById("shadow").innerHTML=loading("加载中…","正在获取影子审计分歧数据");document.getElementById("autonomy").innerHTML=loading("加载中…","正在获取自治决策数据");document.getElementById("human-audit").innerHTML=loading("加载中…","正在获取人工审计队列");document.getElementById("changes").innerHTML=loading("加载中…","正在获取最近变更数据");loadUser();refresh();refreshTimer=setInterval(refresh,30000);
+document.getElementById("health").innerHTML=loading("加载中…","正在获取服务健康数据");document.getElementById("org-health").innerHTML=loading("加载中…","正在获取组织健康数据");document.getElementById("quota").innerHTML=loading("加载中…","正在获取配额消耗数据");document.getElementById("effectiveness").innerHTML=loading("加载中…","正在获取有效性报告");document.getElementById("shadow").innerHTML=loading("加载中…","正在获取影子审计分歧数据");document.getElementById("autonomy").innerHTML=loading("加载中…","正在获取自治决策数据");document.getElementById("human-audit").innerHTML=loading("加载中…","正在获取人工审计队列");document.getElementById("diagnoses").innerHTML=loading("加载中…","正在获取数据故障诊断");document.getElementById("changes").innerHTML=loading("加载中…","正在获取最近变更数据");loadUser();refresh();refreshTimer=setInterval(refresh,30000);
 </script>
 </body></html>`;
 
@@ -471,6 +482,137 @@ async function proxyAPI(path, search, env) {
   });
 }
 
+function diagnosisUpstreamUrl(env, jobId = "") {
+  const rawOrigin = String(env.AI_GATEWAY_ORIGIN_URL || "").trim();
+  if (!rawOrigin) throw new Error("origin_unavailable");
+  const origin = new URL(rawOrigin);
+  if (origin.protocol !== "https:") throw new Error("origin_unavailable");
+  const basePath = withoutTrailingSlash(origin.pathname);
+  const path = "/v1/ai/automation/runs" + (jobId ? "/" + jobId : "");
+  origin.pathname = !basePath || basePath === "/" || shouldIgnoreLegacyEndpointBase(basePath, path)
+    ? path
+    : basePath + path;
+  origin.search = jobId ? "" : "?limit=100";
+  origin.hash = "";
+  return origin.toString();
+}
+
+async function fetchDiagnosisUpstream(env, jobId = "") {
+  const token = String(env.DASHBOARD_API_TOKEN || "").trim();
+  const response = await fetch(diagnosisUpstreamUrl(env, jobId), {
+    method: "GET",
+    redirect: "manual",
+    signal: AbortSignal.timeout(5000),
+    headers: {
+      Authorization: token ? "Bearer " + token : "",
+      Accept: "application/json",
+      "User-Agent": "AiGatewayDashboard/1.0",
+    },
+  });
+  if (response.status >= 300 && response.status < 400) throw new Error("upstream_redirect_rejected");
+  const declaredLength = Number(response.headers.get("content-length") || 0);
+  if (declaredLength > DIAGNOSIS_MAX_RESPONSE_BYTES) throw new Error("upstream_response_too_large");
+  const chunks = [];
+  let size = 0;
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error("upstream_response_invalid");
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > DIAGNOSIS_MAX_RESPONSE_BYTES) {
+      await reader.cancel();
+      throw new Error("upstream_response_too_large");
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  let payload = null;
+  try {
+    payload = JSON.parse(new TextDecoder().decode(bytes));
+  } catch (e) {
+    throw new Error("upstream_response_invalid");
+  }
+  if (response.status === 404) return { missing: true, payload: null };
+  if (!response.ok || !payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new Error("upstream_unavailable");
+  }
+  return { missing: false, payload };
+}
+
+function isOperationalDiagnosisRun(run, expectedId = "") {
+  if (!run || typeof run !== "object" || Array.isArray(run)) return false;
+  const metadata = run.metadata;
+  const runId = String(run.run_id || "");
+  return DIAGNOSIS_JOB_ID_PATTERN.test(runId)
+    && (!expectedId || runId === expectedId)
+    && DIAGNOSIS_TASKS.has(run.task_name)
+    && metadata && typeof metadata === "object" && !Array.isArray(metadata)
+    && metadata.origin === "service_job"
+    && metadata.source_repository === DIAGNOSIS_SOURCE_REPOSITORY
+    && metadata.mode === "review_only";
+}
+
+function diagnosisKind(run) {
+  return DIAGNOSIS_TASKS.get(run.task_name) || "unknown";
+}
+
+function diagnosisListItem(run) {
+  const status = String(run.metadata?.diagnosis_status || "unknown");
+  return {
+    job_id: String(run.run_id),
+    status: ["queued", "running", "succeeded", "failed"].includes(status) ? status : "unknown",
+    updated_at: Number.isFinite(Number(run.updated_at)) ? Number(run.updated_at) : 0,
+    kind: diagnosisKind(run),
+  };
+}
+
+async function listDiagnoses(env) {
+  const upstream = await fetchDiagnosisUpstream(env);
+  const runs = upstream.payload?.ledger?.runs;
+  if (!Array.isArray(runs)) throw new Error("upstream_response_invalid");
+  const diagnoses = runs
+    .filter(run => isOperationalDiagnosisRun(run))
+    .sort((a, b) => Number(b.updated_at || 0) - Number(a.updated_at || 0))
+    .slice(0, 20)
+    .map(diagnosisListItem);
+  return json({ status: "ok", diagnoses });
+}
+
+async function diagnosisDetail(env, jobId) {
+  const upstream = await fetchDiagnosisUpstream(env, jobId);
+  if (upstream.missing) {
+    return json({ status: "ok", diagnosis: { job_id: jobId, status: "missing", message: "诊断记录已过期或不存在。", advisory: true } });
+  }
+  const run = upstream.payload?.run;
+  if (!isOperationalDiagnosisRun(run, jobId)) return json({ status: "error", error: "diagnosis_not_found" }, 404);
+  const metadata = run.metadata;
+  const rawStatus = String(metadata.diagnosis_status || "unknown");
+  const status = ["queued", "running", "succeeded", "failed"].includes(rawStatus) ? rawStatus : "unknown";
+  const diagnosis = {
+    job_id: jobId,
+    status,
+    updated_at: Number.isFinite(Number(run.updated_at)) ? Number(run.updated_at) : 0,
+    advisory: true,
+    kind: diagnosisKind(run),
+  };
+  if (status === "succeeded" && typeof metadata.diagnosis_summary === "string" && metadata.diagnosis_summary.trim()) {
+    diagnosis.output = metadata.diagnosis_summary.slice(0, 500);
+  } else if (status === "queued" || status === "running") {
+    diagnosis.message = "诊断尚未完成。";
+  } else if (status === "failed" || status === "blocked") {
+    diagnosis.message = "诊断未完成，未提供结果摘要。";
+  } else {
+    diagnosis.message = "诊断摘要尚未提供。";
+  }
+  return json({ status: "ok", diagnosis });
+}
+
 // ── Main ───────────────────────────────────────────────────────────────
 
 export default {
@@ -564,6 +706,26 @@ export default {
       const session = await getSession(token, env);
       if (!session) return json({ error: "unauthorized" }, 401);
       return json({ login: session.login, avatar_url: session.avatar_url });
+    }
+
+    // ── Bounded diagnosis read API (requires session) ─────────────
+    if (path === "/api/diagnoses" || path.startsWith("/api/diagnoses/")) {
+      const token = getCookie(request, COOKIE_NAME);
+      const session = await getSession(token, env);
+      if (!session) return json({ status: "error", error: "unauthorized" }, 401);
+      if (request.method !== "GET") {
+        return new Response(null, { status: 405, headers: { Allow: "GET" } });
+      }
+      try {
+        if (path === "/api/diagnoses") return await listDiagnoses(env);
+        const jobId = path.slice("/api/diagnoses/".length);
+        if (!DIAGNOSIS_JOB_ID_PATTERN.test(jobId)) {
+          return json({ status: "error", error: "diagnosis_not_found" }, 404);
+        }
+        return await diagnosisDetail(env, jobId);
+      } catch (e) {
+        return json({ status: "error", error: "诊断数据暂不可用" }, 502);
+      }
     }
 
     // ── API proxy (requires session) ───────────────────────────────

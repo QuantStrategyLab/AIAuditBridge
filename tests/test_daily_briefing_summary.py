@@ -6,6 +6,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import urllib.error
 from unittest.mock import patch
@@ -24,6 +25,29 @@ ENV = {
     "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "synthetic",
     "GITHUB_REPOSITORY": "QuantStrategyLab/AIAuditBridge",
 }
+
+
+@pytest.mark.parametrize("clock, expected_day", [
+    ("2026-09-09T22:45:00+00:00", "2026-09-09"),
+    ("2026-09-10T00:36:31+00:00", "2026-09-09"),
+    ("2026-09-10T21:00:00+00:00", "2026-09-09"),
+    ("2026-09-10T22:30:00+00:00", "2026-09-10"),
+    ("2027-01-01T00:20:00+00:00", "2026-12-31"),
+])
+def test_workflow_selects_report_slot_across_delayed_runs(clock, expected_day, capsys):
+    workflow = Path(__file__).resolve().parents[1] / ".github/workflows/codex_audit.yml"
+    selector = re.search(r"report_day=\"\$\(python3 -c '([^']+)'\)\"", workflow.read_text())
+    assert selector is not None
+    now = datetime.fromisoformat(clock)
+
+    class FrozenClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now.astimezone(tz)
+
+    with patch("datetime.datetime", FrozenClock):
+        exec(selector.group(1), {})
+    assert capsys.readouterr().out.strip() == expected_day
 
 
 @pytest.fixture
@@ -179,6 +203,28 @@ def test_daily_job_uses_existing_oidc_workflow_and_only_exports_summary():
     assert "ACTIONS_ID_TOKEN_REQUEST_TOKEN" not in job
     assert "uses: actions/upload-artifact@v7" in job and "if: always()" in job
     assert "path: daily-ai-summary.json" in job
+
+
+def test_historical_diagnosis_rehearsal_is_manual_oidc_codex_only():
+    workflow = Path(__file__).resolve().parents[1] / ".github/workflows/codex_audit.yml"
+    text = workflow.read_text()
+    job = text.split("\n  historical-diagnosis-rehearsal:\n", 1)[1]
+    assert "github.event_name == 'workflow_dispatch'" in job
+    assert "inputs.historical_diagnosis_rehearsal == true" in job
+    assert "github.ref == 'refs/heads/main'" in job
+    assert "GITHUB_RUN_ATTEMPT" in job and '"1"' in job
+    assert "permissions:\n      contents: read\n      id-token: write" in job
+    assert "AI_GATEWAY_RESEARCH_PROVIDERS: codex" in job
+    assert "--diagnose-static-token-guard-rehearsal" in job
+    assert "cancel-in-progress:" in text
+    assert "inputs.historical_diagnosis_rehearsal != true" in text.split("\n\njobs:", 1)[0]
+    assert "CODEX_AUDIT_SERVICE_TOKEN" not in job
+    assert "OPENAI_API_KEY" not in job and "ANTHROPIC_API_KEY" not in job
+    assert "schedule" not in job.split("\n  ", 1)[0]
+    daily_job = text.split("\n  daily-summary:\n", 1)[1].split("\n  operational-diagnosis:", 1)[0]
+    operational_job = text.split("\n  operational-diagnosis:\n", 1)[1].split("\n  historical-diagnosis-rehearsal:", 1)[0]
+    assert "inputs.historical_diagnosis_rehearsal != true" in daily_job
+    assert "inputs.historical_diagnosis_rehearsal != true" in operational_job
 
 
 @pytest.mark.parametrize("kind", ["old_service", "quota", "failed", "wrong_route", "wrong_job"])

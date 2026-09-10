@@ -573,7 +573,7 @@ def test_sdk_to_actual_auth_and_execute_handler_preserves_aab_caller_cn_source(d
 
     with patch("client.gateway_client.urllib.request.urlopen", side_effect=http), patch("client.gateway_client.time.sleep"), \
             patch.object(gateway, "get_quota_manager", return_value=quota), \
-            patch.object(gateway, "_cleanup_expired_jobs"), patch.object(gateway, "_find_active_job_by_dedupe_key", return_value=None), \
+            patch.object(gateway, "_cleanup_expired_jobs"), patch.object(gateway, "_find_job_by_dedupe_key", return_value=None), \
             patch.object(gateway, "_active_job_count", return_value=0), patch.object(gateway, "_admit_codex_execute", side_effect=admit), \
             patch.object(gateway, "_submit_job", submit), patch.object(gateway, "get_health_monitor"), \
             patch.object(runtime.client, "analyze", side_effect=AssertionError("paid fallback")):
