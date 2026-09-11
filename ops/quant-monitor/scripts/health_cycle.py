@@ -265,10 +265,17 @@ def _load_operational_diagnosis_state(root: Path) -> dict[str, Any]:
         for item in attempts
     ):
         raise OSError("operational diagnosis state is unavailable")
+    attempt_date = payload.get("operational_diagnosis_last_attempt_date")
+    if attempt_date is not None:
+        try:
+            if not isinstance(attempt_date, str) or datetime.strptime(attempt_date, "%Y-%m-%d").strftime("%Y-%m-%d") != attempt_date:
+                raise ValueError("invalid date")
+        except ValueError as exc:
+            raise OSError("operational diagnosis state is unavailable") from exc
     return payload
 
 
-def _record_operational_diagnosis_attempt(root: Path, fingerprint: str) -> None:
+def _record_operational_diagnosis_attempt(root: Path, fingerprint: str, *, attempt_date: str | None = None) -> None:
     payload = _load_operational_diagnosis_state(root)
     attempts = payload.get("operational_diagnosis_attempts")
     if not isinstance(attempts, list):
@@ -279,6 +286,8 @@ def _record_operational_diagnosis_attempt(root: Path, fingerprint: str) -> None:
         schema_version="quant_monitor_alert_state.v1",
         operational_diagnosis_attempts=attempts,
     )
+    if attempt_date is not None:
+        payload["operational_diagnosis_last_attempt_date"] = attempt_date
     _write_alert_state(root, payload)
 
 
@@ -291,7 +300,7 @@ def _forget_operational_diagnosis_attempt(root: Path, fingerprint: str) -> None:
     _write_alert_state(root, payload)
 
 
-def _operational_diagnosis_prompt(data_errors: list[dict[str, str]]) -> str:
+def _operational_diagnosis_prompt(data_errors: list[dict[str, str]], *, observation: dict[str, str] | None = None) -> str:
     incidents: list[dict[str, str]] = []
     for error in data_errors:
         domain = str(error.get("domain") or "")
@@ -307,10 +316,18 @@ def _operational_diagnosis_prompt(data_errors: list[dict[str, str]]) -> str:
             }
         )
     incidents.sort(key=lambda item: (item["domain"], item["code"], item["error_type"]))
-    payload = json.dumps({"incidents": incidents}, sort_keys=True, separators=(",", ":"))
+    context: dict[str, Any] = {"incidents": incidents}
+    if observation is not None:
+        context["observation"] = {key: observation[key] for key in (
+            "observed_at", "latest_cycle_at", "current_state",
+        )}
+    payload = json.dumps(context, sort_keys=True, separators=(",", ":"))
     return (
         "Diagnose these sanitized quant-monitor data availability incidents. "
         "Use repository evidence read-only. Return likely cause, evidence to inspect, and safe next checks. "
+        "When observation metadata is present, state both observation times and distinguish still_observed, "
+        "partially_observed, and not_observed_in_latest. Absence from the latest cycle does not prove "
+        "account or trading recovery. Historical diagnosis never authorizes a repair or replay. "
         "Do not place orders, access accounts, change files, create patches, publish, deploy, or notify.\n"
         + payload
     )
@@ -405,6 +422,8 @@ def _run_operational_diagnosis(
     data_errors: list[dict[str, str]],
     fingerprint: str,
     *,
+    observation: dict[str, str] | None = None,
+    attempt_date: str | None = None,
     config_loader=None,
     client_factory=None,
 ) -> dict[str, Any]:
@@ -413,6 +432,9 @@ def _run_operational_diagnosis(
     if not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
         return {"status": "rejected", "reason": "invalid_fingerprint"}
     try:
+        last_date = _load_operational_diagnosis_state(root).get("operational_diagnosis_last_attempt_date")
+        if attempt_date is not None and last_date is not None and last_date >= attempt_date:
+            return {"status": "skipped", "reason": "daily_attempt_limit"}
         if _operational_diagnosis_attempted(root, fingerprint):
             return {"status": "skipped", "reason": "already_attempted"}
     except OSError:
@@ -436,12 +458,12 @@ def _run_operational_diagnosis(
     except (ImportError, OSError, RuntimeError, ValueError):
         return {"status": "deferred", "reason": "ai_gateway_not_configured"}
     try:
-        _record_operational_diagnosis_attempt(root, fingerprint)
+        _record_operational_diagnosis_attempt(root, fingerprint, attempt_date=attempt_date)
     except OSError:
         return {"status": "deferred", "reason": "dedupe_state_unavailable"}
     try:
         result = client.execute(
-            _operational_diagnosis_prompt(data_errors),
+            _operational_diagnosis_prompt(data_errors, observation=observation),
             task="operational_data_diagnosis",
             mode="review_only",
             sandbox="read-only",
@@ -466,39 +488,87 @@ def _run_operational_diagnosis(
     return {"status": "unavailable", "reason": "codex_result_unavailable"}
 
 
+def _read_diagnosis_cycle(path: Path, *, now: datetime, max_age: timedelta) -> tuple[datetime, list[dict[str, str]]]:
+    if path.is_symlink() or path.stat().st_size > 1024 * 1024:
+        raise ValueError("cycle unavailable")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict) or payload.get("domains") != list(DOMAINS):
+        raise ValueError("invalid cycle")
+    as_of = datetime.fromisoformat(payload["as_of"].replace("Z", "+00:00"))
+    if as_of.tzinfo is None:
+        raise ValueError("cycle time must include timezone")
+    age = now - as_of
+    if age < -timedelta(minutes=5) or age > max_age:
+        raise ValueError("cycle is not current")
+    errors = payload.get("data_errors")
+    if not isinstance(errors, list) or len(errors) > 100:
+        raise ValueError("invalid errors")
+    for error in errors:
+        if (not isinstance(error, dict) or error.get("domain") not in DOMAINS
+                or error.get("code") not in _OPERATIONAL_ERROR_CODES
+                or error.get("error_type") not in _OPERATIONAL_ERROR_TYPES):
+            raise ValueError("invalid error classification")
+    return as_of, [{key: error[key] for key in ("domain", "code", "error_type")} for error in errors]
+
+
 def diagnose_latest_cycle(root: Path, *, now: datetime | None = None) -> dict[str, Any]:
-    """Consume the newest saved cycle only; never run collection or replay old incidents."""
+    """Consume only the current cycle; retain the original current-state interface."""
     try:
         paths = sorted((root / "data/health").glob("cycle_*.json"))
-        if not paths or paths[-1].stat().st_size > 1024 * 1024:
+        if not paths:
             raise ValueError("latest cycle unavailable")
-        payload = json.loads(paths[-1].read_text(encoding="utf-8"))
-        if not isinstance(payload, dict) or payload.get("domains") != list(DOMAINS):
-            raise ValueError("invalid cycle")
-        as_of = datetime.fromisoformat(payload["as_of"].replace("Z", "+00:00"))
-        if as_of.tzinfo is None:
-            raise ValueError("cycle time must include timezone")
-        age = (now or datetime.now(timezone.utc)) - as_of
-        if age < -timedelta(minutes=5) or age > timedelta(hours=2):
-            raise ValueError("cycle is not current")
-        errors = payload.get("data_errors")
-        if not isinstance(errors, list) or len(errors) > 100:
-            raise ValueError("invalid errors")
-        for error in errors:
-            if (not isinstance(error, dict) or error.get("domain") not in DOMAINS
-                    or error.get("code") not in _OPERATIONAL_ERROR_CODES
-                    or error.get("error_type") not in _OPERATIONAL_ERROR_TYPES):
-                raise ValueError("invalid error classification")
-        # Pass only fixed categories, never fields added to a saved incident.
-        errors = [{key: error[key] for key in ("domain", "code", "error_type")} for error in errors]
+        _, errors = _read_diagnosis_cycle(paths[-1], now=now or datetime.now(timezone.utc), max_age=timedelta(hours=2))
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return {"status": "rejected", "reason": "latest_cycle_unavailable"}
     if not errors:
         return {"status": "skipped", "reason": "no_data_errors"}
-    # Workflow concurrency serializes this consumer; monitor alert state has a separate owner.
     return _run_operational_diagnosis(
         root / "data/diagnosis-consumer", errors, _operational_diagnosis_fingerprint(errors)
     )
+
+
+def diagnose_recent_cycles(root: Path, *, now: datetime | None = None) -> dict[str, Any]:
+    """Diagnose at most one unattempted recent category set, without recollection."""
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    state_root = root / "data/diagnosis-consumer"
+    try:
+        state = _load_operational_diagnosis_state(state_root)
+        last_date = state.get("operational_diagnosis_last_attempt_date")
+        if last_date is not None and last_date >= now.date().isoformat():
+            return {"status": "skipped", "reason": "daily_attempt_limit"}
+        paths = sorted((root / "data/health").glob("cycle_*.json"))
+        if not paths:
+            raise ValueError("latest cycle unavailable")
+        latest_at, latest_errors = _read_diagnosis_cycle(paths[-1], now=now, max_age=timedelta(hours=2))
+        cutoff_name = f"cycle_{(now - timedelta(hours=24)).strftime('%Y%m%dT%H%M%SZ')}.json"
+        recent = [path for path in paths if path.name >= cutoff_name]
+        if len(recent) > 512:
+            return {"status": "rejected", "reason": "recent_cycle_limit_exceeded"}
+        for path in reversed(recent):
+            observed_at, errors = _read_diagnosis_cycle(path, now=now, max_age=timedelta(hours=24))
+            if observed_at > latest_at:
+                raise ValueError("cycle order invalid")
+            if not errors:
+                continue
+            fingerprint = _operational_diagnosis_fingerprint(errors)
+            if fingerprint in state.get("operational_diagnosis_attempts", []):
+                continue
+            remaining = [error for error in errors if error in latest_errors]
+            observation = {
+                "observed_at": observed_at.isoformat(),
+                "latest_cycle_at": latest_at.isoformat(),
+                "current_state": "still_observed" if len(remaining) == len(errors) else (
+                    "partially_observed" if remaining else "not_observed_in_latest"
+                ),
+            }
+            result = _run_operational_diagnosis(
+                state_root, errors, fingerprint, observation=observation,
+                attempt_date=now.date().isoformat(),
+            )
+            return {**result, "observation": observation}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return {"status": "rejected", "reason": "recent_cycles_or_state_unavailable"}
+    return {"status": "skipped", "reason": "no_unattempted_recent_errors"}
 
 
 def _build_monitoring_findings(
@@ -743,6 +813,10 @@ if __name__ == "__main__":
         result = run_historical_diagnosis_rehearsal()
         print(json.dumps(result))
         sys.exit(0 if result["status"] in {"succeeded", "deferred"} else 2)
+    if sys.argv[1:] == ["--diagnose-recent"]:
+        result = diagnose_recent_cycles(Path(os.environ["QUANT_MONITOR_ROOT"]))
+        print(json.dumps(result))
+        sys.exit(0 if result["status"] in {"succeeded", "skipped", "deferred"} else 2)
     if sys.argv[1:] == ["--diagnose-latest"]:
         result = diagnose_latest_cycle(Path(os.environ["QUANT_MONITOR_ROOT"]))
         print(json.dumps(result))

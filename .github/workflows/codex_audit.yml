@@ -12,7 +12,7 @@ on:
         type: boolean
         default: false
       operational_diagnosis:
-        description: "Diagnose latest saved VPS data incident only (requires AI_OPERATIONAL_DIAGNOSIS_ENABLED)"
+        description: "Diagnose one unattempted saved VPS incident from the last 24h (requires AI_OPERATIONAL_DIAGNOSIS_ENABLED)"
         required: false
         type: boolean
         default: false
@@ -258,7 +258,7 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
-      - name: Diagnose latest saved data incident using this job's OIDC identity
+      - name: Diagnose one recent saved incident using this job's OIDC identity
         env:
           CODEX_AUDIT_SERVICE_URL: ${{ secrets.CODEX_AUDIT_SERVICE_URL }}
           CODEX_AUDIT_SERVICE_AUDIENCE: ${{ vars.CODEX_AUDIT_SERVICE_AUDIENCE || 'quant-codex-audit' }}
@@ -267,7 +267,7 @@ jobs:
           QUANT_MONITOR_ROOT: /home/ubuntu/quant-monitor-runtime/AIAuditBridge/ops/quant-monitor
           PYTHONPATH: .
           PYTHONDONTWRITEBYTECODE: "1"
-        run: python3 ops/quant-monitor/scripts/health_cycle.py --diagnose-latest > operational-diagnosis.json
+        run: python3 ops/quant-monitor/scripts/health_cycle.py --diagnose-recent > operational-diagnosis.json
       - name: Retain sanitized outcome only
         if: always()
         uses: actions/upload-artifact@v7
