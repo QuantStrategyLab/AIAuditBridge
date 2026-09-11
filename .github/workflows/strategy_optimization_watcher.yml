@@ -311,15 +311,21 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.source_app_token.outputs.token || github.token }}
           SOURCE_GITHUB_APP_ID: ${{ vars.CROSS_REPO_GITHUB_APP_ID }}
+          VALIDATION_CONSUMER_REVISION: ${{ vars.SOXL_WATCHER_VALIDATION_CONSUMER_REVISION }}
         working-directory: bridge
         run: |
           set -euo pipefail
           output=data/output/strategy_optimization_watcher/soxl-watcher-learning-ready.json
+          validation_args=()
+          if [ -n "$VALIDATION_CONSUMER_REVISION" ]; then
+            [[ "$VALIDATION_CONSUMER_REVISION" =~ ^[0-9a-f]{40}$ ]]
+            validation_args+=(--watcher-validation)
+          fi
           python -m scripts.run_soxl_manual_learning \
             --watcher-result data/output/strategy_optimization_watcher/result.json \
             --diagnosis-result data/output/strategy_optimization_watcher/research-diagnosis.json \
             --github-app-id "$SOURCE_GITHUB_APP_ID" \
-            --watcher-preflight | tee "$output"
+            --watcher-preflight "${validation_args[@]}" | tee "$output"
           python - "$output" "$GITHUB_OUTPUT" <<'PY'
           import json
           import sys
@@ -400,7 +406,7 @@ jobs:
       vars.SOXL_WATCHER_GCP_WIF_PROVIDER != '' &&
       vars.SOXL_WATCHER_GCP_PROJECT_ID != ''
     runs-on: [self-hosted, codex-vps]
-    timeout-minutes: 35
+    timeout-minutes: 55
     permissions:
       contents: read
       actions: read
@@ -408,6 +414,7 @@ jobs:
     env:
       P1_MANIFEST_SHA256: ${{ needs.strategy-optimization-watcher.outputs.soxl_p1_manifest_sha256 }}
       LEARNING_ROOT: ${{ github.workspace }}/.aab-soxl-watcher-learning-${{ github.run_id }}-${{ github.run_attempt }}
+      VALIDATION_CONSUMER_REVISION: ${{ vars.SOXL_WATCHER_VALIDATION_CONSUMER_REVISION }}
     steps:
       - name: Check dedicated scheduled research identity configuration
         id: research-identity
@@ -619,6 +626,73 @@ jobs:
             --ues-source "$GITHUB_WORKSPACE/ues-source" \
             --output "$LEARNING_ROOT/summary.json"
 
+      # No validation runs until the reviewed consumer commit is explicitly configured.
+      - name: Initialize sanitized watcher validation terminal
+        if: steps.research-identity.outputs.configured == 'true' && vars.SOXL_WATCHER_VALIDATION_CONSUMER_REVISION != ''
+        run: |
+          set -euo pipefail
+          [[ "$VALIDATION_CONSUMER_REVISION" =~ ^[0-9a-f]{40}$ ]]
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          Path(os.environ["LEARNING_ROOT"], "validation.json").write_text(json.dumps({
+              "operation": "soxl_watcher_validation", "status": "parked",
+              "failure_stage": "setup_incomplete", "research_executed": False,
+              "learning_only": True, "no_order": True, "size_zero_required": True,
+              "promotion_eligible": False,
+          }))
+          PY
+
+      - name: Checkout approved watcher validation consumer
+        if: steps.research-identity.outputs.configured == 'true' && vars.SOXL_WATCHER_VALIDATION_CONSUMER_REVISION != ''
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          repository: QuantStrategyLab/UsEquitySnapshotPipelines
+          ref: ${{ vars.SOXL_WATCHER_VALIDATION_CONSUMER_REVISION }}
+          path: validation-consumer-source
+          persist-credentials: false
+
+      - name: Checkout frozen strict validation gate
+        if: steps.research-identity.outputs.configured == 'true' && vars.SOXL_WATCHER_VALIDATION_CONSUMER_REVISION != ''
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          repository: QuantStrategyLab/QuantPlatformKit
+          ref: 7363011d56926d39f4fffeb036e511391114e39f
+          path: validation-gate-source
+          persist-credentials: false
+
+      - name: Install isolated watcher validation runtimes
+        if: steps.research-identity.outputs.configured == 'true' && vars.SOXL_WATCHER_VALIDATION_CONSUMER_REVISION != ''
+        run: |
+          set -euo pipefail
+          test "$(git -C validation-consumer-source rev-parse HEAD)" = "$VALIDATION_CONSUMER_REVISION"
+          cd validation-consumer-source
+          env -u UV_PYTHON -u VIRTUAL_ENV uv sync --locked --no-dev --no-editable --python 3.11
+          cd ..
+          python3 -m venv "$LEARNING_ROOT/validation-control"
+          "$LEARNING_ROOT/validation-control/bin/python" -m pip install --quiet --no-deps ./validation-gate-source
+          cd bridge
+          "$LEARNING_ROOT/validation-control/bin/python" -c 'from quant_platform_kit.strategy_lifecycle.research_promotion_cycle import enforce_promotion_backtest_gates; from scripts.run_soxl_manual_learning import run_watcher_validation'
+
+      - name: Validate the same task learning result with the fixed candidate plan
+        if: steps.research-identity.outputs.configured == 'true' && vars.SOXL_WATCHER_VALIDATION_CONSUMER_REVISION != ''
+        env:
+          GH_TOKEN: ${{ steps.source-app-token.outputs.token }}
+          UV_PROJECT_ENVIRONMENT: ${{ env.LEARNING_ROOT }}/ues-env
+        working-directory: bridge
+        run: |
+          set -euo pipefail
+          "$LEARNING_ROOT/validation-control/bin/python" -m scripts.run_soxl_manual_learning \
+            --watcher-result ../watcher-handoff/result.json \
+            --diagnosis-result ../watcher-handoff/research-diagnosis.json \
+            --github-app-id "${{ vars.CROSS_REPO_GITHUB_APP_ID }}" \
+            --watcher-validation \
+            --manifest-sha256 "$P1_MANIFEST_SHA256" \
+            --root "$LEARNING_ROOT/p1-root" \
+            --consumer-source "$GITHUB_WORKSPACE/validation-consumer-source" \
+            --ues-source "$GITHUB_WORKSPACE/ues-source" \
+            --output "$LEARNING_ROOT/validation.json"
+
       - name: Record known pre-numeric failure for this exact task
         if: failure() && steps.research-identity.outputs.configured == 'true'
         env:
@@ -639,6 +713,15 @@ jobs:
           name: soxl-watcher-learning-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.LEARNING_ROOT }}/summary.json
           if-no-files-found: error
+          retention-days: 35
+
+      - name: Upload sanitized watcher validation terminal
+        if: always() && steps.research-identity.outputs.configured == 'true' && vars.SOXL_WATCHER_VALIDATION_CONSUMER_REVISION != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: soxl-watcher-validation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.LEARNING_ROOT }}/validation.json
+          if-no-files-found: warn
           retention-days: 35
 
       - name: Remove watcher learning workspace

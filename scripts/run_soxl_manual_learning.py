@@ -520,12 +520,13 @@ def _watcher_context(
         raise ManualLearningError("watcher_diagnosis_unavailable")
     terminal = _terminal_from_comments(task, bodies)
     started = any(body.startswith(f"<!-- {_marker(task, 'started')} -->\n") for body in bodies)
-    return {"task": task, "repository": repository, "issue_url": issue_url, "terminal": terminal, "started": started}
+    return {"task": task, "repository": repository, "issue_url": issue_url, "terminal": terminal, "started": started, "trusted_bodies": bodies}
 
 
 def prepare_watcher_learning(
     watcher_result: Mapping[str, Any], diagnosis_result: Mapping[str, Any], *, github_app_id: str,
     read_comments: Callable[[str, str], list[dict[str, Any]]] = read_issue_comments,
+    include_validation: bool = False,
 ) -> dict[str, Any]:
     try:
         context = _watcher_context(
@@ -534,8 +535,14 @@ def prepare_watcher_learning(
     except (ManualLearningError, OSError, ValueError, subprocess.SubprocessError):
         return {"status": "parked", "ready": False}
     if context["terminal"] is not None:
-        return {"status": "reused", "ready": False}
-    if context["started"]:
+        if not include_validation or context["terminal"]["status"] != "accepted":
+            return {"status": "reused", "ready": False}
+        # Any attempted validation is terminal or uncertain: neither is a replay request.
+        if any(body.startswith(f"<!-- {_marker(context['task'], phase)} -->")
+               for body in context["trusted_bodies"]
+               for phase in ("validation_started", "validation_terminal")):
+            return {"status": "reused", "ready": False}
+    elif context["started"]:
         return {"status": "parked", "ready": False, "failure_stage": "numeric_outcome_unknown"}
     task = context["task"]
     return {
@@ -743,10 +750,15 @@ def _summary_digest(value: object) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
 
 
-def _strict_validation_summary(value: object, gate: Callable[..., tuple[bool, str]]) -> dict[str, Any]:
+def _strict_validation_summary(
+    value: object, gate: Callable[..., tuple[bool, str]], *, development_digest: str | None = None,
+) -> dict[str, Any]:
     from dataclasses import fields
     from quant_platform_kit.strategy_lifecycle.contracts import BacktestValidationIdentity, OptimizationProposal
 
+    development_digest = DEVELOPMENT_SUMMARY_SHA256 if development_digest is None else development_digest
+    if re.fullmatch(r"[0-9a-f]{64}", development_digest) is None:
+        raise ManualLearningError("validation_development_source_invalid")
     profile = "soxl_soxx_three_asset_mid_weight_learning_v1"
     if (
         not isinstance(value, Mapping) or value.get("status") != "PROMOTION_BACKTEST_RUNS_BUILT"
@@ -757,7 +769,7 @@ def _strict_validation_summary(value: object, gate: Callable[..., tuple[bool, st
     ):
         raise ManualLearningError("validation_result_invalid")
     raw_proposal = value.get("proposal")
-    method = f"bounded_development_tradeoff:sha256:{DEVELOPMENT_SUMMARY_SHA256}"
+    method = f"bounded_development_tradeoff:sha256:{development_digest}"
     if (
         not isinstance(raw_proposal, Mapping)
         or raw_proposal.get("strategy_profile") != profile or raw_proposal.get("domain") != "us_equity"
@@ -805,7 +817,7 @@ def _strict_validation_summary(value: object, gate: Callable[..., tuple[bool, st
             windows.append((run["locked_oos_start"], run["locked_oos_end"]))
             for index, (result, (start, end)) in enumerate(zip([*run["fold_results"], run.get("locked_oos_result")], windows, strict=True)):
                 suffix = f"_wf{index}" if index < 3 else "_locked_oos"
-                result_id = f"soxl-three-asset-{DEVELOPMENT_SUMMARY_SHA256}-{role}-cost-{cost:g}{suffix}"
+                result_id = f"soxl-three-asset-{development_digest}-{role}-cost-{cost:g}{suffix}"
                 if (
                     not isinstance(result, Mapping) or result.get("strategy_profile") != profile
                     or result.get("domain") != "us_equity"
@@ -856,6 +868,141 @@ def _strict_validation_summary(value: object, gate: Callable[..., tuple[bool, st
         "strict_backtest_gate": {"status": "passed", "checks": 6, "qpk_revision": VALIDATION_QPK_REVISION},
         "human_quality_decision_required": True,
     }
+
+
+def _watcher_development_summary(context: Mapping[str, Any]) -> dict[str, Any]:
+    task, terminal = context["task"], context["terminal"]
+    if terminal is None or terminal["status"] != "accepted":
+        raise ManualLearningError("watcher_learning_not_accepted")
+    summary = _watcher_base(task, task["evidence"]["p1_input_digest"])
+    summary.update(status="accepted", research_executed=True)
+    summary.update({key: terminal[key] for key in (
+        "numeric_summary", "numeric_source_identity", "numeric_result_sha256",
+    )})
+    return summary
+
+
+def _watcher_validation_comment(task: Mapping[str, Any], digest: str, status: str, result: object = None) -> str:
+    phase = "validation_started" if status == "started" else "validation_terminal"
+    record = {"task_sha256": task["task_sha256"], "development_summary_sha256": digest,
+              "status": status, "result": result}
+    return f"<!-- {_marker(task, phase)} -->\n`{canonical_json(record)}`"
+
+
+def _watcher_validation_terminal(context: Mapping[str, Any], digest: str) -> dict[str, Any] | None:
+    marker = f"<!-- {_marker(context['task'], 'validation_terminal')} -->"
+    records = []
+    for body in context["trusted_bodies"]:
+        if not body.startswith(marker):
+            continue
+        if not body.startswith(marker + "\n`") or not body.endswith("`"):
+            raise ManualLearningError("watcher_validation_terminal_invalid")
+        try:
+            record = json.loads(body[len(marker) + 2:-1])
+        except ValueError:
+            raise ManualLearningError("watcher_validation_terminal_invalid") from None
+        if (
+            not isinstance(record, dict)
+            or set(record) != {"task_sha256", "development_summary_sha256", "status", "result"}
+            or record["task_sha256"] != context["task"]["task_sha256"]
+            or record["development_summary_sha256"] != digest
+            or record["status"] not in {"accepted", "failed"}
+            or (record["status"] == "failed" and record["result"] is not None)
+            or (record["status"] == "accepted" and not isinstance(record["result"], Mapping))
+        ):
+            raise ManualLearningError("watcher_validation_terminal_invalid")
+        records.append(record)
+    if any(record != records[0] for record in records[1:]):
+        raise ManualLearningError("watcher_validation_terminal_conflict")
+    return records[0] if records else None
+
+
+def run_watcher_validation(
+    *, watcher_result: Mapping[str, Any], diagnosis_result: Mapping[str, Any], manifest_sha256: str,
+    root: Path, consumer_source: Path, ues_source: Path, github_app_id: str,
+    read_comments: Callable[[str, str], list[dict[str, Any]]] = read_issue_comments,
+    write_comment: Callable[[str, str, str], str] = write_issue_comment,
+    command_runner: Callable[[list[str]], Any] | None = None,
+) -> dict[str, Any]:
+    """Validate the fixed 0.55 candidate from this task's trusted learning terminal once."""
+    artifact: dict[str, Any] = {
+        "schema_version": ARTIFACT_SCHEMA, "operation": "soxl_watcher_validation", "status": "parked",
+        "research_executed": False, "learning_only": True, "no_order": True,
+        "size_zero_required": True, "promotion_eligible": False,
+    }
+    try:
+        context = _watcher_context(watcher_result, diagnosis_result, github_app_id=github_app_id, read_comments=read_comments)
+        development = _watcher_development_summary(context)
+        if manifest_sha256 != development["input_identity"]["manifest_sha256"]:
+            raise ManualLearningError("input_identity_invalid")
+        digest = _summary_digest(development)
+        task = context["task"]
+        artifact.update(task_id=task["task_id"], task_sha256=task["task_sha256"],
+                        input_identity=development["input_identity"], development_summary_sha256=digest)
+        terminal = _watcher_validation_terminal(context, digest)
+    except (ManualLearningError, OSError, ValueError, subprocess.SubprocessError):
+        artifact["failure_stage"] = "watcher_validation_source_unavailable"
+        return artifact
+    try:
+        from quant_platform_kit.strategy_lifecycle.research_promotion_cycle import enforce_promotion_backtest_gates
+    except ImportError:
+        artifact["failure_stage"] = "strict_validation_runtime_unavailable"
+        return artifact
+    if terminal is not None:
+        artifact["numeric_execution"] = {"status": "reused"}
+        if terminal["status"] == "failed":
+            artifact["failure_stage"] = "numeric_execution_failed"
+            return artifact
+        try:
+            safe = _strict_validation_summary(terminal["result"], enforce_promotion_backtest_gates, development_digest=digest)
+        except (TypeError, ValueError, KeyError):
+            artifact["failure_stage"] = "watcher_validation_terminal_invalid"
+            return artifact
+        artifact.update(safe, status="accepted", research_executed=True)
+        return artifact
+    if any(body.startswith(f"<!-- {_marker(task, 'validation_started')} -->") for body in context["trusted_bodies"]):
+        artifact.update(failure_stage="numeric_outcome_unknown", research_executed=None, numeric_execution={"status": "outcome_unknown"})
+        return artifact
+    required = (root / "binding.json", root / "manifest.json", root / "bars.json",
+                consumer_source / "scripts/run_soxl_three_asset_learning.py", consumer_source / "config/soxl_soxx_core_only_p2_v3.json")
+    summary_path = root.parent / "watcher-development.json"
+    if (any(path.is_symlink() or not path.is_file() for path in required)
+        or not (consumer_source / ".venv/bin/python").is_file() or ues_source.is_symlink()
+        or not ues_source.is_dir() or summary_path.is_symlink()):
+        artifact["failure_stage"] = "source_or_input_unavailable"
+        return artifact
+    try:
+        summary_path.write_text(canonical_json(development), encoding="utf-8")
+        write_comment(context["repository"], context["issue_url"], _watcher_validation_comment(task, digest, "started"))
+    except (OSError, ManualLearningError, subprocess.SubprocessError):
+        artifact["failure_stage"] = "watcher_validation_setup_failed"
+        return artifact
+    command = _numeric_command(root, consumer_source, ues_source, ())
+    command.extend(("--promotion-validation-development-summary", str(summary_path),
+                    "--watcher-development-summary-sha256", digest))
+    artifact.update(research_executed=None, numeric_execution={"status": "started"})
+    runner = command_runner or (lambda argv: subprocess.run(argv, capture_output=True, text=True, timeout=1200, check=False))
+    try:
+        completed = runner(command)
+        if getattr(completed, "returncode", None) != 0:
+            write_comment(context["repository"], context["issue_url"], _watcher_validation_comment(task, digest, "failed"))
+            artifact.update(failure_stage="numeric_execution_failed", numeric_execution={"status": "failed"})
+            return artifact
+        safe = _strict_validation_summary(json.loads(completed.stdout), enforce_promotion_backtest_gates, development_digest=digest)
+        # Keep only the verified runs; derived comparisons are rebuilt when reusing this terminal.
+        result = {key: safe[key] for key in ("proposal", "baseline_promotion_runs", "candidate_promotion_runs")}
+        result.update(status="PROMOTION_BACKTEST_RUNS_BUILT", stage="promotion_validation",
+                      learning_only=True, no_order=True, size_zero_required=True,
+                      promotion_eligible=False, live_authority_granted=False)
+        body = _watcher_validation_comment(task, digest, "accepted", result)
+        if len(body) > 65536:
+            raise ManualLearningError("watcher_validation_terminal_too_large")
+        write_comment(context["repository"], context["issue_url"], body)
+    except (AttributeError, TypeError, ValueError, KeyError, OSError, subprocess.SubprocessError):
+        artifact.update(failure_stage="numeric_outcome_unknown", numeric_execution={"status": "outcome_unknown"})
+        return artifact
+    artifact.update(safe, status="accepted", research_executed=True, numeric_execution={"status": "succeeded"})
+    return artifact
 
 
 def run_manual_validation(
@@ -1089,11 +1236,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--diagnosis-result", type=Path)
     parser.add_argument("--github-app-id")
     parser.add_argument("--watcher-preflight", action="store_true")
+    parser.add_argument("--watcher-validation", action="store_true")
     parser.add_argument("--watcher-record-pre-numeric-failure", action="store_true")
     parser.add_argument("--control-plane-source-from-summary", type=Path)
     parser.add_argument("--source-revision")
     parser.add_argument("--computed-at")
     args = parser.parse_args(argv)
+    if args.watcher_validation and (args.watcher_result is None or args.watcher_record_pre_numeric_failure or args.development_summary is not None or args.parameter_grid is not None):
+        parser.error("watcher validation requires its watcher task and fixed parameters")
     if args.control_plane_source_from_summary is not None:
         if any(value is None for value in (args.output, args.run_id, args.source_revision, args.computed_at)):
             parser.error("control-plane source mode requires output, run ID, source revision, and computed timestamp")
@@ -1125,6 +1275,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.watcher_preflight:
             result = prepare_watcher_learning(
                 watcher_result, diagnosis_result, github_app_id=args.github_app_id,
+                include_validation=args.watcher_validation,
             )
             print(canonical_json(result))
             return 0
@@ -1141,14 +1292,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0 if result["status"] in {"failed", "reused"} else 2
         if any(value is None for value in (args.manifest_sha256, args.root, args.consumer_source, args.ues_source, args.output)):
             parser.error("watcher execution requires manifest, source, root and output paths")
-        result = run_watcher_learning(
+        run_watcher = run_watcher_validation if args.watcher_validation else run_watcher_learning
+        result = run_watcher(
             watcher_result=watcher_result, diagnosis_result=diagnosis_result,
             manifest_sha256=args.manifest_sha256, root=args.root,
             consumer_source=args.consumer_source, ues_source=args.ues_source,
             github_app_id=args.github_app_id,
         )
         _write(args.output, result)
-        print(json.dumps({"status": result["status"], "operation": "soxl_watcher_learning"}, sort_keys=True))
+        print(json.dumps({"status": result["status"], "operation": result.get("operation", "soxl_watcher_learning")}, sort_keys=True))
         return 0 if result["status"] == "accepted" else 2
     manual_required = (
         args.manifest_sha256, args.root, args.consumer_source,

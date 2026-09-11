@@ -629,7 +629,7 @@ def test_gateway_auth_accepts_only_the_exact_manual_workflow_on_main() -> None:
         verify(payload | {"workflow_ref": other_ref, "job_workflow_ref": other_ref, "ref": "refs/heads/other"})
 
 
-def promotion_validation_result() -> dict[str, object]:
+def promotion_validation_result(development_digest=None) -> dict[str, object]:
     from datetime import date
     from quant_platform_kit.strategy_lifecycle.contracts import (
         BacktestResult, BacktestValidationIdentity, OptimizationProposal, PromotionBacktestRun,
@@ -637,6 +637,7 @@ def promotion_validation_result() -> dict[str, object]:
     )
     from scripts import run_soxl_manual_learning as module
 
+    development_digest = development_digest or module.DEVELOPMENT_SUMMARY_SHA256
     profile = "soxl_soxx_three_asset_mid_weight_learning_v1"
     folds = tuple(PurgedWalkForwardFold(*map(date.fromisoformat, item)) for item in (
         ("2022-12-28", "2023-06-30", "2023-07-03", "2023-12-29"),
@@ -648,7 +649,7 @@ def promotion_validation_result() -> dict[str, object]:
         current_params={"blend_gate_mid_soxl_weight": 0.65},
         proposed_params={"blend_gate_mid_soxl_weight": 0.55},
         recommendation="research_candidate", search_iterations=3,
-        optimization_method=f"bounded_development_tradeoff:sha256:{module.DEVELOPMENT_SUMMARY_SHA256}",
+        optimization_method=f"bounded_development_tradeoff:sha256:{development_digest}",
     )
 
     def runs(weight, role):
@@ -656,7 +657,7 @@ def promotion_validation_result() -> dict[str, object]:
         for cost in (5.0, 10.0, 15.0):
             def metrics(start, end, fold=None):
                 suffix = f"_wf{folds.index(fold)}" if fold else "_locked_oos"
-                result_id = f"soxl-three-asset-{module.DEVELOPMENT_SUMMARY_SHA256}-{role}-cost-{cost:g}{suffix}"
+                result_id = f"soxl-three-asset-{development_digest}-{role}-cost-{cost:g}{suffix}"
                 return BacktestResult(
                     strategy_profile=profile, domain="us_equity",
                     param_set_id=result_id,
@@ -694,6 +695,126 @@ def promotion_validation_result() -> dict[str, object]:
         "baseline_promotion_runs": runs(0.65, "baseline"),
         "candidate_promotion_runs": runs(0.55, "candidate"),
     }
+
+
+def accepted_watcher_comments(watcher):
+    from scripts import run_soxl_manual_learning as module
+    task = watcher["research_task_source_snapshot"]["tasks"][0]
+    safe, source, digest = module._sanitize_numeric(numeric_result(), (0.65, 0.6, 0.55), "0" * 64)
+    return [trusted_diagnosis_comment(watcher), trusted_comment(module.watcher_learning_comment(
+        task, phase="terminal", status="accepted", numeric_result_sha256=digest,
+        numeric_summary=safe, numeric_source_identity=source,
+    ))]
+
+
+def test_watcher_validation_consumes_same_task_learning_once_and_reuses_terminal(paths):
+    from scripts import run_soxl_manual_learning as module
+    watcher, diagnosis = watcher_inputs()
+    comments = accepted_watcher_comments(watcher)
+    calls = []
+
+    def run(argv):
+        calls.append(argv)
+        summary = json.loads(Path(argv[argv.index("--promotion-validation-development-summary") + 1]).read_text())
+        digest = argv[argv.index("--watcher-development-summary-sha256") + 1]
+        assert module._summary_digest(summary) == digest != module.DEVELOPMENT_SUMMARY_SHA256
+        assert summary["task_sha256"] == watcher["research_task_source_snapshot"]["tasks"][0]["task_sha256"]
+        assert summary["input_identity"] == {"manifest_sha256": "0" * 64, "member_count": 4}
+        assert summary["research_executed"] is True
+        assert "--blend-gate-mid-soxl-weight" not in argv
+        return SimpleNamespace(returncode=0, stdout=json.dumps(promotion_validation_result(digest)))
+
+    kwargs = dict(
+        watcher_result=watcher, diagnosis_result=diagnosis, manifest_sha256="0" * 64,
+        root=paths["root"], consumer_source=paths["consumer"], ues_source=paths["ues"],
+        github_app_id="42", read_comments=lambda *_: comments,
+        write_comment=lambda _repo, _url, body: comments.append(trusted_comment(body)) or "comment",
+        command_runner=run,
+    )
+    with patch.object(module.AiGatewayClient, "execute", side_effect=AssertionError("no AI in validation")):
+        output = module.run_watcher_validation(**kwargs)
+        reused = module.run_watcher_validation(**kwargs)
+    assert len(calls) == 1
+    assert len(comments) == 4
+    assert len(comments[-1]["body"]) < 65536
+    assert output["status"] == reused["status"] == "accepted"
+    assert output["strict_backtest_gate"]["checks"] == 6
+    assert reused["numeric_execution"] == {"status": "reused"}
+    assert output["candidate_promotion_runs"] == reused["candidate_promotion_runs"]
+    assert output["promotion_eligible"] is False
+    assert output["human_quality_decision_required"] is True
+    assert module.prepare_watcher_learning(watcher, diagnosis, github_app_id="42", read_comments=lambda *_: comments, include_validation=True)["ready"] is False
+
+
+@pytest.mark.parametrize("failure", ["missing_learning", "untrusted_learning", "manifest", "failed_learning"])
+def test_watcher_validation_requires_trusted_matching_successful_learning(paths, failure):
+    from scripts import run_soxl_manual_learning as module
+    watcher, diagnosis = watcher_inputs()
+    comments = accepted_watcher_comments(watcher)
+    manifest = "0" * 64
+    if failure == "missing_learning":
+        comments.pop()
+    elif failure == "untrusted_learning":
+        comments[-1]["performed_via_github_app"]["id"] = 99
+    elif failure == "manifest":
+        manifest = "f" * 64
+    else:
+        task = watcher["research_task_source_snapshot"]["tasks"][0]
+        comments[-1] = trusted_comment(module.watcher_learning_comment(task, phase="terminal", status="failed"))
+    calls = []
+    output = module.run_watcher_validation(
+        watcher_result=watcher, diagnosis_result=diagnosis, manifest_sha256=manifest,
+        root=paths["root"], consumer_source=paths["consumer"], ues_source=paths["ues"],
+        github_app_id="42", read_comments=lambda *_: comments,
+        write_comment=lambda *args: calls.append(args), command_runner=lambda argv: calls.append(argv),
+    )
+    assert output["status"] == "parked"
+    assert calls == []
+
+
+@pytest.mark.parametrize("failure", ["timeout", "numeric_failure", "old_manual_result", "terminal_write"])
+def test_watcher_validation_failed_or_unknown_outcome_never_reexecutes(paths, failure):
+    from scripts import run_soxl_manual_learning as module
+    watcher, diagnosis = watcher_inputs()
+    comments = accepted_watcher_comments(watcher)
+    calls = []
+
+    def write(_repo, _url, body):
+        if failure == "terminal_write" and ":validation_terminal:" in body:
+            raise subprocess.TimeoutExpired("synthetic", 1)
+        comments.append(trusted_comment(body))
+        return "comment"
+
+    def run(argv):
+        calls.append(argv)
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired("synthetic", 1)
+        if failure == "numeric_failure":
+            return SimpleNamespace(returncode=2)
+        digest = argv[argv.index("--watcher-development-summary-sha256") + 1]
+        return SimpleNamespace(returncode=0, stdout=json.dumps(promotion_validation_result(None if failure == "old_manual_result" else digest)))
+
+    kwargs = dict(
+        watcher_result=watcher, diagnosis_result=diagnosis, manifest_sha256="0" * 64,
+        root=paths["root"], consumer_source=paths["consumer"], ues_source=paths["ues"],
+        github_app_id="42", read_comments=lambda *_: comments, write_comment=write, command_runner=run,
+    )
+    output = module.run_watcher_validation(**kwargs)
+    repeated = module.run_watcher_validation(**kwargs)
+    assert len(calls) == 1
+    assert output["status"] == repeated["status"] == "parked"
+    assert "oos_comparison" not in output
+    assert module.prepare_watcher_learning(watcher, diagnosis, github_app_id="42", read_comments=lambda *_: comments, include_validation=True)["ready"] is False
+
+
+def test_watcher_preflight_can_continue_accepted_learning_without_relearning():
+    from scripts import run_soxl_manual_learning as module
+    watcher, diagnosis = watcher_inputs()
+    comments = accepted_watcher_comments(watcher)
+    assert module.prepare_watcher_learning(watcher, diagnosis, github_app_id="42", read_comments=lambda *_: comments)["ready"] is False
+    ready = module.prepare_watcher_learning(watcher, diagnosis, github_app_id="42", read_comments=lambda *_: comments, include_validation=True)
+    assert ready["ready"] is True
+    assert ready["p1_manifest_sha256"] == "0" * 64
 
 
 @pytest.mark.parametrize("path,replacement", [

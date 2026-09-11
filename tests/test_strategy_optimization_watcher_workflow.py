@@ -95,6 +95,21 @@ class StrategyOptimizationWatcherWorkflowTest(unittest.TestCase):
         self.assertIn("--body-file", Path(__file__).resolve().parents[1].joinpath("scripts/run_soxl_manual_learning.py").read_text())
         self.assertNotIn("bars.json=${{ needs.", text)
 
+    def test_watcher_validation_is_version_gated_and_keeps_frozen_learning_runtime(self) -> None:
+        text = WORKFLOW_PATH.read_text(encoding="utf-8")
+        self.assertIn("SOXL_WATCHER_VALIDATION_CONSUMER_REVISION", text)
+        self.assertIn("^[0-9a-f]{40}$", text)
+        self.assertIn("--watcher-preflight", text)
+        self.assertIn('validation_args+=(--watcher-validation)', text)
+        self.assertIn("ref: b03ecbe4e0a7a0de22f298499f867a7039e4b60a", text)
+        self.assertIn("ref: 7363011d56926d39f4fffeb036e511391114e39f", text)
+        self.assertIn("path: validation-consumer-source", text)
+        self.assertIn('"$LEARNING_ROOT/validation-control/bin/python" -m scripts.run_soxl_manual_learning', text)
+        self.assertIn('--consumer-source "$GITHUB_WORKSPACE/validation-consumer-source"', text)
+        self.assertIn('--output "$LEARNING_ROOT/validation.json"', text)
+        self.assertIn("name: soxl-watcher-validation-${{ github.run_id }}-${{ github.run_attempt }}", text)
+        self.assertIn("vars.SOXL_WATCHER_VALIDATION_CONSUMER_REVISION != ''", text)
+
 
 if __name__ == "__main__":
     unittest.main()
