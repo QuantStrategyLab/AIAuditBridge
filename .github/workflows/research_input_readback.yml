@@ -12,6 +12,7 @@ on:
           - readback
           - soxl_learning
           - soxl_validation
+          - soxl_attribution
           - publish_validation
       blend_gate_mid_soxl_weights:
         description: Reviewed baseline and up to two bounded learning values
@@ -76,7 +77,7 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           repository: QuantStrategyLab/UsEquitySnapshotPipelines
-          ref: ${{ inputs.operation == 'soxl_validation' && 'b68b4a81ccdab7b61042fcf98df0189dfe539ef4' || 'b03ecbe4e0a7a0de22f298499f867a7039e4b60a' }}
+          ref: ${{ inputs.operation == 'soxl_attribution' && '84cd38a2fc8dede06ab09b32900006c6b858142d' || inputs.operation == 'soxl_validation' && 'b68b4a81ccdab7b61042fcf98df0189dfe539ef4' || 'b03ecbe4e0a7a0de22f298499f867a7039e4b60a' }}
           path: consumer-source
           persist-credentials: false
 
@@ -297,6 +298,21 @@ jobs:
             cd "$GITHUB_WORKSPACE"
             UV_PROJECT_ENVIRONMENT="$UES_ENV_ROOT" python3 -m scripts.run_soxl_manual_learning \
               --parameter-grid "$PARAMETER_GRID" \
+              --manifest-sha256 "$EXPECTED_MANIFEST_SHA256" \
+              --root "$READBACK_ROOT/root" \
+              --consumer-source "$CONSUMER_SOURCE" \
+              --ues-source "$UES_SOURCE" \
+              --output "$LEARNING_OUTPUT" \
+              --repository "$GITHUB_REPOSITORY" \
+              --ref "$GITHUB_REF" \
+              --event-name "$GITHUB_EVENT_NAME" \
+              --actor "$GITHUB_ACTOR" \
+              --run-id "$GITHUB_RUN_ID" \
+              --run-attempt "$GITHUB_RUN_ATTEMPT"
+          elif [ "$OPERATION" = "soxl_attribution" ]; then
+            cd "$GITHUB_WORKSPACE"
+            UV_PROJECT_ENVIRONMENT="$UES_ENV_ROOT" python3 -m scripts.run_soxl_manual_learning \
+              --attribution \
               --manifest-sha256 "$EXPECTED_MANIFEST_SHA256" \
               --root "$READBACK_ROOT/root" \
               --consumer-source "$CONSUMER_SOURCE" \
