@@ -4,6 +4,32 @@
 
 这是 AIAuditBridge 在策略监测之后的一个小闭环，不是策略执行器。
 
+## 2026-09-11 SOXL 自然研究接严格验证
+
+本次新增的 `run_watcher_validation` 接续既有 SOXL watcher learning：从原 Issue
+中相同 GitHub App 写入、同一任务且成功的 learning 终态重新构造开发摘要，核对
+P1 输入身份后，将摘要及其 canonical SHA-256 交给 UESP 既有验证入口。
+它只执行已固定的 0.65 基准 / 0.55 候选、5/10/15 bps、三组 walk-forward
+窗口和 2025-08-04 至 2026-08-04 OOS；不选择新参数，不把原人工任务的结果
+改绑到自然任务。严格校验继续使用 QPK `7363011d56926d39f4fffeb036e511391114e39f`。
+
+验证开始前在原 Issue 写 started 标记；已有成功终态会重新核对来源和严格门后复用，
+已知失败或只有 started 的未知结果不会自动重跑。结构性验证通过仍为
+`promotion_eligible=false`，只提供收益/回撤对照和待人工质量判断，不启动 shadow、
+创建晋级票据或变更实盘。
+
+发布顺序是先发布 UESP 新入口，再发布 AAB 接线，最后将 AAB 仓库变量
+`SOXL_WATCHER_VALIDATION_CONSUMER_REVISION` 绑定已验收的 UESP 完整 40 位 commit。
+变量为空时保持原 learning 流程；分支名或非法 revision 会在任务接续前拒绝。
+已固定的 learning consumer 与 UES runtime 不变，验证 consumer 和 QPK strict gate
+各用独立环境。单个任务保持最多一次 learning 数值调用和一次 validation 调用；
+每次调用原 1200 秒上限不变，整个 job 上限从 35 调整至 55 分钟以容纳串行两阶段。
+结果仍写回原 Issue，并保留独立的 `soxl-watcher-validation-<run>-<attempt>` 工件。
+
+本入口已完成本地实现和合成验证；生产是否启用以实际仓库变量和 workflow 读回为准。合成跨仓联调验证了
+AAB 摘要 → UESP CLI → 24 次固定数值测试 → QPK 六项严格门 → 原任务终态复用；
+P1 材料和数值回放为测试替身，不构成真实数据、自然事件或策略晋级验收。
+
 ## 自动做什么
 
 每天的 `Strategy Optimization Watcher` 先从受信任的两个 P3 脱敏绩效
