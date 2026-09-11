@@ -9,7 +9,7 @@ import json
 import math
 import re
 import subprocess
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from urllib.parse import urlparse
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
@@ -56,6 +56,10 @@ VALIDATION_FOLDS = [
 ]
 CONTROL_PLANE_SOURCE_SCHEMA = "qsl_control_plane_source_snapshot.v1"
 CONTROL_PLANE_SOURCE_ID = "aiaudit.soxl_manual_validation"
+ATTRIBUTION_SCHEMA = "qsl.soxl-three-asset-attribution.v1"
+ATTRIBUTION_VARIANTS = ("baseline_mid_065", "soxx_buy_hold", "fixed_full_weights")
+# Replaced by the reviewed producer commit before this consumer is published.
+ATTRIBUTION_CONSUMER_REVISION = "84cd38a2fc8dede06ab09b32900006c6b858142d"
 
 
 class ManualLearningError(ValueError):
@@ -750,6 +754,139 @@ def _summary_digest(value: object) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
 
 
+def _sanitize_attribution(value: object, manifest_sha256: str) -> dict[str, Any]:
+    """Keep fixed, reconciled aggregate results; never export replay series."""
+    try:
+        if not isinstance(value, Mapping):
+            raise ValueError
+        if (
+            value.get("schema_version") != ATTRIBUTION_SCHEMA
+            or value.get("status") != "SUCCESS"
+            or value.get("study_kind") != "retrospective_research"
+            or any(value.get(key) is not True for key in ("learning_only", "research_executed", "no_order", "size_zero_required"))
+            or value.get("promotion_eligible") is not False
+            or value.get("development_cutoff") != DEVELOPMENT_CUTOFF
+            or value["p1_identity"]["input_manifest_sha256"] != manifest_sha256
+        ):
+            raise ValueError
+        source = value["source_identity"]
+        if (
+            source["repository"] != "QuantStrategyLab/UsEquityStrategies"
+            or source["revision"] != UES_REVISION
+            or source["quant_platform_kit_revision"] != SOXL_WATCHER_QPK_REVISION
+            or source["uv_lock_sha256"] != "6c12df9b3412681829295f15de7e2ce7fc5b708d1de815f72d654fc16b7848e6"
+        ):
+            raise ValueError
+        unsigned = dict(value)
+        claimed = unsigned.pop("result_sha256")
+        if claimed != _summary_digest(unsigned):
+            raise ValueError
+        results = value["results"]
+        expected = [(variant, cost) for variant in ATTRIBUTION_VARIANTS for cost in COST_BPS]
+        if not isinstance(results, list) or len(results) != len(expected):
+            raise ValueError
+        safe_results = []
+        comparison_window = None
+        numbers = (
+            "initial_equity", "final_equity", "total_return", "max_drawdown", "cost_total",
+            "one_way_turnover", "cash_pnl_usd", "external_flow_usd", "reconciliation_residual_usd",
+        )
+        for item, (variant, cost) in zip(results, expected, strict=True):
+            if item["variant"] != variant or item["cost_bps"] != cost or isinstance(item["cost_bps"], bool):
+                raise ValueError
+            assets, points = item["asset_pnl_usd"], item["contribution_pct_points"]
+            if set(assets) != {"SOXL", "SOXX", "BOXX"} or set(points) != {"SOXL", "SOXX", "BOXX", "cash", "execution_cost"}:
+                raise ValueError
+            vals = [*(item[key] for key in numbers), *assets.values(), *points.values()]
+            if any(isinstance(number, bool) or not isinstance(number, (int, float)) or not math.isfinite(number) for number in vals):
+                raise ValueError
+            initial, final = item["initial_equity"], item["final_equity"]
+            if (
+                initial != 100_000.0 or final <= 0 or not 0 <= item["max_drawdown"] <= 1
+                or item["cost_total"] < 0 or item["one_way_turnover"] < 0
+                or item["cash_pnl_usd"] != 0 or item["external_flow_usd"] != 0
+                or item["unexecuted_final_signal"] is not True
+                or isinstance(item["observation_count"], bool)
+                or not isinstance(item["observation_count"], int) or item["observation_count"] < 2
+            ):
+                raise ValueError
+            start, end = date.fromisoformat(item["start_date"]), date.fromisoformat(item["end_date"])
+            if start > end or end > date.fromisoformat(DEVELOPMENT_CUTOFF):
+                raise ValueError
+            window = (start, end, item["observation_count"])
+            if comparison_window is not None and comparison_window != window:
+                raise ValueError
+            comparison_window = window
+            pnl = sum(assets.values()) - item["cost_total"]
+            tolerance = max(1e-7, initial * 1e-10)
+            if (
+                abs(final - initial - pnl) > tolerance
+                or abs(item["reconciliation_residual_usd"]) > tolerance
+                or not math.isclose(item["total_return"], final / initial - 1, rel_tol=1e-10, abs_tol=1e-10)
+            ):
+                raise ValueError
+            expected_points = {**{symbol: amount / initial * 100 for symbol, amount in assets.items()},
+                               "cash": 0.0, "execution_cost": -item["cost_total"] / initial * 100}
+            if any(not math.isclose(points[key], amount, rel_tol=1e-10, abs_tol=1e-8) for key, amount in expected_points.items()):
+                raise ValueError
+            safe_results.append({
+                "variant": variant, "cost_bps": cost, **{key: item[key] for key in numbers},
+                "asset_pnl_usd": dict(assets), "contribution_pct_points": dict(points),
+                "start_date": start.isoformat(), "end_date": end.isoformat(),
+                "observation_count": item["observation_count"], "unexecuted_final_signal": True,
+            })
+        return {
+            "study_kind": "retrospective_research", "promotion_eligible": False,
+            "source_identity": {key: source[key] for key in ("repository", "revision", "quant_platform_kit_revision", "uv_lock_sha256")},
+            "results": safe_results, "result_sha256": claimed,
+        }
+    except (KeyError, TypeError, ValueError, OverflowError):
+        raise ManualLearningError("attribution_result_invalid") from None
+
+
+def run_manual_attribution(
+    *, manifest_sha256: str, root: Path, consumer_source: Path, ues_source: Path,
+    context: Mapping[str, str], command_runner: Callable[[list[str]], Any] | None = None,
+    progress_writer: Callable[[Mapping[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    _validate_authority(context)
+    if re.fullmatch(r"[0-9a-f]{64}", manifest_sha256) is None:
+        raise ManualLearningError("input_identity_invalid")
+    required = (root / "binding.json", root / "manifest.json", root / "bars.json",
+                consumer_source / "scripts/run_soxl_three_asset_learning.py",
+                consumer_source / "config/soxl_soxx_core_only_p2_v3.json")
+    if any(path.is_symlink() or not path.is_file() for path in required) or not (consumer_source / ".venv/bin/python").is_file() or ues_source.is_symlink() or not ues_source.is_dir():
+        raise ManualLearningError("source_or_input_unavailable")
+    artifact = _safe_base(context, (BASELINE,), manifest_sha256)
+    artifact.pop("parameter_key")
+    artifact.pop("parameter_values")
+    artifact.update(operation="soxl_attribution", study_kind="retrospective_research",
+                    variants=list(ATTRIBUTION_VARIANTS), research_executed=None,
+                    numeric_execution={"status": "started"})
+    artifact["consumer_source"]["revision"] = ATTRIBUTION_CONSUMER_REVISION
+    if progress_writer is not None:
+        progress_writer(artifact)
+    runner = command_runner or (lambda argv: subprocess.run(argv, capture_output=True, text=True, timeout=1200, check=False))
+    try:
+        completed = runner([*_numeric_command(root, consumer_source, ues_source, ()), "--attribution"])
+    except (OSError, subprocess.SubprocessError):
+        artifact.update(status="parked", failure_stage="numeric_outcome_unknown", numeric_execution={"status": "outcome_unknown"})
+        return artifact
+    if getattr(completed, "returncode", None) != 0:
+        artifact.update(status="parked", failure_stage="numeric_execution_failed", numeric_execution={"status": "failed"})
+        return artifact
+    try:
+        if not isinstance(completed.stdout, str) or len(completed.stdout) > 2 * 1024 * 1024:
+            raise ManualLearningError("attribution_result_invalid")
+        safe = _sanitize_attribution(json.loads(completed.stdout), manifest_sha256)
+    except (AttributeError, TypeError, json.JSONDecodeError, ManualLearningError):
+        artifact.update(status="parked", failure_stage="attribution_result_invalid", numeric_execution={"status": "outcome_unknown"})
+        return artifact
+    artifact.update(status="accepted", research_executed=True, numeric_attribution=safe,
+                    numeric_execution={"status": "succeeded"})
+    return artifact
+
+
 def _strict_validation_summary(
     value: object, gate: Callable[..., tuple[bool, str]], *, development_digest: str | None = None,
 ) -> dict[str, Any]:
@@ -1191,7 +1328,7 @@ def _write(path: Path, value: Mapping[str, Any]) -> None:
 def initialize_record(path: Path, context: Mapping[str, str], *, operation: str = "soxl_learning") -> None:
     """Write the bound terminal placeholder before setup or remote reads begin."""
     _validate_authority(context)
-    if operation not in {"soxl_learning", "soxl_validation"}:
+    if operation not in {"soxl_learning", "soxl_validation", "soxl_attribution"}:
         raise ManualLearningError("manual_operation_invalid")
     _write(
         path,
@@ -1220,6 +1357,7 @@ def initialize_record(path: Path, context: Mapping[str, str], *, operation: str 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--parameter-grid")
+    parser.add_argument("--attribution", action="store_true")
     parser.add_argument("--development-summary", type=Path)
     parser.add_argument("--manifest-sha256")
     parser.add_argument("--root", type=Path)
@@ -1242,6 +1380,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--source-revision")
     parser.add_argument("--computed-at")
     args = parser.parse_args(argv)
+    if args.attribution and any((args.parameter_grid is not None, args.development_summary is not None,
+                                 args.watcher_result is not None, args.watcher_validation,
+                                 args.watcher_preflight, args.watcher_record_pre_numeric_failure,
+                                 args.control_plane_source_from_summary is not None)):
+        parser.error("attribution requires its independent fixed study mode")
     if args.watcher_validation and (args.watcher_result is None or args.watcher_record_pre_numeric_failure or args.development_summary is not None or args.parameter_grid is not None):
         parser.error("watcher validation requires its watcher task and fixed parameters")
     if args.control_plane_source_from_summary is not None:
@@ -1309,14 +1452,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     if any(value is None for value in manual_required):
         parser.error("manual mode requires the original bounded input and authority arguments")
-    if args.development_summary is None and args.parameter_grid is None:
+    if not args.attribution and args.development_summary is None and args.parameter_grid is None:
         parser.error("manual learning requires a parameter grid")
     if args.development_summary is not None and args.parameter_grid is not None:
         parser.error("selected validation cannot accept a parameter grid")
     context = {key: getattr(args, key) for key in ("repository", "ref", "event_name", "actor", "run_id", "run_attempt")}
-    operation = "soxl_validation" if args.development_summary is not None else "soxl_learning"
+    operation = "soxl_attribution" if args.attribution else ("soxl_validation" if args.development_summary is not None else "soxl_learning")
     try:
-        if args.development_summary is not None:
+        if args.attribution:
+            result = run_manual_attribution(
+                manifest_sha256=args.manifest_sha256, root=args.root, consumer_source=args.consumer_source,
+                ues_source=args.ues_source, context=context, progress_writer=lambda value: _write(args.output, value),
+            )
+        elif args.development_summary is not None:
             result = run_manual_validation(
                 development_summary=args.development_summary, manifest_sha256=args.manifest_sha256,
                 root=args.root, consumer_source=args.consumer_source, ues_source=args.ues_source,
