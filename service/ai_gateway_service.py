@@ -759,14 +759,14 @@ def _automation_triage_snapshot(
 ) -> dict[str, Any]:
     control = _automation_control_snapshot(repo, task_name=task, requested_mode=requested_mode)
     policy = load_autonomy_policy()
-    normalized_paths = [
-        normalized
-        for path in (changed_paths or [])
-        if isinstance(path, str)
-        for normalized in (_normalize_changed_path(path),)
-        if normalized
-    ]
-    path_risk = _highest_changed_path_risk(normalized_paths, policy)
+    if changed_paths is not None and (
+        not isinstance(changed_paths, list) or any(not isinstance(path, str) for path in changed_paths)
+    ):
+        raise ValueError("changed_paths must be a list of non-empty repo-relative paths")
+    normalized_paths = [_normalize_changed_path(path) for path in (changed_paths or [])]
+    if any(not path for path in normalized_paths):
+        raise ValueError("changed_paths must be a list of non-empty repo-relative paths")
+    path_risk = _highest_changed_path_risk(normalized_paths, policy) if normalized_paths else "unknown"
     category = str(failure_category or "").strip().lower()
     if not category and error:
         category = service_failure_category(error)
@@ -775,9 +775,8 @@ def _automation_triage_snapshot(
     execution = control.get("execution") if isinstance(control.get("execution"), dict) else {}
     execution_auto_fix_allowed = bool(control.get("auto_fix_allowed")) and bool(execution.get("auto_fix_allowed"))
     retry_allowed = False
-    deploy_allowed = False
     auto_fix_allowed = False
-    human_review_required = bool(control.get("requires_human_review"))
+    human_review_required = bool(control.get("requires_human_review")) or not normalized_paths
     incident_class = "investigate"
     recommended_action = "open_issue"
     next_step = "open_issue"
@@ -805,7 +804,7 @@ def _automation_triage_snapshot(
             incident_class = "degraded"
             recommended_action = "open_issue"
             next_step = "pause_auto_fix"
-        elif control_action == CONTROL_CONTINUE and execution_auto_fix_allowed:
+        elif control_action == CONTROL_CONTINUE and execution_auto_fix_allowed and normalized_paths:
             incident_class = "investigate"
             recommended_action = "open_fix_pr" if path_risk in {RISK_LOW, RISK_MEDIUM} else "open_issue"
             next_step = "open_fix_pr" if path_risk in {RISK_LOW, RISK_MEDIUM} else "open_issue"
@@ -816,13 +815,10 @@ def _automation_triage_snapshot(
 
     if execution_auto_fix_allowed and category == "" and path_risk in {RISK_LOW, RISK_MEDIUM}:
         auto_fix_allowed = True
-        deploy_allowed = True
     if path_risk in {RISK_HIGH, RISK_CRITICAL}:
         human_review_required = True
-        deploy_allowed = False
         auto_fix_allowed = False
     if category:
-        deploy_allowed = False
         auto_fix_allowed = False
         human_review_required = True
 
@@ -849,7 +845,8 @@ def _automation_triage_snapshot(
         "control": control,
         "auto_fix_allowed": auto_fix_allowed,
         "retry_allowed": retry_allowed,
-        "deploy_allowed": deploy_allowed,
+        # Triage has no deployment target, release evidence, or deployment authority.
+        "deploy_allowed": False,
         "human_review_required": human_review_required,
         "recommended_action": recommended_action,
         "next_step": next_step,
@@ -1969,16 +1966,13 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         failure_category = str(payload.get("failure_category") or params.get("failure_category", [""])[0] or "")
         error = str(payload.get("error") or params.get("error", [""])[0] or "")
         run_id = str(payload.get("run_id") or params.get("run_id", [""])[0] or "")
-        changed_paths_raw = payload.get("changed_paths")
-        if not isinstance(changed_paths_raw, list):
-            changed_paths_raw = []
         triage = _automation_triage_snapshot(
             repo,
             task=task,
             requested_mode=requested_mode,
             failure_category=failure_category,
             error=error,
-            changed_paths=[str(item) for item in changed_paths_raw if isinstance(item, str)],
+            changed_paths=payload.get("changed_paths"),
             run_id=run_id,
         )
         _json_response(self, HTTPStatus.OK, {"status": "ok", "triage": triage})

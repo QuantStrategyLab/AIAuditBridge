@@ -70,10 +70,20 @@ operations: **Analyze**, **Execute**, and **Review**.
 | `/v1/ai/health` | GET | Online service health snapshot | No |
 | `/healthz` | GET | Liveness check | No |
 | `/v1/ai/quota` | GET | Provider usage, Codex account limits, and internal estimates | No |
-| `/v1/ai/automation/triage` | POST | Structured failure triage and release/readiness guidance | No |
+| `/v1/ai/automation/triage` | POST | Structured failure triage and bounded next-step advice | No |
 | `/v1/ai/feedback/*` | GET/POST | Change tracking and evaluation | No |
 
 Health status vocabulary is defined in [`health_taxonomy.md`](health_taxonomy.md). Do not use `/v1/ai/health` as a substitute for monthly audit results, artifact freshness, or strategy-level health evidence.
+
+Automation triage is advisory: `auto_fix_allowed` and `open_fix_pr` describe eligibility
+to propose a bounded repair PR, not permission to merge, deploy, or change an account.
+`deploy_allowed` is always `false`; release authorization and validation belong to the
+actual release workflow. Missing, `null`, or empty `changed_paths` returns
+`file_risk: unknown`, `auto_fix_allowed: false`, and `human_review_required: true`.
+When supplied, paths must be a list of non-empty repository-relative strings;
+malformed lists, blank entries, absolute paths, and parent-directory segments return
+HTTP 400 instead of silently discarding entries. Existing failure retry advice is
+independent of these write permissions.
 
 Backward-compatible aliases:
 - `/v1/codex-audit` → `/v1/ai/execute`
