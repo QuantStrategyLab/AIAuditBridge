@@ -58,6 +58,10 @@ CONTROL_PLANE_SOURCE_SCHEMA = "qsl_control_plane_source_snapshot.v1"
 CONTROL_PLANE_SOURCE_ID = "aiaudit.soxl_manual_validation"
 ATTRIBUTION_SCHEMA = "qsl.soxl-three-asset-attribution.v1"
 ATTRIBUTION_VARIANTS = ("baseline_mid_065", "soxx_buy_hold", "fixed_full_weights")
+VOLATILITY_ABLATION_VARIANTS = ("baseline_mid_065", "baseline_without_volatility_delever")
+VOLATILITY_ABLATION_STUDY_VARIANT = "volatility_delever_on_off_v1"
+# Reviewed producer merged by UsEquitySnapshotPipelines PR #497.
+VOLATILITY_ABLATION_CONSUMER_REVISION = "ddce45441ef3a1306db30f502b3773a4eb81f4f8"
 # Replaced by the reviewed producer commit before this consumer is published.
 ATTRIBUTION_CONSUMER_REVISION = "84cd38a2fc8dede06ab09b32900006c6b858142d"
 
@@ -754,7 +758,7 @@ def _summary_digest(value: object) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
 
 
-def _sanitize_attribution(value: object, manifest_sha256: str) -> dict[str, Any]:
+def _sanitize_attribution(value: object, manifest_sha256: str, *, volatility_ablation: bool = False) -> dict[str, Any]:
     """Keep fixed, reconciled aggregate results; never export replay series."""
     try:
         if not isinstance(value, Mapping):
@@ -767,6 +771,13 @@ def _sanitize_attribution(value: object, manifest_sha256: str) -> dict[str, Any]
             or value.get("promotion_eligible") is not False
             or value.get("development_cutoff") != DEVELOPMENT_CUTOFF
             or value["p1_identity"]["input_manifest_sha256"] != manifest_sha256
+        ):
+            raise ValueError
+        if volatility_ablation and (
+            value.get("study_variant") != VOLATILITY_ABLATION_STUDY_VARIANT
+            or value.get("variants") != list(VOLATILITY_ABLATION_VARIANTS)
+            or value.get("cost_bps") != [10.0]
+            or value.get("causal_attribution_claimed") is not False
         ):
             raise ValueError
         source = value["source_identity"]
@@ -782,7 +793,9 @@ def _sanitize_attribution(value: object, manifest_sha256: str) -> dict[str, Any]
         if claimed != _summary_digest(unsigned):
             raise ValueError
         results = value["results"]
-        expected = [(variant, cost) for variant in ATTRIBUTION_VARIANTS for cost in COST_BPS]
+        variants = VOLATILITY_ABLATION_VARIANTS if volatility_ablation else ATTRIBUTION_VARIANTS
+        costs = (10.0,) if volatility_ablation else COST_BPS
+        expected = [(variant, cost) for variant in variants for cost in costs]
         if not isinstance(results, list) or len(results) != len(expected):
             raise ValueError
         safe_results = []
@@ -839,6 +852,9 @@ def _sanitize_attribution(value: object, manifest_sha256: str) -> dict[str, Any]
             "study_kind": "retrospective_research", "promotion_eligible": False,
             "source_identity": {key: source[key] for key in ("repository", "revision", "quant_platform_kit_revision", "uv_lock_sha256")},
             "results": safe_results, "result_sha256": claimed,
+            **({"study_variant": VOLATILITY_ABLATION_STUDY_VARIANT,
+                "variants": list(VOLATILITY_ABLATION_VARIANTS), "cost_bps": [10.0],
+                "causal_attribution_claimed": False} if volatility_ablation else {}),
         }
     except (KeyError, TypeError, ValueError, OverflowError):
         raise ManualLearningError("attribution_result_invalid") from None
@@ -848,8 +864,11 @@ def run_manual_attribution(
     *, manifest_sha256: str, root: Path, consumer_source: Path, ues_source: Path,
     context: Mapping[str, str], command_runner: Callable[[list[str]], Any] | None = None,
     progress_writer: Callable[[Mapping[str, Any]], None] | None = None,
+    volatility_ablation: bool = False,
 ) -> dict[str, Any]:
     _validate_authority(context)
+    if volatility_ablation and re.fullmatch(r"[0-9a-f]{40}", VOLATILITY_ABLATION_CONSUMER_REVISION) is None:
+        raise ManualLearningError("volatility_ablation_source_unpinned")
     if re.fullmatch(r"[0-9a-f]{64}", manifest_sha256) is None:
         raise ManualLearningError("input_identity_invalid")
     required = (root / "binding.json", root / "manifest.json", root / "bars.json",
@@ -860,15 +879,20 @@ def run_manual_attribution(
     artifact = _safe_base(context, (BASELINE,), manifest_sha256)
     artifact.pop("parameter_key")
     artifact.pop("parameter_values")
-    artifact.update(operation="soxl_attribution", study_kind="retrospective_research",
-                    variants=list(ATTRIBUTION_VARIANTS), research_executed=None,
+    artifact.update(operation="soxl_volatility_ablation" if volatility_ablation else "soxl_attribution", study_kind="retrospective_research",
+                    variants=list(VOLATILITY_ABLATION_VARIANTS if volatility_ablation else ATTRIBUTION_VARIANTS), research_executed=None,
                     numeric_execution={"status": "started"})
-    artifact["consumer_source"]["revision"] = ATTRIBUTION_CONSUMER_REVISION
+    artifact["consumer_source"]["revision"] = (
+        VOLATILITY_ABLATION_CONSUMER_REVISION if volatility_ablation else ATTRIBUTION_CONSUMER_REVISION
+    )
+    if volatility_ablation:
+        artifact.update(study_variant=VOLATILITY_ABLATION_STUDY_VARIANT,
+                        cost_bps=[10.0], causal_attribution_claimed=False)
     if progress_writer is not None:
         progress_writer(artifact)
     runner = command_runner or (lambda argv: subprocess.run(argv, capture_output=True, text=True, timeout=1200, check=False))
     try:
-        completed = runner([*_numeric_command(root, consumer_source, ues_source, ()), "--attribution"])
+        completed = runner([*_numeric_command(root, consumer_source, ues_source, ()), "--volatility-ablation" if volatility_ablation else "--attribution"])
     except (OSError, subprocess.SubprocessError):
         artifact.update(status="parked", failure_stage="numeric_outcome_unknown", numeric_execution={"status": "outcome_unknown"})
         return artifact
@@ -878,7 +902,7 @@ def run_manual_attribution(
     try:
         if not isinstance(completed.stdout, str) or len(completed.stdout) > 2 * 1024 * 1024:
             raise ManualLearningError("attribution_result_invalid")
-        safe = _sanitize_attribution(json.loads(completed.stdout), manifest_sha256)
+        safe = _sanitize_attribution(json.loads(completed.stdout), manifest_sha256, volatility_ablation=volatility_ablation)
     except (AttributeError, TypeError, json.JSONDecodeError, ManualLearningError):
         artifact.update(status="parked", failure_stage="attribution_result_invalid", numeric_execution={"status": "outcome_unknown"})
         return artifact
@@ -1328,7 +1352,7 @@ def _write(path: Path, value: Mapping[str, Any]) -> None:
 def initialize_record(path: Path, context: Mapping[str, str], *, operation: str = "soxl_learning") -> None:
     """Write the bound terminal placeholder before setup or remote reads begin."""
     _validate_authority(context)
-    if operation not in {"soxl_learning", "soxl_validation", "soxl_attribution"}:
+    if operation not in {"soxl_learning", "soxl_validation", "soxl_attribution", "soxl_volatility_ablation"}:
         raise ManualLearningError("manual_operation_invalid")
     _write(
         path,
@@ -1358,6 +1382,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--parameter-grid")
     parser.add_argument("--attribution", action="store_true")
+    parser.add_argument("--volatility-ablation", action="store_true")
     parser.add_argument("--development-summary", type=Path)
     parser.add_argument("--manifest-sha256")
     parser.add_argument("--root", type=Path)
@@ -1380,7 +1405,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--source-revision")
     parser.add_argument("--computed-at")
     args = parser.parse_args(argv)
-    if args.attribution and any((args.parameter_grid is not None, args.development_summary is not None,
+    if args.volatility_ablation and args.attribution:
+        parser.error("attribution study modes are mutually exclusive")
+    if (args.attribution or args.volatility_ablation) and any((args.parameter_grid is not None, args.development_summary is not None,
                                  args.watcher_result is not None, args.watcher_validation,
                                  args.watcher_preflight, args.watcher_record_pre_numeric_failure,
                                  args.control_plane_source_from_summary is not None)):
@@ -1452,17 +1479,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     if any(value is None for value in manual_required):
         parser.error("manual mode requires the original bounded input and authority arguments")
-    if not args.attribution and args.development_summary is None and args.parameter_grid is None:
+    if not (args.attribution or args.volatility_ablation) and args.development_summary is None and args.parameter_grid is None:
         parser.error("manual learning requires a parameter grid")
     if args.development_summary is not None and args.parameter_grid is not None:
         parser.error("selected validation cannot accept a parameter grid")
     context = {key: getattr(args, key) for key in ("repository", "ref", "event_name", "actor", "run_id", "run_attempt")}
-    operation = "soxl_attribution" if args.attribution else ("soxl_validation" if args.development_summary is not None else "soxl_learning")
+    operation = ("soxl_volatility_ablation" if args.volatility_ablation else "soxl_attribution") if (
+        args.attribution or args.volatility_ablation
+    ) else ("soxl_validation" if args.development_summary is not None else "soxl_learning")
     try:
-        if args.attribution:
+        if args.attribution or args.volatility_ablation:
             result = run_manual_attribution(
                 manifest_sha256=args.manifest_sha256, root=args.root, consumer_source=args.consumer_source,
                 ues_source=args.ues_source, context=context, progress_writer=lambda value: _write(args.output, value),
+                volatility_ablation=args.volatility_ablation,
             )
         elif args.development_summary is not None:
             result = run_manual_validation(
