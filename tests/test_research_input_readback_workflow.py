@@ -250,7 +250,9 @@ def test_validation_result_can_be_published_without_rerunning_research():
     assert "gh run download" in text
     assert "--control-plane-source-from-summary" in text
     assert "QSL_CONTROL_PLANE_SYNC_URL" in text
-    assert "secrets.CONTROL_PLANE_SYNC_TOKEN" in text
+    assert "secrets.AAB_VALIDATION_SYNC_TOKEN" in text
+    assert "secrets.CONTROL_PLANE_SYNC_TOKEN" not in text
+    assert "secrets.QSL_RESEARCH_TASK_SYNC_TOKEN" not in text
     assert "/api/internal/sync-control-plane-source" in text
     assert "CONTROL_PLANE_SYNC_STATUS=NOT_CONFIGURED" in text
     assert "--retry" not in text[text.index("name: Publish validation result to the read-only control plane"):]

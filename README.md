@@ -1,5 +1,21 @@
 # Quant AI Audit Bridge
 
+## Publishing an existing SOXL validation result
+
+The `publish_validation` operation in `research_input_readback.yml` uses the
+repository secret `AAB_VALIDATION_SYNC_TOKEN` and existing
+`QSL_CONTROL_PLANE_SYNC_URL`. The same dedicated value must be bound to the
+console's Worker through QuantRuntimeSettings' `runtime-strategy-switch`
+environment and deployed before publication. Its authority is limited to the
+`aiaudit.soxl_manual_validation` read-only, parked result source; it cannot approve
+a candidate or change trading settings. Keep the existing control-plane and
+research-task credentials unchanged; never copy a personal token as a substitute.
+
+Use `operation=publish_validation` with the original successful `validation_run_id`.
+The workflow validates and republishes that artifact without another model call
+or backtest. Missing configuration is not successful delivery; verify the
+publication result and the console's original source/run/time before closing it.
+
 
 ## QSL architecture role
 
