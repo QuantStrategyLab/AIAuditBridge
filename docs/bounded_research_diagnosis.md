@@ -164,3 +164,17 @@ watcher 保留未完成任务，QPK 将研究状态记为 `deferred`，不误写
 本研究使用已经看过的历史窗口，标为 `retrospective_research`；成交成本、现金零利息及外部流为
 原模拟假设，不冒充真实券商账务。资产收益贡献不等于经济因果证明，各规则间的差值也不能相加
 当成唯一的因子贡献。该结果只能解释当前固定对照，不用于重调旧候选或宣称新的样本外胜出。
+
+### 固定波动率减仓消融
+
+独立 `operation=soxl_volatility_ablation` / `--volatility-ablation` 只允许
+`baseline_mid_065` 与 `baseline_without_volatility_delever`，成本固定 10 bps；第二组仅关闭
+冻结配置中的 `blend_gate_volatility_delever_enabled`，其余输入、策略版本、现金和执行时点相同。
+结果明确 `study_variant=volatility_delever_on_off_v1`、`causal_attribution_claimed=false`；
+原九组 attribution 与已保存结果保持不变。无论净收益改善、恶化或不变，本次实验均到此结项。
+
+`VOLATILITY_ABLATION_CONSUMER_REVISION` 已绑定到 UESP PR #497 合并的精确提交
+`ddce45441ef3a1306db30f502b3773a4eb81f4f8`；后续运行仍须保持已审查发布的来源绑定。
+未绑定时 workflow 在受限数据读取前停止，不调用模型、研究或券商。该提交也是运行记录的
+消费者版本来源，不接受操作人任意指定版本。研究结果只保存聚合字段，不发布为验证通过、
+不启动 shadow、不获得账户权限；原资料许可、临时清理、单次运行及失败停止要求保持。

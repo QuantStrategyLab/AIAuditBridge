@@ -13,6 +13,7 @@ on:
           - soxl_learning
           - soxl_validation
           - soxl_attribution
+          - soxl_volatility_ablation
           - publish_validation
       blend_gate_mid_soxl_weights:
         description: Reviewed baseline and up to two bounded learning values
@@ -72,12 +73,27 @@ jobs:
           path: validator-source
           persist-credentials: false
 
+      - name: Resolve the fixed volatility ablation source
+        id: ablation-source
+        if: inputs.operation == 'soxl_volatility_ablation'
+        run: |
+          python3 - <<'PY_SOURCE'
+          import os
+          import re
+          from scripts.run_soxl_manual_learning import VOLATILITY_ABLATION_CONSUMER_REVISION
+          revision = VOLATILITY_ABLATION_CONSUMER_REVISION
+          if re.fullmatch(r"[0-9a-f]{40}", revision) is None:
+              raise SystemExit("volatility ablation source is not published")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write("revision=" + revision + "\n")
+          PY_SOURCE
+
       - name: Checkout the bounded learning consumer
         if: inputs.operation != 'readback'
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           repository: QuantStrategyLab/UsEquitySnapshotPipelines
-          ref: ${{ inputs.operation == 'soxl_attribution' && '84cd38a2fc8dede06ab09b32900006c6b858142d' || inputs.operation == 'soxl_validation' && 'b68b4a81ccdab7b61042fcf98df0189dfe539ef4' || 'b03ecbe4e0a7a0de22f298499f867a7039e4b60a' }}
+          ref: ${{ inputs.operation == 'soxl_volatility_ablation' && steps.ablation-source.outputs.revision || inputs.operation == 'soxl_attribution' && '84cd38a2fc8dede06ab09b32900006c6b858142d' || inputs.operation == 'soxl_validation' && 'b68b4a81ccdab7b61042fcf98df0189dfe539ef4' || 'b03ecbe4e0a7a0de22f298499f867a7039e4b60a' }}
           path: consumer-source
           persist-credentials: false
 
@@ -309,10 +325,14 @@ jobs:
               --actor "$GITHUB_ACTOR" \
               --run-id "$GITHUB_RUN_ID" \
               --run-attempt "$GITHUB_RUN_ATTEMPT"
-          elif [ "$OPERATION" = "soxl_attribution" ]; then
+          elif [ "$OPERATION" = "soxl_attribution" ] || [ "$OPERATION" = "soxl_volatility_ablation" ]; then
             cd "$GITHUB_WORKSPACE"
+            study_flag=--attribution
+            if [ "$OPERATION" = "soxl_volatility_ablation" ]; then
+              study_flag=--volatility-ablation
+            fi
             UV_PROJECT_ENVIRONMENT="$UES_ENV_ROOT" python3 -m scripts.run_soxl_manual_learning \
-              --attribution \
+              "$study_flag" \
               --manifest-sha256 "$EXPECTED_MANIFEST_SHA256" \
               --root "$READBACK_ROOT/root" \
               --consumer-source "$CONSUMER_SOURCE" \

@@ -123,3 +123,108 @@ def test_attribution_workflow_is_explicit_and_never_publishes_as_validation():
     assert 'default: readback' in text
     publish = text.split('  publish-validation-result:', 1)[1]
     assert "inputs.operation == 'soxl_attribution'" not in publish
+
+
+def volatility_result():
+    value = numeric_result()
+    value['results'] = [copy.deepcopy(value['results'][1]), copy.deepcopy(value['results'][1])]
+    value['results'][1]['variant'] = 'baseline_without_volatility_delever'
+    value.update(study_variant='volatility_delever_on_off_v1',
+                 variants=['baseline_mid_065', 'baseline_without_volatility_delever'],
+                 cost_bps=[10.0], causal_attribution_claimed=False)
+    value.pop('result_sha256')
+    value['result_sha256'] = consumer._summary_digest(value)
+    return value
+
+
+def test_volatility_ablation_accepts_only_its_fixed_pair():
+    safe = consumer._sanitize_attribution(volatility_result(), 'a' * 64, volatility_ablation=True)
+    assert [x['variant'] for x in safe['results']] == ['baseline_mid_065', 'baseline_without_volatility_delever']
+    assert safe['study_variant'] == 'volatility_delever_on_off_v1'
+    assert safe['causal_attribution_claimed'] is False
+    with pytest.raises(consumer.ManualLearningError):
+        consumer._sanitize_attribution(volatility_result(), 'a' * 64)
+
+
+@pytest.mark.parametrize('mutation', [
+    lambda x: x.update(study_variant='optimized_study'),
+    lambda x: x.update(causal_attribution_claimed=True),
+    lambda x: x.update(cost_bps=[5.0]),
+    lambda x: x.update(variants=['baseline_mid_065', 'fixed_full_weights']),
+    lambda x: x['results'][1].update(cost_bps=5.0),
+    lambda x: x['results'][1].update(variant='baseline_mid_065'),
+    lambda x: x['results'][1].update(observation_count=599),
+])
+def test_volatility_ablation_rejects_changed_trial_or_window(mutation):
+    value = volatility_result()
+    mutation(value)
+    value.pop('result_sha256')
+    value['result_sha256'] = consumer._summary_digest(value)
+    with pytest.raises(consumer.ManualLearningError):
+        consumer._sanitize_attribution(value, 'a' * 64, volatility_ablation=True)
+
+
+def test_ablation_cli_rejects_grid_and_other_modes_before_execution():
+    for other in (['--attribution'], ['--parameter-grid', '0.65'], ['--watcher-preflight']):
+        with pytest.raises(SystemExit) as exc:
+            consumer.main(['--volatility-ablation', *other])
+        assert exc.value.code == 2
+
+
+def test_ablation_unpublished_source_cannot_execute(tmp_path, monkeypatch):
+    monkeypatch.setattr(consumer, 'VOLATILITY_ABLATION_CONSUMER_REVISION', '')
+    calls = []
+    with pytest.raises(consumer.ManualLearningError, match='volatility_ablation_source_unpinned'):
+        consumer.run_manual_attribution(
+            manifest_sha256='a' * 64, root=tmp_path, consumer_source=tmp_path, ues_source=tmp_path,
+            context={'repository': consumer.EXPECTED_REPOSITORY, 'ref': consumer.EXPECTED_REF,
+                     'event_name': consumer.EXPECTED_EVENT, 'actor': 'tester', 'run_id': '123', 'run_attempt': '1'},
+            command_runner=lambda argv: calls.append(argv), volatility_ablation=True,
+        )
+    assert calls == []
+
+
+@pytest.mark.parametrize('timeout', [False, True])
+def test_ablation_executes_once_and_preserves_research_boundary(tmp_path, monkeypatch, timeout):
+    monkeypatch.setattr(consumer, 'VOLATILITY_ABLATION_CONSUMER_REVISION', 'b' * 40)
+    root, source, ues = (tmp_path / name for name in ('input', 'consumer', 'ues'))
+    for path in (root / 'binding.json', root / 'manifest.json', root / 'bars.json',
+                 source / 'scripts/run_soxl_three_asset_learning.py',
+                 source / 'config/soxl_soxx_core_only_p2_v3.json', source / '.venv/bin/python'):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{}')
+    ues.mkdir()
+    calls = []
+
+    def execute(command):
+        calls.append(command)
+        if timeout:
+            raise subprocess.TimeoutExpired(command, 1200)
+        return subprocess.CompletedProcess(command, 0, json.dumps(volatility_result()), '')
+
+    result = consumer.run_manual_attribution(
+        manifest_sha256='a' * 64, root=root, consumer_source=source, ues_source=ues,
+        context={'repository': consumer.EXPECTED_REPOSITORY, 'ref': consumer.EXPECTED_REF,
+                 'event_name': consumer.EXPECTED_EVENT, 'actor': 'tester', 'run_id': '123', 'run_attempt': '1'},
+        command_runner=execute, volatility_ablation=True,
+    )
+    assert len(calls) == 1
+    assert '--volatility-ablation' in calls[0] and '--attribution' not in calls[0]
+    assert '--blend-gate-mid-soxl-weight' not in calls[0]
+    assert result['operation'] == 'soxl_volatility_ablation'
+    assert result['consumer_source']['revision'] == 'b' * 40
+    assert result['causal_attribution_claimed'] is False
+    assert result['promotion_eligible'] is False and result['no_order'] is True
+    assert result['status'] == ('parked' if timeout else 'accepted')
+    assert result['research_executed'] is (None if timeout else True)
+
+
+def test_ablation_workflow_uses_fixed_source_and_cannot_publish_validation():
+    from pathlib import Path
+    text = (Path(__file__).parents[1] / '.github/workflows/research_input_readback.yml').read_text()
+    assert '- soxl_volatility_ablation' in text
+    assert 'VOLATILITY_ABLATION_CONSUMER_REVISION' in text
+    assert '--volatility-ablation' in text
+    assert 'steps.ablation-source.outputs.revision' in text
+    publish = text.split('  publish-validation-result:', 1)[1]
+    assert "inputs.operation == 'soxl_volatility_ablation'" not in publish
