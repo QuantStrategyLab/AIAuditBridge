@@ -436,7 +436,7 @@ jobs:
       - name: Publish validation result to the read-only control plane
         env:
           CONTROL_PLANE_SYNC_URL: ${{ vars.QSL_CONTROL_PLANE_SYNC_URL }}
-          CONTROL_PLANE_SYNC_TOKEN: ${{ secrets.CONTROL_PLANE_SYNC_TOKEN }}
+          CONTROL_PLANE_SYNC_TOKEN: ${{ secrets.AAB_VALIDATION_SYNC_TOKEN }}
         run: |
           set -euo pipefail
           if [ -z "${CONTROL_PLANE_SYNC_URL:-}" ] || [ -z "${CONTROL_PLANE_SYNC_TOKEN:-}" ]; then
