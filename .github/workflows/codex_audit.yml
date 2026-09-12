@@ -6,6 +6,11 @@ on:
     - cron: '45 22 * * *'
   workflow_dispatch:
     inputs:
+      account_diagnosis_request_id:
+        description: "Run one read-only diagnosis for an existing QRT account request"
+        required: false
+        type: string
+        default: ""
       watchdog_repair_rehearsal:
         description: "Replay the fixed historical watchdog repair in a temporary directory; artifact only"
         required: false
@@ -93,12 +98,12 @@ permissions:
   id-token: write
 
 concurrency:
-  group: ${{ inputs.watchdog_repair_rehearsal && 'codex-audit-watchdog-repair-rehearsal' || inputs.historical_diagnosis_rehearsal && 'codex-audit-historical-diagnosis-rehearsal' || (github.event_name == 'schedule' || inputs.daily_summary || inputs.operational_diagnosis) && 'codex-audit-daily-summary' || inputs.synthetic_sdk_check && 'codex-audit-synthetic-sdk' || format('codex-audit-{0}-{1}', github.event.client_payload.source_repo || inputs.source_repo, github.event.client_payload.issue_number || inputs.issue_number) }}
-  cancel-in-progress: ${{ github.event_name != 'schedule' && inputs.daily_summary != true && inputs.synthetic_sdk_check != true && inputs.operational_diagnosis != true && inputs.historical_diagnosis_rehearsal != true && inputs.watchdog_repair_rehearsal != true }}
+  group: ${{ inputs.account_diagnosis_request_id != '' && format('codex-audit-account-diagnosis-{0}', inputs.account_diagnosis_request_id) || inputs.watchdog_repair_rehearsal && 'codex-audit-watchdog-repair-rehearsal' || inputs.historical_diagnosis_rehearsal && 'codex-audit-historical-diagnosis-rehearsal' || (github.event_name == 'schedule' || inputs.daily_summary || inputs.operational_diagnosis) && 'codex-audit-daily-summary' || inputs.synthetic_sdk_check && 'codex-audit-synthetic-sdk' || format('codex-audit-{0}-{1}', github.event.client_payload.source_repo || inputs.source_repo, github.event.client_payload.issue_number || inputs.issue_number) }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' && inputs.account_diagnosis_request_id == '' && inputs.daily_summary != true && inputs.synthetic_sdk_check != true && inputs.operational_diagnosis != true && inputs.historical_diagnosis_rehearsal != true && inputs.watchdog_repair_rehearsal != true }}
 
 jobs:
   codex-audit:
-    if: github.event_name != 'schedule' && inputs.daily_summary != true && inputs.synthetic_sdk_check != true && inputs.operational_diagnosis != true && inputs.historical_diagnosis_rehearsal != true && inputs.watchdog_repair_rehearsal != true
+    if: github.event_name != 'schedule' && inputs.account_diagnosis_request_id == '' && inputs.daily_summary != true && inputs.synthetic_sdk_check != true && inputs.operational_diagnosis != true && inputs.historical_diagnosis_rehearsal != true && inputs.watchdog_repair_rehearsal != true
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -168,8 +173,35 @@ jobs:
           CODEX_AUDIT_SERVICE_AUDIENCE: ${{ vars.CODEX_AUDIT_SERVICE_AUDIENCE || 'quant-codex-audit' }}
         run: python scripts/run_monthly_codex_audit.py
 
+  account-diagnosis:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.account_diagnosis_request_id != '' &&
+      github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout approved Bridge revision
+        uses: actions/checkout@v6.0.3
+        with:
+          persist-credentials: false
+      - name: Run one read-only account diagnosis
+        env:
+          ACCOUNT_DIAGNOSIS_REQUEST_ID: ${{ inputs.account_diagnosis_request_id }}
+          ACCOUNT_DIAGNOSIS_SYNC_TOKEN: ${{ secrets.ACCOUNT_DIAGNOSIS_SYNC_TOKEN }}
+          QSL_CONTROL_PLANE_SYNC_URL: ${{ vars.QSL_CONTROL_PLANE_SYNC_URL }}
+          CODEX_AUDIT_SERVICE_URL: ${{ secrets.CODEX_AUDIT_SERVICE_URL }}
+          CODEX_AUDIT_SERVICE_AUDIENCE: ${{ vars.CODEX_AUDIT_SERVICE_AUDIENCE || 'quant-codex-audit' }}
+          AI_GATEWAY_SOURCE_REPO: QuantStrategyLab/AIAuditBridge
+          AI_GATEWAY_RESEARCH_PROVIDERS: codex
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python3 -m scripts.run_account_diagnosis
+
   synthetic-sdk-check:
-    if: github.event_name == 'workflow_dispatch' && inputs.synthetic_sdk_check == true && inputs.daily_summary != true && inputs.operational_diagnosis != true && inputs.historical_diagnosis_rehearsal != true && inputs.watchdog_repair_rehearsal != true && github.ref == 'refs/heads/main'
+    if: github.event_name == 'workflow_dispatch' && inputs.account_diagnosis_request_id == '' && inputs.synthetic_sdk_check == true && inputs.daily_summary != true && inputs.operational_diagnosis != true && inputs.historical_diagnosis_rehearsal != true && inputs.watchdog_repair_rehearsal != true && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -202,6 +234,7 @@ jobs:
   daily-summary:
     if: >-
       github.ref == 'refs/heads/main' && vars.AI_DAILY_SUMMARY_ENABLED == 'true' &&
+      inputs.account_diagnosis_request_id == '' &&
       inputs.historical_diagnosis_rehearsal != true && inputs.watchdog_repair_rehearsal != true &&
       (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.daily_summary == true))
     runs-on:
@@ -244,6 +277,7 @@ jobs:
   operational-diagnosis:
     if: >-
       github.ref == 'refs/heads/main' && vars.AI_OPERATIONAL_DIAGNOSIS_ENABLED == 'true' &&
+      inputs.account_diagnosis_request_id == '' &&
       inputs.historical_diagnosis_rehearsal != true && inputs.watchdog_repair_rehearsal != true &&
       (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.operational_diagnosis == true))
     runs-on:
@@ -279,7 +313,7 @@ jobs:
 
   historical-diagnosis-rehearsal:
     if: >-
-      github.event_name == 'workflow_dispatch' && inputs.historical_diagnosis_rehearsal == true && inputs.watchdog_repair_rehearsal != true &&
+      github.event_name == 'workflow_dispatch' && inputs.account_diagnosis_request_id == '' && inputs.historical_diagnosis_rehearsal == true && inputs.watchdog_repair_rehearsal != true &&
       github.ref == 'refs/heads/main'
     runs-on:
       - self-hosted
@@ -317,7 +351,7 @@ jobs:
 
   watchdog-repair-rehearsal:
     if: >-
-      github.event_name == 'workflow_dispatch' && inputs.watchdog_repair_rehearsal == true &&
+      github.event_name == 'workflow_dispatch' && inputs.account_diagnosis_request_id == '' && inputs.watchdog_repair_rehearsal == true &&
       github.ref == 'refs/heads/main'
     runs-on:
       - self-hosted
