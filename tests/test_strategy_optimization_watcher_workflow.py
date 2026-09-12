@@ -42,6 +42,15 @@ class StrategyOptimizationWatcherWorkflowTest(unittest.TestCase):
         self.assertIn("p1-status.json", text)
         self.assertIn("soxl_soxx_trend_income", text)
         self.assertIn("python -m scripts.run_research_task_diagnosis", text)
+        self.assertIn("Recover pending verified watcher tasks", text)
+        recovery = text.split("      - name: Recover pending verified watcher tasks", 1)[1].split(
+            "      - name: Run one bounded Codex-only research diagnosis", 1
+        )[0]
+        self.assertIn("github.event.schedule == '23 6 * * *'", recovery)
+        self.assertIn("--event schedule --status success --limit 20", text)
+        self.assertIn("--prior-input", text)
+        self.assertIn("--output-watcher-result data/output/strategy_optimization_watcher/result.json", text)
+        self.assertIn('GH_TOKEN="${BRIDGE_GH_TOKEN}" gh run download', text)
         self.assertIn("Two completed observations are required", text)
         self.assertIn("--limit 5", text)
         self.assertIn('current_run_id="${RUN_IDS[0]}"', text)

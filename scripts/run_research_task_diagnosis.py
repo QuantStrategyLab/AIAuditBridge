@@ -11,6 +11,7 @@ or alter a strategy.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import subprocess
 import sys
@@ -79,23 +80,104 @@ def diagnosis_candidates(result: Mapping[str, Any]) -> list[dict[str, Any]]:
         issue_url = str(issue.get("url") or issue.get("existing_url") or "").strip()
         trigger = summary.get("trigger") if isinstance(summary.get("trigger"), Mapping) else {}
         if repo and issue_url:
-            candidates.append({"repository": repo, "issue_url": issue_url, "task": task, "trigger": trigger})
+            candidates.append(
+                {
+                    "repository": repo,
+                    "issue_url": issue_url,
+                    "task": task,
+                    "trigger": trigger,
+                    "issue": issue,
+                }
+            )
     return sorted(candidates, key=lambda item: (str(item["repository"]), str(item["issue_url"])))
 
 
-def issue_has_diagnosis_marker(repository: str, issue_url: str, marker: str) -> bool:
-    """Read comments only; any retrieval error means do not repeat an action."""
+def issue_is_open_and_undiagnosed(repository: str, issue_url: str, marker: str) -> bool:
+    """Return true only for a readable open Issue without this exact marker."""
     try:
         completed = subprocess.run(
-            ["gh", "issue", "view", issue_url, "--repo", repository, "--json", "comments", "--jq", ".comments[].body"],
+            ["gh", "issue", "view", issue_url, "--repo", repository, "--json", "state,comments"],
             check=True,
             capture_output=True,
             text=True,
             timeout=30,
         )
-    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        return True
-    return marker in completed.stdout
+        payload = json.loads(completed.stdout)
+        if not isinstance(payload, Mapping):
+            return False
+        comments = payload.get("comments")
+        if payload.get("state") != "OPEN" or not isinstance(comments, list):
+            return False
+        return not any(isinstance(item, Mapping) and marker in str(item.get("body") or "") for item in comments)
+    except (OSError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return False
+
+
+def issue_has_diagnosis_marker(repository: str, issue_url: str, marker: str) -> bool:
+    """Any closed Issue or retrieval error is treated as already handled."""
+    return not issue_is_open_and_undiagnosed(repository, issue_url, marker)
+
+
+def recover_pending_watcher_result(
+    current: Mapping[str, Any],
+    prior_results: list[Mapping[str, Any]],
+    *,
+    source_repository: str,
+    issue_pending: Callable[[str, str, str], bool] = issue_is_open_and_undiagnosed,
+) -> dict[str, Any]:
+    """Carry one exact verified historical task into the current watcher handoff."""
+    result = copy.deepcopy(dict(current))
+    snapshot = result.get("research_task_source_snapshot")
+    issues = result.get("issues")
+    if (
+        _clean_repo(source_repository) != source_repository
+        or not isinstance(snapshot, dict)
+        or snapshot.get("data_status") != "ready"
+        or not isinstance(snapshot.get("tasks"), list)
+        or not isinstance(issues, list)
+    ):
+        return result
+    # A current verified task keeps priority. The SOXL handoff deliberately
+    # accepts exactly one verified task.
+    if snapshot["tasks"]:
+        return result
+
+    pending: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    for prior in prior_results:
+        for candidate in diagnosis_candidates(prior):
+            if candidate["repository"] != source_repository:
+                continue
+            try:
+                request = build_research_diagnosis_request(candidate["task"], trigger=candidate["trigger"])
+                marker = marker_for_research_diagnosis(request)
+            except (TypeError, ValueError):
+                continue
+            identity = (
+                str(candidate["repository"]),
+                str(candidate["issue_url"]),
+                str(request["task_id"]),
+                str(request["task_sha256"]),
+            )
+            if identity in seen:
+                continue
+            seen.add(identity)
+            if issue_pending(identity[0], identity[1], marker):
+                pending.append(candidate)
+
+    if not pending:
+        return result
+    pending.sort(
+        key=lambda item: (
+            str(item["task"].get("created_at") or ""),
+            str(item["repository"]),
+            str(item["issue_url"]),
+        )
+    )
+    recovered = pending[0]
+    snapshot["tasks"].append(copy.deepcopy(recovered["task"]))
+    issues.append(copy.deepcopy(recovered["issue"]))
+    return result
 
 
 def comment_issue(repository: str, issue_url: str, body: str) -> str:
@@ -250,11 +332,52 @@ def run_diagnosis(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run bounded AI diagnosis for verified research tasks.")
     parser.add_argument("--input", required=True, help="Watcher result JSON path")
+    parser.add_argument("--prior-input", action="append", default=[], help="Prior successful watcher result JSON path")
+    parser.add_argument("--source-repository", help="Current watcher source repository for historical recovery")
+    parser.add_argument("--output-watcher-result", help="Write the recovered handoff result before diagnosis")
     parser.add_argument("--dry-run", action="store_true", help="Build the prompt but do not call AI or comment")
     parser.add_argument("--max-per-run", type=int, default=MAX_AUTOMATIC_DIAGNOSES)
     args = parser.parse_args(argv)
     try:
-        result = run_diagnosis(load_watcher_result(args.input), dry_run=args.dry_run, max_per_run=args.max_per_run)
+        watcher_result = load_watcher_result(args.input)
+        marker_present: Callable[[str, str, str], bool] = issue_has_diagnosis_marker
+        if args.prior_input:
+            if not args.source_repository or not args.output_watcher_result:
+                raise ValueError("historical recovery requires source repository and watcher result output")
+            pending_cache: dict[tuple[str, str, str], bool] = {}
+
+            def cached_issue_pending(repository: str, issue_url: str, marker: str) -> bool:
+                key = (repository, issue_url, marker)
+                if key not in pending_cache:
+                    pending_cache[key] = issue_is_open_and_undiagnosed(repository, issue_url, marker)
+                return pending_cache[key]
+
+            prior_results: list[Mapping[str, Any]] = []
+            for path in args.prior_input:
+                try:
+                    prior_results.append(load_watcher_result(path))
+                except (OSError, ValueError, json.JSONDecodeError):
+                    continue
+            watcher_result = recover_pending_watcher_result(
+                watcher_result,
+                prior_results,
+                source_repository=args.source_repository,
+                issue_pending=cached_issue_pending,
+            )
+            Path(args.output_watcher_result).write_text(
+                json.dumps(watcher_result, ensure_ascii=False, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            def cached_marker_present(repository: str, issue_url: str, marker: str) -> bool:
+                return not cached_issue_pending(repository, issue_url, marker)
+
+            marker_present = cached_marker_present
+        result = run_diagnosis(
+            watcher_result,
+            dry_run=args.dry_run,
+            max_per_run=args.max_per_run,
+            marker_present=marker_present,
+        )
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         print(json.dumps({"status": "error", "error": _error_summary(exc)}, sort_keys=True))
         return 2
