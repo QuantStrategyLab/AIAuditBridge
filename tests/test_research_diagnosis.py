@@ -6,7 +6,13 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from scripts.run_research_task_diagnosis import diagnosis_candidates, run_diagnosis
+from scripts.run_research_task_diagnosis import (
+    diagnosis_candidates,
+    issue_is_open_and_undiagnosed,
+    recover_pending_watcher_result,
+    run_diagnosis,
+)
+from scripts.run_soxl_manual_learning import prepare_watcher_learning
 from service.research_diagnosis import (
     MARKER,
     build_research_diagnosis_prompt,
@@ -56,6 +62,41 @@ def _result(task: dict[str, object] | None = None) -> dict[str, object]:
             }
         ],
     }
+
+
+def _empty_result() -> dict[str, object]:
+    return {
+        "status": "ok",
+        "findings": 0,
+        "issues": [],
+        "research_task_source_snapshot": {
+            "schema_version": "qsl_research_task_source_snapshot.v1",
+            "source_id": "aiaudit.strategy_optimization_watcher",
+            "generated_at": "2026-09-12T00:00:00Z",
+            "computed_at": "2026-09-12T00:00:00Z",
+            "data_status": "ready",
+            "tasks": [],
+            "errors": [],
+        },
+    }
+
+
+def _soxl_task() -> dict[str, object]:
+    return build_strategy_diagnosis_task(
+        event_key="798ac840f875",
+        created_at="2026-09-11T07:30:11Z",
+        candidate_id="soxl_soxx_core_only_p2_v3",
+        candidate_kind="individual",
+        domain="us_equity",
+        strategy_repository="QuantStrategyLab/UsEquityStrategies",
+        evidence={
+            "p1_input_digest": "0" * 64,
+            "p2_config_digest": "ff8fa0acf4f175a7c40c3e1e6a3304ea2748b6b81c3797342085a4df3810ab4d",
+            "p3_evidence_id": "c" * 64,
+            "strategy_revision": "7756fe32585e85cf1d09a163203a02e3eee39fe1",
+            "producer_revision": "e" * 40,
+        },
+    )
 
 
 class FakeClient:
@@ -183,6 +224,89 @@ class ResearchDiagnosisTests(unittest.TestCase):
         no_match = _result()
         no_match["issues"][0]["task"]["event_key"] = "000000000000"  # type: ignore[index]
         self.assertEqual(diagnosis_candidates(no_match), [])
+
+    def test_recovers_exact_pending_verified_task_for_existing_downstream_handoff(self) -> None:
+        historical = _result(_soxl_task())
+        historical["issues"][0]["url"] = "https://github.com/QuantStrategyLab/UsEquitySnapshotPipelines/issues/496"  # type: ignore[index]
+
+        recovered = recover_pending_watcher_result(
+            _empty_result(),
+            [historical],
+            source_repository="QuantStrategyLab/UsEquitySnapshotPipelines",
+            issue_pending=lambda _repo, _url, _marker: True,
+        )
+
+        task = recovered["research_task_source_snapshot"]["tasks"][0]  # type: ignore[index]
+        self.assertEqual(task, historical["research_task_source_snapshot"]["tasks"][0])  # type: ignore[index]
+        self.assertEqual(recovered["issues"], historical["issues"])
+        request = build_research_diagnosis_request(task)
+        diagnosis_comment = format_research_diagnosis_comment(request, "## 已验证事实\n已绑定。")
+        ready = prepare_watcher_learning(
+            recovered,
+            {"diagnoses": [{"status": "diagnosed", "task_id": task["task_id"]}]},
+            github_app_id="42",
+            read_comments=lambda _repo, _url: [
+                {"performed_via_github_app": {"id": 42}, "body": diagnosis_comment}
+            ],
+        )
+        self.assertTrue(ready["ready"])
+        self.assertEqual(ready["p1_manifest_sha256"], "0" * 64)
+
+    def test_recovery_requires_open_unhandled_issue_and_valid_original_task(self) -> None:
+        historical = _result()
+        handled = recover_pending_watcher_result(
+            _empty_result(),
+            [historical],
+            source_repository="QuantStrategyLab/UsEquitySnapshotPipelines",
+            issue_pending=lambda _repo, _url, _marker: False,
+        )
+        self.assertEqual(handled["research_task_source_snapshot"]["tasks"], [])  # type: ignore[index]
+
+        tampered = _result()
+        tampered["research_task_source_snapshot"]["tasks"][0]["task_sha256"] = "0" * 64  # type: ignore[index]
+        rejected = recover_pending_watcher_result(
+            _empty_result(),
+            [tampered],
+            source_repository="QuantStrategyLab/UsEquitySnapshotPipelines",
+            issue_pending=lambda _repo, _url, _marker: True,
+        )
+        self.assertEqual(rejected["research_task_source_snapshot"]["tasks"], [])  # type: ignore[index]
+
+    def test_current_verified_task_takes_precedence_over_history(self) -> None:
+        current = _result(_task(event_key="111111111111"))
+        recovered = recover_pending_watcher_result(
+            current,
+            [_result(_task(event_key="222222222222"))],
+            source_repository="QuantStrategyLab/UsEquitySnapshotPipelines",
+            issue_pending=lambda _repo, _url, _marker: True,
+        )
+
+        self.assertEqual(
+            recovered["research_task_source_snapshot"]["tasks"],  # type: ignore[index]
+            current["research_task_source_snapshot"]["tasks"],  # type: ignore[index]
+        )
+
+    def test_historical_issue_must_be_open_and_missing_exact_marker(self) -> None:
+        marker = "<!-- qsl-research-diagnosis:v1:watcher-a1b2c3d4e5f6:digest -->"
+        with patch(
+            "scripts.run_research_task_diagnosis.subprocess.run",
+            return_value=SimpleNamespace(
+                stdout=json.dumps({"state": "OPEN", "comments": [{"body": "unrelated"}]})
+            ),
+        ):
+            self.assertTrue(issue_is_open_and_undiagnosed("QuantStrategyLab/Test", "issue", marker))
+        with patch(
+            "scripts.run_research_task_diagnosis.subprocess.run",
+            return_value=SimpleNamespace(
+                stdout=json.dumps({"state": "OPEN", "comments": [{"body": marker}]})
+            ),
+        ):
+            self.assertFalse(issue_is_open_and_undiagnosed("QuantStrategyLab/Test", "issue", marker))
+        with patch(
+            "scripts.run_research_task_diagnosis.subprocess.run",
+            return_value=SimpleNamespace(stdout=json.dumps({"state": "CLOSED", "comments": []})),
+        ):
+            self.assertFalse(issue_is_open_and_undiagnosed("QuantStrategyLab/Test", "issue", marker))
 
     def test_run_diagnosis_calls_ai_once_and_writes_marked_comment(self) -> None:
         fake = FakeClient()
