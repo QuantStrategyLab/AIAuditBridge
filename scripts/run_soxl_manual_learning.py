@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import re
 import subprocess
 from datetime import date, datetime, timezone
@@ -43,6 +44,8 @@ EXPECTED_REF = "refs/heads/main"
 EXPECTED_EVENT = "workflow_dispatch"
 SAFE_REASON = re.compile(r"[a-z0-9_]{1,64}\Z")
 WATCHER_MARKER_PREFIX = "qsl-soxl-watcher-learning:v1"
+VALIDATION_QUALITY_MARKER_PREFIX = "qsl-soxl-validation-quality:v1"
+VALIDATION_QUALITY_SCHEMA = "qsl.soxl-validation-quality.v1"
 DEVELOPMENT_SUMMARY_SHA256 = "89418d4e13efa9379f91c522ccbe084e2cbf180ba343103d5b73fb7cdbb955a8"
 VALIDATION_QPK_REVISION = "7363011d56926d39f4fffeb036e511391114e39f"
 VALIDATION_CONSUMER_REVISION = "b68b4a81ccdab7b61042fcf98df0189dfe539ef4"
@@ -485,6 +488,235 @@ def _terminal_from_comments(task: Mapping[str, Any], bodies: Sequence[str]) -> d
     return parsed[0]
 
 
+def _validation_quality_marker(task: Mapping[str, Any], validation_digest: str, phase: str) -> str:
+    return ":".join((VALIDATION_QUALITY_MARKER_PREFIX, phase, str(task["task_sha256"]), validation_digest))
+
+
+def _validation_quality_comment(
+    task: Mapping[str, Any], validation_digest: str, *, phase: str, record: Mapping[str, Any]
+) -> str:
+    marker = f"<!-- {_validation_quality_marker(task, validation_digest, phase)} -->"
+    return f"{marker}\n`{canonical_json(record)}`"
+
+
+def _saved_validation_quality_terminal(
+    task: Mapping[str, Any], bodies: Sequence[str], validation_digest: str,
+) -> dict[str, Any] | None:
+    marker = f"<!-- {_validation_quality_marker(task, validation_digest, 'terminal')} -->"
+    candidates = [body for body in bodies if body.startswith(marker)]
+    if not candidates:
+        return None
+    if any(not body.startswith(marker + "\n`") or not body.endswith("`") for body in candidates):
+        raise ManualLearningError("validation_quality_terminal_invalid")
+    expected = {
+        "schema_version", "task_id", "task_sha256", "validation_digest", "status",
+        "quality_decision", "shadow_status", "shadow_passed", "shadow_evidence_sha256",
+        "lifecycle_status", "summary", "next_action", "learning_only", "no_order",
+        "size_zero_required", "promotion_eligible", "live_authority_granted", "metrics_digest",
+    }
+    parsed = []
+    for body in candidates:
+        try:
+            value = json.loads(body[len(marker) + 2 : -1])
+        except json.JSONDecodeError as exc:
+            raise ManualLearningError("validation_quality_terminal_invalid") from exc
+        if (
+            not isinstance(value, dict) or set(value) != expected
+            or value["schema_version"] != VALIDATION_QUALITY_SCHEMA
+            or value["task_id"] != task["task_id"]
+            or value["task_sha256"] != task["task_sha256"]
+            or value["validation_digest"] != validation_digest
+            or value["status"] != "parked"
+            or value["lifecycle_status"] != "parked"
+            or value["learning_only"] is not True or value["no_order"] is not True
+            or value["size_zero_required"] is not True or value["promotion_eligible"] is not False
+            or value["live_authority_granted"] is not False or value["shadow_passed"] is not False
+            or value["shadow_status"] not in {"not_required", "missing"}
+            or value["quality_decision"] not in {"no_improvement", "needs_policy", "shadow_candidate"}
+        ):
+            raise ManualLearningError("validation_quality_terminal_invalid")
+        parsed.append(value)
+    if any(value != parsed[0] for value in parsed[1:]):
+        raise ManualLearningError("validation_quality_terminal_conflict")
+    return parsed[0]
+
+
+def _quality_from_validation_comparison(comparisons: Sequence[Mapping[str, Any]]) -> tuple[str, str, str]:
+    if len(comparisons) != len(COST_BPS):
+        raise ManualLearningError("validation_quality_material_missing")
+    relations = []
+    for row, expected_cost in zip(comparisons, COST_BPS, strict=True):
+        if not isinstance(row, Mapping) or row.get("cost_bps") != expected_cost:
+            raise ManualLearningError("validation_quality_material_missing")
+        values = tuple(row.get(key) for key in (
+            "baseline_cagr", "candidate_cagr", "baseline_max_drawdown", "candidate_max_drawdown",
+        ))
+        if any(isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) for value in values):
+            raise ManualLearningError("validation_quality_material_missing")
+        baseline_cagr, candidate_cagr, baseline_drawdown, candidate_drawdown = map(float, values)
+        if not all(0.0 <= value <= 1.0 for value in (baseline_drawdown, candidate_drawdown)):
+            raise ManualLearningError("validation_quality_material_missing")
+        dominated = candidate_cagr <= baseline_cagr and candidate_drawdown >= baseline_drawdown
+        strict_worse = candidate_cagr < baseline_cagr or candidate_drawdown > baseline_drawdown
+        pareto = candidate_cagr >= baseline_cagr and candidate_drawdown <= baseline_drawdown
+        if dominated and strict_worse:
+            relations.append("dominated")
+        elif candidate_cagr == baseline_cagr and candidate_drawdown == baseline_drawdown:
+            relations.append("equal")
+        elif pareto and candidate_drawdown < baseline_drawdown:
+            relations.append("pareto")
+        else:
+            relations.append("tradeoff")
+    yield_changes = [
+        (float(row["candidate_cagr"]) - float(row["baseline_cagr"])) * 100
+        for row in comparisons
+    ]
+    drawdown_changes = [
+        (float(row["baseline_max_drawdown"]) - float(row["candidate_max_drawdown"])) * 100
+        for row in comparisons
+    ]
+    delta = (
+        "收益变化 " + "/".join(f"{value:+.4f}" for value in yield_changes)
+        + " 个百分点，回撤变化 " + "/".join(f"{value:+.4f}" for value in drawdown_changes)
+        + " 个百分点"
+    )
+    if all(relation in {"dominated", "equal"} for relation in relations):
+        return "no_improvement", "not_required", "严格验证的 5/10/15 基点候选均被基线支配或完全相等；" + delta + "；结果停留在研究阶段。"
+    if any(relation == "tradeoff" for relation in relations) or not all(relation == "pareto" for relation in relations):
+        return "needs_policy", "missing", "严格验证包含成本间不一致或收益/回撤权衡；" + delta + "；需要既有策略规则和正式验证。"
+    return "shadow_candidate", "missing", "严格验证各成本均有回撤改善且收益不低；" + delta + "；仍需正式 promotion/shadow 验证。"
+
+
+def _quality_state_path(path: Path, *, task: Mapping[str, Any], validation_digest: str) -> Path:
+    key = hashlib.sha256(f"{task['task_sha256']}:{validation_digest}".encode()).hexdigest()
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    return path.with_name(f"{path.name}.{key}.json")
+
+
+def _read_quality_state(path: Path, *, task: Mapping[str, Any], validation_digest: str) -> tuple[Path, str | None]:
+    target = _quality_state_path(path, task=task, validation_digest=validation_digest)
+    if not target.exists():
+        return target, None
+    if target.is_symlink() or target.stat().st_size > 64 * 1024:
+        raise ManualLearningError("validation_quality_state_invalid")
+    try:
+        value = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        raise ManualLearningError("validation_quality_state_invalid") from None
+    if (
+        not isinstance(value, Mapping)
+        or value.get("task_sha256") != task["task_sha256"]
+        or value.get("validation_digest") != validation_digest
+        or value.get("state") not in {"running", "confirmed"}
+    ):
+        raise ManualLearningError("validation_quality_state_invalid")
+    return target, str(value["state"])
+
+
+def _claim_quality_state(path: Path, *, task: Mapping[str, Any], validation_digest: str) -> tuple[Path, str, bool]:
+    target, existing = _read_quality_state(path, task=task, validation_digest=validation_digest)
+    if existing is not None:
+        return target, existing, False
+    payload = canonical_json({
+        "schema_version": VALIDATION_QUALITY_SCHEMA, "state": "running",
+        "task_id": task["task_id"], "task_sha256": task["task_sha256"],
+        "validation_digest": validation_digest,
+    }).encode("utf-8") + b"\n"
+    try:
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        _, existing = _read_quality_state(path, task=task, validation_digest=validation_digest)
+        if existing is None:
+            raise ManualLearningError("validation_quality_state_invalid")
+        return target, existing, False
+    try:
+        os.write(fd, payload)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    return target, "running", True
+
+
+def _confirm_quality_state(target: Path, *, task: Mapping[str, Any], validation_digest: str) -> None:
+    payload = canonical_json({
+        "schema_version": VALIDATION_QUALITY_SCHEMA, "state": "confirmed",
+        "task_id": task["task_id"], "task_sha256": task["task_sha256"],
+        "validation_digest": validation_digest,
+    }).encode("utf-8") + b"\n"
+    temporary = target.with_name(target.name + f".tmp-{os.getpid()}")
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        os.write(fd, payload)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(temporary, target)
+
+
+def run_saved_validation_quality(
+    *, watcher_result: Mapping[str, Any], diagnosis_result: Mapping[str, Any], github_app_id: str,
+    state_path: Path,
+    read_comments: Callable[[str, str], list[dict[str, Any]]] = read_issue_comments,
+    write_comment: Callable[[str, str, str], str] = write_issue_comment,
+) -> dict[str, Any]:
+    """Read a trusted validation terminal and persist deterministic quality state."""
+    context = _watcher_context(
+        watcher_result, diagnosis_result, github_app_id=github_app_id, read_comments=read_comments,
+    )
+    task = context["task"]
+    development = _watcher_development_summary(context)
+    development_digest = _summary_digest(development)
+    validation = _watcher_validation_terminal(context, development_digest)
+    if validation is None or validation["status"] != "accepted":
+        raise ManualLearningError("validation_quality_material_missing")
+    from quant_platform_kit.strategy_lifecycle.research_promotion_cycle import enforce_promotion_backtest_gates
+    rebuilt = _strict_validation_summary(
+        validation["result"], enforce_promotion_backtest_gates, development_digest=development_digest,
+    )
+    validation_digest = _summary_digest({
+        "task_id": task["task_id"], "task_sha256": task["task_sha256"],
+        "development_summary_sha256": development_digest,
+        "strict_backtest_gate": {"status": "passed", "checks": 6, "qpk_revision": VALIDATION_QPK_REVISION},
+        "proposal": rebuilt["proposal"], "baseline_promotion_runs": rebuilt["baseline_promotion_runs"],
+        "candidate_promotion_runs": rebuilt["candidate_promotion_runs"],
+    })
+    terminal = _saved_validation_quality_terminal(task, context["trusted_bodies"], validation_digest)
+    if terminal is not None:
+        target, _ = _read_quality_state(state_path, task=task, validation_digest=validation_digest)
+        _confirm_quality_state(target, task=task, validation_digest=validation_digest)
+        return {**terminal, "reused": True, "numeric_execution": {"status": "reused"}}
+    quality_decision, shadow_status, summary = _quality_from_validation_comparison(rebuilt["oos_comparison"])
+    target, state, claimed = _claim_quality_state(state_path, task=task, validation_digest=validation_digest)
+    if not claimed and state in {"running", "confirmed"}:
+        return {
+            "schema_version": VALIDATION_QUALITY_SCHEMA, "task_id": task["task_id"],
+            "task_sha256": task["task_sha256"], "validation_digest": validation_digest,
+            "status": "parked", "quality_decision": quality_decision, "shadow_status": shadow_status,
+            "shadow_passed": False, "shadow_evidence_sha256": None, "lifecycle_status": "parked",
+            "summary": "质量终态写入结果未知；按同 task 保护停止重试。",
+            "next_action": "manual_readback_required", "learning_only": True, "no_order": True,
+            "size_zero_required": True, "promotion_eligible": False, "live_authority_granted": False,
+            "metrics_digest": _summary_digest(rebuilt["oos_comparison"]),
+            "reused": False, "numeric_execution": {"status": "outcome_unknown"},
+        }
+    record = {
+        "schema_version": VALIDATION_QUALITY_SCHEMA, "task_id": task["task_id"],
+        "task_sha256": task["task_sha256"], "validation_digest": validation_digest,
+        "status": "parked", "quality_decision": quality_decision, "shadow_status": shadow_status,
+        "shadow_passed": False, "shadow_evidence_sha256": None, "lifecycle_status": "parked",
+        "summary": summary, "next_action": "none" if quality_decision == "no_improvement" else "await_actual_paired_shadow_binding",
+        "learning_only": True, "no_order": True, "size_zero_required": True,
+        "promotion_eligible": False, "live_authority_granted": False,
+        "metrics_digest": _summary_digest(rebuilt["oos_comparison"]),
+    }
+    try:
+        write_comment(context["repository"], context["issue_url"], _validation_quality_comment(task, validation_digest, phase="terminal", record=record))
+    except (OSError, ManualLearningError, subprocess.SubprocessError):
+        raise ManualLearningError("validation_quality_terminal_write_failed") from None
+    _confirm_quality_state(target, task=task, validation_digest=validation_digest)
+    return {**record, "reused": False, "numeric_execution": {"status": "reused"}}
+
+
 def _watcher_context(
     watcher_result: Mapping[str, Any], diagnosis_result: Mapping[str, Any],
     *, github_app_id: str,
@@ -541,20 +773,30 @@ def prepare_watcher_learning(
             watcher_result, diagnosis_result, github_app_id=github_app_id, read_comments=read_comments,
         )
     except (ManualLearningError, OSError, ValueError, subprocess.SubprocessError):
-        return {"status": "parked", "ready": False}
+        return {"status": "parked", "ready": False, "quality_ready": False}
     if context["terminal"] is not None:
         if not include_validation or context["terminal"]["status"] != "accepted":
-            return {"status": "reused", "ready": False}
+            return {"status": "reused", "ready": False, "quality_ready": False}
+        try:
+            development = _watcher_development_summary(context)
+            validation = _watcher_validation_terminal(context, _summary_digest(development))
+        except (ManualLearningError, OSError, ValueError, subprocess.SubprocessError):
+            validation = None
+        if validation is not None and validation["status"] == "accepted":
+            return {
+                "status": "reused", "ready": False, "quality_ready": True,
+                "p1_manifest_sha256": context["task"]["evidence"]["p1_input_digest"],
+            }
         # Any attempted validation is terminal or uncertain: neither is a replay request.
         if any(body.startswith(f"<!-- {_marker(context['task'], phase)} -->")
                for body in context["trusted_bodies"]
                for phase in ("validation_started", "validation_terminal")):
-            return {"status": "reused", "ready": False}
+            return {"status": "reused", "ready": False, "quality_ready": False}
     elif context["started"]:
-        return {"status": "parked", "ready": False, "failure_stage": "numeric_outcome_unknown"}
+        return {"status": "parked", "ready": False, "quality_ready": False, "failure_stage": "numeric_outcome_unknown"}
     task = context["task"]
     return {
-        "status": "ready", "ready": True, "p1_manifest_sha256": task["evidence"]["p1_input_digest"],
+        "status": "ready", "ready": True, "quality_ready": False, "p1_manifest_sha256": task["evidence"]["p1_input_digest"],
         "producer_revision": task["evidence"]["producer_revision"],
     }
 
@@ -1349,6 +1591,15 @@ def _write(path: Path, value: Mapping[str, Any]) -> None:
     path.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
 
 
+def _read_json_input(path: Path, *, max_bytes: int = 4 * 1024 * 1024) -> object:
+    if path.is_symlink() or not path.is_file() or path.stat().st_size > max_bytes:
+        raise ManualLearningError("input_unavailable")
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, Mapping):
+        raise ManualLearningError("input_invalid")
+    return value
+
+
 def initialize_record(path: Path, context: Mapping[str, str], *, operation: str = "soxl_learning") -> None:
     """Write the bound terminal placeholder before setup or remote reads begin."""
     _validate_authority(context)
@@ -1401,10 +1652,35 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--watcher-preflight", action="store_true")
     parser.add_argument("--watcher-validation", action="store_true")
     parser.add_argument("--watcher-record-pre-numeric-failure", action="store_true")
+    parser.add_argument("--saved-validation-quality", action="store_true")
+    parser.add_argument("--validation-quality-state", type=Path)
     parser.add_argument("--control-plane-source-from-summary", type=Path)
     parser.add_argument("--source-revision")
     parser.add_argument("--computed-at")
     args = parser.parse_args(argv)
+    if args.saved_validation_quality:
+        if any(value is None for value in (args.watcher_result, args.diagnosis_result, args.github_app_id, args.output, args.validation_quality_state)):
+            parser.error("saved validation quality requires watcher, diagnosis, app id, output, and state")
+        try:
+            result = run_saved_validation_quality(
+                watcher_result=_read_json_input(args.watcher_result),
+                diagnosis_result=_read_json_input(args.diagnosis_result),
+                github_app_id=args.github_app_id,
+                state_path=args.validation_quality_state,
+            )
+        except (ManualLearningError, OSError, ValueError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+            failure_stage = str(exc) if isinstance(exc, ManualLearningError) and SAFE_REASON.fullmatch(str(exc)) else "validation_quality_failed"
+            result = {
+                "schema_version": VALIDATION_QUALITY_SCHEMA, "status": "parked",
+                "failure_stage": failure_stage, "learning_only": True, "no_order": True,
+                "size_zero_required": True, "promotion_eligible": False,
+            }
+            _write(args.output, result)
+            print(canonical_json(result))
+            return 2
+        _write(args.output, result)
+        print(canonical_json({"status": result["status"], "quality_decision": result["quality_decision"], "reused": result["reused"]}))
+        return 0
     if args.volatility_ablation and args.attribution:
         parser.error("attribution study modes are mutually exclusive")
     if (args.attribution or args.volatility_ablation) and any((args.parameter_grid is not None, args.development_summary is not None,
