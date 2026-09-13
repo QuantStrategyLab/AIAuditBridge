@@ -56,7 +56,15 @@ jobs:
       - name: Verify Binance lifecycle consumer with interval-aware QPK
         run: |
           set -euo pipefail
-          python3 -m pip install 'quant-platform-kit @ git+https://github.com/QuantStrategyLab/QuantPlatformKit.git@2dc59d648af76382a08aaf6c84b19e9721fe8d6f'
+          python3 -m pip install --force-reinstall --no-deps 'quant-platform-kit @ git+https://github.com/QuantStrategyLab/QuantPlatformKit.git@2dc59d648af76382a08aaf6c84b19e9721fe8d6f'
+          python3 - <<'PY'
+          import importlib.metadata
+          import json
+
+          dist = importlib.metadata.distribution("quant-platform-kit")
+          direct_url = json.loads(dist.read_text("direct_url.json"))
+          assert direct_url["vcs_info"]["commit_id"] == "2dc59d648af76382a08aaf6c84b19e9721fe8d6f"
+          PY
           python3 -m pytest ops/quant-monitor/tests/test_binance_live_runs_sync.py -q
 
       - uses: actions/setup-node@v6
