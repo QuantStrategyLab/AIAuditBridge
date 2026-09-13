@@ -65,6 +65,12 @@ class DeployScriptTests(unittest.TestCase):
             script.index("sync_lifecycle_artifacts.py"),
             script.index("health_cycle.py"),
         )
+        self.assertLess(
+            script.index("sync_binance_live_runs.py"),
+            script.index("health_cycle.py"),
+        )
+        self.assertIn('binance_live_runs_status=$?', script)
+        self.assertIn('[[ "$binance_live_runs_status" -ne 0 && "$binance_live_runs_status" -ne 2 ]]', script)
 
     def test_health_check_publishes_the_snapshot_before_returning_an_alert_status(self) -> None:
         script = (ROOT / "scripts" / "health_check.sh").read_text(encoding="utf-8")
