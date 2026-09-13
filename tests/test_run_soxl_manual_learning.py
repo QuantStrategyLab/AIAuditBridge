@@ -901,6 +901,123 @@ def test_strategy_workflow_schedules_quality_tail_without_research_replay():
     assert "soxl_validation_quality_ready" in text
     assert "soxl-validation-quality:" in text
     assert "--saved-validation-quality" in text
+    assert "--paired-shadow-observation" in text
+    assert "--paired-shadow-session" not in text
+    assert "ddce45441ef3a1306db30f502b3773a4eb81f4f8" in text
+
+
+def _paired_shadow_request(module, task, *, validation_digest, as_of="2026-09-14T20:00:00Z", digest="a" * 64, previous_receipt=None, previous_evidence=None):
+    policy = {
+        "schema_version": "forward_observation_policy.v1",
+        "candidate_id": module.PAIRED_SHADOW_CANDIDATE_ID,
+        "strategy_profile": "soxl_soxx_three_asset_mid_weight_learning_v1",
+        "domain": "us_equity", "benchmark_symbol": "SOXX",
+        "required_trading_sessions": 63, "review_milestones": [15, 42],
+        "automatic_non_live_modes": ["shadow"], "auto_resume_clean_sessions": 1,
+        "observation_calendar": "XNYS", "observation_window_type": "rolling",
+        "observation_start_session": None, "window_rationale_ref": "sha256:" + "b" * 64,
+        "non_live_evidence_modes": ["shadow_decision"], "live_authority_granted": False,
+    }
+    dependencies = {
+        "p1_manifest": task["evidence"]["p1_input_digest"],
+        "p2_config": task["evidence"]["p2_config_digest"],
+        "p3_evidence": task["evidence"]["p3_evidence_id"],
+        "risk_policy": "1" * 64, "strategy_release": "2" * 64, "plugin_bundle": "3" * 64,
+    }
+    request = {
+        "schema_version": module.PAIRED_SHADOW_SESSION_SCHEMA, "policy": policy,
+        "dependency_digests": dependencies, "baseline_id": module.PAIRED_SHADOW_BASELINE_ID,
+        "session": {"as_of": as_of, "prices": {"SOXL": 10.0, "SOXX": 20.0, "BOXX": 30.0}, "market_data": {}, "input_snapshot_sha256": digest},
+        "cost_bps": 10.0, "baseline_state": {}, "candidate_state": {},
+        "previous_forward_observation_receipt": previous_receipt,
+        "previous_paired_shadow_evidence": previous_evidence,
+    }
+    return {
+        "schema_version": module.PAIRED_SHADOW_REQUEST_SCHEMA,
+        "task_id": task["task_id"], "task_sha256": task["task_sha256"],
+        "validation_digest": validation_digest, "request": request,
+    }
+
+
+def _patch_paired_shadow_material(monkeypatch, module, watcher, *, quality="shadow_candidate"):
+    task = watcher["research_task_source_snapshot"]["tasks"][0]
+    monkeypatch.setattr(module, "_watcher_context", lambda *_args, **_kwargs: {"task": task, "trusted_bodies": []})
+    monkeypatch.setattr(module, "_watcher_development_summary", lambda _context: {"development": "fixed"})
+    monkeypatch.setattr(module, "_watcher_validation_terminal", lambda *_args, **_kwargs: {"status": "accepted", "result": {}})
+    comparisons = [{"cost_bps": cost, "baseline_cagr": 1.0, "candidate_cagr": 1.1 if quality == "shadow_candidate" else 0.9, "baseline_max_drawdown": 0.2, "candidate_max_drawdown": 0.1 if quality == "shadow_candidate" else 0.3} for cost in module.COST_BPS]
+    monkeypatch.setattr(module, "_strict_validation_summary", lambda *_args, **_kwargs: {"oos_comparison": comparisons, "proposal": {}, "baseline_promotion_runs": [], "candidate_promotion_runs": []})
+    gate_module = type(sys)("quant_platform_kit.strategy_lifecycle.research_promotion_cycle")
+    gate_module.enforce_promotion_backtest_gates = lambda *_args, **_kwargs: (True, "ok")
+    monkeypatch.setitem(sys.modules, "quant_platform_kit.strategy_lifecycle.research_promotion_cycle", gate_module)
+    monkeypatch.setattr(module, "_quality_from_validation_comparison", lambda _comparison: (quality, "missing", "fixed quality"))
+    return task
+
+
+def _paired_shadow_validation_digest(module, task):
+    development_digest = module._summary_digest({"development": "fixed"})
+    return module._summary_digest({
+        "task_id": task["task_id"], "task_sha256": task["task_sha256"],
+        "development_summary_sha256": development_digest,
+        "strict_backtest_gate": {"status": "passed", "checks": 6, "qpk_revision": module.VALIDATION_QPK_REVISION},
+        "proposal": {}, "baseline_promotion_runs": [], "candidate_promotion_runs": [],
+    })
+
+
+def test_paired_shadow_observation_reuses_and_advances_stub_runner_state(tmp_path, monkeypatch):
+    from scripts import run_soxl_manual_learning as module
+
+    watcher, diagnosis = watcher_inputs()
+    task = _patch_paired_shadow_material(monkeypatch, module, watcher)
+    validation_digest = _paired_shadow_validation_digest(module, task)
+    first_request = _paired_shadow_request(module, task, validation_digest=validation_digest)
+    calls = []
+    outputs = iter([
+        {"status": "pending", "no_order": True, "live_authority_granted": False, "passed": False, "promotion_eligible": False, "forward_observation_receipt": {"index": 1}, "evidence": {"index": 1}},
+        {"status": "pending", "no_order": True, "live_authority_granted": False, "passed": False, "promotion_eligible": False, "forward_observation_receipt": {"index": 2}, "evidence": {"index": 2}},
+    ])
+    monkeypatch.setattr(module, "_verify_paired_shadow_runtime", lambda **_kwargs: None)
+    def runner(argv):
+        calls.append(argv)
+        return SimpleNamespace(returncode=0, stdout=json.dumps(next(outputs)))
+
+    def invoke(request):
+        return module.run_paired_shadow_observation(
+            watcher_result=watcher, diagnosis_result=diagnosis, github_app_id="42",
+            state_path=tmp_path / "quality-state.json", paired_shadow_request=request,
+            consumer_source=tmp_path / "consumer", ues_source=tmp_path / "ues",
+            qpk_python=tmp_path / "qpk", p2_candidate=tmp_path / "p2",
+            read_comments=lambda *_: [], command_runner=runner,
+        )
+
+    first = invoke(first_request)
+    repeated = invoke(first_request)
+    assert len(calls) == 1 and repeated["reused"] is True
+    next_request = _paired_shadow_request(
+        module, task, as_of="2026-09-15T20:00:00Z", digest="b" * 64,
+        validation_digest=validation_digest,
+        previous_receipt=first["observation"]["forward_observation_receipt"],
+        previous_evidence=first["observation"]["evidence"],
+    )
+    advanced = invoke(next_request)
+    assert len(calls) == 2 and advanced["observation"]["evidence"] == {"index": 2}
+    changed_same_session = _paired_shadow_request(module, task, validation_digest=validation_digest, as_of="2026-09-15T20:00:00Z", digest="c" * 64)
+    with pytest.raises(ManualLearningError, match="paired_shadow_binding_conflict"):
+        invoke(changed_same_session)
+
+
+def test_paired_shadow_observation_missing_quality_never_calls_cli(tmp_path, monkeypatch):
+    from scripts import run_soxl_manual_learning as module
+
+    watcher, diagnosis = watcher_inputs()
+    _patch_paired_shadow_material(monkeypatch, module, watcher, quality="no_improvement")
+    calls = []
+    result = module.run_paired_shadow_observation(
+        watcher_result=watcher, diagnosis_result=diagnosis, github_app_id="42",
+        state_path=tmp_path / "quality-state.json", paired_shadow_request=None,
+        command_runner=lambda argv: calls.append(argv), read_comments=lambda *_: [],
+    )
+    assert result["failure_stage"] == "quality_not_shadow_candidate"
+    assert calls == []
 
 
 @pytest.mark.parametrize("failure", ["missing_learning", "untrusted_learning", "manifest", "failed_learning"])

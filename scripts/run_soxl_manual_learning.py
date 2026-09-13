@@ -4,21 +4,26 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import math
 import os
 import re
 import subprocess
-from datetime import date, datetime, timezone
-from urllib.parse import urlparse
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import contextmanager
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from client.config import GatewayConfig
 from client.gateway_client import AiGatewayClient
-from service.research_diagnosis import build_research_diagnosis_request, marker_for_research_diagnosis
+from service.research_diagnosis import (
+    build_research_diagnosis_request,
+    marker_for_research_diagnosis,
+)
 from service.research_task import (
     SOXL_WATCHER_CANDIDATE_ID,
     SOXL_WATCHER_CONSUMER_REVISION,
@@ -49,6 +54,13 @@ VALIDATION_QUALITY_SCHEMA = "qsl.soxl-validation-quality.v1"
 DEVELOPMENT_SUMMARY_SHA256 = "89418d4e13efa9379f91c522ccbe084e2cbf180ba343103d5b73fb7cdbb955a8"
 VALIDATION_QPK_REVISION = "7363011d56926d39f4fffeb036e511391114e39f"
 VALIDATION_CONSUMER_REVISION = "b68b4a81ccdab7b61042fcf98df0189dfe539ef4"
+PAIRED_SHADOW_CONSUMER_REVISION = "ddce45441ef3a1306db30f502b3773a4eb81f4f8"
+PAIRED_SHADOW_SCHEMA = "qsl.soxl-three-asset-paired-shadow-observation.v1"
+PAIRED_SHADOW_REQUEST_SCHEMA = "qsl.soxl-three-asset-paired-shadow-observation-request.v1"
+PAIRED_SHADOW_SESSION_SCHEMA = "qsl.soxl-three-asset-paired-shadow-session.v1"
+PAIRED_SHADOW_CANDIDATE_ID = "soxl_soxx_three_asset_mid_weight_055_v1"
+PAIRED_SHADOW_BASELINE_ID = "soxl_soxx_three_asset_mid_weight_065_v1"
+PAIRED_SHADOW_QPK_REVISION = VALIDATION_QPK_REVISION
 VALIDATION_FOLDS = [
     dict(zip(("train_start", "train_end", "test_start", "test_end"), boundaries, strict=True))
     for boundaries in (
@@ -653,6 +665,285 @@ def _confirm_quality_state(target: Path, *, task: Mapping[str, Any], validation_
     os.replace(temporary, target)
 
 
+def _paired_shadow_state_path(path: Path, *, task: Mapping[str, Any], validation_digest: str) -> Path:
+    key = hashlib.sha256(f"{task['task_sha256']}:{validation_digest}".encode()).hexdigest()
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    return path.with_name(f"{path.name}.{key}.paired-shadow.json")
+
+
+def _read_paired_shadow_state(
+    path: Path, *, task: Mapping[str, Any], validation_digest: str,
+) -> tuple[Path, dict[str, Any] | None]:
+    target = _paired_shadow_state_path(path, task=task, validation_digest=validation_digest)
+    if target.is_symlink() or not target.exists():
+        if target.is_symlink():
+            raise ManualLearningError("paired_shadow_state_invalid")
+        return target, None
+    if target.stat().st_size > 256 * 1024:
+        raise ManualLearningError("paired_shadow_state_invalid")
+    try:
+        value = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        raise ManualLearningError("paired_shadow_state_invalid") from None
+    if (
+        not isinstance(value, dict)
+        or value.get("schema_version") != PAIRED_SHADOW_SCHEMA
+        or value.get("task_id") != task["task_id"]
+        or value.get("task_sha256") != task["task_sha256"]
+        or value.get("validation_digest") != validation_digest
+        or value.get("state") != "confirmed"
+    ):
+        raise ManualLearningError("paired_shadow_state_invalid")
+    return target, value
+
+
+@contextmanager
+def _paired_shadow_state_lock(target: Path):
+    lock_path = target.with_name(target.name + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with lock_path.open("a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _confirm_paired_shadow_state(
+    target: Path, *, task: Mapping[str, Any], validation_digest: str,
+    request_digest: str, input_snapshot_sha256: str, policy_digest: str,
+    observation_session: str, result: Mapping[str, Any],
+) -> None:
+    payload = canonical_json({
+        "schema_version": PAIRED_SHADOW_SCHEMA, "state": "confirmed",
+        "task_id": task["task_id"], "task_sha256": task["task_sha256"],
+        "validation_digest": validation_digest, "request_digest": request_digest,
+        "input_snapshot_sha256": input_snapshot_sha256, "policy_digest": policy_digest,
+        "observation_session": observation_session, "result": result,
+    }).encode("utf-8") + b"\n"
+    temporary = target.with_name(target.name + f".tmp-{os.getpid()}")
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        os.write(fd, payload)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(temporary, target)
+
+
+def _validate_paired_shadow_request(
+    value: Mapping[str, Any], *, task: Mapping[str, Any], validation_digest: str,
+) -> tuple[dict[str, Any], str, str, str, str]:
+    if set(value) != {"schema_version", "task_id", "task_sha256", "validation_digest", "request"}:
+        raise ManualLearningError("paired_shadow_request_invalid")
+    if (
+        value["schema_version"] != PAIRED_SHADOW_REQUEST_SCHEMA
+        or value["task_id"] != task["task_id"]
+        or value["task_sha256"] != task["task_sha256"]
+        or value["validation_digest"] != validation_digest
+        or not isinstance(value["request"], Mapping)
+    ):
+        raise ManualLearningError("paired_shadow_binding_invalid")
+    request = dict(value["request"])
+    required = {
+        "schema_version", "policy", "dependency_digests", "baseline_id", "session",
+        "cost_bps", "baseline_state", "candidate_state",
+        "previous_forward_observation_receipt", "previous_paired_shadow_evidence",
+    }
+    if set(request) != required or request["schema_version"] != PAIRED_SHADOW_SESSION_SCHEMA:
+        raise ManualLearningError("paired_shadow_request_invalid")
+    policy = request["policy"]
+    dependencies = request["dependency_digests"]
+    if not isinstance(policy, Mapping) or not isinstance(dependencies, Mapping):
+        raise ManualLearningError("paired_shadow_request_invalid")
+    if (
+        policy.get("candidate_id") != PAIRED_SHADOW_CANDIDATE_ID
+        or policy.get("strategy_profile") != "soxl_soxx_three_asset_mid_weight_learning_v1"
+        or policy.get("domain") != "us_equity"
+        or policy.get("automatic_non_live_modes") != ["shadow"]
+        or policy.get("non_live_evidence_modes") != ["shadow_decision"]
+        or policy.get("live_authority_granted") is not False
+        or request["baseline_id"] != PAIRED_SHADOW_BASELINE_ID
+        or request["cost_bps"] not in COST_BPS
+    ):
+        raise ManualLearningError("paired_shadow_policy_invalid")
+    expected_keys = {"p1_manifest", "p2_config", "p3_evidence", "risk_policy", "strategy_release", "plugin_bundle"}
+    if set(dependencies) != expected_keys or any(
+        not isinstance(dependencies[key], str) or re.fullmatch(r"[0-9a-f]{64}", dependencies[key]) is None
+        for key in expected_keys
+    ):
+        raise ManualLearningError("paired_shadow_dependency_invalid")
+    if (
+        dependencies["p1_manifest"] != task["evidence"]["p1_input_digest"]
+        or dependencies["p2_config"] != task["evidence"]["p2_config_digest"]
+        or dependencies["p3_evidence"] != task["evidence"]["p3_evidence_id"]
+    ):
+        raise ManualLearningError("paired_shadow_dependency_invalid")
+    session = request["session"]
+    if (
+        not isinstance(session, Mapping)
+        or set(session) != {"as_of", "prices", "market_data", "input_snapshot_sha256"}
+        or not isinstance(session["input_snapshot_sha256"], str)
+        or re.fullmatch(r"[0-9a-f]{64}", session["input_snapshot_sha256"]) is None
+    ):
+        raise ManualLearningError("paired_shadow_session_invalid")
+    return request, _summary_digest(request), session["input_snapshot_sha256"], _summary_digest(policy), str(session["as_of"])
+
+
+def _verify_paired_shadow_runtime(
+    *, consumer_source: Path, ues_source: Path, qpk_python: Path, p2_candidate: Path,
+) -> None:
+    # A venv's interpreter is commonly a symlink to the managed Python binary.
+    # Trust the interpreter by its executable identity and QPK direct_url below;
+    # keep source and candidate paths strict so a symlink cannot replace inputs.
+    if any(path.is_symlink() for path in (consumer_source, ues_source, p2_candidate)):
+        raise ManualLearningError("paired_shadow_runtime_unavailable")
+    if (
+        not consumer_source.is_dir() or not ues_source.is_dir()
+        or not qpk_python.is_file() or not p2_candidate.is_file()
+        or not (consumer_source / ".venv/bin/python").is_file()
+    ):
+        raise ManualLearningError("paired_shadow_runtime_unavailable")
+    interpreter = consumer_source / ".venv/bin/python"
+    try:
+        runtime = subprocess.run(
+            [str(interpreter), "-c", "import pathlib,sys; print(pathlib.Path(sys.prefix).resolve())"],
+            check=False, capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        raise ManualLearningError("paired_shadow_runtime_unavailable") from None
+    if runtime.returncode != 0 or Path(runtime.stdout.strip()).resolve() != (consumer_source / ".venv").resolve():
+        raise ManualLearningError("paired_shadow_runtime_unavailable")
+    for source, revision in ((consumer_source, PAIRED_SHADOW_CONSUMER_REVISION), (ues_source, UES_REVISION)):
+        try:
+            identity = subprocess.run(
+                ["git", "-C", str(source), "rev-parse", "HEAD"],
+                check=False, capture_output=True, text=True, timeout=10,
+            )
+            dirty = subprocess.run(
+                ["git", "-C", str(source), "status", "--porcelain", "--untracked-files=all"],
+                check=False, capture_output=True, text=True, timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            raise ManualLearningError("paired_shadow_runtime_unavailable") from None
+        if identity.returncode != 0 or identity.stdout.strip() != revision or dirty.returncode != 0 or dirty.stdout:
+            raise ManualLearningError("paired_shadow_runtime_unavailable")
+    try:
+        qpk_identity = subprocess.run(
+            [str(qpk_python), "-c", "import importlib.metadata,json;d=importlib.metadata.distribution('quant-platform-kit');print(json.loads(d.read_text('direct_url.json') or '{}')['vcs_info']['commit_id'])"],
+            check=False, capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        raise ManualLearningError("paired_shadow_runtime_unavailable") from None
+    if qpk_identity.returncode != 0 or qpk_identity.stdout.strip() != PAIRED_SHADOW_QPK_REVISION:
+        raise ManualLearningError("paired_shadow_runtime_unavailable")
+
+
+def run_paired_shadow_observation(
+    *, watcher_result: Mapping[str, Any], diagnosis_result: Mapping[str, Any], github_app_id: str,
+    state_path: Path, paired_shadow_request: Mapping[str, Any] | None,
+    consumer_source: Path | None = None, ues_source: Path | None = None,
+    qpk_python: Path | None = None, p2_candidate: Path | None = None,
+    read_comments: Callable[[str, str], list[dict[str, Any]]] = read_issue_comments,
+    command_runner: Callable[[list[str]], Any] | None = None,
+) -> dict[str, Any]:
+    """Run one bound, no-order UESP/QPK paired-shadow observation when eligible."""
+    context = _watcher_context(
+        watcher_result, diagnosis_result, github_app_id=github_app_id, read_comments=read_comments,
+    )
+    task = context["task"]
+    development = _watcher_development_summary(context)
+    development_digest = _summary_digest(development)
+    validation = _watcher_validation_terminal(context, development_digest)
+    if validation is None or validation["status"] != "accepted":
+        return {"schema_version": PAIRED_SHADOW_SCHEMA, "status": "parked", "failure_stage": "paired_shadow_material_missing", "learning_only": True, "no_order": True, "promotion_eligible": False}
+    from quant_platform_kit.strategy_lifecycle.research_promotion_cycle import (
+        enforce_promotion_backtest_gates,
+    )
+    rebuilt = _strict_validation_summary(validation["result"], enforce_promotion_backtest_gates, development_digest=development_digest)
+    validation_digest = _summary_digest({
+        "task_id": task["task_id"], "task_sha256": task["task_sha256"],
+        "development_summary_sha256": development_digest,
+        "strict_backtest_gate": {"status": "passed", "checks": 6, "qpk_revision": VALIDATION_QPK_REVISION},
+        "proposal": rebuilt["proposal"], "baseline_promotion_runs": rebuilt["baseline_promotion_runs"],
+        "candidate_promotion_runs": rebuilt["candidate_promotion_runs"],
+    })
+    quality_decision, _, summary = _quality_from_validation_comparison(rebuilt["oos_comparison"])
+    base = {
+        "schema_version": PAIRED_SHADOW_SCHEMA, "task_id": task["task_id"],
+        "task_sha256": task["task_sha256"], "validation_digest": validation_digest,
+        "quality_decision": quality_decision, "summary": summary,
+        "learning_only": True, "no_order": True, "promotion_eligible": False,
+        "passed": False, "live_authority_granted": False,
+    }
+    if quality_decision != "shadow_candidate":
+        return {**base, "status": "parked", "failure_stage": "quality_not_shadow_candidate", "observation_status": "not_started", "reused": False}
+    if paired_shadow_request is None:
+        return {**base, "status": "parked", "failure_stage": "paired_shadow_material_missing", "observation_status": "not_started", "reused": False}
+    request, request_digest, input_snapshot_sha256, policy_digest, observation_session = _validate_paired_shadow_request(
+        paired_shadow_request, task=task, validation_digest=validation_digest,
+    )
+    if any(path is None for path in (consumer_source, ues_source, qpk_python, p2_candidate)):
+        return {**base, "status": "parked", "failure_stage": "paired_shadow_runtime_unavailable", "observation_status": "not_started", "reused": False}
+    target = _paired_shadow_state_path(state_path, task=task, validation_digest=validation_digest)
+    with _paired_shadow_state_lock(target):
+        _, existing = _read_paired_shadow_state(state_path, task=task, validation_digest=validation_digest)
+        if existing is not None:
+            if existing.get("policy_digest") != policy_digest:
+                raise ManualLearningError("paired_shadow_binding_conflict")
+            if existing.get("request_digest") == request_digest and existing.get("input_snapshot_sha256") == input_snapshot_sha256:
+                return {**existing["result"], "reused": True}
+            if existing.get("observation_session") == observation_session:
+                raise ManualLearningError("paired_shadow_binding_conflict")
+            prior = existing.get("result")
+            prior_observation = prior.get("observation") if isinstance(prior, Mapping) else None
+            if (
+                not isinstance(prior_observation, Mapping)
+                or request.get("previous_forward_observation_receipt") != prior_observation.get("forward_observation_receipt")
+                or request.get("previous_paired_shadow_evidence") != prior_observation.get("evidence")
+            ):
+                raise ManualLearningError("paired_shadow_predecessor_conflict")
+        if consumer_source is None or ues_source is None or qpk_python is None or p2_candidate is None:
+            return {**base, "status": "parked", "failure_stage": "paired_shadow_runtime_unavailable", "observation_status": "not_started", "reused": False}
+        _verify_paired_shadow_runtime(
+            consumer_source=consumer_source, ues_source=ues_source,
+            qpk_python=qpk_python, p2_candidate=p2_candidate,
+        )
+        session_file = state_path.with_name(state_path.name + f".session-{os.getpid()}.json")
+        try:
+            _write(session_file, request)
+            command = [
+                str(consumer_source / ".venv/bin/python"),
+                str(consumer_source / "scripts/run_soxl_three_asset_learning.py"),
+                "--paired-shadow-session", str(session_file), "--ues-project", str(ues_source),
+                "--qpk-python", str(qpk_python), "--p2-candidate", str(p2_candidate),
+            ]
+            runner = command_runner or (lambda argv: subprocess.run(argv, capture_output=True, text=True, timeout=120, check=False))
+            completed = runner(command)
+            if getattr(completed, "returncode", None) != 0 or not isinstance(completed.stdout, str):
+                raise ManualLearningError("paired_shadow_runtime_failed")
+            observation = json.loads(completed.stdout)
+            if (
+                not isinstance(observation, Mapping) or observation.get("no_order") is not True
+                or observation.get("live_authority_granted") is not False
+                or observation.get("passed") is not False
+                or observation.get("promotion_eligible") is not False
+            ):
+                raise ManualLearningError("paired_shadow_result_invalid")
+            result = {**base, "status": "parked", "observation_status": observation.get("status", "pending"), "observation": observation, "reused": False}
+            _confirm_paired_shadow_state(
+                target, task=task, validation_digest=validation_digest,
+                request_digest=request_digest, input_snapshot_sha256=input_snapshot_sha256,
+                policy_digest=policy_digest, observation_session=observation_session, result=result,
+            )
+            return result
+        finally:
+            try:
+                session_file.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
 def run_saved_validation_quality(
     *, watcher_result: Mapping[str, Any], diagnosis_result: Mapping[str, Any], github_app_id: str,
     state_path: Path,
@@ -669,7 +960,9 @@ def run_saved_validation_quality(
     validation = _watcher_validation_terminal(context, development_digest)
     if validation is None or validation["status"] != "accepted":
         raise ManualLearningError("validation_quality_material_missing")
-    from quant_platform_kit.strategy_lifecycle.research_promotion_cycle import enforce_promotion_backtest_gates
+    from quant_platform_kit.strategy_lifecycle.research_promotion_cycle import (
+        enforce_promotion_backtest_gates,
+    )
     rebuilt = _strict_validation_summary(
         validation["result"], enforce_promotion_backtest_gates, development_digest=development_digest,
     )
@@ -1157,7 +1450,11 @@ def _strict_validation_summary(
     value: object, gate: Callable[..., tuple[bool, str]], *, development_digest: str | None = None,
 ) -> dict[str, Any]:
     from dataclasses import fields
-    from quant_platform_kit.strategy_lifecycle.contracts import BacktestValidationIdentity, OptimizationProposal
+
+    from quant_platform_kit.strategy_lifecycle.contracts import (
+        BacktestValidationIdentity,
+        OptimizationProposal,
+    )
 
     development_digest = DEVELOPMENT_SUMMARY_SHA256 if development_digest is None else development_digest
     if re.fullmatch(r"[0-9a-f]{64}", development_digest) is None:
@@ -1347,7 +1644,9 @@ def run_watcher_validation(
         artifact["failure_stage"] = "watcher_validation_source_unavailable"
         return artifact
     try:
-        from quant_platform_kit.strategy_lifecycle.research_promotion_cycle import enforce_promotion_backtest_gates
+        from quant_platform_kit.strategy_lifecycle.research_promotion_cycle import (
+            enforce_promotion_backtest_gates,
+        )
     except ImportError:
         artifact["failure_stage"] = "strict_validation_runtime_unavailable"
         return artifact
@@ -1422,7 +1721,9 @@ def run_manual_validation(
     except (OSError, ValueError, TypeError):
         raise ManualLearningError("validation_development_source_invalid") from None
     try:
-        from quant_platform_kit.strategy_lifecycle.research_promotion_cycle import enforce_promotion_backtest_gates
+        from quant_platform_kit.strategy_lifecycle.research_promotion_cycle import (
+            enforce_promotion_backtest_gates,
+        )
     except ImportError:
         raise ManualLearningError("strict_validation_runtime_unavailable") from None
     required = (root / "binding.json", root / "manifest.json", root / "bars.json", consumer_source / "scripts/run_soxl_three_asset_learning.py", consumer_source / "config/soxl_soxx_core_only_p2_v3.json")
@@ -1653,11 +1954,64 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--watcher-validation", action="store_true")
     parser.add_argument("--watcher-record-pre-numeric-failure", action="store_true")
     parser.add_argument("--saved-validation-quality", action="store_true")
+    parser.add_argument("--paired-shadow-observation", action="store_true")
+    parser.add_argument("--paired-shadow-request", type=Path)
+    parser.add_argument("--qpk-python", type=Path)
+    parser.add_argument("--p2-candidate", type=Path)
     parser.add_argument("--validation-quality-state", type=Path)
     parser.add_argument("--control-plane-source-from-summary", type=Path)
     parser.add_argument("--source-revision")
     parser.add_argument("--computed-at")
     args = parser.parse_args(argv)
+    if args.paired_shadow_observation:
+        if any(value is None for value in (
+            args.watcher_result, args.diagnosis_result, args.github_app_id,
+            args.output, args.validation_quality_state,
+        )):
+            parser.error("paired shadow observation requires watcher, diagnosis, app id, output, and state")
+        if args.paired_shadow_request is None:
+            result = {
+                "schema_version": PAIRED_SHADOW_SCHEMA, "status": "parked",
+                "failure_stage": "paired_shadow_material_missing", "observation_status": "not_started",
+                "learning_only": True, "no_order": True, "promotion_eligible": False,
+            }
+            _write(args.output, result)
+            print(canonical_json({"status": result["status"], "failure_stage": result["failure_stage"]}))
+            return 0
+        if args.paired_shadow_request.is_symlink() or not args.paired_shadow_request.is_file():
+            result = {
+                "schema_version": PAIRED_SHADOW_SCHEMA, "status": "parked",
+                "failure_stage": "paired_shadow_material_missing", "observation_status": "not_started",
+                "learning_only": True, "no_order": True, "promotion_eligible": False,
+            }
+            _write(args.output, result)
+            print(canonical_json({"status": result["status"], "failure_stage": result["failure_stage"]}))
+            return 0
+        try:
+            request = _read_json_input(args.paired_shadow_request)
+            if any(value is None for value in (args.consumer_source, args.ues_source, args.qpk_python, args.p2_candidate)):
+                raise ManualLearningError("paired_shadow_runtime_unavailable")
+            result = run_paired_shadow_observation(
+                watcher_result=_read_json_input(args.watcher_result),
+                diagnosis_result=_read_json_input(args.diagnosis_result),
+                github_app_id=args.github_app_id, state_path=args.validation_quality_state,
+                paired_shadow_request=request, consumer_source=args.consumer_source,
+                ues_source=args.ues_source, qpk_python=args.qpk_python,
+                p2_candidate=args.p2_candidate,
+            )
+        except (ManualLearningError, OSError, ValueError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+            failure_stage = str(exc) if isinstance(exc, ManualLearningError) and SAFE_REASON.fullmatch(str(exc)) else "paired_shadow_failed"
+            result = {
+                "schema_version": PAIRED_SHADOW_SCHEMA, "status": "parked",
+                "failure_stage": failure_stage, "learning_only": True, "no_order": True,
+                "promotion_eligible": False,
+            }
+            _write(args.output, result)
+            print(canonical_json(result))
+            return 2
+        _write(args.output, result)
+        print(canonical_json({"status": result["status"], "observation_status": result.get("observation_status"), "reused": result.get("reused", False)}))
+        return 0
     if args.saved_validation_quality:
         if any(value is None for value in (args.watcher_result, args.diagnosis_result, args.github_app_id, args.output, args.validation_quality_state)):
             parser.error("saved validation quality requires watcher, diagnosis, app id, output, and state")

@@ -466,6 +466,7 @@ jobs:
       P1_MANIFEST_SHA256: ${{ needs.strategy-optimization-watcher.outputs.soxl_p1_manifest_sha256 }}
       LEARNING_ROOT: ${{ github.workspace }}/.aab-soxl-watcher-learning-${{ github.run_id }}-${{ github.run_attempt }}
       QUALITY_STATE_PATH: /var/tmp/aab-soxl-validation-quality/quality-state.json
+      PAIRED_SHADOW_REQUEST_PATH: /var/tmp/aab-soxl-validation-quality/paired-shadow-request.json
       VALIDATION_CONSUMER_REVISION: ${{ vars.SOXL_WATCHER_VALIDATION_CONSUMER_REVISION }}
     steps:
       - name: Check dedicated scheduled research identity configuration
@@ -505,6 +506,7 @@ jobs:
           private-key: ${{ secrets.CROSS_REPO_GITHUB_APP_PRIVATE_KEY }}
           owner: QuantStrategyLab
           repositories: UsEquitySnapshotPipelines
+          permission-contents: read
           permission-issues: write
 
       - name: Initialize sanitized watcher learning terminal
@@ -722,7 +724,8 @@ jobs:
           env -u UV_PYTHON -u VIRTUAL_ENV uv sync --locked --no-dev --no-editable --python 3.11
           cd ..
           python3 -m venv "$LEARNING_ROOT/validation-control"
-          "$LEARNING_ROOT/validation-control/bin/python" -m pip install --quiet --no-deps ./validation-gate-source
+          "$LEARNING_ROOT/validation-control/bin/python" -m pip install --quiet --no-deps \
+            "quant-platform-kit @ git+file://$GITHUB_WORKSPACE/validation-gate-source@7363011d56926d39f4fffeb036e511391114e39f"
           cd bridge
           "$LEARNING_ROOT/validation-control/bin/python" -c 'from quant_platform_kit.strategy_lifecycle.research_promotion_cycle import enforce_promotion_backtest_gates; from scripts.run_soxl_manual_learning import run_watcher_validation'
 
@@ -760,6 +763,59 @@ jobs:
             --github-app-id "${{ vars.CROSS_REPO_GITHUB_APP_ID }}" \
             --validation-quality-state "$QUALITY_STATE_PATH" \
             --output "$LEARNING_ROOT/quality.json"
+
+      - name: Check protected paired shadow input
+        id: paired-shadow-input
+        if: steps.research-identity.outputs.configured == 'true' && vars.SOXL_WATCHER_VALIDATION_CONSUMER_REVISION != '' && success()
+        run: |
+          set -euo pipefail
+          if [ -f "$PAIRED_SHADOW_REQUEST_PATH" ] && [ ! -L "$PAIRED_SHADOW_REQUEST_PATH" ]; then
+            echo 'available=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'available=false' >> "$GITHUB_OUTPUT"
+            umask 077
+            mkdir -p "$LEARNING_ROOT"
+            printf '%s\n' '{"schema_version":"qsl.soxl-three-asset-paired-shadow-observation.v1","status":"parked","failure_stage":"paired_shadow_material_missing","observation_status":"not_started","learning_only":true,"no_order":true,"promotion_eligible":false}' > "$LEARNING_ROOT/paired-shadow.json"
+          fi
+
+      - name: Checkout fixed paired shadow consumer
+        if: steps.paired-shadow-input.outputs.available == 'true'
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          repository: QuantStrategyLab/UsEquitySnapshotPipelines
+          ref: ddce45441ef3a1306db30f502b3773a4eb81f4f8
+          path: paired-shadow-consumer-source
+          token: ${{ steps.source-app-token.outputs.token }}
+          persist-credentials: false
+
+      - name: Install fixed paired shadow consumer runtime
+        if: steps.paired-shadow-input.outputs.available == 'true'
+        run: |
+          set -euo pipefail
+          test "$(git -C paired-shadow-consumer-source rev-parse HEAD)" = "ddce45441ef3a1306db30f502b3773a4eb81f4f8"
+          test -z "$(git -C paired-shadow-consumer-source status --porcelain --untracked-files=all)"
+          cd paired-shadow-consumer-source
+          env -u UV_PYTHON -u VIRTUAL_ENV uv sync --locked --no-dev --no-editable --python 3.11
+
+      - name: Consume paired shadow observation when a trusted session is present
+        if: steps.paired-shadow-input.outputs.available == 'true'
+        working-directory: bridge
+        env:
+          GH_TOKEN: ${{ steps.source-app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          "$LEARNING_ROOT/validation-control/bin/python" -m scripts.run_soxl_manual_learning \
+            --paired-shadow-observation \
+            --paired-shadow-request "$PAIRED_SHADOW_REQUEST_PATH" \
+            --watcher-result ../watcher-handoff/result.json \
+            --diagnosis-result ../watcher-handoff/research-diagnosis.json \
+            --github-app-id "${{ vars.CROSS_REPO_GITHUB_APP_ID }}" \
+            --consumer-source "$GITHUB_WORKSPACE/paired-shadow-consumer-source" \
+            --ues-source "$GITHUB_WORKSPACE/ues-source" \
+            --qpk-python "$LEARNING_ROOT/validation-control/bin/python" \
+            --p2-candidate "$GITHUB_WORKSPACE/consumer-source/config/soxl_soxx_core_only_p2_v3.json" \
+            --validation-quality-state "$QUALITY_STATE_PATH" \
+            --output "$LEARNING_ROOT/paired-shadow.json"
 
       - name: Record known pre-numeric failure for this exact task
         if: failure() && steps.research-identity.outputs.configured == 'true'
@@ -801,6 +857,15 @@ jobs:
           if-no-files-found: warn
           retention-days: 35
 
+      - name: Upload paired shadow observation terminal
+        if: always() && steps.research-identity.outputs.configured == 'true' && vars.SOXL_WATCHER_VALIDATION_CONSUMER_REVISION != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: soxl-paired-shadow-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.LEARNING_ROOT }}/paired-shadow.json
+          if-no-files-found: warn
+          retention-days: 35
+
       - name: Remove watcher learning workspace
         if: always()
         run: rm -rf -- "$LEARNING_ROOT"
@@ -822,6 +887,8 @@ jobs:
       actions: read
     env:
       QUALITY_STATE_PATH: /var/tmp/aab-soxl-validation-quality/quality-state.json
+      PAIRED_SHADOW_REQUEST_PATH: /var/tmp/aab-soxl-validation-quality/paired-shadow-request.json
+      PAIRED_SHADOW_ROOT: ${{ github.workspace }}/.aab-soxl-paired-shadow-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Checkout Bridge
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
@@ -843,6 +910,7 @@ jobs:
           private-key: ${{ secrets.CROSS_REPO_GITHUB_APP_PRIVATE_KEY }}
           owner: QuantStrategyLab
           repositories: UsEquitySnapshotPipelines
+          permission-contents: read
           permission-issues: write
 
       - name: Checkout frozen validation gate
@@ -857,7 +925,53 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m venv "$RUNNER_TEMP/aab-soxl-quality-control"
-          "$RUNNER_TEMP/aab-soxl-quality-control/bin/python" -m pip install --quiet --no-deps ./validation-gate-source
+          "$RUNNER_TEMP/aab-soxl-quality-control/bin/python" -m pip install --quiet --no-deps \
+            "quant-platform-kit @ git+file://$GITHUB_WORKSPACE/validation-gate-source@7363011d56926d39f4fffeb036e511391114e39f"
+
+      - name: Check protected paired shadow input
+        id: paired-shadow-input
+        run: |
+          set -euo pipefail
+          if [ -f "$PAIRED_SHADOW_REQUEST_PATH" ] && [ ! -L "$PAIRED_SHADOW_REQUEST_PATH" ]; then
+            echo 'available=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'available=false' >> "$GITHUB_OUTPUT"
+            mkdir -p "$PAIRED_SHADOW_ROOT"
+            printf '%s\n' '{"schema_version":"qsl.soxl-three-asset-paired-shadow-observation.v1","status":"parked","failure_stage":"paired_shadow_material_missing","observation_status":"not_started","learning_only":true,"no_order":true,"promotion_eligible":false}' > "$PAIRED_SHADOW_ROOT/summary.json"
+          fi
+
+      - name: Checkout fixed paired shadow consumer for quality tail
+        if: steps.paired-shadow-input.outputs.available == 'true'
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          repository: QuantStrategyLab/UsEquitySnapshotPipelines
+          ref: ddce45441ef3a1306db30f502b3773a4eb81f4f8
+          path: paired-shadow-consumer-source
+          token: ${{ steps.source-app-token.outputs.token }}
+          persist-credentials: false
+
+      - name: Checkout fixed UES runtime for quality tail
+        if: steps.paired-shadow-input.outputs.available == 'true'
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          repository: QuantStrategyLab/UsEquityStrategies
+          ref: 7756fe32585e85cf1d09a163203a02e3eee39fe1
+          path: paired-shadow-ues-source
+          persist-credentials: false
+
+      - name: Install fixed quality-tail paired shadow runtimes
+        if: steps.paired-shadow-input.outputs.available == 'true'
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet 'uv==0.11.19'
+          test "$(git -C paired-shadow-consumer-source rev-parse HEAD)" = "ddce45441ef3a1306db30f502b3773a4eb81f4f8"
+          test "$(git -C paired-shadow-ues-source rev-parse HEAD)" = "7756fe32585e85cf1d09a163203a02e3eee39fe1"
+          test -z "$(git -C paired-shadow-consumer-source status --porcelain --untracked-files=all)"
+          test -z "$(git -C paired-shadow-ues-source status --porcelain --untracked-files=all)"
+          cd paired-shadow-consumer-source
+          env -u UV_PYTHON -u VIRTUAL_ENV uv sync --locked --no-dev --no-editable --python 3.11
+          cd ../paired-shadow-ues-source
+          UV_PROJECT_ENVIRONMENT="$PAIRED_SHADOW_ROOT/ues-env" env -u UV_PYTHON -u VIRTUAL_ENV uv sync --locked --no-dev --no-editable --python 3.11
 
       - name: Consume saved validation terminal
         env:
@@ -874,12 +988,41 @@ jobs:
             --validation-quality-state "$QUALITY_STATE_PATH" \
             --output "$RUNNER_TEMP/aab-soxl-quality/summary.json"
 
+      - name: Consume paired shadow observation from quality tail
+        if: steps.paired-shadow-input.outputs.available == 'true' && success()
+        env:
+          GH_TOKEN: ${{ steps.source-app-token.outputs.token }}
+        working-directory: bridge
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/aab-soxl-quality-control/bin/python" -m scripts.run_soxl_manual_learning \
+            --paired-shadow-observation \
+            --paired-shadow-request "$PAIRED_SHADOW_REQUEST_PATH" \
+            --watcher-result ../watcher-handoff/result.json \
+            --diagnosis-result ../watcher-handoff/research-diagnosis.json \
+            --github-app-id "${{ vars.CROSS_REPO_GITHUB_APP_ID }}" \
+            --consumer-source "$GITHUB_WORKSPACE/paired-shadow-consumer-source" \
+            --ues-source "$GITHUB_WORKSPACE/paired-shadow-ues-source" \
+            --qpk-python "$RUNNER_TEMP/aab-soxl-quality-control/bin/python" \
+            --p2-candidate "$GITHUB_WORKSPACE/paired-shadow-consumer-source/config/soxl_soxx_core_only_p2_v3.json" \
+            --validation-quality-state "$QUALITY_STATE_PATH" \
+            --output "$PAIRED_SHADOW_ROOT/summary.json"
+
       - name: Upload saved validation quality terminal
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: soxl-validation-quality-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/aab-soxl-quality/summary.json
+          if-no-files-found: warn
+          retention-days: 35
+
+      - name: Upload paired shadow observation terminal
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: soxl-paired-shadow-quality-tail-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.PAIRED_SHADOW_ROOT }}/summary.json
           if-no-files-found: warn
           retention-days: 35
 
