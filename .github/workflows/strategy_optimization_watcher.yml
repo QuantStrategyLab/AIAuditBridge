@@ -809,7 +809,34 @@ jobs:
           name: strategy-optimization-watcher-${{ github.run_id }}
           path: data/input/cn-index-etf-watcher
 
+      - name: Detect source Issue token credentials
+        id: cn-source-issue-credentials
+        env:
+          APP_ID: ${{ vars.CROSS_REPO_GITHUB_APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.CROSS_REPO_GITHUB_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -n "${APP_ID:-}" ] && [ -n "${APP_PRIVATE_KEY:-}" ]; then
+            echo 'available=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'available=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create source Issue token for CN research retirement
+        id: cn-source-issue-token
+        if: steps.cn-source-issue-credentials.outputs.available == 'true'
+        uses: actions/create-github-app-token@v3.2.0
+        with:
+          app-id: ${{ vars.CROSS_REPO_GITHUB_APP_ID }}
+          private-key: ${{ secrets.CROSS_REPO_GITHUB_APP_PRIVATE_KEY }}
+          owner: QuantStrategyLab
+          repositories: CnEquitySnapshotPipelines
+          permission-issues: write
+
       - name: Run the policy-bound CN research job
+        env:
+          GH_TOKEN: ${{ steps.cn-source-issue-token.outputs.token }}
+          STRATEGY_WATCH_SOURCE_REPO: ${{ needs.strategy-optimization-watcher.outputs.source_repo }}
         run: |
           set -euo pipefail
           mkdir -p data/output/cn-index-etf-research

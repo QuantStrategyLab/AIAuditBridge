@@ -29,6 +29,7 @@ from service.strategy_watch import (  # noqa: E402
 )
 
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+ISSUE_URL_RE = re.compile(r"^https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/issues/([1-9][0-9]*)$")
 
 
 def parse_bool(value: Any, *, default: bool = False) -> bool:
@@ -109,6 +110,93 @@ def list_open_issue_urls(repo: str) -> dict[str, str]:
                 open_issues[match.group(1)] = str(issue.get("html_url") or issue.get("url") or "")
         if len(issues) < 100:
             return open_issues
+        page += 1
+
+
+_ARCHIVE_MARKER_RE = re.compile(r"<!--\s*research-scope-archived:(\{.*?\})\s*-->")
+
+
+def _archived_watcher_issue(issue: Any, *, repository: str, watcher_key: str) -> bool:
+    if not isinstance(issue, dict) or "pull_request" in issue:
+        return False
+    if str(issue.get("state") or "").upper() != "CLOSED":
+        return False
+    number = issue.get("number")
+    if type(number) is not int or number <= 0:
+        return False
+    body = str(issue.get("body") or "")
+    if f"<!-- strategy-optimization-watcher:{watcher_key} -->" not in body:
+        return False
+    match = _ARCHIVE_MARKER_RE.search(body)
+    if not match:
+        return False
+    try:
+        marker = json.loads(match.group(1))
+    except (TypeError, ValueError):
+        return False
+    return (
+        isinstance(marker, dict)
+        and marker.get("automation") == "strategy_optimization_watcher"
+        and marker.get("repository") == repository
+        and marker.get("issue_number") == number
+        and marker.get("watcher_issue_key") == watcher_key
+        and isinstance(marker.get("scope_key"), str)
+        and bool(re.fullmatch(r"[0-9a-f]{64}", marker["scope_key"]))
+        and isinstance(marker.get("ticket_id"), str)
+        and bool(marker["ticket_id"])
+        and marker.get("reason") in {"no_improvement_limit", "idle_timeout"}
+        and isinstance(issue.get("html_url"), str)
+        and (url_match := ISSUE_URL_RE.fullmatch(issue["html_url"])) is not None
+        and url_match.group(1) == repository
+        and int(url_match.group(2)) == number
+        and isinstance(issue.get("user"), dict)
+        and isinstance(issue.get("closed_by"), dict)
+        and issue["user"].get("login") == issue["closed_by"].get("login")
+        and isinstance(issue["user"].get("login"), str)
+        and issue["user"]["login"].endswith("[bot]")
+    )
+
+
+def list_archived_issue_urls(repo: str) -> dict[str, str]:
+    """Read closed Issues and suppress only trusted research archive markers."""
+    if not REPO_RE.fullmatch(repo):
+        raise ValueError("repository must be in owner/name form")
+    page = 1
+    archived: dict[str, str] = {}
+    while True:
+        result = subprocess.run(
+            ["gh", "api", "--method", "GET", f"/repos/{repo}/issues",
+             "-f", "state=closed", "-f", "per_page=100", "-f", f"page={page}"],
+            check=True, capture_output=True, text=True,
+        )
+        try:
+            issues = json.loads(result.stdout or "[]")
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("failed to parse closed issue list") from exc
+        if not isinstance(issues, list) or not issues:
+            return archived
+        for issue in issues:
+            if not isinstance(issue, dict) or "pull_request" in issue:
+                continue
+            body = str(issue.get("body") or "")
+            watcher_match = re.search(r"<!--\s*strategy-optimization-watcher:([A-Za-z0-9_-]{8,64})\s*-->", body)
+            if not watcher_match or str(issue.get("state") or "").upper() != "CLOSED":
+                continue
+            try:
+                detail = subprocess.run(
+                    ["gh", "api", "--method", "GET", f"/repos/{repo}/issues/{issue['number']}"],
+                    check=True, capture_output=True, text=True,
+                )
+                detail_issue = json.loads(detail.stdout or "{}")
+            except (KeyError, OSError, ValueError, subprocess.CalledProcessError):
+                raise RuntimeError("failed to verify closed watcher issue") from None
+            if not _archived_watcher_issue(detail_issue, repository=repo, watcher_key=watcher_match.group(1)):
+                continue
+            url = str(detail_issue.get("html_url") or "")
+            if url:
+                archived[watcher_match.group(1)] = url
+        if len(issues) < 100:
+            return archived
         page += 1
 
 
@@ -211,11 +299,14 @@ def dispatch_strategy_watch_findings(
     create_issue: Callable[[str, str, str], str] = create_github_issue,
     comment_issue: Callable[[str, str, str], str] = comment_github_issue,
     list_issues: Callable[[str], dict[str, str]] = list_open_issue_urls,
+    list_archived_issues: Callable[[str], dict[str, str]] = list_archived_issue_urls,
 ) -> dict[str, Any]:
     if source_repo and not REPO_RE.fullmatch(source_repo):
         raise ValueError("source_repo must be in owner/name form")
     issues: list[dict[str, Any]] = []
     open_issue_cache: dict[str, dict[str, str]] = {}
+    archived_issue_cache: dict[str, dict[str, str]] = {}
+    archive_lookup_failed: dict[str, str] = {}
     for finding in findings:
         task = finding_to_automation_task(finding)
         issue = issue_for_task(task)
@@ -246,10 +337,30 @@ def dispatch_strategy_watch_findings(
                     else:
                         issue_result["skipped_reason"] = "open issue already records this strategy"
                 else:
-                    issue_result["url"] = create_issue(repo, issue["title"], issue["body"])
-                    open_issue_cache[repo][issue_key] = str(issue_result["url"])
-                    issue_result["created"] = True
-            except (ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
+                    if repo in archive_lookup_failed:
+                        issue_result["archive_lookup_failed"] = True
+                        issue_result["error"] = archive_lookup_failed[repo]
+                        issues.append(issue_result)
+                        continue
+                    if repo not in archived_issue_cache:
+                        try:
+                            archived_issue_cache[repo] = list_archived_issues(repo)
+                        except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
+                            archive_lookup_failed[repo] = str(exc)
+                            issue_result["archive_lookup_failed"] = True
+                            issue_result["error"] = archive_lookup_failed[repo]
+                            issues.append(issue_result)
+                            continue
+                    archived_url = archived_issue_cache[repo].get(issue_key, "")
+                    if archived_url:
+                        issue_result["existing_url"] = archived_url
+                        issue_result["archived"] = True
+                        issue_result["skipped_reason"] = "trusted archived research scope"
+                    else:
+                        issue_result["url"] = create_issue(repo, issue["title"], issue["body"])
+                        open_issue_cache[repo][issue_key] = str(issue_result["url"])
+                        issue_result["created"] = True
+            except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
                 issue_result["error"] = str(exc)
         issues.append(issue_result)
     errors = sum(1 for issue in issues if issue.get("error"))
@@ -270,6 +381,7 @@ def run_watcher(
     create_issue: Callable[[str, str, str], str] = create_github_issue,
     comment_issue: Callable[[str, str, str], str] = comment_github_issue,
     list_issues: Callable[[str], dict[str, str]] = list_open_issue_urls,
+    list_archived_issues: Callable[[str], dict[str, str]] = list_archived_issue_urls,
 ) -> dict[str, Any]:
     if not dry_run and not source_repo:
         raise ValueError("source_repo is required for non-dry-run strategy watcher runs")
@@ -284,12 +396,40 @@ def run_watcher(
         create_issue=create_issue,
         comment_issue=comment_issue,
         list_issues=list_issues,
+        list_archived_issues=list_archived_issues,
     )
     result["research_task_source_snapshot"] = research_task_source_snapshot(
         findings,
         context_available=research_task_context_available(watch_payload),
         computed_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     )
+    archived_event_keys = {
+        str(issue.get("task", {}).get("event_key") or "")
+        for issue in result["issues"]
+        if issue.get("archived") and isinstance(issue.get("task"), dict)
+    }
+    if archived_event_keys:
+        snapshot = result["research_task_source_snapshot"]
+        tasks = snapshot.get("tasks")
+        if isinstance(tasks, list):
+            snapshot["tasks"] = [
+                task for task in tasks
+                if str(task.get("task_id") or "").removeprefix("watcher-") not in archived_event_keys
+            ]
+        result["archived_research_task_ids"] = [
+            f"watcher-{event_key}" for event_key in sorted(archived_event_keys) if event_key
+        ]
+    blocked_event_keys = {
+        str(issue.get("task", {}).get("event_key") or "")
+        for issue in result["issues"]
+        if issue.get("archive_lookup_failed") and isinstance(issue.get("task"), dict)
+    }
+    if blocked_event_keys:
+        snapshot = result["research_task_source_snapshot"]
+        snapshot["tasks"] = []
+        result["blocked_research_task_ids"] = [
+            f"watcher-{event_key}" for event_key in sorted(blocked_event_keys) if event_key
+        ]
     return result
 
 
@@ -303,6 +443,7 @@ def run_research_input_terminal_watcher(
     create_issue: Callable[[str, str, str], str] = create_github_issue,
     comment_issue: Callable[[str, str, str], str] = comment_github_issue,
     list_issues: Callable[[str], dict[str, str]] = list_open_issue_urls,
+    list_archived_issues: Callable[[str], dict[str, str]] = list_archived_issue_urls,
 ) -> dict[str, Any]:
     """Surface a trusted deferred P1 record as an issue-only finding.
 
@@ -333,6 +474,7 @@ def run_research_input_terminal_watcher(
         create_issue=create_issue,
         comment_issue=comment_issue,
         list_issues=list_issues,
+        list_archived_issues=list_archived_issues,
     )
     result["research_task_source_snapshot"] = research_task_source_snapshot(
         [finding],
