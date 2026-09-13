@@ -149,16 +149,16 @@ def numeric_result() -> dict[str, object]:
     }
 
 
-def watcher_inputs() -> tuple[dict[str, object], dict[str, object]]:
+def watcher_inputs(event_key: str = "123456789abc") -> tuple[dict[str, object], dict[str, object]]:
     task = build_strategy_diagnosis_task(
-        event_key="123456789abc", created_at="2026-09-10T00:00:00Z",
+        event_key=event_key, created_at="2026-09-10T00:00:00Z",
         candidate_id="soxl_soxx_core_only_p2_v3", candidate_kind="individual",
         domain="us_equity", strategy_repository="QuantStrategyLab/UsEquityStrategies",
         evidence={"p1_input_digest": "0" * 64, "p2_config_digest": "ff8fa0acf4f175a7c40c3e1e6a3304ea2748b6b81c3797342085a4df3810ab4d", "p3_evidence_id": "c" * 64, "strategy_revision": UES_REVISION, "producer_revision": "e" * 40},
     )
     result = {
         "research_task_source_snapshot": {"data_status": "ready", "tasks": [task]},
-        "issues": [{"repo": "QuantStrategyLab/UsEquitySnapshotPipelines", "url": "https://github.com/QuantStrategyLab/UsEquitySnapshotPipelines/issues/1", "task": {"event_key": "123456789abc", "trigger": {}}}],
+        "issues": [{"repo": "QuantStrategyLab/UsEquitySnapshotPipelines", "url": "https://github.com/QuantStrategyLab/UsEquitySnapshotPipelines/issues/1", "task": {"event_key": event_key, "trigger": {}}}],
     }
     diagnosis = {"diagnoses": [{"status": "diagnosed", "task_id": task["task_id"], "task_sha256": task["task_sha256"], "issue_url": "https://github.com/QuantStrategyLab/UsEquitySnapshotPipelines/issues/1"}]}
     return result, diagnosis
@@ -744,6 +744,163 @@ def test_watcher_validation_consumes_same_task_learning_once_and_reuses_terminal
     assert output["promotion_eligible"] is False
     assert output["human_quality_decision_required"] is True
     assert module.prepare_watcher_learning(watcher, diagnosis, github_app_id="42", read_comments=lambda *_: comments, include_validation=True)["ready"] is False
+
+
+def validation_terminal_comments(watcher, diagnosis):
+    from scripts import run_soxl_manual_learning as module
+
+    comments = accepted_watcher_comments(watcher)
+    context = module._watcher_context(
+        watcher, diagnosis, github_app_id="42", read_comments=lambda *_: comments,
+    )
+    digest = module._summary_digest(module._watcher_development_summary(context))
+    comments.append(trusted_comment(module._watcher_validation_comment(
+        context["task"], digest, "accepted", promotion_validation_result(digest),
+    )))
+    return comments
+
+
+def test_saved_validation_quality_is_tail_only_and_reuses_same_issue_terminal(tmp_path):
+    from scripts import run_soxl_manual_learning as module
+
+    watcher, diagnosis = watcher_inputs()
+    comments = validation_terminal_comments(watcher, diagnosis)
+    writes = []
+    def write(_repo, _url, body):
+        writes.append(body)
+        comments.append(trusted_comment(body))
+        return "comment"
+    result = module.run_saved_validation_quality(
+        watcher_result=watcher, diagnosis_result=diagnosis, github_app_id="42",
+        state_path=tmp_path / "quality-state.json",
+        read_comments=lambda *_: comments,
+        write_comment=write,
+    )
+    repeated = module.run_saved_validation_quality(
+        watcher_result=watcher, diagnosis_result=diagnosis, github_app_id="42",
+        state_path=tmp_path / "quality-state.json",
+        read_comments=lambda *_: comments,
+        write_comment=write,
+    )
+    assert result["status"] == repeated["status"] == "parked"
+    assert result["quality_decision"] == repeated["quality_decision"] == "needs_policy"
+    assert result["shadow_status"] == "missing"
+    assert result["shadow_passed"] is repeated["shadow_passed"] is False
+    assert result["promotion_eligible"] is repeated["promotion_eligible"] is False
+    assert repeated["reused"] is True
+    assert len(writes) == 1 and "qsl-soxl-validation-quality:v1:terminal:" in writes[0]
+    ready = module.prepare_watcher_learning(
+        watcher, diagnosis, github_app_id="42", read_comments=lambda *_: comments,
+        include_validation=True,
+    )
+    assert ready["ready"] is False and ready["quality_ready"] is True
+
+
+def test_saved_validation_quality_quality_classes_follow_existing_metrics_only():
+    from scripts import run_soxl_manual_learning as module
+
+    equal = [
+        {"cost_bps": cost, "baseline_cagr": 1.0, "candidate_cagr": 1.0,
+         "baseline_max_drawdown": 0.2, "candidate_max_drawdown": 0.2}
+        for cost in module.COST_BPS
+    ]
+    pareto = [
+        {"cost_bps": cost, "baseline_cagr": 1.0, "candidate_cagr": 1.1,
+         "baseline_max_drawdown": 0.2, "candidate_max_drawdown": 0.1}
+        for cost in module.COST_BPS
+    ]
+    tradeoff = [
+        {"cost_bps": cost, "baseline_cagr": 1.0, "candidate_cagr": 0.9,
+         "baseline_max_drawdown": 0.2, "candidate_max_drawdown": 0.1}
+        for cost in module.COST_BPS
+    ]
+    mixed = [pareto[0], equal[1] | {"candidate_cagr": 0.9, "candidate_max_drawdown": 0.3}, pareto[2]]
+    assert module._quality_from_validation_comparison(equal)[0] == "no_improvement"
+    assert module._quality_from_validation_comparison(pareto)[0] == "shadow_candidate"
+    assert module._quality_from_validation_comparison(tradeoff)[0] == "needs_policy"
+    assert module._quality_from_validation_comparison(mixed)[0] == "needs_policy"
+    with pytest.raises(module.ManualLearningError, match="validation_quality_material_missing"):
+        module._quality_from_validation_comparison([
+            {"cost_bps": cost, "baseline_cagr": 1.0, "candidate_cagr": 1.0,
+             "baseline_max_drawdown": 1.1, "candidate_max_drawdown": 0.2}
+            for cost in module.COST_BPS
+        ])
+
+
+def test_saved_validation_quality_unknown_terminal_write_is_read_only_on_reentry(tmp_path):
+    from scripts import run_soxl_manual_learning as module
+
+    watcher, diagnosis = watcher_inputs()
+    comments = validation_terminal_comments(watcher, diagnosis)
+    calls = []
+    def uncertain_write(_repo, _url, body):
+        calls.append(body)
+        if ":terminal:" in body:
+            raise OSError("private transport detail")
+        comments.append(trusted_comment(body))
+        return "comment"
+    with pytest.raises(module.ManualLearningError, match="validation_quality_terminal_write_failed"):
+        module.run_saved_validation_quality(
+            watcher_result=watcher, diagnosis_result=diagnosis, github_app_id="42",
+            state_path=tmp_path / "quality-state.json",
+            read_comments=lambda *_: comments, write_comment=uncertain_write,
+        )
+    repeated = module.run_saved_validation_quality(
+        watcher_result=watcher, diagnosis_result=diagnosis, github_app_id="42",
+        state_path=tmp_path / "quality-state.json",
+        read_comments=lambda *_: comments,
+        write_comment=lambda *_: pytest.fail("running terminal must not POST again"),
+    )
+    assert len(calls) == 1
+    assert repeated["numeric_execution"] == {"status": "outcome_unknown"}
+
+
+def test_saved_validation_quality_task_states_are_isolated_across_unknown_reentry(tmp_path):
+    from scripts import run_soxl_manual_learning as module
+
+    watcher_a, diagnosis_a = watcher_inputs("aaaaaaaaaaaa")
+    comments_a = validation_terminal_comments(watcher_a, diagnosis_a)
+    calls_a = []
+    def fail_a(_repo, _url, body):
+        calls_a.append(body)
+        raise OSError("private transport detail")
+    with pytest.raises(module.ManualLearningError, match="validation_quality_terminal_write_failed"):
+        module.run_saved_validation_quality(
+            watcher_result=watcher_a, diagnosis_result=diagnosis_a, github_app_id="42",
+            state_path=tmp_path / "quality-state.json", read_comments=lambda *_: comments_a,
+            write_comment=fail_a,
+        )
+
+    watcher_b, diagnosis_b = watcher_inputs("bbbbbbbbbbbb")
+    comments_b = validation_terminal_comments(watcher_b, diagnosis_b)
+    calls_b = []
+    def finish_b(_repo, _url, body):
+        calls_b.append(body)
+        comments_b.append(trusted_comment(body))
+        return "comment"
+    result_b = module.run_saved_validation_quality(
+        watcher_result=watcher_b, diagnosis_result=diagnosis_b, github_app_id="42",
+        state_path=tmp_path / "quality-state.json", read_comments=lambda *_: comments_b,
+        write_comment=finish_b,
+    )
+    assert result_b["status"] == "parked" and len(calls_b) == 1
+
+    repeated_a = module.run_saved_validation_quality(
+        watcher_result=watcher_a, diagnosis_result=diagnosis_a, github_app_id="42",
+        state_path=tmp_path / "quality-state.json", read_comments=lambda *_: comments_a,
+        write_comment=lambda *_: pytest.fail("unknown task A must not POST again"),
+    )
+    assert repeated_a["numeric_execution"] == {"status": "outcome_unknown"}
+    state_files = list(tmp_path.glob("quality-state.json.*.json"))
+    assert len(state_files) == 2
+
+
+def test_strategy_workflow_schedules_quality_tail_without_research_replay():
+    workflow = Path(__file__).parents[1] / ".github/workflows/strategy_optimization_watcher.yml"
+    text = workflow.read_text(encoding="utf-8")
+    assert "soxl_validation_quality_ready" in text
+    assert "soxl-validation-quality:" in text
+    assert "--saved-validation-quality" in text
 
 
 @pytest.mark.parametrize("failure", ["missing_learning", "untrusted_learning", "manifest", "failed_learning"])

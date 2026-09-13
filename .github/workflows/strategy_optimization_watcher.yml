@@ -50,6 +50,7 @@ jobs:
       source_repo: ${{ env.SOURCE_REPO }}
       dry_run: ${{ env.STRATEGY_WATCH_DRY_RUN }}
       soxl_learning_ready: ${{ steps.soxl-watcher-learning-ready.outputs.ready }}
+      soxl_validation_quality_ready: ${{ steps.soxl-watcher-learning-ready.outputs.quality_ready }}
       soxl_p1_manifest_sha256: ${{ steps.soxl-watcher-learning-ready.outputs.p1_manifest_sha256 }}
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
@@ -380,8 +381,10 @@ jobs:
 
           value = json.load(open(sys.argv[1], encoding="utf-8"))
           ready = value.get("ready") is True
+          quality_ready = value.get("quality_ready") is True
           with open(sys.argv[2], "a", encoding="utf-8") as target:
               target.write(f"ready={'true' if ready else 'false'}\n")
+              target.write(f"quality_ready={'true' if quality_ready else 'false'}\n")
               if ready:
                   target.write(f"p1_manifest_sha256={value['p1_manifest_sha256']}\n")
           PY
@@ -462,6 +465,7 @@ jobs:
     env:
       P1_MANIFEST_SHA256: ${{ needs.strategy-optimization-watcher.outputs.soxl_p1_manifest_sha256 }}
       LEARNING_ROOT: ${{ github.workspace }}/.aab-soxl-watcher-learning-${{ github.run_id }}-${{ github.run_attempt }}
+      QUALITY_STATE_PATH: /var/tmp/aab-soxl-validation-quality/quality-state.json
       VALIDATION_CONSUMER_REVISION: ${{ vars.SOXL_WATCHER_VALIDATION_CONSUMER_REVISION }}
     steps:
       - name: Check dedicated scheduled research identity configuration
@@ -723,6 +727,7 @@ jobs:
           "$LEARNING_ROOT/validation-control/bin/python" -c 'from quant_platform_kit.strategy_lifecycle.research_promotion_cycle import enforce_promotion_backtest_gates; from scripts.run_soxl_manual_learning import run_watcher_validation'
 
       - name: Validate the same task learning result with the fixed candidate plan
+        id: watcher-validation
         if: steps.research-identity.outputs.configured == 'true' && vars.SOXL_WATCHER_VALIDATION_CONSUMER_REVISION != ''
         env:
           GH_TOKEN: ${{ steps.source-app-token.outputs.token }}
@@ -740,6 +745,21 @@ jobs:
             --consumer-source "$GITHUB_WORKSPACE/validation-consumer-source" \
             --ues-source "$GITHUB_WORKSPACE/ues-source" \
             --output "$LEARNING_ROOT/validation.json"
+
+      - name: Consume saved validation quality terminal
+        if: steps.research-identity.outputs.configured == 'true' && vars.SOXL_WATCHER_VALIDATION_CONSUMER_REVISION != '' && success()
+        env:
+          GH_TOKEN: ${{ steps.source-app-token.outputs.token }}
+        working-directory: bridge
+        run: |
+          set -euo pipefail
+          "$LEARNING_ROOT/validation-control/bin/python" -m scripts.run_soxl_manual_learning \
+            --saved-validation-quality \
+            --watcher-result ../watcher-handoff/result.json \
+            --diagnosis-result ../watcher-handoff/research-diagnosis.json \
+            --github-app-id "${{ vars.CROSS_REPO_GITHUB_APP_ID }}" \
+            --validation-quality-state "$QUALITY_STATE_PATH" \
+            --output "$LEARNING_ROOT/quality.json"
 
       - name: Record known pre-numeric failure for this exact task
         if: failure() && steps.research-identity.outputs.configured == 'true'
@@ -772,9 +792,96 @@ jobs:
           if-no-files-found: warn
           retention-days: 35
 
+      - name: Upload saved validation quality terminal
+        if: always() && steps.research-identity.outputs.configured == 'true' && vars.SOXL_WATCHER_VALIDATION_CONSUMER_REVISION != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: soxl-validation-quality-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.LEARNING_ROOT }}/quality.json
+          if-no-files-found: warn
+          retention-days: 35
+
       - name: Remove watcher learning workspace
         if: always()
         run: rm -rf -- "$LEARNING_ROOT"
+
+  soxl-validation-quality:
+    needs: strategy-optimization-watcher
+    if: >-
+      needs.strategy-optimization-watcher.outputs.soxl_validation_quality_ready == 'true' &&
+      needs.strategy-optimization-watcher.outputs.source_repo == 'QuantStrategyLab/UsEquitySnapshotPipelines' &&
+      needs.strategy-optimization-watcher.outputs.dry_run == 'false' &&
+      github.repository == 'QuantStrategyLab/AIAuditBridge' &&
+      github.ref == 'refs/heads/main' &&
+      github.event_name == 'schedule' &&
+      vars.SOXL_WATCHER_VALIDATION_CONSUMER_REVISION != ''
+    runs-on: [self-hosted, codex-vps]
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    env:
+      QUALITY_STATE_PATH: /var/tmp/aab-soxl-validation-quality/quality-state.json
+    steps:
+      - name: Checkout Bridge
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          path: bridge
+          persist-credentials: false
+
+      - name: Download trusted watcher handoff
+        uses: actions/download-artifact@v8
+        with:
+          name: strategy-optimization-watcher-${{ github.run_id }}
+          path: watcher-handoff
+
+      - name: Create source issue token
+        id: source-app-token
+        uses: actions/create-github-app-token@v3.2.0
+        with:
+          app-id: ${{ vars.CROSS_REPO_GITHUB_APP_ID }}
+          private-key: ${{ secrets.CROSS_REPO_GITHUB_APP_PRIVATE_KEY }}
+          owner: QuantStrategyLab
+          repositories: UsEquitySnapshotPipelines
+          permission-issues: write
+
+      - name: Checkout frozen validation gate
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          repository: QuantStrategyLab/QuantPlatformKit
+          ref: 7363011d56926d39f4fffeb036e511391114e39f
+          path: validation-gate-source
+          persist-credentials: false
+
+      - name: Install isolated quality runtime
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/aab-soxl-quality-control"
+          "$RUNNER_TEMP/aab-soxl-quality-control/bin/python" -m pip install --quiet --no-deps ./validation-gate-source
+
+      - name: Consume saved validation terminal
+        env:
+          GH_TOKEN: ${{ steps.source-app-token.outputs.token }}
+        working-directory: bridge
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/aab-soxl-quality"
+          "$RUNNER_TEMP/aab-soxl-quality-control/bin/python" -m scripts.run_soxl_manual_learning \
+            --saved-validation-quality \
+            --watcher-result ../watcher-handoff/result.json \
+            --diagnosis-result ../watcher-handoff/research-diagnosis.json \
+            --github-app-id "${{ vars.CROSS_REPO_GITHUB_APP_ID }}" \
+            --validation-quality-state "$QUALITY_STATE_PATH" \
+            --output "$RUNNER_TEMP/aab-soxl-quality/summary.json"
+
+      - name: Upload saved validation quality terminal
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: soxl-validation-quality-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/aab-soxl-quality/summary.json
+          if-no-files-found: warn
+          retention-days: 35
 
   cn-index-etf-research:
     needs: strategy-optimization-watcher
