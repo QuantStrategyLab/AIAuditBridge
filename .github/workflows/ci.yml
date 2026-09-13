@@ -65,7 +65,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m venv "${RUNNER_TEMP}/aab-cn-research"
-          "${RUNNER_TEMP}/aab-cn-research/bin/python" -m pip install pytest 'cn-equity-strategies[research] @ git+https://github.com/QuantStrategyLab/CnEquityStrategies.git@2a0c5c9aafacfbe6519fb4029ca4ac18e4996a66'
+          "${RUNNER_TEMP}/aab-cn-research/bin/python" -m pip install pytest 'cn-equity-strategies[research] @ git+https://github.com/QuantStrategyLab/CnEquityStrategies.git@db8df9fca6665ec7c605bf04f12b74f5daa54491'
           "${RUNNER_TEMP}/aab-cn-research/bin/python" -m pip check
       - name: Verify the real CN caller without network or model execution
         env:

@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from scripts.run_strategy_optimization_watcher import (
     dispatch_strategy_watch_findings,
+    list_archived_issue_urls,
     list_open_issue_urls,
     parse_bool,
     resolve_input_path,
@@ -100,6 +101,7 @@ class RunStrategyOptimizationWatcherTest(unittest.TestCase):
             dry_run=False,
             create_issue=lambda repo, title, body: created.append((repo, title, body)) or "https://example.test/issues/1",
             list_issues=lambda _repo: {},
+            list_archived_issues=lambda _repo: {},
         )
 
         self.assertEqual(result["findings"], 1)
@@ -172,6 +174,7 @@ class RunStrategyOptimizationWatcherTest(unittest.TestCase):
             create_issue=lambda repo, title, body: "https://example.test/new",
             comment_issue=lambda repo, url, body: comment_calls.append((repo, url, body)) or "",
             list_issues=lambda repo: {issue_key: "https://example.test/existing"},
+            list_archived_issues=lambda _repo: {},
         )
 
         self.assertEqual(result["errors"], 0)
@@ -188,6 +191,7 @@ class RunStrategyOptimizationWatcherTest(unittest.TestCase):
             create_issue=lambda repo, title, body: calls.append((repo, title, body)) or "https://example.test/1",
             comment_issue=lambda repo, url, body: "https://example.test/comment",
             list_issues=lambda repo: {},
+            list_archived_issues=lambda _repo: {},
         )
 
         self.assertEqual(result["findings"], 1)
@@ -243,6 +247,7 @@ class RunStrategyOptimizationWatcherTest(unittest.TestCase):
             create_issue=lambda repo, title, body: calls.append((repo, title, body)) or "https://example.test/issue/1",
             comment_issue=lambda repo, url, body: "https://example.test/comment",
             list_issues=lambda repo: {},
+            list_archived_issues=lambda _repo: {},
         )
 
         self.assertTrue(result["issues"][0]["created"])
@@ -262,6 +267,7 @@ class RunStrategyOptimizationWatcherTest(unittest.TestCase):
             create_issue=lambda repo, title, body: calls.append((repo, title, body)) or "https://example.test/new",
             comment_issue=lambda repo, url, body: "https://example.test/comment",
             list_issues=lambda repo: {issue_key: "https://example.test/existing"},
+            list_archived_issues=lambda _repo: {},
         )
 
         self.assertFalse(result["issues"][0]["created"])
@@ -343,6 +349,7 @@ class RunStrategyOptimizationWatcherTest(unittest.TestCase):
             create_issue=lambda repo, title, body: (_ for _ in ()).throw(RuntimeError("boom")) if ":a" in title else "https://example.test/new",
             comment_issue=lambda repo, url, body: "https://example.test/comment",
             list_issues=lambda repo: {},
+            list_archived_issues=lambda _repo: {},
         )
 
         self.assertEqual(result["status"], "partial_error")
@@ -366,6 +373,7 @@ class RunStrategyOptimizationWatcherTest(unittest.TestCase):
             create_issue=lambda repo, title, body: create_calls.append((repo, title, body)) or "https://example.test/new",
             comment_issue=lambda repo, url, body: "https://example.test/comment",
             list_issues=lambda repo: {},
+            list_archived_issues=lambda _repo: {},
         )
 
         self.assertEqual(result["findings"], 2)
@@ -389,11 +397,56 @@ class RunStrategyOptimizationWatcherTest(unittest.TestCase):
             dry_run=False,
             create_issue=lambda repo, title, body: create_calls.append((repo, title, body)) or "https://example.test/new",
             list_issues=lambda repo: list_calls.append(repo) or {},
+            list_archived_issues=lambda _repo: {},
         )
 
         self.assertEqual(result["findings"], 2)
         self.assertEqual(list_calls, ["QuantStrategyLab/TestStrategies"])
         self.assertEqual(len(create_calls), 2)
+
+    def test_closed_archive_lookup_failure_never_creates_or_emits_tasks(self) -> None:
+        created: list[tuple[str, str, str]] = []
+        result = run_watcher(
+            _verified_p3_payload(),
+            source_repo="QuantStrategyLab/UsEquitySnapshotPipelines",
+            dry_run=False,
+            list_issues=lambda _repo: {},
+            list_archived_issues=lambda _repo: (_ for _ in ()).throw(RuntimeError("closed state unavailable")),
+            create_issue=lambda repo, title, body: created.append((repo, title, body)) or "https://example.test/new",
+        )
+
+        self.assertEqual(result["status"], "partial_error")
+        self.assertEqual(result["errors"], 1)
+        self.assertEqual(created, [])
+        self.assertEqual(result["research_task_source_snapshot"]["tasks"], [])
+        self.assertEqual(result["blocked_research_task_ids"], ["watcher-" + result["issues"][0]["task"]["event_key"]])
+
+    def test_trusted_archived_issue_is_reused_without_recreating_task(self) -> None:
+        payload = _verified_p3_payload()
+        dry = run_watcher(payload, source_repo="QuantStrategyLab/UsEquitySnapshotPipelines", dry_run=True)
+        issue = dry["issues"][0]
+        key = issue["watcher_issue_key"]
+        result = run_watcher(
+            payload,
+            source_repo="QuantStrategyLab/UsEquitySnapshotPipelines",
+            dry_run=False,
+            list_issues=lambda _repo: {},
+            list_archived_issues=lambda _repo: {key: "https://github.com/QuantStrategyLab/UsEquitySnapshotPipelines/issues/123"},
+            create_issue=lambda *_: (_ for _ in ()).throw(AssertionError("archived issue must not be recreated")),
+        )
+        self.assertTrue(result["issues"][0]["archived"])
+        self.assertEqual(result["research_task_source_snapshot"]["tasks"], [])
+        self.assertEqual(result["archived_research_task_ids"], [issue["task"]["event_key"] and "watcher-" + issue["task"]["event_key"]])
+
+    def test_closed_archive_marker_requires_trusted_identity_and_scope(self) -> None:
+        body = "<!-- strategy-optimization-watcher:abc12345 -->\n<!-- research-scope-archived:{\"automation\":\"strategy_optimization_watcher\",\"issue_number\":123,\"reason\":\"idle_timeout\",\"repository\":\"QuantStrategyLab/TestStrategies\",\"scope_key\":\"" + "a" * 64 + "\",\"ticket_id\":\"rpt_x\",\"watcher_issue_key\":\"abc12345\"} -->"
+        issue = {"state": "closed", "number": 123, "body": body, "html_url": "https://github.com/QuantStrategyLab/TestStrategies/issues/123",
+                 "user": {"login": "strategy-watcher[bot]"}, "closed_by": {"login": "strategy-watcher[bot]"}}
+        with patch("scripts.run_strategy_optimization_watcher.subprocess.run", side_effect=[
+            subprocess.CompletedProcess([], 0, stdout=json.dumps([issue]), stderr=""),
+            subprocess.CompletedProcess([], 0, stdout=json.dumps(issue), stderr=""),
+        ]):
+            self.assertEqual(list_archived_issue_urls("QuantStrategyLab/TestStrategies")["abc12345"], issue["html_url"])
 
     def test_list_open_issue_urls_fails_closed_on_bad_json(self) -> None:
         def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:

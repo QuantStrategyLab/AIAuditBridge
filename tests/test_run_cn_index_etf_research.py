@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from types import SimpleNamespace
 import hashlib
 import importlib
@@ -259,7 +259,7 @@ def test_actual_entrypoint_calls_cn_runner_with_persistent_callbacks(shadow_inpu
     from unittest.mock import Mock
     binding, identity, _, _ = shadow_inputs
     runtime = SimpleNamespace(cn=SimpleNamespace(preflight_index_etf_research_job=Mock(return_value=identity),
-        run_index_etf_research_job=Mock(return_value={"status": "parked", "reason": "synthetic_gate_rejection",
+        run_index_etf_research_job=Mock(return_value={"status": "parked", "reason": "research_scope_archived",
             "research_key": "f" * 64, "resumed": False, "console_synced": None})),
         read_input=Mock(return_value=object()), fold=lambda **kw: kw,
         execution_config=lambda **kw: kw, cost_model=lambda **kw: kw,
@@ -273,21 +273,47 @@ def test_actual_entrypoint_calls_cn_runner_with_persistent_callbacks(shadow_inpu
         plan=dict(development_start="2020-01-01", development_end="2020-12-31", folds=[],
                   locked_oos_start="2024-01-01", locked_oos_end="2025-01-01", purge_days=1, embargo_days=1),
         execution_config={}, cost_model={})
-    sync, pull, diagnose = Mock(), Mock(), Mock()
+    sync, pull, diagnose, summarize = Mock(), Mock(), Mock(), Mock()
     with patch.object(job, "_read_policy", return_value=policy), patch.object(job, "_load_runtime", return_value=runtime), \
-            patch.object(job, "_diagnosis", return_value=diagnose), patch.object(job, "_console_bindings", return_value=(sync, pull)), \
+            patch.object(job, "_diagnosis", return_value=diagnose), patch.object(job, "_summary_callback", return_value=summarize), \
+            patch.object(job, "_console_bindings", return_value=(sync, pull)), \
             patch.object(job, "STATE_ROOT", tmp_path / "state"):
         result = job.run_from_watcher(watcher())
-    assert result["reason"] == "synthetic_gate_rejection"
+    assert result["reason"] == "research_scope_archived"
     kwargs = runtime.cn.run_index_etf_research_job.call_args.kwargs
     assert callable(kwargs["admit_new_research"])
     assert kwargs["record_shadow"] is kwargs["read_pending_shadow"]
     assert kwargs["sync_console"] is sync and kwargs["pull_console"] is pull
+    assert kwargs["summarize"] is summarize
     assert kwargs["diagnose"]() == {"optimization_needed": False, "reason": "forward_window_start_elapsed"}
     diagnose.assert_not_called()
     assert kwargs["as_of"] == "2026-09-09" and kwargs["source_revision"] == REVISION
     assert kwargs["ticket_dir"] == tmp_path / "state" / "research_promotion_tickets"
     assert "ticket" not in result and "trial_records_path" not in result
+
+
+@pytest.mark.parametrize("issues", [
+    [
+        {"repo": job.ISSUE_REPOSITORY, "watcher_issue_key": "watcher-key-1",
+         "url": f"https://github.com/{job.ISSUE_REPOSITORY}/issues/123",
+         "task": {"event_key": "aaaaaaaaaaaa"}},
+        {"repo": job.ISSUE_REPOSITORY, "watcher_issue_key": "watcher-key-2",
+         "url": f"https://github.com/{job.ISSUE_REPOSITORY}/issues/124",
+         "task": {"event_key": "aaaaaaaaaaaa"}},
+    ],
+    [{"repo": job.ISSUE_REPOSITORY, "watcher_issue_key": "watcher-key-1",
+      "url": "https://github.com/QuantStrategyLab/Other/issues/123",
+      "task": {"event_key": "aaaaaaaaaaaa"}}],
+])
+def test_actual_entrypoint_parks_declared_owner_ambiguity_before_runtime(issues, monkeypatch):
+    source = watcher()
+    source["issues"] = issues
+    monkeypatch.setenv("STRATEGY_WATCH_SOURCE_REPO", job.ISSUE_REPOSITORY)
+    policy = {"enabled": True, "code_revision": REVISION}
+    with patch.object(job, "_read_policy", return_value=policy), \
+            patch.object(job, "_load_runtime", side_effect=AssertionError("runtime must not load")):
+        result = job.run_from_watcher(source)
+    assert result["reason"] == "cn_research_issue_owner_unavailable"
 
 
 class Response:
@@ -349,6 +375,246 @@ def test_real_sdk_quota_defers_and_sanitizes_without_polling():
     assert http.call_count == 3 and "private" not in str(result)
 
 
+def summary_context():
+    return {
+        "identity": {"strategy_profile": job.PROFILE, "domain": "cn_equity", "proposed_params": {"top_n": 1}},
+        "strategy_description": "动量+趋势+基准risk-off+逆波+相关性过滤",
+        "plugins": None,
+        "comparison": {"status": "available", "baseline": {"cagr": 0.1}, "candidate": {"cagr": 0.11},
+                        "start_date": "2024-01-01", "end_date": "2026-01-01", "cost_model": "frozen"},
+        "limitations": ["synthetic fixture"],
+    }
+
+
+def test_summary_callback_uses_codex_contract_and_trusted_route():
+    from unittest.mock import Mock
+
+    client = Mock()
+    client.execute.return_value = SimpleNamespace(
+        success=True, provider="codex", model="codex-test", error="", note="",
+        raw={"status": "succeeded"},
+        output=json.dumps({"text": "候选与基线在既定窗口内可比较。"}),
+    )
+    config = SimpleNamespace(research_providers=("codex",))
+    runtime = SimpleNamespace(config=SimpleNamespace(from_env=Mock(return_value=config)), client=Mock(return_value=client))
+
+    result = job._summary_callback(runtime, REVISION)(summary_context())
+
+    assert result == {"status": "available", "text": "候选与基线在既定窗口内可比较。",
+                     "provider": "codex", "model": "codex-test"}
+    args, kwargs = client.execute.call_args
+    assert "不可信的 data" in args[0] and "根据动量和趋势选取标的" in args[0]
+    assert kwargs == {"mode": "review_only", "research_stage": "optimization", "allowed_providers": ["codex"],
+                      "source_repository": job.STRATEGY_REPOSITORY, "source_ref": REVISION, "timeout": 600}
+
+
+@pytest.mark.parametrize("output", [
+    {"text": "候选提升 12%。"},
+    {"text": "候选说明。", "extra": True},
+    {"status": "available", "text": "候选说明。"},
+])
+def test_summary_callback_rejects_unsafe_model_output_without_retry(output):
+    from unittest.mock import Mock
+
+    client = Mock()
+    client.execute.return_value = SimpleNamespace(
+        success=True, provider="codex", model="codex-test", error="", note="", raw={"status": "succeeded"},
+        output=json.dumps(output),
+    )
+    runtime = SimpleNamespace(
+        config=SimpleNamespace(from_env=Mock(return_value=SimpleNamespace(research_providers=("codex",)))),
+        client=Mock(return_value=client),
+    )
+    summarize = job._summary_callback(runtime, REVISION)
+
+    assert summarize(summary_context()) == {"status": "unavailable", "text": "", "provider": "", "model": ""}
+    assert client.execute.call_count == 1
+    assert summarize({**summary_context(), "unsupported": True}) == {
+        "status": "unavailable", "text": "", "provider": "", "model": "",
+    }
+    assert client.execute.call_count == 1
+
+
+def test_resolve_research_owner_requires_exact_source_issue_and_body_marker(monkeypatch):
+    source = watcher()
+    source["issues"] = [{
+        "repo": job.ISSUE_REPOSITORY,
+        "watcher_issue_key": "watcher-key-1",
+        "url": f"https://github.com/{job.ISSUE_REPOSITORY}/issues/123",
+        "task": {"event_key": "aaaaaaaaaaaa"},
+    }]
+    monkeypatch.setenv("STRATEGY_WATCH_SOURCE_REPO", job.ISSUE_REPOSITORY)
+    monkeypatch.setenv("GH_TOKEN", "synthetic")
+    with patch.object(job, "_github_issue_get", return_value={
+        "state": "open", "number": 123,
+        "html_url": f"https://github.com/{job.ISSUE_REPOSITORY}/issues/123",
+        "body": "<!-- strategy-optimization-watcher:watcher-key-1 -->\noriginal",
+    }):
+        assert job._resolve_research_owner(source, source["research_task_source_snapshot"]["tasks"][0]) == {
+            "repository": job.ISSUE_REPOSITORY, "issue_number": 123, "watcher_issue_key": "watcher-key-1",
+        }
+    source["issues"][0]["url"] = "https://github.com/QuantStrategyLab/Other/issues/123"
+    assert job._resolve_research_owner(source, source["research_task_source_snapshot"]["tasks"][0]) is None
+
+
+@pytest.mark.parametrize("issue", [
+    {"state": "OPEN", "number": 123, "body": "<!-- strategy-optimization-watcher:watcher-key-1 -->"},
+    {"state": "OPEN", "number": 123, "html_url": "https://github.com/QuantStrategyLab/CnEquitySnapshotPipelines/pull/123",
+     "body": "<!-- strategy-optimization-watcher:watcher-key-1 -->"},
+    {"state": "OPEN", "number": 123, "html_url": "https://github.com/QuantStrategyLab/Other/issues/123",
+     "body": "<!-- strategy-optimization-watcher:watcher-key-1 -->"},
+    {"state": "OPEN", "number": 123, "html_url": "https://github.com/QuantStrategyLab/CnEquitySnapshotPipelines/issues/123",
+     "body": "unrelated"},
+])
+def test_resolve_research_owner_rejects_unverifiable_github_detail(monkeypatch, issue):
+    source = watcher()
+    source["issues"] = [{
+        "repo": job.ISSUE_REPOSITORY,
+        "watcher_issue_key": "watcher-key-1",
+        "url": f"https://github.com/{job.ISSUE_REPOSITORY}/issues/123",
+        "task": {"event_key": "aaaaaaaaaaaa"},
+    }]
+    monkeypatch.setenv("STRATEGY_WATCH_SOURCE_REPO", job.ISSUE_REPOSITORY)
+    monkeypatch.setenv("GH_TOKEN", "synthetic")
+    with patch.object(job, "_github_issue_get", return_value=issue):
+        assert job._resolve_research_owner(source, source["research_task_source_snapshot"]["tasks"][0]) is None
+
+
+def _archive_ticket_fixture(tmp_path, *, archived=True, paused=False, stage_status="completed"):
+    root = tmp_path / "state"
+    ticket_dir = root / "research_promotion_tickets"
+    ticket_dir.mkdir(parents=True)
+    ticket_path = ticket_dir / ("rpt_" + "a" * 64 + ".json")
+    owner = {"repository": job.ISSUE_REPOSITORY, "issue_number": 123, "watcher_issue_key": "watcher-key-1"}
+    progress = {
+        "identity": {"owner": owner}, "scope_key": "b" * 64,
+        "lifecycle": {"archived": archived, "paused": paused, "archive_reason": "idle_timeout"},
+        "stages": {"optimize": {"status": stage_status}},
+    }
+    ticket = SimpleNamespace(
+        ticket_id=ticket_path.stem, live_authority_granted=False, state=SimpleNamespace(value="parked"),
+        research_progress=progress,
+    )
+    saved = []
+    class Cycle:
+        @staticmethod
+        def load_research_promotion_ticket(path):
+            return ticket
+        @staticmethod
+        def save_research_promotion_ticket(value, path):
+            saved.append(dict(value.research_progress))
+        @staticmethod
+        def _saved_scope_records(directory, scope_key):
+            return [(ticket_path, ticket)]
+        @staticmethod
+        def _research_directory_lock(directory):
+            from contextlib import contextmanager
+            @contextmanager
+            def lock():
+                yield True
+            return lock()
+    return root, ticket_path, owner, ticket, saved, Cycle
+
+
+def test_archived_issue_is_patched_once_and_confirmed_delivery_is_idempotent(tmp_path, monkeypatch):
+    root, path, owner, ticket, saved, cycle = _archive_ticket_fixture(tmp_path)
+    monkeypatch.setattr(job, "STATE_ROOT", root)
+    get_calls, patch_calls = [], []
+    monkeypatch.setattr(job, "_github_issue_get", lambda repo, number: get_calls.append((repo, number)) or {
+        "state": "OPEN", "number": 123,
+        "html_url": f"https://github.com/{job.ISSUE_REPOSITORY}/issues/123",
+        "body": "<!-- strategy-optimization-watcher:watcher-key-1 -->",
+    })
+    monkeypatch.setattr(job, "_github_issue_close", lambda repo, number, body: patch_calls.append((repo, number, body)) or {
+        "state": "CLOSED", "body": body,
+    })
+    runtime = SimpleNamespace(cycle=cycle)
+    result = {"reason": "research_scope_archived", "ticket_path": str(path)}
+    assert job._archive_research_issue(runtime, result, owner)["status"] == "confirmed"
+    assert len(patch_calls) == 1
+    assert "research-scope-archived:" in patch_calls[0][2]
+    assert job._archive_research_issue(runtime, result, owner)["reason"] == "issue_already_archived"
+    assert len(patch_calls) == 1
+    assert saved[-1]["issue_archive"]["status"] == "confirmed"
+
+
+def test_unknown_archive_only_gets_on_follow_up_and_never_repatches(tmp_path, monkeypatch):
+    root, path, owner, ticket, saved, cycle = _archive_ticket_fixture(tmp_path)
+    monkeypatch.setattr(job, "STATE_ROOT", root)
+    get_calls, patch_calls = [], []
+    monkeypatch.setattr(job, "_github_issue_get", lambda repo, number: get_calls.append((repo, number)) or {
+        "state": "OPEN", "number": 123,
+        "html_url": f"https://github.com/{job.ISSUE_REPOSITORY}/issues/123",
+        "body": "<!-- strategy-optimization-watcher:watcher-key-1 -->",
+    })
+    monkeypatch.setattr(job, "_github_issue_close", lambda *_: patch_calls.append(1) or (_ for _ in ()).throw(TimeoutError()))
+    runtime = SimpleNamespace(cycle=cycle)
+    result = {"reason": "research_scope_archived", "ticket_path": str(path)}
+    assert job._archive_research_issue(runtime, result, owner)["reason"] == "issue_archive_unknown"
+    assert len(patch_calls) == 1
+    assert job._archive_research_issue(runtime, result, owner)["reason"] == "issue_archive_unknown"
+    assert len(patch_calls) == 1
+    assert len(get_calls) == 2
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"paused": True}, {"stage_status": "unknown"}, {"archived": False},
+])
+def test_archive_requires_verified_terminal_ticket_without_protection(tmp_path, monkeypatch, kwargs):
+    root, path, owner, ticket, saved, cycle = _archive_ticket_fixture(tmp_path, **kwargs)
+    monkeypatch.setattr(job, "STATE_ROOT", root)
+    get = Mock()
+    close = Mock()
+    monkeypatch.setattr(job, "_github_issue_get", get)
+    monkeypatch.setattr(job, "_github_issue_close", close)
+    result = job._archive_research_issue(SimpleNamespace(cycle=cycle), {"ticket_path": str(path)}, owner)
+    assert result["reason"] == "research_ticket_not_archiveable"
+    get.assert_not_called()
+    close.assert_not_called()
+
+
+def test_archive_is_blocked_by_active_ticket_in_same_scope(tmp_path, monkeypatch):
+    root, path, owner, ticket, saved, cycle = _archive_ticket_fixture(tmp_path)
+    active = SimpleNamespace(
+        ticket_id="rpt_" + "c" * 64, live_authority_granted=False,
+        state=SimpleNamespace(value="awaiting_human"),
+        research_progress={
+            "identity": {"owner": owner}, "scope_key": "b" * 64,
+            "lifecycle": {"archived": False, "paused": False},
+            "stages": {"optimize": {"status": "completed"}},
+        },
+    )
+    cycle._saved_scope_records = staticmethod(lambda directory, scope_key: [(path, ticket), (path, active)])
+    monkeypatch.setattr(job, "STATE_ROOT", root)
+    get = Mock()
+    close = Mock()
+    monkeypatch.setattr(job, "_github_issue_get", get)
+    monkeypatch.setattr(job, "_github_issue_close", close)
+    result = job._archive_research_issue(SimpleNamespace(cycle=cycle), {"ticket_path": str(path)}, owner)
+    assert result["reason"] == "research_ticket_not_archiveable"
+    get.assert_not_called()
+    close.assert_not_called()
+
+
+@pytest.mark.parametrize("issue", [
+    {"state": "OPEN", "number": 123, "html_url": "https://github.com/QuantStrategyLab/CnEquitySnapshotPipelines/issues/123",
+     "body": "unrelated"},
+    {"state": "OPEN", "number": 123, "html_url": "https://github.com/QuantStrategyLab/CnEquitySnapshotPipelines/pull/123",
+     "body": "<!-- strategy-optimization-watcher:watcher-key-1 -->"},
+    {"state": "OPEN", "number": 123, "html_url": "https://github.com/QuantStrategyLab/Other/issues/123",
+     "body": "<!-- strategy-optimization-watcher:watcher-key-1 -->"},
+])
+def test_archive_rechecks_exact_issue_before_patch(tmp_path, monkeypatch, issue):
+    root, path, owner, ticket, saved, cycle = _archive_ticket_fixture(tmp_path)
+    monkeypatch.setattr(job, "STATE_ROOT", root)
+    monkeypatch.setattr(job, "_github_issue_get", lambda *_: issue)
+    close = Mock()
+    monkeypatch.setattr(job, "_github_issue_close", close)
+    result = job._archive_research_issue(SimpleNamespace(cycle=cycle), {"ticket_path": str(path)}, owner)
+    assert result["reason"] == "issue_archive_unknown"
+    close.assert_not_called()
+
+
 def test_watcher_uses_one_opt_in_vps_owner_with_same_run_artifact():
     text = (Path(__file__).resolve().parents[1] / ".github/workflows/strategy_optimization_watcher.yml").read_text()
     research = text.split("  cn-index-etf-research:", 1)[1]
@@ -361,7 +627,8 @@ def test_watcher_uses_one_opt_in_vps_owner_with_same_run_artifact():
         "/opt/codex-cn-index-etf-research/venv/bin/python", "-m scripts.run_cn_index_etf_research"):
         assert required in research
     assert "CODEX_AUDIT_SERVICE_TOKEN" not in research
-    assert "issues: write" not in research and "pip install" not in research
+    assert "permission-issues: write" in research and "repositories: CnEquitySnapshotPipelines" in research
+    assert "pip install" not in research
     assert "path: data/output/cn-index-etf-research/result.json" in research
 
 
@@ -415,9 +682,9 @@ def test_installed_cn_reader_preflight_real_numeric_search_ticket_reuse_and_dail
         binding["forward_policy"]["observation_start_session"] = "2026-09-10"
         calendar = write(Path(binding["calendar_path"]), ["2026-09-10", "2026-09-11"])
         binding["calendar_sha256"] = hashlib.sha256(calendar.read_bytes()).hexdigest()
-    revision = "2a0c5c9aafacfbe6519fb4029ca4ac18e4996a66"
+    revision = "db8df9fca6665ec7c605bf04f12b74f5daa54491"
     policy = dict(enabled=True, candidate_id=job.PROFILE, domain="cn_equity", code_revision=revision,
-        qpk_revision="b5654244aa5d08bce2b4b4f931436268d57216df", sdk_revision="60bd64a2ae059a082614181eeb845b46df395523", shadow=binding, console={},
+        qpk_revision="5488048cc0fc8e818b8c4be7a9729f6f1b5fdfdd", sdk_revision="60bd64a2ae059a082614181eeb845b46df395523", shadow=binding, console={},
         inputs={"development": input_package(tmp_path / "development", "2019-01-02", "2020-12-31"),
                 "validation": input_package(tmp_path / "validation", "2020-01-02", "2025-01-08")},
         plan=dict(development_start="2020-01-02", development_end="2020-12-31", folds=[dict(
@@ -495,7 +762,11 @@ def test_installed_cn_reader_preflight_real_numeric_search_ticket_reuse_and_dail
         raw["drift_score"] = .81
         write(drift_path, raw)
         third = job.run_from_watcher(watcher(revision))
-        assert third["reason"] == "new_research_not_admitted" and http.call_count == 5
+        assert third["reason"] == "saved_research_ticket_reused"
+        assert third["research_key"] == first["research_key"]
+        expected_ticket = tmp_path / "state" / "research_promotion_tickets" / f"rpt_{first['research_key']}.json"
+        assert list((tmp_path / "state" / "research_promotion_tickets").glob("*.json")) == [expected_ticket]
+        assert http.call_count == 5
     tickets = list((tmp_path / "state" / "research_promotion_tickets").glob("*.json"))
     assert len(tickets) == 1
     ticket = json.loads(tickets[0].read_text())
@@ -670,7 +941,7 @@ def test_required_ci_runs_the_complete_cn_slice_in_an_isolated_pinned_environmen
     research = text.split("      - name: Install the isolated CN research dependency set", 1)[1]
     assert "python3 -m venv" in research and "--system-site-packages" not in research
     assert research in text.split("  test:\n", 1)[1]
-    assert "cn-equity-strategies[research] @ git+https://github.com/QuantStrategyLab/CnEquityStrategies.git@2a0c5c9aafacfbe6519fb4029ca4ac18e4996a66" in research
+    assert "cn-equity-strategies[research] @ git+https://github.com/QuantStrategyLab/CnEquityStrategies.git@db8df9fca6665ec7c605bf04f12b74f5daa54491" in research
     assert '"${RUNNER_TEMP}/aab-cn-research/bin/python" -m pip check' in research
     assert '"tests/test_run_cn_index_etf_research.py"' in research
     assert 'git archive HEAD | tar -x -C "${cn_test_source}"' in research
