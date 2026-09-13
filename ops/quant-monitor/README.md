@@ -23,6 +23,15 @@ contract 和大小限制校验后原子切换；代码仓库与 lifecycle 数据
 任一 domain 缺少可信工件时只阻断该 domain，并写入
 `data/lifecycle-artifacts/status.json`；不会回退到演示或合成数据。
 
+启用 Binance live-run 同步时，在 VPS 环境中显式设置
+`BINANCE_LIVE_RUNS_SYNC_ENABLED=1` 和 producer 发布后的
+`BINANCE_LIVE_RUNS_START_AT=<UTC ISO timestamp>`。同步器只读取
+`QuantStrategyLab/BinancePlatform` 的 `main.yml`、`main` 分支普通
+`workflow_dispatch` strategy runs，并接受精确的
+`binance-live-run-<run_id>-<run_attempt>` artifact 中的
+`lifecycle-run.json`。单次运行缺失或失败会保存对应 UTC 日的未知屏障；GitHub
+列表/API 不可用时只把 `crypto` 写成不可用并保留其他 domain。没有这两个配置时不访问远端。
+
 ## Telegram（量化哨兵）
 
 Token 从 GCP Secret `quant-sentinel-telegram-bot-token` 加载；**不要**把 token 或 chat id 写进 git。

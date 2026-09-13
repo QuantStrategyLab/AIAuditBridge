@@ -7,6 +7,13 @@ source "$ROOT/scripts/common_env.sh"
 bash "$ROOT/scripts/sync_strategy_repos.sh"
 python3 "$ROOT/scripts/sync_lifecycle_artifacts.py"
 set +e
+python3 "$ROOT/scripts/sync_binance_live_runs.py"
+binance_live_runs_status=$?
+set -e
+if [[ "$binance_live_runs_status" -ne 0 && "$binance_live_runs_status" -ne 2 ]]; then
+  exit "$binance_live_runs_status"
+fi
+set +e
 python3 "$ROOT/scripts/health_cycle.py"
 health_cycle_status=$?
 set -e
