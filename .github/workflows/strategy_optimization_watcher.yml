@@ -955,6 +955,7 @@ jobs:
           set -euo pipefail
           umask 077
           root="$CASE_ROOT/p1-root"
+          completion="$CASE_ROOT/p1-complete.json"
           source="gs://qsl-runtime-logs-shared/soxl-p1-p3/${P1_MANIFEST_SHA256}"
           mkdir -p "$root"
           credential="${GOOGLE_APPLICATION_CREDENTIALS:-}"
@@ -972,9 +973,10 @@ jobs:
           for member in binding.json bars.json manifest.json; do
             gcloud storage cp --quiet "$source/$member" "$root/$member"
           done
-          gcloud storage cp --quiet "$source/p1-complete.json" "$root/p1-complete.json"
+          gcloud storage cp --quiet "$source/p1-complete.json" "$completion"
           test "$(sha256sum "$root/manifest.json" | cut -d' ' -f1)" = "$P1_MANIFEST_SHA256"
-          "$CASE_ROOT/uesp-env/bin/python" - "$root" "$P1_MANIFEST_SHA256" <<'PY'
+          COMPLETION="$completion" "$CASE_ROOT/uesp-env/bin/python" - "$root" "$P1_MANIFEST_SHA256" <<'PY'
+          import os
           import sys
           from pathlib import Path
           from us_equity_snapshot_pipelines.lifecycle.soxl_core_only_p1_publisher import (
@@ -983,7 +985,7 @@ jobs:
           root = Path(sys.argv[1])
           if verify_soxl_core_only_input_root(root) != sys.argv[2]:
               raise SystemExit("p1 root verification failed")
-          if verify_soxl_core_only_p1_remote_completion(root, root / "p1-complete.json") != sys.argv[2]:
+          if verify_soxl_core_only_p1_remote_completion(root, Path(os.environ["COMPLETION"])) != sys.argv[2]:
               raise SystemExit("p1 completion verification failed")
           PY
       - name: Run fixed SOXL RSI2 controlled research case
