@@ -2725,6 +2725,14 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertIn('"$CASE_ROOT/tools/bin/uv" sync --locked --no-dev --no-editable --python 3.11', workflow)
         self.assertIn('"$CASE_ROOT/tools/bin/uv" venv --python 3.11 --seed "$CASE_ROOT/venv"', workflow)
 
+    def test_soxl_controlled_job_keeps_completion_marker_outside_three_member_root(self) -> None:
+        workflow = Path(".github/workflows/strategy_optimization_watcher.yml").read_text(encoding="utf-8")
+        self.assertIn('completion="$CASE_ROOT/p1-complete.json"', workflow)
+        self.assertIn('gcloud storage cp --quiet "$source/p1-complete.json" "$completion"', workflow)
+        self.assertIn('verify_soxl_core_only_p1_remote_completion(root, Path(os.environ["COMPLETION"]))', workflow)
+        self.assertNotIn('gcloud storage cp --quiet "$source/p1-complete.json" "$root/p1-complete.json"', workflow)
+        self.assertNotIn('verify_soxl_core_only_p1_remote_completion(root, root / "p1-complete.json")', workflow)
+
 
 class ShadowArtifactScopeTests(unittest.TestCase):
     task = "long_horizon_signal_shadow"
