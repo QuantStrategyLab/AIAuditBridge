@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from scripts.run_russell_research_explanation import (
-    SOURCE_HEAD_SHA, SOURCE_RUN_ID, extract_summary, validate_input,
+    SOURCE_HEAD_SHA, SOURCE_RUN_ID, _safe_execution_details, extract_summary, validate_input,
 )
 
 
@@ -89,3 +89,38 @@ def test_workflow_uses_module_entrypoint_and_main_gate():
     assert "- russell_explanation" in workflow
     assert "inputs.operation != 'russell_explanation'" in workflow
     assert "inputs.operation == 'russell_explanation'" in workflow
+
+
+def test_execution_failure_preserves_safe_category_and_identifiers_only():
+    response = type("Result", (), {
+        "success": False, "provider": "codex", "model": "gpt-5.6-luna",
+        "error": "secret-token / private prompt", "note": "private note",
+        "raw": {"failure_category": "quota_or_capacity_failure", "job_id": "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6", "request_id": "req-456", "status": "failed", "provider": "codex", "model": "sk-example-secret", "reasoning_effort": "low", "research_stage": "research_summary", "output": "private output"},
+    })()
+    details = _safe_execution_details(response)
+    assert details == {"failure_category": "quota_or_capacity_failure", "status": "failed", "job_id": "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6"}
+    assert "secret" not in json.dumps(details)
+    assert "private" not in json.dumps(details)
+
+
+def test_execution_failure_invalid_category_becomes_unknown():
+    response = type("Result", (), {"success": False, "provider": "codex", "model": "sk-example-secret", "error": "private", "note": "private", "raw": {"failure_category": [], "status": {"private": "value"}, "job_id": "bad id"}})()
+    assert _safe_execution_details(response) == {"failure_category": "unknown_failure", "status": "unknown", "job_id": "unknown"}
+
+
+def test_route_contract_failure_does_not_write_success_artifact(tmp_path: Path, monkeypatch):
+    from client.config import GatewayConfig
+    from client.gateway_client import AiGatewayClient
+
+    run_path = tmp_path / "run.json"
+    run_path.write_text(json.dumps(_run()))
+    log_path = tmp_path / "run.log"
+    log_path.write_text("research-case step " + json.dumps(_summary()) + "\n")
+    output = tmp_path / "out" / "summary.json"
+    monkeypatch.setattr(GatewayConfig, "from_env", classmethod(lambda cls: type("Config", (), {"research_providers": ("codex",)})()))
+    response = type("Result", (), {"success": False, "provider": "codex", "model": "", "output": "", "error": "private", "note": "private", "raw": {"failure_category": "auth_or_config_failure", "request_id": "req-1"}})()
+    monkeypatch.setattr(AiGatewayClient, "execute", lambda self, *args, **kwargs: response)
+    with pytest.raises(ValueError, match="auth_or_config_failure"):
+        from scripts.run_russell_research_explanation import explain
+        explain(log_path=log_path, run_path=run_path, output_path=output, source_ref="6960b9f")
+    assert not output.exists()

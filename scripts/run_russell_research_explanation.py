@@ -24,6 +24,32 @@ class RussellInputError(ValueError):
     pass
 
 
+SAFE_FAILURE_CATEGORIES = {
+    "quota_or_capacity_failure", "auth_or_config_failure", "transient_service_failure",
+    "patch_contract_failure", "unknown_failure",
+}
+_SAFE_JOB_ID = re.compile(r"^[A-Za-z0-9_-]{32}$")
+_SAFE_STATUSES = {"queued", "running", "succeeded", "failed", "deferred"}
+
+
+def _safe_execution_details(response: Any) -> dict[str, str]:
+    raw = response.raw if isinstance(response.raw, dict) else {}
+    category = raw.get("failure_category")
+    if not isinstance(category, str) or category not in SAFE_FAILURE_CATEGORIES:
+        category = "unknown_failure"
+    status = raw.get("status")
+    if not isinstance(status, str) or status not in _SAFE_STATUSES:
+        status = "unknown"
+    job_id = raw.get("job_id")
+    if not isinstance(job_id, str) or not _SAFE_JOB_ID.fullmatch(job_id):
+        job_id = "unknown"
+    return {
+        "failure_category": category,
+        "status": status,
+        "job_id": job_id,
+    }
+
+
 def _read_json(path: Path) -> dict[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
@@ -122,7 +148,7 @@ def explain(*, log_path: Path, run_path: Path, output_path: Path, source_ref: st
     )
     raw = response.raw if isinstance(response.raw, dict) else {}
     if not (response.success is True and response.provider == "codex" and response.output and raw.get("status") == "succeeded" and raw.get("provider") == "codex" and raw.get("research_stage") == "research_summary"):
-        raise RussellInputError("Codex result did not satisfy the existing route contract")
+        raise RussellInputError("Codex result did not satisfy the existing route contract: " + json.dumps(_safe_execution_details(response), sort_keys=True))
     artifact = {
         "status": "available", "advisory_only": True, "interpretation_kind": "manual_historical_result_explanation",
         "source_run": input_record["source_run"], "source_result": input_record["source_result"],
