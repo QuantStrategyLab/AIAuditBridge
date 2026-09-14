@@ -61,7 +61,11 @@ it does not fetch market data, submit orders, or grant promotion authority.
 The CLI parks when formal backtest evidence is absent. A trusted Python caller
 may provide UES `SoxlRsi2PromotionBinding`, promotion store, and shadow recorder
 keywords to the same entry; arbitrary JSON pass/fail fields are not accepted as
-formal evidence.
+formal evidence. `promotion_shadow_recorder` registers the initial observation;
+`read_pending_shadow` only reads it later, while `sync_console` and
+`pull_console` deliver it for review and recover the human decision. These are
+caller-owned Python callbacks kept separate; the CLI has no trusted material
+binding for them and parks without it. No HTTP or JSON schema layer is added.
 
 Health terms are intentionally split into online service health, organization workflow health, background job health, and artifact/content health. See [`docs/health_taxonomy.md`](docs/health_taxonomy.md) before wiring new dashboard panels or automation gates.
 The service also exposes a structured automation triage endpoint for failure diagnosis and release-readiness guidance. It remains advisory and does not bypass merge or deploy controls.

@@ -198,6 +198,7 @@ def _codex_callbacks(*, source_ref: str, facts: Mapping[str, Any]):
 def run_request(
     payload: Mapping[str, Any], *, diagnose=None, summarize=None,
     promotion_binding=None, promotion_store=None, promotion_shadow_recorder=None,
+    read_pending_shadow=None, sync_console=None, pull_console=None,
 ) -> dict[str, Any]:
     if not isinstance(payload, Mapping) or not _REQUIRED <= set(payload) or set(payload) - _REQUIRED - _OPTIONAL:
         raise NewResearchInputError("new_research_input_fields_invalid")
@@ -259,8 +260,10 @@ def run_request(
         ticket_dir=Path(str(payload["ticket_dir"])), optimize=optimize,
         enforce_backtest_gates=enforce_backtest_gates,
         record_shadow=record_shadow,
+        read_pending_shadow=read_pending_shadow,
         budget=ResearchPromotionBudget(require_paired_shadow=True),
         diagnose=diagnose, summarize=summarize,
+        sync_console=sync_console, pull_console=pull_console,
     )
     summary = {key: result[key] for key in ("status", "reason", "research_key", "resumed", "live_authority_granted") if key in result}
     ticket = result.get("ticket")

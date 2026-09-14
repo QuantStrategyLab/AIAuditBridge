@@ -188,8 +188,55 @@ def _binding_for_source(source):
     )
 
 
+def _complete_paired_shadow():
+    from quant_platform_kit.strategy_lifecycle.forward_observation import ForwardObservationPolicy
+    from quant_platform_kit.strategy_lifecycle.forward_observation_receipt import (
+        FORWARD_OBSERVATION_DEPENDENCY_DIGESTS, build_forward_observation_receipt,
+    )
+    from quant_platform_kit.strategy_lifecycle.paired_shadow_evidence import build_paired_shadow_evidence
+
+    policy = ForwardObservationPolicy(
+        candidate_id="UNSCALED_SMA200", strategy_profile="soxl_rsi2_mean_reversion",
+        domain="us_equity", benchmark_symbol="SOXX", required_trading_sessions=2,
+        review_milestones=(1,), automatic_non_live_modes=("shadow", "paper"),
+        auto_resume_clean_sessions=2, observation_calendar="XNYS",
+        observation_window_type="fixed", observation_start_session="2026-09-14",
+        window_rationale_ref="sha256:soxl-rsi2-forward-window",
+        non_live_evidence_modes=("shadow_decision", "simulated_replay"),
+    )
+    dependencies = {field: character * 64 for field, character in zip(
+        sorted(FORWARD_OBSERVATION_DEPENDENCY_DIGESTS), "abcdef")}
+    def leg(name):
+        return {"signal": {"kind": "target_weight", "source": name},
+                "hypothetical_order": {"kind": "rebalance_preview", "source": name},
+                "position": {"kind": "end_of_snapshot", "source": name},
+                "cost": {"kind": "configured_cost_model", "source": name},
+                "return": {"kind": "one_snapshot_return", "source": name}}
+    first_receipt = build_forward_observation_receipt(
+        policy=policy, observation_session="2026-09-14", observation_index=1,
+        dependency_digests=dependencies, evidence_modes=policy.non_live_evidence_modes,
+    )
+    earlier = build_paired_shadow_evidence(
+        policy=policy, forward_observation_receipt=first_receipt,
+        baseline_id="baseline", observed_at="2026-09-14T20:00:00Z",
+        input_snapshot_sha256="a" * 64, candidate=leg("candidate"), baseline=leg("baseline"),
+    )
+    second_receipt = build_forward_observation_receipt(
+        policy=policy, observation_session="2026-09-15", observation_index=2,
+        dependency_digests=dependencies, evidence_modes=policy.non_live_evidence_modes,
+        previous_receipt=first_receipt,
+    )
+    return {"status": "complete", "observation": dict(
+        policy=policy, forward_observation_receipt=second_receipt,
+        baseline_id="baseline", observed_at="2026-09-15T20:00:00Z",
+        input_snapshot_sha256="a" * 64, candidate=leg("candidate"), baseline=leg("baseline"),
+        previous_evidence=earlier, previous_forward_observation_receipt=first_receipt,
+    )}
+
+
 def test_actual_ues_binding_qpk_cycle_and_reentry(tmp_path, monkeypatch):
     from quant_platform_kit.strategy_lifecycle.performance_store import PerformanceStore
+    import quant_platform_kit.strategy_lifecycle.research_promotion_cycle as qpk_cycle
     from us_equity_strategies.research import soxl_rsi2_research_adapter as adapter
 
     optimization = _synthetic_ues_source(date(2022, 1, 3), "source-v1")
@@ -219,7 +266,7 @@ def test_actual_ues_binding_qpk_cycle_and_reentry(tmp_path, monkeypatch):
             recommendation="research_candidate", improvement_score=0.0,
             confidence=0.0, winning_dimensions=(), regressing_dimensions=(),
             walk_forward_passed=False, optimization_method="synthetic_fixture",
-            search_iterations=4,
+            search_iterations=4, computed_at=clock[0].isoformat(),
         ),
     )
     optimize_calls = {"count": 0}
@@ -232,31 +279,85 @@ def test_actual_ues_binding_qpk_cycle_and_reentry(tmp_path, monkeypatch):
     monkeypatch.setattr(adapter, "run_soxl_rsi2_mean_reversion", counted_run)
 
     shadow_calls = {"count": 0}
+    clock = [datetime(2026, 9, 14, 12, 0, tzinfo=timezone.utc)]
+    monkeypatch.setattr(qpk_cycle, "_clock_now", lambda: clock[0])
 
     def shadow(_proposal):
         shadow_calls["count"] += 1
         return {"status": "pending", "passed": False, "no_order": True,
-                "live_authority_granted": False}
+                "live_authority_granted": False,
+                "retry_at": (clock[0] + timedelta(seconds=60)).timestamp()}
+
+    reader_calls = {"count": 0}
+
+    def reader(_proposal):
+        reader_calls["count"] += 1
+        return _complete_paired_shadow()
+
+    sync_calls = {"count": 0}
+    synced_ticket = {}
+
+    def sync(ticket):
+        sync_calls["count"] += 1
+        synced_ticket.update(ticket.to_dict(include_progress=True))
+        return True
+
+    pull_calls = {"count": 0}
+
+    def pull(_ticket_id):
+        pull_calls["count"] += 1
+        from quant_platform_kit.strategy_lifecycle.research_promotion_cycle import (
+            ResearchPromotionTicket, apply_human_promotion_decision,
+        )
+        ticket = ResearchPromotionTicket.from_dict(synced_ticket)
+        return apply_human_promotion_decision(
+            ticket, decision="reject", decided_at=clock[0].isoformat(),
+        ).to_dict(include_progress=True)
 
     kwargs = {
         "promotion_binding": binding,
         "promotion_store": PerformanceStore(local_root=tmp_path / "promotion-store"),
         "promotion_shadow_recorder": shadow,
+        "read_pending_shadow": reader,
+        "sync_console": sync,
+        "pull_console": pull,
     }
     def diagnose(_context, _budget):
         return {"optimization_needed": True, "design": "固定模板研究设计"}
+
+    summary_calls = {"count": 0}
+
+    def summarize(_context):
+        summary_calls["count"] += 1
+        return {"status": "available", "text": "这是受限研究说明。", "provider": "codex",
+                "model": "fixture-codex"}
+
+    kwargs["summarize"] = summarize
     no_binding_payload = dict(payload)
     no_binding_payload["ticket_dir"] = str(tmp_path / "no-binding-tickets")
     no_binding = run_request(no_binding_payload, diagnose=diagnose)
     assert no_binding["notes"] == ["promotion_backtest_gate_failed", "missing_promotion_backtest_evidence"]
     assert shadow_calls["count"] == 0
     first = run_request(payload, diagnose=diagnose, **kwargs)
+    assert reader_calls["count"] == 0
+    clock[0] = datetime(2026, 9, 15, 21, 0, tzinfo=timezone.utc)
     second = run_request(payload, diagnose=diagnose, **kwargs)
     assert first["status"] == "deferred"
     assert second["resumed"] is True
+    assert second["reason"] == "promotion_cycle_completed"
     assert optimize_calls["count"] == 2
     assert shadow_calls["count"] == 1
-    assert first["reason"] == "paired_shadow_observation_pending"
+    assert reader_calls["count"] == 1
+    assert sync_calls["count"] == 1
+    assert summary_calls["count"] == 1
+    assert synced_ticket["research_summary"]["ai_explanation"]["status"] == "available"
+    third = run_request(payload, diagnose=diagnose, **kwargs)
+    assert third["reason"] == "saved_research_ticket_reused"
+    assert third["state"] == "human_rejected"
+    assert third["live_authority_granted"] is False
+    assert pull_calls["count"] == 1
+    assert optimize_calls["count"] == 2
+    assert shadow_calls["count"] == 1
     from dataclasses import replace
 
     changed_binding = replace(binding, embargo_days=6)
@@ -269,3 +370,30 @@ def test_actual_ues_binding_qpk_cycle_and_reentry(tmp_path, monkeypatch):
     assert changed["reason"] == "paired_shadow_observation_pending"
     assert optimize_calls["count"] == 3
     assert shadow_calls["count"] == 2
+
+    invalid_payload = dict(payload)
+    invalid_payload["ticket_dir"] = str(tmp_path / "invalid-shadow-tickets")
+    invalid_reader_calls = {"count": 0}
+
+    def invalid_reader(_proposal):
+        invalid_reader_calls["count"] += 1
+        return {"status": "complete", "observation": {}}
+
+    invalid_first = run_request(
+        invalid_payload, diagnose=diagnose,
+        promotion_binding=binding, promotion_store=kwargs["promotion_store"],
+        promotion_shadow_recorder=shadow, read_pending_shadow=invalid_reader,
+        sync_console=sync, pull_console=pull,
+    )
+    assert invalid_first["status"] == "deferred"
+    sync_before_invalid = sync_calls["count"]
+    clock[0] += timedelta(seconds=120)
+    invalid_second = run_request(
+        invalid_payload, diagnose=diagnose,
+        promotion_binding=binding, promotion_store=kwargs["promotion_store"],
+        promotion_shadow_recorder=shadow, read_pending_shadow=invalid_reader,
+        sync_console=sync, pull_console=pull,
+    )
+    assert invalid_second["reason"] == "research_outcome_unknown"
+    assert invalid_reader_calls["count"] == 1
+    assert sync_calls["count"] == sync_before_invalid
