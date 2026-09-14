@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import argparse
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 import hashlib
 import json
+import os
 import re
+import subprocess
+import shutil
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -41,10 +44,215 @@ _REQUIRED = frozenset({
     "source_commit", "source_blobs", "input_paths", "output_root", "ticket_dir",
 })
 _OPTIONAL = frozenset({"ues_repo_root", "caller_ref", "strategy_facts"})
+SOXL_P1_MANIFEST_SHA256 = "b39008e05eeebd4a126eefe289a18bcae05869d937dc76e6040b71d3b0daf36d"
+SOXL_P1_MANIFEST_URL = "https://storage.googleapis.com/qsl-runtime-logs-shared/soxl-p1-p3/b39008e05eeebd4a126eefe289a18bcae05869d937dc76e6040b71d3b0daf36d/manifest.json"
+SOXL_UES_COMMIT = "d6b37b77c309e1fb7f25263271b6b0f653f7e7b8"
+SOXL_QPK_COMMIT = "de13e486da1bdba60f425e576e944591fc97b809"
+_SOXL_PROVENANCE_PATHS = (
+    "src/us_equity_strategies/research/soxl_core_optimization.py",
+    "src/us_equity_strategies/research/soxl_soxx_offline_input_contract.py",
+    "src/us_equity_strategies/research/soxl_soxx_typed_baseline_result.py",
+)
 
 
 class NewResearchInputError(ValueError):
     """Sanitized request validation failure."""
+
+
+def build_soxl_p1_source_receipt(*, retrieved_at: datetime) -> dict[str, Any]:
+    """Build the citation-only receipt for the already verified fixed P1 run."""
+    value = ResearchSourceReceipt(
+        schema_version="research_source_receipt.v1",
+        source_id="soxl-p1-b39008e05eee",
+        source_url=SOXL_P1_MANIFEST_URL,
+        publisher="QuantStrategyLab/UsEquitySnapshotPipelines",
+        retrieved_at=retrieved_at,
+        content_sha256=SOXL_P1_MANIFEST_SHA256,
+        declared_license=None,
+        usage_scope="citation_or_summary",
+        license_review_id=None,
+    )
+    return value.to_dict()
+
+
+SOXL_RSI2_FOLDS = (
+    (date(2023, 9, 12), date(2024, 12, 31), date(2025, 1, 27), date(2025, 2, 7)),
+    (date(2025, 3, 3), date(2025, 3, 14), date(2025, 4, 7), date(2025, 4, 18)),
+    (date(2025, 5, 12), date(2025, 5, 23), date(2025, 6, 16), date(2025, 6, 27)),
+)
+
+
+def _read_aab_caller_revision() -> str:
+    try:
+        revision = subprocess.run(
+            ["git", "-C", str(Path(__file__).resolve().parents[1]), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        raise NewResearchInputError("aab_caller_revision_unavailable") from None
+    expected = os.environ.get("GITHUB_SHA", "").strip()
+    if expected and revision != expected:
+        raise NewResearchInputError("aab_caller_revision_mismatch")
+    if _REVISION.fullmatch(revision) is None:
+        raise NewResearchInputError("aab_caller_revision_invalid")
+    return revision
+
+
+def run_fixed_soxl_rsi2_case(
+    *, p1_root: str | Path, ues_repo_root: str | Path, run_root: str | Path,
+    as_of: date | None = None, diagnose=None, summarize=None,
+    sync_console=None, pull_console=None,
+) -> dict[str, Any]:
+    """Run the one approved real-input case, once, with fixed folds and local-only evidence."""
+    from quant_platform_kit.strategy_lifecycle.contracts import PromotionCostModel, PurgedWalkForwardFold
+    from quant_platform_kit.strategy_lifecycle.performance_store import PerformanceStore
+    from quant_platform_kit.strategy_lifecycle.research_promotion_cycle import ResearchPromotionBudget
+    from us_equity_strategies.research.soxl_alpaca_input_adapter import materialize_soxl_alpaca_input
+    from us_equity_strategies.research.soxl_rsi2_research_adapter import (
+        Rsi2OfflineInputPaths, _COST_MODEL_REVISION, _PARAM_SPACE_REVISION,
+        _VALIDATOR_REVISION, SoxlRsi2PromotionBinding, load_rsi2_offline_input,
+        make_soxl_rsi2_optimize,
+    )
+
+    root = Path(run_root)
+    optimization_root = root / "input-optimization"
+    promotion_root = root / "input-promotion"
+    result_root = root / "optimization-result"
+    ticket_root = root / "tickets"
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        source_commit, source_blobs = read_soxl_ues_provenance(ues_repo_root)
+        caller_revision = _read_aab_caller_revision()
+        manifest_bytes = (Path(p1_root) / "manifest.json").read_bytes()
+        if hashlib.sha256(manifest_bytes).hexdigest() != SOXL_P1_MANIFEST_SHA256:
+            raise NewResearchInputError("p1_manifest_invalid")
+        optimization_paths = materialize_soxl_alpaca_input(
+            p1_root, optimization_root, start="2022-01-03", end_exclusive="2025-01-01", expected_sessions=753,
+        )
+        promotion_paths = materialize_soxl_alpaca_input(
+            p1_root, promotion_root, start="2023-09-12", end_exclusive="2026-09-12", expected_sessions=753,
+        )
+        optimization = load_rsi2_offline_input(Rsi2OfflineInputPaths(
+            optimization_paths.manifest, optimization_paths.artifact, optimization_paths.readback,
+        ))
+        promotion = load_rsi2_offline_input(Rsi2OfflineInputPaths(
+            promotion_paths.manifest, promotion_paths.artifact, promotion_paths.readback,
+        ))
+        worker = ResearchWorkerManifest.expected(
+            worker_id="soxl-rsi2-controlled-case", role=ResearchWorkerRole.PLANNER_BUILDER,
+        )
+        receipt = build_soxl_p1_source_receipt(retrieved_at=datetime.now(timezone.utc))
+        identity = {
+            "code_revision": source_commit, "input_revision": optimization.input_digest,
+            "param_space_revision": _PARAM_SPACE_REVISION,
+            "cost_model_revision": _COST_MODEL_REVISION,
+            "validator_revision": _VALIDATOR_REVISION,
+        }
+        payload = {
+            "request": {
+                "strategy_profile": "soxl_rsi2_mean_reversion", "domain": "us_equity",
+                "as_of": (as_of or datetime.now(timezone.utc).date()).isoformat(),
+                "source_revision": optimization.source_revision,
+                "research_intent": "fixed_soxl_rsi2_dual_window",
+            },
+            "worker_manifest": {
+                "schema_version": worker.schema_version, "worker_id": worker.worker_id,
+                "role": worker.role.value, "capabilities": sorted(worker.capabilities),
+                "secret_access": False, "broker_access": False,
+                "cloud_runtime_access": False, "deployment_write_access": False,
+            },
+            "source_receipts": [receipt], "research_identity": identity,
+            "source_commit": source_commit, "source_blobs": source_blobs,
+            "ues_repo_root": str(ues_repo_root), "strategy_facts": _LOCAL_STRATEGY_FACTS,
+            "caller_ref": caller_revision,
+            "input_paths": {"manifest": str(optimization_paths.manifest),
+                            "artifact": str(optimization_paths.artifact),
+                            "readback": str(optimization_paths.readback)},
+            "output_root": str(result_root), "ticket_dir": str(ticket_root),
+        }
+        request = _request(payload["request"], [_receipt(receipt)])
+        folds = tuple(PurgedWalkForwardFold(*values) for values in SOXL_RSI2_FOLDS)
+        cost_model = PromotionCostModel("C2_5", 2.0, 5.0)
+        from quant_platform_kit.strategy_lifecycle.backtest_orchestrator import _validate_promotion_plan
+        _validate_promotion_plan(
+            folds, locked_oos_start=date(2025, 8, 1), locked_oos_end=date(2026, 9, 11),
+            purge_days=20, embargo_days=20, source_revision=source_commit, cost_model=cost_model,
+        )
+        optimizer = make_soxl_rsi2_optimize(
+            input_paths=Rsi2OfflineInputPaths(
+                optimization_paths.manifest, optimization_paths.artifact, optimization_paths.readback,
+            ), output_root=result_root, source_commit=source_commit,
+            source_blobs=source_blobs, ues_repo_root=ues_repo_root,
+            source=optimization, expected_identity=identity,
+        )
+        proposal = optimizer(request, ResearchPromotionBudget(max_search_iterations=4, max_param_keys=1))
+        candidate_id = dict(proposal.proposed_params or {}).get("candidate_id")
+        if not isinstance(candidate_id, str) or not candidate_id:
+            raise NewResearchInputError("rsi2_candidate_invalid")
+        binding = SoxlRsi2PromotionBinding(
+            source=promotion, candidate_id=candidate_id, folds=folds,
+            locked_oos_start=date(2025, 8, 1), locked_oos_end=date(2026, 9, 11),
+            purge_days=20, embargo_days=20, source_revision=source_commit,
+            cost_model=cost_model,
+        )
+        store = PerformanceStore(cloud_bucket="", local_root=root / "performance")
+        shadow_check_attempted = {"value": False}
+        shadow_started = {"value": False}
+        formal_backtest_started = {"value": False}
+        from quant_platform_kit.strategy_lifecycle.paired_shadow_adapter import resolve_promotion_shadow_record
+        def shadow(proposal_value):
+            shadow_check_attempted["value"] = True
+            return resolve_promotion_shadow_record(
+                proposal=proposal_value, collector=None, allow_proxy_fallback=False,
+            )
+        result = run_request(
+            payload, diagnose=diagnose, summarize=summarize,
+            promotion_binding=binding, promotion_store=store,
+            promotion_shadow_recorder=shadow,
+            sync_console=sync_console, pull_console=pull_console,
+            frozen_proposal=proposal,
+            research_budget=ResearchPromotionBudget(
+                max_search_iterations=4, max_param_keys=1, require_paired_shadow=True,
+            ),
+            on_formal_backtest=lambda: formal_backtest_started.__setitem__("value", True),
+        )
+        result.update({
+            "optimizer_executions": 1,
+            "optimizer_candidate_id": candidate_id,
+            "optimizer_recommendation": proposal.recommendation,
+            "optimization_input_digest": optimization.input_digest,
+            "promotion_input_digest": promotion.input_digest,
+            "optimization_window": {"start": "2022-01-03", "end_exclusive": "2025-01-01", "sessions": 753},
+            "promotion_window": {"start": "2023-09-12", "end_exclusive": "2026-09-12", "sessions": 753},
+            "formal_backtest_attempted": formal_backtest_started["value"],
+            "shadow_started": shadow_started["value"],
+            "shadow_check_attempted": shadow_check_attempted["value"],
+            "shadow_status": (
+                "awaiting_forward_observation" if shadow_check_attempted["value"] else "not_started"
+            ),
+        })
+        return result
+    finally:
+        for path in (optimization_root, promotion_root):
+            shutil.rmtree(path, ignore_errors=True)
+
+
+def read_soxl_ues_provenance(ues_repo_root: str | Path) -> tuple[str, dict[str, str]]:
+    """Read exact pinned UES commit and blob IDs from a checked-out repository."""
+    root = Path(ues_repo_root)
+    try:
+        def git(*args: str) -> str:
+            return subprocess.run(
+                ["git", "-C", str(root), *args], check=True,
+                capture_output=True, text=True,
+            ).stdout.strip()
+        commit = git("rev-parse", "HEAD")
+        blobs = {path: git("rev-parse", f"HEAD:{path}") for path in _SOXL_PROVENANCE_PATHS}
+    except (OSError, subprocess.CalledProcessError):
+        raise NewResearchInputError("ues_provenance_unavailable") from None
+    if commit != SOXL_UES_COMMIT or any(_REVISION.fullmatch(value) is None for value in blobs.values()):
+        raise NewResearchInputError("ues_provenance_mismatch")
+    return commit, blobs
 
 
 def run_trusted_soxl_rsi2_dual_window(
@@ -56,6 +264,7 @@ def run_trusted_soxl_rsi2_dual_window(
     source_revision: str, cost_model: Any, diagnose=None, summarize=None,
     promotion_store=None, promotion_shadow_recorder=None,
     read_pending_shadow=None, sync_console=None, pull_console=None,
+    frozen_proposal=None,
 ) -> dict[str, Any]:
     """Run one fixed SOXL RSI2 case from one verified P1 root.
 
@@ -100,6 +309,9 @@ def run_trusted_soxl_rsi2_dual_window(
             _validate_research_identity, load_rsi2_offline_input,
             validate_promotion_timing,
         )
+        from quant_platform_kit.strategy_lifecycle.backtest_orchestrator import (
+            _validate_promotion_plan,
+        )
         optimization_paths = materialize_soxl_alpaca_input(
             p1_root, optimization_root,
             start="2022-01-03", end_exclusive="2025-01-01", expected_sessions=753,
@@ -125,11 +337,21 @@ def run_trusted_soxl_rsi2_dual_window(
         _validate_research_identity(
             optimization_input, payload["source_commit"], identity,
         )
+        if frozen_proposal is not None and dict(getattr(frozen_proposal, "proposed_params", {}) or {}) != {
+            "candidate_id": candidate_id
+        }:
+            raise NewResearchInputError("rsi2_promotion_candidate_mismatch")
         binding = SoxlRsi2PromotionBinding(
             source=promotion_input, candidate_id=candidate_id, folds=folds,
             locked_oos_start=locked_oos_start, locked_oos_end=locked_oos_end,
             purge_days=purge_days, embargo_days=embargo_days,
             source_revision=source_revision, cost_model=cost_model,
+        )
+        _validate_promotion_plan(
+            binding.folds, locked_oos_start=binding.locked_oos_start,
+            locked_oos_end=binding.locked_oos_end, purge_days=binding.purge_days,
+            embargo_days=binding.embargo_days, source_revision=binding.source_revision,
+            cost_model=binding.cost_model,
         )
         validate_promotion_timing(optimization_input, binding)
     except NewResearchInputError:
@@ -148,7 +370,7 @@ def run_trusted_soxl_rsi2_dual_window(
         promotion_binding=binding, promotion_store=promotion_store,
         promotion_shadow_recorder=promotion_shadow_recorder,
         read_pending_shadow=read_pending_shadow, sync_console=sync_console,
-        pull_console=pull_console,
+        pull_console=pull_console, frozen_proposal=frozen_proposal,
     )
 
 
@@ -301,10 +523,18 @@ def _codex_callbacks(*, source_ref: str, facts: Mapping[str, Any]):
     return diagnose, summarize
 
 
+def _instrument_formal_backtest(callback, started):
+    def wrapped(proposal):
+        started()
+        return callback(proposal)
+    return wrapped
+
+
 def run_request(
     payload: Mapping[str, Any], *, diagnose=None, summarize=None,
     promotion_binding=None, promotion_store=None, promotion_shadow_recorder=None,
     read_pending_shadow=None, sync_console=None, pull_console=None,
+    frozen_proposal=None, research_budget=None, on_formal_backtest=None,
 ) -> dict[str, Any]:
     if not isinstance(payload, Mapping) or not _REQUIRED <= set(payload) or set(payload) - _REQUIRED - _OPTIONAL:
         raise NewResearchInputError("new_research_input_fields_invalid")
@@ -336,12 +566,16 @@ def run_request(
     facts = payload.get("strategy_facts", _LOCAL_STRATEGY_FACTS)
     if facts != _LOCAL_STRATEGY_FACTS:
         raise NewResearchInputError("strategy_facts_unverified")
-    optimize = make_soxl_rsi2_optimize(
-        input_paths=paths_value,
-        output_root=Path(str(payload["output_root"])), source_commit=source_commit,
-        source_blobs=source_blobs, ues_repo_root=payload.get("ues_repo_root"),
-        source=typed_source, expected_identity=research_identity,
-    )
+    if frozen_proposal is None:
+        optimize = make_soxl_rsi2_optimize(
+            input_paths=paths_value,
+            output_root=Path(str(payload["output_root"])), source_commit=source_commit,
+            source_blobs=source_blobs, ues_repo_root=payload.get("ues_repo_root"),
+            source=typed_source, expected_identity=research_identity,
+        )
+    else:
+        def optimize(_request, _budget):
+            return frozen_proposal
     try:
         cycle_identity, enforce_backtest_gates, record_shadow = prepare_soxl_rsi2_promotion(
             optimization_source=typed_source,
@@ -355,6 +589,10 @@ def run_request(
         if isinstance(exc, NewResearchInputError):
             raise
         raise NewResearchInputError("rsi2_promotion_binding_invalid") from None
+    if callable(on_formal_backtest):
+        enforce_backtest_gates = _instrument_formal_backtest(
+            enforce_backtest_gates, on_formal_backtest,
+        )
     if diagnose is None and summarize is None:
         source_ref = payload.get("caller_ref")
         if (not isinstance(facts, Mapping) or not isinstance(source_ref, str)
@@ -367,7 +605,7 @@ def run_request(
         enforce_backtest_gates=enforce_backtest_gates,
         record_shadow=record_shadow,
         read_pending_shadow=read_pending_shadow,
-        budget=ResearchPromotionBudget(require_paired_shadow=True),
+        budget=research_budget or ResearchPromotionBudget(require_paired_shadow=True),
         diagnose=diagnose, summarize=summarize,
         sync_console=sync_console, pull_console=pull_console,
     )
@@ -380,11 +618,24 @@ def run_request(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--request", required=True, type=Path)
+    parser.add_argument("--request", type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--soxl-rsi2-controlled", action="store_true")
+    parser.add_argument("--p1-root", type=Path)
+    parser.add_argument("--ues-repo-root", type=Path)
+    parser.add_argument("--run-root", type=Path)
     args = parser.parse_args(argv)
     try:
-        result = run_request(_read_json(args.request))
+        if args.soxl_rsi2_controlled:
+            if args.request is not None or args.p1_root is None or args.ues_repo_root is None or args.run_root is None:
+                parser.error("controlled SOXL mode requires --p1-root, --ues-repo-root, --run-root and no --request")
+            result = run_fixed_soxl_rsi2_case(
+                p1_root=args.p1_root, ues_repo_root=args.ues_repo_root, run_root=args.run_root,
+            )
+        else:
+            if args.request is None:
+                parser.error("--request is required unless --soxl-rsi2-controlled is used")
+            result = run_request(_read_json(args.request))
         args.output.write_text(json.dumps(result, ensure_ascii=False, sort_keys=True), encoding="utf-8")
         return 0
     except NewResearchInputError as exc:

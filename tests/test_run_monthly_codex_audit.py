@@ -2701,6 +2701,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         expected_refs = (
             "QuantStrategyLab/AIAuditBridge/.github/workflows/codex_audit.yml@refs/heads/main",
             "QuantStrategyLab/AIAuditBridge/.github/workflows/dependency_audit.yml@refs/heads/main",
+            "QuantStrategyLab/AIAuditBridge/.github/workflows/strategy_optimization_watcher.yml@refs/heads/main",
         )
 
         script_line = next(

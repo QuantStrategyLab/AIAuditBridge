@@ -140,6 +140,24 @@ def test_formal_binding_is_passed_to_ues_prepare_and_identity_is_used(tmp_path, 
     assert result["drift_status"] == "new_research"
 
 
+def test_frozen_proposal_skips_second_optimizer_run(tmp_path, monkeypatch):
+    _install_adapter(monkeypatch)
+    import us_equity_strategies.research.soxl_rsi2_research_adapter as adapter
+    proposal = OptimizationProposal(
+        strategy_profile="soxl_rsi2_mean_reversion", domain="us_equity",
+        proposed_params={"candidate_id": "UNSCALED_SMA200"}, recommendation="research_candidate",
+    )
+    monkeypatch.setattr(adapter, "make_soxl_rsi2_optimize", lambda **_: (_ for _ in ()).throw(
+        AssertionError("optimizer must not rerun after candidate freeze")
+    ))
+    result = run_request(
+        _payload(tmp_path),
+        diagnose=lambda _context, _budget: {"optimization_needed": True, "design": "固定模板研究设计"},
+        frozen_proposal=proposal,
+    )
+    assert result["status"] == "parked"
+
+
 def test_installed_ues_exposes_formal_promotion_binding_helper():
     from us_equity_strategies.research import soxl_rsi2_research_adapter as adapter
 
@@ -257,6 +275,7 @@ def test_installed_ues_alpaca_path_runs_aab_request(tmp_path):
 
 
 def test_trusted_dual_window_materializes_both_windows_before_request(tmp_path, monkeypatch):
+    import scripts.run_new_research as runner
     from quant_platform_kit.strategy_lifecycle.contracts import PromotionCostModel, PurgedWalkForwardFold
     from us_equity_strategies.research.soxl_rsi2_research_adapter import (
         _COST_MODEL_REVISION, _PARAM_SPACE_REVISION, _VALIDATOR_REVISION,
@@ -302,9 +321,10 @@ def test_trusted_dual_window_materializes_both_windows_before_request(tmp_path, 
     ))
     promotion_dates = sorted({date.fromisoformat(row.as_of) for row in promotion.rows})
     folds = (
-        PurgedWalkForwardFold(date(2024, 12, 1), date(2025, 1, 1), date(2025, 1, 27), date(2025, 2, 7)),
-        PurgedWalkForwardFold(date(2025, 2, 8), date(2025, 3, 1), date(2025, 4, 7), date(2025, 4, 18)),
-        PurgedWalkForwardFold(date(2025, 4, 19), date(2025, 5, 1), date(2025, 6, 16), date(2025, 6, 27)),
+        # Fixed before OOS; QPK validates 20-day purge and 20-day embargo.
+        PurgedWalkForwardFold(date(2023, 9, 12), date(2024, 12, 31), date(2025, 1, 27), date(2025, 2, 7)),
+        PurgedWalkForwardFold(date(2025, 3, 3), date(2025, 3, 14), date(2025, 4, 7), date(2025, 4, 18)),
+        PurgedWalkForwardFold(date(2025, 5, 12), date(2025, 5, 23), date(2025, 6, 16), date(2025, 6, 27)),
     )
     payload = _payload(tmp_path)
     payload["request"]["source_revision"] = optimization.source_revision
@@ -314,6 +334,7 @@ def test_trusted_dual_window_materializes_both_windows_before_request(tmp_path, 
         "validator_revision": _VALIDATOR_REVISION,
     }
     captured = {}
+    original_run_request = runner.run_request
     monkeypatch.setattr(
         "scripts.run_new_research.run_request",
         lambda request_payload, **kwargs: captured.update(payload=request_payload, kwargs=kwargs) or {"status": "parked"},
@@ -335,6 +356,22 @@ def test_trusted_dual_window_materializes_both_windows_before_request(tmp_path, 
     assert binding.source.input_digest == binding_source.input_digest
     assert binding.locked_oos_start == date(2025, 8, 1)
     assert promotion_dates[-1] >= date(2026, 9, 11)
+
+    # Full fixed caller path: real materializer, real optimizer, and real AAB/QPK
+    # request cycle; only the AI diagnosis is deterministic in this synthetic test.
+    monkeypatch.setattr(runner, "run_request", original_run_request)
+    monkeypatch.setattr(runner, "SOXL_P1_MANIFEST_SHA256", hashlib.sha256((root / "manifest.json").read_bytes()).hexdigest())
+    synthetic_ues, synthetic_commit, synthetic_blobs = _ues_provenance_repo(tmp_path)
+    monkeypatch.setattr(runner, "SOXL_UES_COMMIT", synthetic_commit)
+    monkeypatch.setattr(runner, "read_soxl_ues_provenance", lambda _root: (synthetic_commit, synthetic_blobs))
+    case_result = runner.run_fixed_soxl_rsi2_case(
+        p1_root=root, ues_repo_root=synthetic_ues,
+        run_root=tmp_path / "fixed-case", diagnose=lambda _context, _budget: {
+            "optimization_needed": True, "design": "固定模板研究设计",
+        },
+    )
+    assert case_result["status"] == "parked"
+    assert case_result["live_authority_granted"] is False
 
     bad_identity = dict(payload)
     bad_identity["research_identity"] = dict(payload["research_identity"])
