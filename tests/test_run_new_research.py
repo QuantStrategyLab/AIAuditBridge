@@ -3,6 +3,9 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from datetime import date, timedelta
 import hashlib
+import json
+from pathlib import Path
+import subprocess
 import sys
 import types
 
@@ -138,6 +141,116 @@ def test_installed_ues_exposes_formal_promotion_binding_helper():
     from us_equity_strategies.research import soxl_rsi2_research_adapter as adapter
 
     assert callable(adapter.prepare_soxl_rsi2_promotion)
+
+
+def _alpaca_source_root(tmp_path: Path, count: int = 753) -> Path:
+    root = tmp_path / "alpaca-p1"
+    root.mkdir()
+    start = date(2022, 1, 3)
+    cutoff = (start + timedelta(days=count - 1)).isoformat()
+
+    def canonical(value: object) -> bytes:
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode()
+
+    binding = {
+        "schema_version": "qsl.soxl_soxx_core_only_p1_data_binding.v2",
+        "data_identity": {
+            "provider": "ALPACA_MARKET_DATA", "feed": "SIP",
+            "calendar": {"calendar_id": "XNYS", "timezone": "America/New_York", "source": "exchange_calendars:4.13.2:XNYS"},
+            "adjustment": {"policy": "total_return_adjusted", "source": "ALPACA_MARKET_DATA adjustment=all(split,dividend,spin-off)"},
+            "universe": ["SOXL", "SOXX", "BOXX"], "date_cutoff": cutoff,
+        },
+    }
+    binding_bytes = canonical(binding)
+    binding_digest = hashlib.sha256(binding_bytes).hexdigest()
+    series = {}
+    for symbol, base in (("SOXL", 30.0), ("SOXX", 100.0), ("BOXX", 10.0)):
+        rows = []
+        for index in range(count):
+            session = (start + timedelta(days=index)).isoformat()
+            close = base + (index % 7) * 0.2
+            rows.append({"session_date": session, "bar": {"open": close, "high": close + 1.0, "low": close - 1.0, "close": close, "volume": 100.0}})
+        series[symbol] = rows
+    bars = {"schema_version": "qsl.soxl-soxx-core-only-adjusted-ohlcv.v2", "series": series}
+    bars_bytes = canonical(bars)
+    manifest = {
+        "schema_version": "research_input_manifest.v1", "profile": "soxl_soxx_core_only_p2_v3",
+        "artifact_type": "immutable_adjusted_ohlcv_etf_only", "observed_at": "2026-01-08T00:00:00Z",
+        "calendar": {"calendar_id": "XNYS", "timezone": "America/New_York", "session_date": cutoff, "source_revision": binding_digest},
+        "adjustment": {"policy": "total_return_adjusted", "source": "ALPACA_MARKET_DATA adjustment=all(split,dividend,spin-off)", "source_revision": binding_digest},
+        "members": [{"path": "bars.json", "media_type": "application/json", "size_bytes": len(bars_bytes), "sha256": hashlib.sha256(bars_bytes).hexdigest()}],
+        "sources": [{"source_id": f"alpaca_sip_1day_adjustment_all:{symbol}", "content_sha256": hashlib.sha256(canonical({"schema_version": "qsl.soxl-soxx-core-only-adjusted-ohlcv-source.v1", "symbol": symbol, "sessions": series[symbol]})).hexdigest()} for symbol in ("SOXL", "SOXX", "BOXX")],
+    }
+    (root / "binding.json").write_bytes(binding_bytes)
+    (root / "bars.json").write_bytes(bars_bytes)
+    (root / "manifest.json").write_bytes(canonical(manifest))
+    return root
+
+
+def _ues_provenance_repo(tmp_path: Path) -> tuple[Path, str, dict[str, str]]:
+    repo = tmp_path / "ues-source"
+    required = (
+        "src/us_equity_strategies/research/soxl_core_optimization.py",
+        "src/us_equity_strategies/research/soxl_soxx_offline_input_contract.py",
+        "src/us_equity_strategies/research/soxl_soxx_typed_baseline_result.py",
+    )
+    for relative in required:
+        path = repo / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("# synthetic provenance fixture\n", encoding="utf-8")
+    def git(*args: str) -> str:
+        return subprocess.run(
+            ["git", "-C", str(repo), *args], check=True,
+            capture_output=True, text=True,
+        ).stdout.strip()
+    git("init", "-q")
+    git("config", "user.email", "fixture@example.test")
+    git("config", "user.name", "fixture")
+    git("add", ".")
+    git("commit", "-qm", "synthetic UES provenance")
+    commit = git("rev-parse", "HEAD")
+    return repo, commit, {path: git("rev-parse", f"HEAD:{path}") for path in required}
+
+
+def test_installed_ues_alpaca_path_runs_aab_request(tmp_path):
+    from us_equity_strategies.research.soxl_alpaca_input_adapter import (
+        load_soxl_alpaca_input, materialize_soxl_alpaca_input,
+    )
+    from us_equity_strategies.research.soxl_rsi2_research_adapter import (
+        _COST_MODEL_REVISION, _PARAM_SPACE_REVISION, _VALIDATOR_REVISION,
+        Rsi2OfflineInputPaths, load_rsi2_offline_input,
+    )
+
+    paths = materialize_soxl_alpaca_input(
+        _alpaca_source_root(tmp_path), tmp_path / "alpaca-pack",
+        start="2022-01-03", end_exclusive="2024-01-26", expected_sessions=753,
+    )
+    source = load_soxl_alpaca_input(paths.manifest, paths.artifact, paths.readback)
+    routed = load_rsi2_offline_input(Rsi2OfflineInputPaths(paths.manifest, paths.artifact, paths.readback))
+    assert source.input_digest == routed.input_digest
+    assert source.source_revision == routed.source_revision
+    assert source.source_revision.startswith("alpaca_sip:total_return_adjusted:adjustment=all:")
+
+    provenance_repo, source_commit, source_blobs = _ues_provenance_repo(tmp_path)
+    payload = _payload(tmp_path)
+    payload["source_commit"] = source_commit
+    payload["source_blobs"] = source_blobs
+    payload["ues_repo_root"] = str(provenance_repo)
+    payload["request"]["source_revision"] = source.source_revision
+    payload["input_paths"] = {"manifest": str(paths.manifest), "artifact": str(paths.artifact), "readback": str(paths.readback)}
+    payload["research_identity"] = {
+        "code_revision": source_commit, "input_revision": source.input_digest,
+        "param_space_revision": _PARAM_SPACE_REVISION, "cost_model_revision": _COST_MODEL_REVISION,
+        "validator_revision": _VALIDATOR_REVISION,
+    }
+    result = run_request(payload, diagnose=lambda _context, _budget: {
+        "optimization_needed": True, "design": "固定模板研究设计",
+    })
+    assert result["status"] == "parked"
+    assert result["reason"] == "promotion_cycle_completed"
+    assert result["notes"] == ["recommendation=reject"]
+    assert (Path(payload["output_root"]) / "soxl_rsi2_mean_reversion_v1.json").is_file()
+    assert result["live_authority_granted"] is False
 
 
 def _synthetic_ues_source(start: date, source_revision: str):
