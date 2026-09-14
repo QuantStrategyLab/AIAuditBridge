@@ -15,6 +15,7 @@ on:
           - soxl_attribution
           - soxl_volatility_ablation
           - publish_validation
+          - russell_explanation
       blend_gate_mid_soxl_weights:
         description: Reviewed baseline and up to two bounded learning values
         required: true
@@ -34,7 +35,7 @@ concurrency:
 
 jobs:
   readback:
-    if: github.repository == 'QuantStrategyLab/AIAuditBridge' && github.ref == 'refs/heads/main' && inputs.operation != 'publish_validation' && (inputs.operation == 'readback' || github.run_attempt == 1)
+    if: github.repository == 'QuantStrategyLab/AIAuditBridge' && github.ref == 'refs/heads/main' && inputs.operation != 'publish_validation' && inputs.operation != 'russell_explanation' && (inputs.operation == 'readback' || github.run_attempt == 1)
     runs-on: [self-hosted, codex-vps]
     timeout-minutes: ${{ inputs.operation != 'readback' && 35 || 10 }}
     permissions:
@@ -377,6 +378,54 @@ jobs:
           LEARNING_OUTPUT_ROOT: ${{ runner.temp }}/aab-soxl-learning-${{ github.run_id }}-${{ github.run_attempt }}
           UES_ENV_ROOT: ${{ runner.temp }}/aab-soxl-ues-env-${{ github.run_id }}-${{ github.run_attempt }}
         run: rm -rf -- "$READBACK_ROOT" "$LEARNING_OUTPUT_ROOT" "$UES_ENV_ROOT" "$VALIDATION_CONTROL_ENV" "$DEVELOPMENT_SOURCE_ROOT"
+
+  russell-explanation:
+    name: Explain the fixed Russell research result
+    if: github.repository == 'QuantStrategyLab/AIAuditBridge' && github.ref == 'refs/heads/main' && github.run_attempt == 1 && inputs.operation == 'russell_explanation'
+    runs-on: [self-hosted, codex-vps]
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    env:
+      SOURCE_REPO: QuantStrategyLab/UsEquitySnapshotPipelines
+      SOURCE_RUN_ID: '34807588512'
+      CODEX_AUDIT_SERVICE_URL: ${{ secrets.CODEX_AUDIT_SERVICE_URL }}
+      CODEX_AUDIT_SERVICE_AUDIENCE: ${{ vars.CODEX_AUDIT_SERVICE_AUDIENCE || 'quant-codex-audit' }}
+      AI_GATEWAY_SOURCE_REPO: QuantStrategyLab/AIAuditBridge
+      AI_GATEWAY_RESEARCH_PROVIDERS: codex
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Read fixed successful source run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${SOURCE_REPO}/actions/runs/${SOURCE_RUN_ID}" > "$RUNNER_TEMP/russell-run.json"
+          gh run view "$SOURCE_RUN_ID" --repo "$SOURCE_REPO" --log > "$RUNNER_TEMP/russell-run.log"
+      - name: Explain and archive advisory result
+        run: |
+          set -euo pipefail
+          python3 -m scripts.run_russell_research_explanation \
+            --run-metadata "$RUNNER_TEMP/russell-run.json" \
+            --run-log "$RUNNER_TEMP/russell-run.log" \
+            --source-ref "$GITHUB_SHA" \
+            --output "$RUNNER_TEMP/russell-research-explanation/summary.json"
+      - name: Retain sanitized research explanation
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: russell-research-explanation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/russell-research-explanation/summary.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Remove source logs and metadata
+        if: always()
+        run: rm -f "$RUNNER_TEMP/russell-run.json" "$RUNNER_TEMP/russell-run.log"
 
   publish-validation-result:
     name: Publish an existing validation result

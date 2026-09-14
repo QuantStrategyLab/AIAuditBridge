@@ -82,7 +82,10 @@ def test_subprocess_failure_does_not_write_artifact(tmp_path: Path):
 
 
 def test_workflow_uses_module_entrypoint_and_main_gate():
-    workflow = (Path(__file__).parents[1] / ".github/workflows/russell_research_explanation.yml").read_text()
+    workflow = (Path(__file__).parents[1] / ".github/workflows/research_input_readback.yml").read_text()
     assert "python3 -m scripts.run_russell_research_explanation" in workflow
     assert "persist-credentials: false" in workflow
     assert "github.ref == 'refs/heads/main'" in workflow
+    assert "- russell_explanation" in workflow
+    assert "inputs.operation != 'russell_explanation'" in workflow
+    assert "inputs.operation == 'russell_explanation'" in workflow
