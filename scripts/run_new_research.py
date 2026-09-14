@@ -195,7 +195,10 @@ def _codex_callbacks(*, source_ref: str, facts: Mapping[str, Any]):
     return diagnose, summarize
 
 
-def run_request(payload: Mapping[str, Any], *, diagnose=None, summarize=None) -> dict[str, Any]:
+def run_request(
+    payload: Mapping[str, Any], *, diagnose=None, summarize=None,
+    promotion_binding=None, promotion_store=None, promotion_shadow_recorder=None,
+) -> dict[str, Any]:
     if not isinstance(payload, Mapping) or not _REQUIRED <= set(payload) or set(payload) - _REQUIRED - _OPTIONAL:
         raise NewResearchInputError("new_research_input_fields_invalid")
     _worker(payload["worker_manifest"])
@@ -214,7 +217,7 @@ def run_request(payload: Mapping[str, Any], *, diagnose=None, summarize=None) ->
         raise NewResearchInputError("input_paths_invalid")
     from us_equity_strategies.research.soxl_rsi2_research_adapter import (
         Rsi2OfflineInputPaths, _validate_research_identity, load_rsi2_offline_input,
-        make_soxl_rsi2_optimize,
+        make_soxl_rsi2_optimize, prepare_soxl_rsi2_promotion,
     )
     research_identity = _identity(payload["research_identity"])
     paths_value = Rsi2OfflineInputPaths(**{key: Path(paths[key]) for key in paths})
@@ -232,6 +235,19 @@ def run_request(payload: Mapping[str, Any], *, diagnose=None, summarize=None) ->
         source_blobs=source_blobs, ues_repo_root=payload.get("ues_repo_root"),
         source=typed_source, expected_identity=research_identity,
     )
+    try:
+        cycle_identity, enforce_backtest_gates, record_shadow = prepare_soxl_rsi2_promotion(
+            optimization_source=typed_source,
+            source_commit=source_commit,
+            research_identity=research_identity,
+            promotion_binding=promotion_binding,
+            promotion_store=promotion_store,
+            promotion_shadow_recorder=promotion_shadow_recorder,
+        )
+    except Exception as exc:
+        if isinstance(exc, NewResearchInputError):
+            raise
+        raise NewResearchInputError("rsi2_promotion_binding_invalid") from None
     if diagnose is None and summarize is None:
         source_ref = payload.get("caller_ref")
         if (not isinstance(facts, Mapping) or not isinstance(source_ref, str)
@@ -239,10 +255,10 @@ def run_request(payload: Mapping[str, Any], *, diagnose=None, summarize=None) ->
             raise NewResearchInputError("strategy_facts_or_caller_ref_invalid")
         diagnose, summarize = _codex_callbacks(source_ref=source_ref, facts=facts)
     result = run_saved_research_promotion_cycle(
-        new_request=request, research_identity=research_identity,
+        new_request=request, research_identity=cycle_identity,
         ticket_dir=Path(str(payload["ticket_dir"])), optimize=optimize,
-        enforce_backtest_gates=lambda _proposal: None,
-        record_shadow=lambda _proposal: {"status": "pending", "passed": False, "no_order": True, "live_authority_granted": False},
+        enforce_backtest_gates=enforce_backtest_gates,
+        record_shadow=record_shadow,
         budget=ResearchPromotionBudget(require_paired_shadow=True),
         diagnose=diagnose, summarize=summarize,
     )

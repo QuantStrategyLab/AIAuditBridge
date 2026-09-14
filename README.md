@@ -48,7 +48,7 @@ from this repository; the adapter and its offline input contract come from UES.
 python3 -m venv .venv-rsi2-research
 .venv-rsi2-research/bin/python -m pip install \
   'quant-platform-kit @ git+https://github.com/QuantStrategyLab/QuantPlatformKit.git@de13e486da1bdba60f425e576e944591fc97b809' \
-  'us-equity-strategies @ git+https://github.com/QuantStrategyLab/UsEquityStrategies.git@8a8b41b6a4b1b6ea997f52c4afcec5b8e6b04b11' \
+  'us-equity-strategies @ git+https://github.com/QuantStrategyLab/UsEquityStrategies.git@d6fa43c75b72696c0d2efbc3b11f71154b003397' \
   .
 .venv-rsi2-research/bin/python -m scripts.run_new_research \
   --request request.json --output result.json
@@ -58,6 +58,10 @@ python3 -m venv .venv-rsi2-research
 identity, and offline input paths. The command consumes those frozen inputs,
 uses the budgeted Codex-only research route, and persists the research output;
 it does not fetch market data, submit orders, or grant promotion authority.
+The CLI parks when formal backtest evidence is absent. A trusted Python caller
+may provide UES `SoxlRsi2PromotionBinding`, promotion store, and shadow recorder
+keywords to the same entry; arbitrary JSON pass/fail fields are not accepted as
+formal evidence.
 
 Health terms are intentionally split into online service health, organization workflow health, background job health, and artifact/content health. See [`docs/health_taxonomy.md`](docs/health_taxonomy.md) before wiring new dashboard panels or automation gates.
 The service also exposes a structured automation triage endpoint for failure diagnosis and release-readiness guidance. It remains advisory and does not bypass merge or deploy controls.
