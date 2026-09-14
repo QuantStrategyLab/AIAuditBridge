@@ -2718,6 +2718,13 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
                 self.assertIn(expected_ref, script_line)
                 self.assertIn(expected_ref, workflow_line)
 
+    def test_soxl_controlled_job_installs_uv_inside_pinned_python_environment(self) -> None:
+        workflow = Path(".github/workflows/strategy_optimization_watcher.yml").read_text(encoding="utf-8")
+        self.assertIn('python3 -m venv "$CASE_ROOT/tools"', workflow)
+        self.assertIn('"$CASE_ROOT/tools/bin/python" -m pip install --quiet \'uv==0.11.19\'', workflow)
+        self.assertIn('"$CASE_ROOT/tools/bin/uv" sync --locked --no-dev --no-editable --python 3.11', workflow)
+        self.assertIn('"$CASE_ROOT/tools/bin/uv" venv --python 3.11 --seed "$CASE_ROOT/venv"', workflow)
+
 
 class ShadowArtifactScopeTests(unittest.TestCase):
     task = "long_horizon_signal_shadow"
