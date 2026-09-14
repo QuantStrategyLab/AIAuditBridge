@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import date, datetime
+import hashlib
 import json
 import re
 import time
@@ -44,6 +45,111 @@ _OPTIONAL = frozenset({"ues_repo_root", "caller_ref", "strategy_facts"})
 
 class NewResearchInputError(ValueError):
     """Sanitized request validation failure."""
+
+
+def run_trusted_soxl_rsi2_dual_window(
+    payload: Mapping[str, Any], *, p1_root: str | Path,
+    optimization_root: str | Path, promotion_root: str | Path,
+    expected_p1_manifest_sha256: str,
+    candidate_id: str, folds: tuple[Any, ...], locked_oos_start: date,
+    locked_oos_end: date, purge_days: int, embargo_days: int,
+    source_revision: str, cost_model: Any, diagnose=None, summarize=None,
+    promotion_store=None, promotion_shadow_recorder=None,
+    read_pending_shadow=None, sync_console=None, pull_console=None,
+) -> dict[str, Any]:
+    """Run one fixed SOXL RSI2 case from one verified P1 root.
+
+    The caller owns the receipt, source blobs, identity, P1 verifier and typed
+    promotion plan.  This helper only materializes the two frozen windows and
+    passes them through the existing trusted entry; it never derives evidence
+    or accepts promotion decisions from JSON.
+    """
+    if (not isinstance(expected_p1_manifest_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", expected_p1_manifest_sha256) is None):
+        raise NewResearchInputError("p1_manifest_invalid")
+    try:
+        _worker(payload["worker_manifest"])
+        if not isinstance(payload["source_receipts"], list) or not payload["source_receipts"]:
+            raise NewResearchInputError("source_receipts_required")
+        receipts = [_receipt(item) for item in payload["source_receipts"] if isinstance(item, Mapping)]
+        if len(receipts) != len(payload["source_receipts"]):
+            raise NewResearchInputError("source_receipt_invalid")
+        _request(payload["request"], receipts)
+        if (not isinstance(payload["source_commit"], str)
+                or _REVISION.fullmatch(payload["source_commit"]) is None):
+            raise NewResearchInputError("source_commit_invalid")
+        if source_revision != payload["source_commit"]:
+            raise NewResearchInputError("rsi2_promotion_source_mismatch")
+        _digest_map(payload["source_blobs"])
+        _identity(payload["research_identity"])
+        root = Path(p1_root)
+        manifest_bytes = (root / "manifest.json").read_bytes()
+        if hashlib.sha256(manifest_bytes).hexdigest() != expected_p1_manifest_sha256:
+            raise NewResearchInputError("p1_manifest_invalid")
+    except NewResearchInputError:
+        raise
+    except Exception:
+        raise NewResearchInputError("p1_manifest_invalid") from None
+
+    try:
+        from us_equity_strategies.research.soxl_alpaca_input_adapter import (
+            materialize_soxl_alpaca_input,
+        )
+        from us_equity_strategies.research.soxl_rsi2_research_adapter import (
+            Rsi2OfflineInputPaths, SoxlRsi2PromotionBinding,
+            _validate_research_identity, load_rsi2_offline_input,
+            validate_promotion_timing,
+        )
+        optimization_paths = materialize_soxl_alpaca_input(
+            p1_root, optimization_root,
+            start="2022-01-03", end_exclusive="2025-01-01", expected_sessions=753,
+        )
+        promotion_paths = materialize_soxl_alpaca_input(
+            p1_root, promotion_root,
+            start="2023-09-12", end_exclusive="2026-09-12", expected_sessions=753,
+        )
+        optimization_input = load_rsi2_offline_input(Rsi2OfflineInputPaths(
+            optimization_paths.manifest, optimization_paths.artifact, optimization_paths.readback,
+        ))
+        promotion_input = load_rsi2_offline_input(Rsi2OfflineInputPaths(
+            promotion_paths.manifest, promotion_paths.artifact, promotion_paths.readback,
+        ))
+        if not isinstance(payload, Mapping) or not isinstance(payload.get("request"), Mapping):
+            raise NewResearchInputError("rsi2_dual_window_input_invalid")
+        if payload["request"].get("source_revision") != optimization_input.source_revision:
+            raise NewResearchInputError("rsi2_optimization_source_mismatch")
+        identity = payload.get("research_identity")
+        if (not isinstance(identity, Mapping)
+                or identity.get("input_revision") != optimization_input.input_digest):
+            raise NewResearchInputError("rsi2_optimization_identity_mismatch")
+        _validate_research_identity(
+            optimization_input, payload["source_commit"], identity,
+        )
+        binding = SoxlRsi2PromotionBinding(
+            source=promotion_input, candidate_id=candidate_id, folds=folds,
+            locked_oos_start=locked_oos_start, locked_oos_end=locked_oos_end,
+            purge_days=purge_days, embargo_days=embargo_days,
+            source_revision=source_revision, cost_model=cost_model,
+        )
+        validate_promotion_timing(optimization_input, binding)
+    except NewResearchInputError:
+        raise
+    except Exception:
+        raise NewResearchInputError("rsi2_dual_window_invalid") from None
+
+    request_payload = dict(payload)
+    request_payload["input_paths"] = {
+        "manifest": str(optimization_paths.manifest),
+        "artifact": str(optimization_paths.artifact),
+        "readback": str(optimization_paths.readback),
+    }
+    return run_request(
+        request_payload, diagnose=diagnose, summarize=summarize,
+        promotion_binding=binding, promotion_store=promotion_store,
+        promotion_shadow_recorder=promotion_shadow_recorder,
+        read_pending_shadow=read_pending_shadow, sync_console=sync_console,
+        pull_console=pull_console,
+    )
 
 
 def _read_json(path: Path) -> Any:
