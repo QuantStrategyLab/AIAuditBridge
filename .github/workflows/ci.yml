@@ -120,7 +120,7 @@ jobs:
           # Install the fixed UES research-adapter and QPK dependencies; this step must not skip.
           python3 -m venv "${RUNNER_TEMP}/aab-soxl-research"
           "${RUNNER_TEMP}/aab-soxl-research/bin/python" -m pip install pytest \
-            "us-equity-strategies @ git+https://github.com/QuantStrategyLab/UsEquityStrategies.git@d6fa43c75b72696c0d2efbc3b11f71154b003397" \
+            "us-equity-strategies @ git+https://github.com/QuantStrategyLab/UsEquityStrategies.git@d6b37b77c309e1fb7f25263271b6b0f653f7e7b8" \
             "quant-platform-kit @ git+https://github.com/QuantStrategyLab/QuantPlatformKit.git@de13e486da1bdba60f425e576e944591fc97b809" \
             .
           "${RUNNER_TEMP}/aab-soxl-research/bin/python" -m pip check
@@ -132,9 +132,14 @@ jobs:
           set -euo pipefail
           "${RUNNER_TEMP}/aab-soxl-research/bin/python" -m scripts.run_new_research --help
           "${RUNNER_TEMP}/aab-soxl-research/bin/python" - <<'PY'
+          from us_equity_strategies.research.soxl_alpaca_input_adapter import (
+              load_soxl_alpaca_input, materialize_soxl_alpaca_input,
+          )
           from us_equity_strategies.research.soxl_rsi2_research_adapter import (
               load_rsi2_offline_input, make_soxl_rsi2_optimize,
           )
+          assert callable(load_soxl_alpaca_input)
+          assert callable(materialize_soxl_alpaca_input)
           assert callable(load_rsi2_offline_input)
           assert callable(make_soxl_rsi2_optimize)
           PY

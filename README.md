@@ -48,7 +48,7 @@ from this repository; the adapter and its offline input contract come from UES.
 python3 -m venv .venv-rsi2-research
 .venv-rsi2-research/bin/python -m pip install \
   'quant-platform-kit @ git+https://github.com/QuantStrategyLab/QuantPlatformKit.git@de13e486da1bdba60f425e576e944591fc97b809' \
-  'us-equity-strategies @ git+https://github.com/QuantStrategyLab/UsEquityStrategies.git@d6fa43c75b72696c0d2efbc3b11f71154b003397' \
+  'us-equity-strategies @ git+https://github.com/QuantStrategyLab/UsEquityStrategies.git@d6b37b77c309e1fb7f25263271b6b0f653f7e7b8' \
   .
 .venv-rsi2-research/bin/python -m scripts.run_new_research \
   --request request.json --output result.json
