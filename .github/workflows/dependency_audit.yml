@@ -1,0 +1,88 @@
+name: Schwab Dependency Audit
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "Optional Schwab Dependabot PR number"
+        required: false
+        default: ""
+        type: string
+      dry_run:
+        description: "Run read-only review without comments or merge"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: write
+  id-token: write
+
+concurrency:
+  group: schwab-dependency-audit
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'schedule' && vars.DEPENDENCY_AUDIT_ENABLED == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout bridge
+        uses: actions/checkout@v6.0.3
+
+      - name: Detect source app credentials
+        id: app_credentials
+        env:
+          APP_ID: ${{ vars.CROSS_REPO_GITHUB_APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.CROSS_REPO_GITHUB_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -n "${APP_ID:-}" ] && [ -n "${APP_PRIVATE_KEY:-}" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create scoped source app token
+        id: source_app_token
+        if: steps.app_credentials.outputs.available == 'true'
+        uses: actions/create-github-app-token@v3.2.0
+        with:
+          app-id: ${{ vars.CROSS_REPO_GITHUB_APP_ID }}
+          private-key: ${{ secrets.CROSS_REPO_GITHUB_APP_PRIVATE_KEY }}
+          owner: QuantStrategyLab
+          repositories: SchwabTokenAutoRefresher
+          permission-contents: write
+          permission-pull-requests: write
+          permission-actions: read
+
+      - name: Run dependency audit
+        env:
+          CODEX_AUDIT_GH_TOKEN: ${{ steps.source_app_token.outputs.token || secrets.CODEX_AUDIT_GH_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AUDIT_BOT_SLUG: ${{ steps.source_app_token.outputs.app-slug }}
+          AUDIT_EVENT_NAME: ${{ github.event_name }}
+          AUDIT_PR_NUMBER: ${{ inputs.pr }}
+          AUDIT_DRY_RUN_INPUT: ${{ inputs.dry_run }}
+          CODEX_AUDIT_SERVICE_URL: ${{ secrets.CODEX_AUDIT_SERVICE_URL }}
+          CODEX_AUDIT_SERVICE_AUDIENCE: ${{ vars.CODEX_AUDIT_SERVICE_AUDIENCE || 'quant-codex-audit' }}
+        run: |
+          set -euo pipefail
+          if [ "${AUDIT_EVENT_NAME}" = "workflow_dispatch" ] && [ -n "${AUDIT_PR_NUMBER:-}" ]; then
+            if [ "${AUDIT_DRY_RUN_INPUT:-true}" = "true" ]; then
+              python3 -m scripts.run_dependency_audit --pr "${AUDIT_PR_NUMBER}" --dry-run
+            else
+              python3 -m scripts.run_dependency_audit --pr "${AUDIT_PR_NUMBER}"
+            fi
+          elif [ "${AUDIT_EVENT_NAME}" = "workflow_dispatch" ]; then
+            python3 -m scripts.run_dependency_audit --dry-run
+          else
+            python3 -m scripts.run_dependency_audit
+          fi
