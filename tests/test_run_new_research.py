@@ -13,7 +13,10 @@ import pytest
 
 from quant_platform_kit.research_factory import ResearchSourceReceipt, ResearchWorkerManifest, ResearchWorkerRole
 from quant_platform_kit.strategy_lifecycle.contracts import OptimizationProposal
-from scripts.run_new_research import NewResearchInputError, _LOCAL_STRATEGY_FACTS, run_request
+from scripts.run_new_research import (
+    NewResearchInputError, _LOCAL_STRATEGY_FACTS, run_request,
+    run_trusted_soxl_rsi2_dual_window,
+)
 
 
 def _receipt() -> dict:
@@ -143,11 +146,12 @@ def test_installed_ues_exposes_formal_promotion_binding_helper():
     assert callable(adapter.prepare_soxl_rsi2_promotion)
 
 
-def _alpaca_source_root(tmp_path: Path, count: int = 753) -> Path:
+def _alpaca_source_root(tmp_path: Path, count: int = 753, sessions: list[str] | None = None) -> Path:
     root = tmp_path / "alpaca-p1"
     root.mkdir()
     start = date(2022, 1, 3)
-    cutoff = (start + timedelta(days=count - 1)).isoformat()
+    sessions = sessions or [(start + timedelta(days=index)).isoformat() for index in range(count)]
+    cutoff = sessions[-1]
 
     def canonical(value: object) -> bytes:
         return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode()
@@ -166,8 +170,7 @@ def _alpaca_source_root(tmp_path: Path, count: int = 753) -> Path:
     series = {}
     for symbol, base in (("SOXL", 30.0), ("SOXX", 100.0), ("BOXX", 10.0)):
         rows = []
-        for index in range(count):
-            session = (start + timedelta(days=index)).isoformat()
+        for index, session in enumerate(sessions):
             close = base + (index % 7) * 0.2
             rows.append({"session_date": session, "bar": {"open": close, "high": close + 1.0, "low": close - 1.0, "close": close, "volume": 100.0}})
         series[symbol] = rows
@@ -251,6 +254,150 @@ def test_installed_ues_alpaca_path_runs_aab_request(tmp_path):
     assert result["notes"] == ["recommendation=reject"]
     assert (Path(payload["output_root"]) / "soxl_rsi2_mean_reversion_v1.json").is_file()
     assert result["live_authority_granted"] is False
+
+
+def test_trusted_dual_window_materializes_both_windows_before_request(tmp_path, monkeypatch):
+    from quant_platform_kit.strategy_lifecycle.contracts import PromotionCostModel, PurgedWalkForwardFold
+    from us_equity_strategies.research.soxl_rsi2_research_adapter import (
+        _COST_MODEL_REVISION, _PARAM_SPACE_REVISION, _VALIDATOR_REVISION,
+        load_rsi2_offline_input, Rsi2OfflineInputPaths,
+    )
+    from us_equity_strategies.research.soxl_alpaca_input_adapter import materialize_soxl_alpaca_input
+
+    def weekdays(start: date, end: date) -> list[str]:
+        values = []
+        current = start
+        while current <= end:
+            if current.weekday() < 5:
+                values.append(current.isoformat())
+            current += timedelta(days=1)
+        return values
+
+    # Fixed XNYS sessions from the verified 2022-2026 NYSE calendar; prices remain synthetic.
+    holidays = {
+        "2022-01-17", "2022-02-21", "2022-04-15", "2022-05-30", "2022-06-20", "2022-07-04", "2022-09-05", "2022-11-24", "2022-12-26",
+        "2023-01-02", "2023-01-16", "2023-02-20", "2023-04-07", "2023-05-29", "2023-06-19", "2023-07-04", "2023-09-04", "2023-11-23", "2023-12-25",
+        "2024-01-01", "2024-01-15", "2024-02-19", "2024-03-29", "2024-05-27", "2024-06-19", "2024-07-04", "2024-09-02", "2024-11-28", "2024-12-25",
+        "2025-01-01", "2025-01-20", "2025-02-17", "2025-04-18", "2025-05-26", "2025-06-19", "2025-07-04", "2025-09-01", "2025-11-27", "2025-12-25",
+        "2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25", "2026-06-19", "2026-07-03", "2026-09-07",
+        "2025-01-09",
+    }
+    first_window = [x for x in weekdays(date(2022, 1, 3), date(2024, 12, 31)) if x not in holidays]
+    second_window = [x for x in weekdays(date(2023, 9, 12), date(2026, 9, 11)) if x not in holidays]
+    sessions = sorted(set(first_window) | set(second_window))
+    root = _alpaca_source_root(tmp_path, sessions=sessions)
+    optimization_paths = materialize_soxl_alpaca_input(
+        root, tmp_path / "optimization-check",
+        start="2022-01-03", end_exclusive="2025-01-01", expected_sessions=753,
+    )
+    optimization = load_rsi2_offline_input(Rsi2OfflineInputPaths(
+        optimization_paths.manifest, optimization_paths.artifact, optimization_paths.readback,
+    ))
+    promotion_paths = materialize_soxl_alpaca_input(
+        root, tmp_path / "promotion-check",
+        start="2023-09-12", end_exclusive="2026-09-12", expected_sessions=753,
+    )
+    promotion = load_rsi2_offline_input(Rsi2OfflineInputPaths(
+        promotion_paths.manifest, promotion_paths.artifact, promotion_paths.readback,
+    ))
+    promotion_dates = sorted({date.fromisoformat(row.as_of) for row in promotion.rows})
+    folds = (
+        PurgedWalkForwardFold(date(2024, 12, 1), date(2025, 1, 1), date(2025, 1, 27), date(2025, 2, 7)),
+        PurgedWalkForwardFold(date(2025, 2, 8), date(2025, 3, 1), date(2025, 4, 7), date(2025, 4, 18)),
+        PurgedWalkForwardFold(date(2025, 4, 19), date(2025, 5, 1), date(2025, 6, 16), date(2025, 6, 27)),
+    )
+    payload = _payload(tmp_path)
+    payload["request"]["source_revision"] = optimization.source_revision
+    payload["research_identity"] = {
+        "code_revision": "a" * 40, "input_revision": optimization.input_digest,
+        "param_space_revision": _PARAM_SPACE_REVISION, "cost_model_revision": _COST_MODEL_REVISION,
+        "validator_revision": _VALIDATOR_REVISION,
+    }
+    captured = {}
+    monkeypatch.setattr(
+        "scripts.run_new_research.run_request",
+        lambda request_payload, **kwargs: captured.update(payload=request_payload, kwargs=kwargs) or {"status": "parked"},
+    )
+    binding_source = promotion
+    result = run_trusted_soxl_rsi2_dual_window(
+        payload, p1_root=root, optimization_root=tmp_path / "optimization",
+        promotion_root=tmp_path / "promotion",
+        expected_p1_manifest_sha256=hashlib.sha256((root / "manifest.json").read_bytes()).hexdigest(),
+        candidate_id="UNSCALED_SMA200",
+        folds=folds, locked_oos_start=date(2025, 8, 1), locked_oos_end=date(2026, 9, 11),
+        purge_days=20, embargo_days=20, source_revision="a" * 40,
+        cost_model=PromotionCostModel("C2_5", 2.0, 5.0),
+    )
+    assert result == {"status": "parked"}
+    assert captured["payload"]["research_identity"]["input_revision"] == optimization.input_digest
+    assert captured["payload"]["input_paths"]["manifest"].endswith("optimization/prices.csv.manifest.json")
+    binding = captured["kwargs"]["promotion_binding"]
+    assert binding.source.input_digest == binding_source.input_digest
+    assert binding.locked_oos_start == date(2025, 8, 1)
+    assert promotion_dates[-1] >= date(2026, 9, 11)
+
+    bad_identity = dict(payload)
+    bad_identity["research_identity"] = dict(payload["research_identity"])
+    bad_identity["research_identity"]["input_revision"] = "f" * 64
+    with pytest.raises(NewResearchInputError, match="rsi2_optimization_identity_mismatch"):
+        run_trusted_soxl_rsi2_dual_window(
+            bad_identity, p1_root=root, optimization_root=tmp_path / "optimization-identity-error",
+            promotion_root=tmp_path / "promotion-identity-error",
+            expected_p1_manifest_sha256=hashlib.sha256((root / "manifest.json").read_bytes()).hexdigest(),
+            candidate_id="UNSCALED_SMA200", folds=folds, locked_oos_start=date(2025, 8, 1),
+            locked_oos_end=date(2026, 9, 11), purge_days=20, embargo_days=20,
+            source_revision="a" * 40, cost_model=PromotionCostModel("C2_5", 2.0, 5.0),
+        )
+    overlap_folds = (
+        PurgedWalkForwardFold(date(2024, 11, 1), date(2024, 11, 15), date(2024, 12, 1), date(2024, 12, 10)),
+        *folds[1:],
+    )
+    with pytest.raises(NewResearchInputError, match="rsi2_dual_window_invalid"):
+        run_trusted_soxl_rsi2_dual_window(
+            payload, p1_root=root, optimization_root=tmp_path / "optimization-overlap",
+            promotion_root=tmp_path / "promotion-overlap",
+            expected_p1_manifest_sha256=hashlib.sha256((root / "manifest.json").read_bytes()).hexdigest(),
+            candidate_id="UNSCALED_SMA200", folds=overlap_folds, locked_oos_start=date(2025, 8, 1),
+            locked_oos_end=date(2026, 9, 11), purge_days=20, embargo_days=20,
+            source_revision="a" * 40, cost_model=PromotionCostModel("C2_5", 2.0, 5.0),
+        )
+
+
+def test_trusted_dual_window_rejects_bad_manifest_before_request(tmp_path, monkeypatch):
+    called = {"run": 0}
+    monkeypatch.setattr("scripts.run_new_research.run_request", lambda *_args, **_kwargs: called.__setitem__("run", 1))
+    with pytest.raises(NewResearchInputError, match="p1_manifest_invalid"):
+        run_trusted_soxl_rsi2_dual_window(
+            _payload(tmp_path), p1_root=tmp_path, optimization_root=tmp_path / "optimization",
+            promotion_root=tmp_path / "promotion", expected_p1_manifest_sha256="b" * 64,
+            candidate_id="UNSCALED_SMA200", folds=(), locked_oos_start=date(2025, 8, 1),
+            locked_oos_end=date(2026, 9, 11), purge_days=20, embargo_days=20,
+            source_revision="a" * 40, cost_model=object(),
+        )
+    assert called["run"] == 0
+
+
+def test_trusted_dual_window_rejects_missing_promotion_window_before_request(tmp_path, monkeypatch):
+    root = _alpaca_source_root(tmp_path)
+    payload = _payload(tmp_path)
+    from us_equity_strategies.research.soxl_alpaca_input_adapter import materialize_soxl_alpaca_input
+    from us_equity_strategies.research.soxl_rsi2_research_adapter import Rsi2OfflineInputPaths, load_rsi2_offline_input
+    opt_paths = materialize_soxl_alpaca_input(
+        root, tmp_path / "identity-check", start="2022-01-03", end_exclusive="2024-01-26", expected_sessions=753,
+    )
+    payload["request"]["source_revision"] = load_rsi2_offline_input(Rsi2OfflineInputPaths(
+        opt_paths.manifest, opt_paths.artifact, opt_paths.readback,
+    )).source_revision
+    monkeypatch.setattr("scripts.run_new_research.run_request", lambda *_args, **_kwargs: pytest.fail("AI/request must not run"))
+    with pytest.raises(NewResearchInputError, match="rsi2_dual_window_invalid"):
+        run_trusted_soxl_rsi2_dual_window(
+            payload, p1_root=root, optimization_root=tmp_path / "optimization",
+            promotion_root=tmp_path / "promotion",
+            expected_p1_manifest_sha256=hashlib.sha256((root / "manifest.json").read_bytes()).hexdigest(),
+            candidate_id="UNSCALED_SMA200", folds=(), locked_oos_start=date(2025, 8, 1),
+            locked_oos_end=date(2026, 9, 11), purge_days=20, embargo_days=20,
+            source_revision="a" * 40, cost_model=object(),
+        )
 
 
 def _synthetic_ues_source(start: date, source_revision: str):

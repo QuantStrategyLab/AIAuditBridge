@@ -67,6 +67,16 @@ formal evidence. `promotion_shadow_recorder` registers the initial observation;
 caller-owned Python callbacks kept separate; the CLI has no trusted material
 binding for them and parks without it. No HTTP or JSON schema layer is added.
 
+For the fixed SOXL RSI2 case, a trusted Python caller may use
+`run_trusted_soxl_rsi2_dual_window` from `scripts.run_new_research`: it checks
+the supplied P1 manifest SHA, materializes the optimization window
+`2022-01-03..2025-01-01` and the promotion window
+`2023-09-12..2026-09-12` at 753 sessions each, validates the optimization
+identity and promotion timing, then delegates to `run_request` with a typed
+`SoxlRsi2PromotionBinding`. The caller must provide the already validated
+receipt, source blobs, candidate, folds, cost model, and promotion callbacks;
+the helper does not derive or accept those values from JSON.
+
 Health terms are intentionally split into online service health, organization workflow health, background job health, and artifact/content health. See [`docs/health_taxonomy.md`](docs/health_taxonomy.md) before wiring new dashboard panels or automation gates.
 The service also exposes a structured automation triage endpoint for failure diagnosis and release-readiness guidance. It remains advisory and does not bypass merge or deploy controls.
 
