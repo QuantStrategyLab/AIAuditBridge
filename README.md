@@ -67,15 +67,22 @@ formal evidence. `promotion_shadow_recorder` registers the initial observation;
 caller-owned Python callbacks kept separate; the CLI has no trusted material
 binding for them and parks without it. No HTTP or JSON schema layer is added.
 
-For the fixed SOXL RSI2 case, a trusted Python caller may use
-`run_trusted_soxl_rsi2_dual_window` from `scripts.run_new_research`: it checks
-the supplied P1 manifest SHA, materializes the optimization window
-`2022-01-03..2025-01-01` and the promotion window
-`2023-09-12..2026-09-12` at 753 sessions each, validates the optimization
-identity and promotion timing, then delegates to `run_request` with a typed
-`SoxlRsi2PromotionBinding`. The caller must provide the already validated
-receipt, source blobs, candidate, folds, cost model, and promotion callbacks;
-the helper does not derive or accept those values from JSON.
+For the fixed SOXL RSI2 case, `run_fixed_soxl_rsi2_case` is the production
+caller. It reads the exact four-member b390 P1 root, verifies the pinned UES
+checkout, materializes the optimization window `2022-01-03..2025-01-01` and
+promotion window `2023-09-12..2026-09-12` at 753 sessions each, runs the UES
+study once, freezes its real winner, and passes that proposal to the existing
+QPK cycle with the fixed three-fold plan and 20/20 purge/embargo. Intermediate
+input files are removed after the run; `PerformanceStore` is local-only and
+the shadow callback records an explicit no-order pending observation. A
+`NO_IMPROVEMENT` or parked result is a valid research outcome and grants no
+authority.
+
+The `strategy_optimization_watcher.yml` workflow keeps its scheduled learning
+job unchanged. A one-shot manual run is available only when dispatching with
+`run_soxl_rsi2=true`; it uses the same WIF and exact P1 object prefix, uploads
+only the sanitized result, and cleans its temporary workspace. It does not
+accept candidate, date, root, or permission values from workflow inputs.
 
 Health terms are intentionally split into online service health, organization workflow health, background job health, and artifact/content health. See [`docs/health_taxonomy.md`](docs/health_taxonomy.md) before wiring new dashboard panels or automation gates.
 The service also exposes a structured automation triage endpoint for failure diagnosis and release-readiness guidance. It remains advisory and does not bypass merge or deploy controls.
