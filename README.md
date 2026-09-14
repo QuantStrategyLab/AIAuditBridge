@@ -35,6 +35,30 @@ AIAuditBridge is the QuantStrategyLab AI audit automation bridge. It runs Codex 
 
 It produces research, audit, or orchestration artifacts. It should not submit broker orders or mutate live allocations by itself.
 
+## Bounded SOXL research entry
+
+The source-bound new-research entry currently supports only the existing
+`soxl_rsi2_mean_reversion` / `us_equity` template. Run it in an isolated
+research environment after the approved UES research adapter merge, installing the
+approved UES research-adapter merge SHA together with QPK
+`de13e486da1bdba60f425e576e944591fc97b809`. The bridge client is installed
+from this repository; the adapter and its offline input contract come from UES.
+
+```bash
+python3 -m venv .venv-rsi2-research
+.venv-rsi2-research/bin/python -m pip install \
+  'quant-platform-kit @ git+https://github.com/QuantStrategyLab/QuantPlatformKit.git@de13e486da1bdba60f425e576e944591fc97b809' \
+  'us-equity-strategies @ git+https://github.com/QuantStrategyLab/UsEquityStrategies.git@8a8b41b6a4b1b6ea997f52c4afcec5b8e6b04b11' \
+  .
+.venv-rsi2-research/bin/python -m scripts.run_new_research \
+  --request request.json --output result.json
+```
+
+`request.json` supplies the validated source receipt, worker manifest, frozen
+identity, and offline input paths. The command consumes those frozen inputs,
+uses the budgeted Codex-only research route, and persists the research output;
+it does not fetch market data, submit orders, or grant promotion authority.
+
 Health terms are intentionally split into online service health, organization workflow health, background job health, and artifact/content health. See [`docs/health_taxonomy.md`](docs/health_taxonomy.md) before wiring new dashboard panels or automation gates.
 The service also exposes a structured automation triage endpoint for failure diagnosis and release-readiness guidance. It remains advisory and does not bypass merge or deploy controls.
 
