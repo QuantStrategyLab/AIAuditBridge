@@ -2698,7 +2698,10 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
     def test_vps_deploy_allows_canonical_audit_job_workflow_ref(self) -> None:
         deploy_script = Path("scripts/deploy_codex_audit_service.sh").read_text(encoding="utf-8")
         workflow = Path(".github/workflows/vps_codex_service_ops.yml").read_text(encoding="utf-8")
-        expected_ref = "QuantStrategyLab/AIAuditBridge/.github/workflows/codex_audit.yml@refs/heads/main"
+        expected_refs = (
+            "QuantStrategyLab/AIAuditBridge/.github/workflows/codex_audit.yml@refs/heads/main",
+            "QuantStrategyLab/AIAuditBridge/.github/workflows/dependency_audit.yml@refs/heads/main",
+        )
 
         script_line = next(
             line for line in deploy_script.splitlines() if line.startswith('ALLOWED_JOB_WORKFLOW_REFS="')
@@ -2709,8 +2712,10 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
             if line.strip().startswith("CODEX_AUDIT_SERVICE_ALLOWED_JOB_WORKFLOW_REFS: ")
         )
 
-        self.assertIn(expected_ref, script_line)
-        self.assertIn(expected_ref, workflow_line)
+        for expected_ref in expected_refs:
+            with self.subTest(expected_ref=expected_ref):
+                self.assertIn(expected_ref, script_line)
+                self.assertIn(expected_ref, workflow_line)
 
 
 class ShadowArtifactScopeTests(unittest.TestCase):

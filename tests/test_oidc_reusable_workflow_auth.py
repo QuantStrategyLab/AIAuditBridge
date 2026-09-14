@@ -165,3 +165,29 @@ class ReusableWorkflowOidcAuthTests(unittest.TestCase):
         env["CODEX_AUDIT_SERVICE_ALLOWED_DIRECT_REPOSITORIES"] = "QuantStrategyLab/CnEquityStrategies"
         with self.assertRaisesRegex(PermissionError, "exact QPK reusable workflow SHA"):
             self._verify(payload, env)
+
+    def test_dependency_audit_job_workflow_ref_is_parsed_and_allowlisted(self) -> None:
+        dependency_job_ref = (
+            "QuantStrategyLab/AIAuditBridge/.github/workflows/"
+            "dependency_audit.yml@refs/heads/main"
+        )
+        payload: dict[str, object] = {
+            "aud": "quant-codex-audit",
+            "iss": auth.GITHUB_OIDC_ISSUER,
+            "exp": int(time.time()) + 300,
+            "repository": "QuantStrategyLab/AIAuditBridge",
+            "workflow_ref": dependency_job_ref,
+            "job_workflow_ref": dependency_job_ref,
+            "ref": "refs/heads/main",
+            "repository_visibility": "public",
+        }
+        env = {
+            "CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES": "QuantStrategyLab/AIAuditBridge",
+            "CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS": dependency_job_ref,
+            "CODEX_AUDIT_SERVICE_ALLOWED_REFS": "refs/heads/main",
+            "CODEX_AUDIT_SERVICE_ALLOWED_DIRECT_REPOSITORIES": "QuantStrategyLab/AIAuditBridge",
+            "CODEX_AUDIT_SERVICE_ALLOWED_JOB_WORKFLOW_REFS": dependency_job_ref,
+            "CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORY_VISIBILITIES": "public",
+        }
+
+        self.assertEqual(self._verify(payload, env)["workflow_ref"], dependency_job_ref)
