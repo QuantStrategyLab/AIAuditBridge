@@ -66,3 +66,19 @@ def test_retired_pr_reviewer_is_not_authorized_by_deployment_defaults() -> None:
         content = (ROOT / relative_path).read_text(encoding="utf-8")
         assert "codex_pr_review.yml@" not in content
         assert "86458c44b06593b6d7a1602b3c38e7a1c143ef17" not in content
+
+
+def test_schwab_dependency_lane_is_the_narrow_service_exception() -> None:
+    workflow = (ROOT / ".github/workflows/dependency_audit.yml").read_text(encoding="utf-8")
+    assert "0 */6 * * *" in workflow
+    assert "DEPENDENCY_AUDIT_ENABLED" in workflow
+    assert "QuantStrategyLab/SchwabTokenAutoRefresher" in workflow or "SchwabTokenAutoRefresher" in workflow
+    assert "permission-actions: read" in workflow
+    assert "pull-requests: write" in workflow
+    assert "dry_run" in workflow
+
+    for relative_path in ("README.md", "README.zh-CN.md"):
+        content = (ROOT / relative_path).read_text(encoding="utf-8")
+        assert "SchwabTokenAutoRefresher" in content
+        assert "dependency" in content.lower() or "依赖" in content
+        assert "GitHub Codex App" in content or "GitHub Codex App" in content
