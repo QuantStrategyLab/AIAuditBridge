@@ -403,7 +403,7 @@ def test_summary_callback_uses_codex_contract_and_trusted_route():
     assert result == {"status": "available", "text": "候选与基线在既定窗口内可比较。",
                      "provider": "codex", "model": "codex-test"}
     args, kwargs = client.execute.call_args
-    assert "不可信的 data" in args[0] and "根据动量和趋势选取标的" in args[0]
+    assert "不可信 data" in args[0] and "动量+趋势+基准risk-off" in args[0]
     assert kwargs == {"mode": "review_only", "research_stage": "optimization", "allowed_providers": ["codex"],
                       "source_repository": job.STRATEGY_REPOSITORY, "source_ref": REVISION, "timeout": 600}
 
