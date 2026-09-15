@@ -825,6 +825,54 @@ def _automation_control_snapshot(
     except Exception:
         quota_status = {"status": "unavailable"}
     control = suggest_control_action(get_health_monitor().status, quota_status, org_health)
+    global_action = str(control.get("action") or CONTROL_REVIEW_ONLY)
+    global_org_health_status = str(control.get("org_health_status") or "unknown")
+    execution_health_scope = "global"
+    execution_health_status = global_org_health_status
+    execution_action = global_action
+    manual_scope_requested = (
+        bool(manual_approval_valid)
+        and str(task_name or "").strip() == PLATFORM_BUGFIX_TASK
+        and str(requested_mode or "").strip().lower() == MODE_REVIEW_AND_FIX
+        and bool(str(manual_approval_id or "").strip())
+        and bool(str(source_ref or "").strip())
+        and bool(str(source_sha or "").strip())
+    )
+    if manual_scope_requested:
+        snapshot = org_health if isinstance(org_health, dict) else {}
+        snapshot_status = str(snapshot.get("status") or "").strip().lower()
+        provider = snapshot.get("provider") if isinstance(snapshot.get("provider"), dict) else {}
+        provider_available = str(provider.get("status") or "").strip().lower() == "available"
+        scoped_status_allowed = snapshot_status in {"ok", "healthy", "unhealthy"}
+        repositories = snapshot.get("repositories") if isinstance(snapshot.get("repositories"), list) else []
+        matching_targets = [
+            item
+            for item in repositories
+            if isinstance(item, dict) and str(item.get("repo") or "").strip() == str(repo or "").strip()
+        ]
+        target = matching_targets[0] if len(matching_targets) == 1 else None
+        signals = target.get("signals") if isinstance(target, dict) and isinstance(target.get("signals"), dict) else {}
+        target_healthy = bool(
+            target
+            and str(target.get("status") or "").strip().lower() == "healthy"
+            and target.get("reasons") == []
+            and all(signals.get(key) == 0 for key in (
+                "current_unknown_workflow_runs",
+                "current_degraded_workflow_runs",
+                "current_failed_workflow_runs",
+            ))
+        )
+        if provider_available and scoped_status_allowed and target_healthy:
+            execution_health_scope = "scoped"
+            execution_health_status = "healthy"
+            scoped_control = suggest_control_action(
+                control.get("service_health"),
+                quota_status,
+                {"status": execution_health_status},
+            )
+            execution_action = str(scoped_control.get("action") or CONTROL_REVIEW_ONLY)
+        else:
+            execution_action = CONTROL_ESCALATE
     try:
         ledger_snapshot = get_automation_run_ledger().snapshot(limit=None)
         recent_runs = ledger_snapshot["runs"]
@@ -867,10 +915,10 @@ def _automation_control_snapshot(
         repo=repo or "unknown",
         task_name=task_name,
         requested_mode=requested_mode,
-        control_action=str(control.get("action") or CONTROL_REVIEW_ONLY),
+        control_action=execution_action,
         service_health=control.get("service_health"),
         quota_status=quota_status,
-        org_health_status=control.get("org_health_status"),
+        org_health_status=execution_health_status,
         recent_runs=recent_runs,
         failure_history_complete=failure_history_complete,
         manual_approval_valid=manual_approval_valid,
@@ -886,8 +934,8 @@ def _automation_control_snapshot(
         reasons = execution.get("reasons") if isinstance(execution.get("reasons"), list) else []
         reasons.append("automation ledger unavailable; forcing human review")
         execution["reasons"] = reasons
-    original_action = str(control.get("action") or CONTROL_REVIEW_ONLY)
-    strict_action = original_action
+    original_action = global_action
+    strict_action = execution_action
     if execution.get("action") == EXECUTION_HUMAN_REVIEW:
         strict_action = CONTROL_ESCALATE
     elif execution.get("action") == EXECUTION_REVIEW_ONLY:
@@ -899,9 +947,11 @@ def _automation_control_snapshot(
     elif execution.get("effective_mode") == MODE_REVIEW_ONLY and strict_action == CONTROL_CONTINUE:
         strict_action = CONTROL_REVIEW_ONLY
     action_rank = {CONTROL_CONTINUE: 0, CONTROL_PAUSE_AUTO_FIX: 1, CONTROL_REVIEW_ONLY: 2, CONTROL_ESCALATE: 3}
-    if strict_action != CONTROL_CONTINUE and action_rank.get(strict_action, 2) < action_rank.get(original_action, 2):
-        strict_action = original_action
+    if strict_action != CONTROL_CONTINUE and action_rank.get(strict_action, 2) < action_rank.get(execution_action, 2):
+        strict_action = execution_action
     control["runtime_action"] = original_action
+    control["execution_health_scope"] = execution_health_scope
+    control["execution_health_status"] = execution_health_status
     control["effective_action"] = strict_action
     control["action"] = strict_action
     control["auto_fix_allowed"] = bool(execution.get("auto_fix_allowed")) and strict_action == CONTROL_CONTINUE
