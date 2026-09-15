@@ -17,6 +17,7 @@ from unittest.mock import call, patch
 
 from scripts.run_monthly_codex_audit import (
     BridgeError,
+    PlatformBugfixFailure,
     DEFAULT_GUARDED_AUTO_MERGE_POLICY,
     GUARDED_AUTO_MERGE_LABEL,
     HUMAN_REVIEW_LABEL,
@@ -56,6 +57,7 @@ from scripts.run_monthly_codex_audit import (
     normalize_codex_service_url,
     parse_service_patch_response,
     parse_bool,
+    platform_bugfix_failure_comment,
     pr_closing_line,
     remove_issue_label_if_present,
     request_github_oidc_token,
@@ -68,6 +70,7 @@ from scripts.run_monthly_codex_audit import (
     run_configured_api_reviews,
     run_api_patch_provider,
     run_auto_provider_fallback,
+    run_bounded_platform_bugfix_tests,
     run_codex_service,
     service_failure_category,
     is_service_infrastructure_failure,
@@ -501,9 +504,147 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
                 mode="review_and_fix",
             )
             self.assertNotEqual(result[0], 0)
-            self.assertIn("synthetic bounded regression failure", result[1])
+            self.assertEqual(result[1], "platform_bugfix_failure:patch_validation:invalid_edit")
             self.assertEqual((Path(tmp) / "application/rebalance_service.py").read_text(), "fixed source\n")
             publish.assert_not_called()
+
+    def test_platform_bugfix_failure_marker_does_not_leak_raw_service_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "scripts.run_monthly_codex_audit.request_codex_service",
+            side_effect=BridgeError("[auth_or_config_failure] malicious-token-canary"),
+        ), patch("scripts.run_monthly_codex_audit.build_service_prompt", return_value="synthetic"):
+            result = run_codex_service(
+                Path(tmp),
+                "synthetic",
+                1,
+                source_repo="QuantStrategyLab/LongBridgePlatform",
+                source_ref="26844fa9b909e98e867acf4c50120b90acc6c792",
+                task="platform_bugfix",
+                mode="review_and_fix",
+            )
+        self.assertEqual(result, (1, "platform_bugfix_failure:service_request:request", ""))
+        self.assertNotIn("malicious-token-canary", result[1])
+
+    def test_platform_bugfix_dependency_and_timeout_failures_are_typed(self) -> None:
+        for failure, expected in (
+            (PlatformBugfixFailure("dependency_build", "dependency"), "platform_bugfix_failure:dependency_build:dependency"),
+            (subprocess.TimeoutExpired(["docker", "run"], 600), "platform_bugfix_failure:patch_validation:timeout"),
+        ):
+            with self.subTest(expected=expected), tempfile.TemporaryDirectory() as tmp, patch(
+                "scripts.run_monthly_codex_audit.request_codex_service", return_value=json.dumps({
+                    "final_message": "synthetic fix",
+                    "changes": [
+                        {"path": "application/rebalance_service.py", "base_sha256": hashlib.sha256(b"synthetic source\n").hexdigest(), "edits": [{"old": "synthetic source", "new": "fixed source"}]},
+                        {"path": "tests/test_rebalance_service.py", "base_sha256": hashlib.sha256(b"synthetic source\n").hexdigest(), "edits": [{"old": "synthetic source", "new": "fixed test"}]},
+                    ],
+                })
+            ), patch("scripts.run_monthly_codex_audit.build_service_prompt", return_value="synthetic"), patch(
+                "scripts.run_monthly_codex_audit.run_bounded_platform_bugfix_tests", side_effect=failure
+            ):
+                for relative in ("application/rebalance_service.py", "tests/test_rebalance_service.py"):
+                    path = Path(tmp) / relative
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text("synthetic source\n", encoding="utf-8")
+                result = run_codex_service(
+                    Path(tmp), "synthetic", 1,
+                    source_repo="QuantStrategyLab/LongBridgePlatform",
+                    source_ref="main", task="platform_bugfix", mode="review_and_fix",
+                )
+            self.assertEqual(result, (1, expected, ""))
+
+    def test_bounded_tar_failure_is_dependency_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "scripts.run_monthly_codex_audit.shutil.which", return_value="/usr/bin/docker"
+        ), patch(
+            "scripts.run_monthly_codex_audit.subprocess.run",
+            side_effect=subprocess.CalledProcessError(2, ["git", "archive"]),
+        ):
+            with self.assertRaisesRegex(PlatformBugfixFailure, "dependency_build:dependency"):
+                run_bounded_platform_bugfix_tests(Path(tmp))
+
+    def test_bounded_build_oserror_is_dependency_failure(self) -> None:
+        completed = subprocess.CompletedProcess(["git"], 0, stdout=b"")
+        calls = {"count": 0}
+
+        def fake_run(*args, **kwargs):
+            calls["count"] += 1
+            if calls["count"] == 5:
+                raise OSError("build canary")
+            return completed
+
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "scripts.run_monthly_codex_audit.shutil.which", return_value="/usr/bin/docker"
+        ), patch(
+            "scripts.run_monthly_codex_audit.subprocess.run", side_effect=fake_run
+        ), patch(
+            "scripts.run_monthly_codex_audit.subprocess.check_output", return_value="docker-host"
+        ), patch(
+            "scripts.run_monthly_codex_audit.shutil.copy2"
+        ):
+            for relative in ("application/rebalance_service.py", "tests/test_rebalance_service.py"):
+                path = Path(tmp) / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("fixture\n", encoding="utf-8")
+            with self.assertRaisesRegex(PlatformBugfixFailure, "dependency_build:dependency"):
+                run_bounded_platform_bugfix_tests(Path(tmp))
+
+    def test_platform_bugfix_failure_comment_uses_only_typed_marker(self) -> None:
+        comment = platform_bugfix_failure_comment(
+            "platform_bugfix_failure:isolated_regression:timeout"
+        )
+        self.assertIn("isolated_regression", comment)
+        self.assertIn("timeout", comment)
+        self.assertNotIn("raw", comment)
+        self.assertIn("unknown", platform_bugfix_failure_comment("untrusted [auth_or_config_failure]"))
+
+    def test_other_task_keeps_generic_failure_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "scripts.run_monthly_codex_audit.request_codex_service",
+            side_effect=BridgeError("generic failure [auth_or_config_failure]"),
+        ), patch("scripts.run_monthly_codex_audit.build_service_prompt", return_value="synthetic"):
+            result = run_codex_service(
+                Path(tmp),
+                "synthetic",
+                1,
+                source_repo="Synthetic/repo",
+                source_ref="main",
+                task="monthly_snapshot_audit",
+                mode="review_and_fix",
+            )
+        self.assertIn("generic failure", result[1])
+
+    def test_main_posts_safe_platform_failure_comment_without_canary(self) -> None:
+        issue = {"number": 482, "title": "History", "html_url": "https://example.test/issues/482", "body": "Body", "labels": []}
+        env = {
+            "SOURCE_REPO": "QuantStrategyLab/LongBridgePlatform",
+            "SOURCE_REF": "ai-history-sg-claim-dedup-20260915",
+            "ISSUE_NUMBER": "482",
+            "CODEX_AUDIT_GH_TOKEN": "token",
+            "CODEX_AUDIT_TASK": "platform_bugfix",
+            "CODEX_AUDIT_MODE": "review_and_fix",
+            "CODEX_AUDIT_PROVIDER": "codex",
+            "CODEX_AUDIT_CODEX_BACKEND": "service",
+        }
+        workspace = RemediationWorkspace(
+            repo_dir=Path("/tmp/source"), branch_name="codex/history", baseline_auto_merge_policy={},
+            feedback_retry_pr=None, stale_auto_merge_label="", stale_auto_merge_label_skip_reason="",
+            stale_auto_merge_label_removed=False, prompt="prompt",
+        )
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch("scripts.run_monthly_codex_audit.admit_automation", return_value=("review_and_fix", False, None)),
+            patch("scripts.run_monthly_codex_audit.github_request", return_value=issue),
+            patch("scripts.run_monthly_codex_audit.fetch_issue_comments", return_value=[]),
+            patch("scripts.run_monthly_codex_audit.prepare_remediation_workspace", return_value=workspace),
+            patch("scripts.run_monthly_codex_audit.run_codex_backend", return_value=(1, "platform_bugfix_failure:dependency_build:dependency", "")),
+            patch("scripts.run_monthly_codex_audit.post_issue_comment") as post_comment,
+        ):
+            result = run_audit_main()
+        self.assertEqual(result, 1)
+        body = post_comment.call_args.args[3]
+        self.assertIn("依赖构建", body)
+        self.assertIn("依赖或环境失败", body)
+        self.assertNotIn("canary", body)
 
     def test_default_provider_for_task_is_task_specific(self) -> None:
         self.assertEqual(default_provider_for_task("monthly_snapshot_audit"), "auto")
