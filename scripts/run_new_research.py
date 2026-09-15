@@ -1106,6 +1106,7 @@ def _run_codegen_candidate_research(
                 fail("codegen_research_result_invalid")
             if not isinstance(result, dict):
                 fail("codegen_research_result_invalid")
+            _report_opt_in_docker_output("research result", completed)
             required_artifacts = (
                 output_root / "soxl_rsi2_mean_reversion_v1.json",
                 output_root / "soxl_rsi2_mean_reversion_v1.sha256",
