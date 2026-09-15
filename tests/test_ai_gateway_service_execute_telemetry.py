@@ -219,6 +219,7 @@ class AiGatewayExecuteTelemetryTests(unittest.TestCase):
             adapter.return_value.execute.return_value = SimpleNamespace(success=True, output="review", error="")
             for task, mode, expected in (
                 ("platform_bugfix", "review_only", False),
+                (" platform_bugfix ", " REVIEW_ONLY ", False),
                 ("platform_bugfix", "review_and_fix", True),
                 ("execute", "review_only", True),
             ):

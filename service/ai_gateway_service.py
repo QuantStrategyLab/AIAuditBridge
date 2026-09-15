@@ -342,6 +342,13 @@ def _validate_platform_bugfix_payload(payload: dict[str, Any]) -> None:
     payload.update(provider="codex", model=PLATFORM_BUGFIX_MODEL, reasoning_effort="medium", complexity="medium")
 
 
+def _platform_bugfix_readonly_mode(payload: dict[str, Any]) -> bool:
+    return (
+        str(payload.get("task") or "").strip() == PLATFORM_BUGFIX_TASK
+        and str(payload.get("mode") or MODE_REVIEW_AND_FIX).strip().lower() == MODE_REVIEW_ONLY
+    )
+
+
 def _admit_cursor_execute(quota: Any, repo: str, payload: dict[str, Any]) -> dict[str, Any] | None:
     from service.cursor_account import cursor_research_route
     cursor_payload = dict(payload)
@@ -1305,10 +1312,7 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
             "timeout": int(payload.get("timeout_seconds", 2700)),
         }
         if payload.get("provider") != "cursor":
-            execute_kwargs["shell_tool_enabled"] = not (
-                payload.get("task") == PLATFORM_BUGFIX_TASK
-                and payload.get("mode") == MODE_REVIEW_ONLY
-            )
+            execute_kwargs["shell_tool_enabled"] = not _platform_bugfix_readonly_mode(payload)
         result = adapter.execute(**execute_kwargs)
         job = _read_job(job_id)
         if result.success:
@@ -1763,10 +1767,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             "timeout": req.timeout_seconds,
         }
         if payload.get("provider") != "cursor":
-            execute_kwargs["shell_tool_enabled"] = not (
-                payload.get("task") == PLATFORM_BUGFIX_TASK
-                and payload.get("mode") == MODE_REVIEW_ONLY
-            )
+            execute_kwargs["shell_tool_enabled"] = not _platform_bugfix_readonly_mode(payload)
         result = adapter.execute(**execute_kwargs)
         get_health_monitor().record("/v1/ai/execute", time.time() - started, result.success, result.error if not result.success else "")
         if result.success:
