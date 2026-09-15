@@ -17,8 +17,8 @@ from quant_platform_kit.strategy_lifecycle.contracts import OptimizationProposal
 from scripts.run_new_research import (
     NewResearchInputError, SOXL_RSI2_CODEGEN_SOURCE_URLS, _LOCAL_STRATEGY_FACTS,
     fetch_soxl_rsi2_codegen_sources, run_request, soxl_rsi2_codegen,
-    validate_soxl_rsi2_codegen_change,
-    run_trusted_soxl_rsi2_dual_window,
+    validate_soxl_rsi2_codegen_change, _codex_codegen_execute,
+    run_trusted_soxl_rsi2_dual_window, run_soxl_rsi2_codegen_case, main,
 )
 
 
@@ -134,7 +134,84 @@ def test_soxl_rsi2_codegen_uses_fixed_gateway_contract_and_can_stop_empty(tmp_pa
     )
     assert result["status"] == "no_changes"
     assert "UNTRUSTED_BODY" not in captured["prompt"]
+    assert hashlib.sha256(
+        _codegen_core().encode("utf-8")
+    ).hexdigest() in captured["prompt"]
     assert result["source_receipts"][0]["usage_scope"] == "citation_or_summary"
+
+
+def test_default_codegen_callback_uses_codex_medium_research_contract(monkeypatch):
+    calls = []
+    config = types.SimpleNamespace(research_providers=("codex",))
+    class FakeClient:
+        def __init__(self, received):
+            assert received is config
+        def execute(self, prompt, **kwargs):
+            calls.append((prompt, kwargs))
+            return "response"
+    fake_module = types.ModuleType("ai_gateway_client")
+    fake_module.GatewayConfig = types.SimpleNamespace(from_env=lambda: config)
+    fake_module.AiGatewayClient = FakeClient
+    monkeypatch.setitem(sys.modules, "ai_gateway_client", fake_module)
+    callback = _codex_codegen_execute(source_ref="a" * 40)
+    assert callback("bounded prompt") == "response"
+    prompt, kwargs = calls[0]
+    assert prompt == "bounded prompt"
+    assert kwargs == {
+        "task": "soxl_rsi2_research_codegen", "mode": "review_only",
+        "model": "gpt-5.6-luna", "complexity": "medium",
+        "research_stage": "optimization", "reasoning_effort": "medium",
+        "sandbox": "read-only", "allowed_providers": ["codex"],
+        "source_repository": "QuantStrategyLab/AIAuditBridge",
+        "source_ref": "a" * 40, "timeout": 1800,
+    }
+
+
+def test_fixed_codegen_case_builds_optimization_only_payload_and_reuses_run_root(tmp_path, monkeypatch):
+    import us_equity_strategies.research.soxl_alpaca_input_adapter as alpaca
+    import us_equity_strategies.research.soxl_rsi2_research_adapter as adapter
+    p1_root = tmp_path / "p1"
+    ues_root = tmp_path / "ues"
+    p1_root.mkdir()
+    ues_root.mkdir()
+    paths = types.SimpleNamespace(
+        manifest=tmp_path / "manifest.json", artifact=tmp_path / "artifact.json", readback=tmp_path / "readback.json",
+    )
+    for path in (paths.manifest, paths.artifact, paths.readback):
+        path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        "scripts.run_new_research.read_soxl_ues_provenance",
+        lambda _root, expected_commit: (expected_commit, {"a": "a" * 40, "b": "b" * 40, "c": "c" * 40}),
+    )
+    monkeypatch.setattr(alpaca, "materialize_soxl_alpaca_input", lambda *_args, **_kwargs: paths)
+    monkeypatch.setattr(adapter, "load_rsi2_offline_input", lambda _paths: types.SimpleNamespace(
+        source_revision="source-v1", input_digest="input-v1",
+    ))
+    captured = []
+    monkeypatch.setattr(
+        "scripts.run_new_research.soxl_rsi2_codegen",
+        lambda **kwargs: captured.append(kwargs) or {"status": "parked"},
+    )
+    result = run_soxl_rsi2_codegen_case(
+        p1_root=p1_root, ues_repo_root=ues_root, run_root=tmp_path / "run", source_ref="a" * 40,
+    )
+    assert result == {"status": "parked"}
+    payload = captured[0]["research_payload"]
+    assert payload["research_identity"]["code_revision"] == "86aa4e03c30eb2fb561748d6e9c22e68d3267cfa"
+    assert payload["request"]["research_intent"] == "bounded_template_selection"
+    assert payload["input_paths"]["manifest"].endswith("manifest.json")
+    assert captured[0]["run_root"] == tmp_path / "run"
+    run_soxl_rsi2_codegen_case(
+        p1_root=p1_root, ues_repo_root=ues_root, run_root=tmp_path / "run", source_ref="a" * 40,
+    )
+    assert captured[1]["research_payload"]["request"] == payload["request"]
+    assert captured[1]["research_payload"]["source_receipts"] == payload["source_receipts"]
+
+
+def test_codegen_cli_requires_fixed_case_roots(tmp_path):
+    with pytest.raises(SystemExit) as error:
+        main(["--soxl-rsi2-codegen", "--output", str(tmp_path / "result.json")])
+    assert error.value.code == 2
 
 
 def test_soxl_rsi2_codegen_validates_patch_in_git_archive_candidate(tmp_path, monkeypatch):
