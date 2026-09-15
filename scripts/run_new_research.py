@@ -1046,8 +1046,25 @@ def _run_codegen_candidate_research(
         request_file.write_text(json.dumps(container_payload, ensure_ascii=False, sort_keys=True, allow_nan=False), encoding="utf-8")
         script_file.write_text(
             "import json\n"
+            "import os\n"
             "from pathlib import Path\n"
             "import us_equity_strategies.research.soxl_core_optimization as module\n"
+            "if os.environ.get('AAB_DOCKER_FIXTURE_DIAGNOSTICS') == '1':\n"
+            "    import sys\n"
+            "    import traceback\n"
+            "    import us_equity_strategies.research.soxl_rsi2_research_adapter as adapter\n"
+            "    _make_optimize = adapter.make_soxl_rsi2_optimize\n"
+            "    def _diagnostic_make_optimize(*args, **kwargs):\n"
+            "        callback = _make_optimize(*args, **kwargs)\n"
+            "        def _diagnostic_optimize(request, budget):\n"
+            "            try:\n"
+            "                return callback(request, budget)\n"
+            "            except BaseException as exc:\n"
+            "                print('AAB_SYNTHETIC_OPTIMIZE_EXCEPTION', type(exc).__name__, str(exc), file=sys.stderr)\n"
+            "                traceback.print_exc(file=sys.stderr)\n"
+            "                raise\n"
+            "        return _diagnostic_optimize\n"
+            "    adapter.make_soxl_rsi2_optimize = _diagnostic_make_optimize\n"
             "from scripts.run_new_research import run_request\n"
             "candidate = Path('/workspace').resolve()\n"
             "module_path = Path(module.__file__).resolve()\n"
@@ -1079,6 +1096,10 @@ def _run_codegen_candidate_research(
             "-v", f"{request_file}:/request/research_payload.json:ro",
             "-v", f"{output_root}:/output:rw", "-v", f"{ticket_root}:/tickets:rw",
         ]
+        if os.environ.get("AAB_RUN_DOCKER_INTEGRATION") == "1":
+            command[command.index("-v"):command.index("-v")] = [
+                "-e", "AAB_DOCKER_FIXTURE_DIAGNOSTICS=1",
+            ]
         for key, raw_path in paths.items():
             command.extend(["-v", f"{Path(str(raw_path)).resolve()}:/inputs/{key}:ro"])
         command.extend(["-w", "/workspace", image, "/opt/ues/.venv/bin/python", "/request/run_research.py"])
