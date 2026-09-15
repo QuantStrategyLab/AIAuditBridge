@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from datetime import date, timedelta
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -276,6 +277,7 @@ def test_installed_ues_alpaca_path_runs_aab_request(tmp_path):
 
 def test_trusted_dual_window_materializes_both_windows_before_request(tmp_path, monkeypatch):
     import scripts.run_new_research as runner
+    from us_equity_strategies.research import soxl_rsi2_research_adapter as adapter
     from quant_platform_kit.strategy_lifecycle.contracts import PromotionCostModel, PurgedWalkForwardFold
     from us_equity_strategies.research.soxl_rsi2_research_adapter import (
         _COST_MODEL_REVISION, _PARAM_SPACE_REVISION, _VALIDATOR_REVISION,
@@ -364,14 +366,72 @@ def test_trusted_dual_window_materializes_both_windows_before_request(tmp_path, 
     synthetic_ues, synthetic_commit, synthetic_blobs = _ues_provenance_repo(tmp_path)
     monkeypatch.setattr(runner, "SOXL_UES_COMMIT", synthetic_commit)
     monkeypatch.setattr(runner, "read_soxl_ues_provenance", lambda _root: (synthetic_commit, synthetic_blobs))
+    original_make_optimizer = adapter.make_soxl_rsi2_optimize
+    optimizer_calls = {"count": 0}
+
+    def counted_make_optimizer(**kwargs):
+        optimize = original_make_optimizer(**kwargs)
+
+        def counted_optimize(*args, **inner_kwargs):
+            optimizer_calls["count"] += 1
+            return optimize(*args, **inner_kwargs)
+
+        return counted_optimize
+
+    monkeypatch.setattr(adapter, "make_soxl_rsi2_optimize", counted_make_optimizer)
+    run_root = tmp_path / "fixed-case"
     case_result = runner.run_fixed_soxl_rsi2_case(
         p1_root=root, ues_repo_root=synthetic_ues,
-        run_root=tmp_path / "fixed-case", diagnose=lambda _context, _budget: {
+        run_root=run_root, diagnose=lambda _context, _budget: {
             "optimization_needed": True, "design": "固定模板研究设计",
         },
     )
     assert case_result["status"] == "parked"
     assert case_result["live_authority_granted"] is False
+    assert case_result["optimizer_executions"] == 1
+    assert optimizer_calls["count"] == 1
+    saved_request = json.loads((run_root / "request.json").read_text(encoding="utf-8"))
+    second_result = runner.run_fixed_soxl_rsi2_case(
+        p1_root=root, ues_repo_root=synthetic_ues, run_root=run_root,
+        diagnose=lambda _context, _budget: pytest.fail("saved request must skip diagnosis"),
+    )
+    assert second_result["optimizer_executions"] == 0
+    assert optimizer_calls["count"] == 1
+    assert json.loads((run_root / "request.json").read_text(encoding="utf-8")) == saved_request
+
+    tampered_request = json.loads(json.dumps(saved_request))
+    tampered_request["request"]["source_revision"] = "tampered-source"
+    (run_root / "request.json").write_text(
+        json.dumps(tampered_request, ensure_ascii=False, sort_keys=True), encoding="utf-8",
+    )
+    with pytest.raises(NewResearchInputError, match="fixed_research_input_mismatch"):
+        runner.run_fixed_soxl_rsi2_case(
+            p1_root=root, ues_repo_root=synthetic_ues, run_root=run_root,
+        )
+    (run_root / "request.json").write_text(
+        json.dumps(saved_request, ensure_ascii=False, sort_keys=True), encoding="utf-8",
+    )
+
+    ticket_path = next((run_root / "tickets").glob("*.json"))
+    ticket = json.loads(ticket_path.read_text(encoding="utf-8"))
+    ticket["research_progress"]["stages"]["optimize"] = {"status": "unknown"}
+    ticket_path.write_text(json.dumps(ticket, sort_keys=True), encoding="utf-8")
+    unknown_result = runner.run_fixed_soxl_rsi2_case(
+        p1_root=root, ues_repo_root=synthetic_ues, run_root=run_root,
+        diagnose=lambda *_: pytest.fail("unknown optimizer stage must not retry"),
+    )
+    assert unknown_result["reason"] == "research_outcome_unknown"
+    assert optimizer_calls["count"] == 1
+
+    ticket["state"] = "human_rejected"
+    ticket["research_progress"]["stages"] = {}
+    ticket_path.write_text(json.dumps(ticket, sort_keys=True), encoding="utf-8")
+    terminal_result = runner.run_fixed_soxl_rsi2_case(
+        p1_root=root, ues_repo_root=synthetic_ues, run_root=run_root,
+        diagnose=lambda *_: pytest.fail("terminal ticket must not retry optimizer"),
+    )
+    assert terminal_result["reason"] == "saved_research_ticket_terminal"
+    assert optimizer_calls["count"] == 1
 
     bad_identity = dict(payload)
     bad_identity["research_identity"] = dict(payload["research_identity"])
@@ -694,3 +754,105 @@ def test_actual_ues_binding_qpk_cycle_and_reentry(tmp_path, monkeypatch):
     assert invalid_second["reason"] == "research_outcome_unknown"
     assert invalid_reader_calls["count"] == 1
     assert sync_calls["count"] == sync_before_invalid
+def test_fixed_entry_reuses_request_and_ticket_across_processes(tmp_path):
+    p1_root = tmp_path / "p1"
+    p1_root.mkdir()
+    manifest = b"synthetic-p1-manifest"
+    (p1_root / "manifest.json").write_bytes(manifest)
+    p1_sha = hashlib.sha256(manifest).hexdigest()
+    ues_root = tmp_path / "ues"
+    ues_root.mkdir()
+    run_root = tmp_path / "run"
+    count_path = tmp_path / "optimizer-count"
+    source_commit = "a" * 40
+    source_blobs = {"study.py": "b" * 40}
+    child = r'''
+import json
+import os
+import sys
+import types
+from pathlib import Path
+from types import SimpleNamespace
+
+import scripts.run_new_research as runner
+from quant_platform_kit.strategy_lifecycle.contracts import OptimizationProposal
+
+runner.SOXL_P1_MANIFEST_SHA256 = os.environ["P1_SHA"]
+runner.SOXL_UES_COMMIT = os.environ["UES_COMMIT"]
+runner.read_soxl_ues_provenance = lambda _root: (
+    os.environ["UES_COMMIT"], json.loads(os.environ["UES_BLOBS"])
+)
+
+package = types.ModuleType("us_equity_strategies")
+research = types.ModuleType("us_equity_strategies.research")
+alpaca = types.ModuleType("us_equity_strategies.research.soxl_alpaca_input_adapter")
+adapter = types.ModuleType("us_equity_strategies.research.soxl_rsi2_research_adapter")
+class Paths:
+    def __init__(self, manifest, artifact, readback):
+        self.manifest, self.artifact, self.readback = manifest, artifact, readback
+class Binding:
+    def __init__(self, **kwargs): self.__dict__.update(kwargs)
+source = SimpleNamespace(input_digest="optimization-v1", source_revision="source-v1")
+def materialize(root, output, **_kwargs):
+    output = Path(output)
+    output.mkdir(parents=True, exist_ok=True)
+    paths = Paths(output / "manifest.json", output / "artifact.json", output / "readback.json")
+    for path in (paths.manifest, paths.artifact, paths.readback): path.write_text("{}", encoding="utf-8")
+    return paths
+def load(_paths): return source
+def make_optimizer(**_kwargs):
+    def optimize(request, _budget):
+        count_path = Path(os.environ["COUNT_PATH"])
+        count = int(count_path.read_text(encoding="utf-8")) if count_path.exists() else 0
+        count_path.write_text(str(count + 1), encoding="utf-8")
+        return OptimizationProposal(
+            strategy_profile=request.strategy_profile, domain=request.domain,
+            proposed_params={"candidate_id": "UNSCALED_SMA200"},
+            recommendation="research_candidate",
+        )
+    return optimize
+def prepare(**_kwargs):
+    return ({"code_revision": "a" * 40, "input_revision": "optimization-v1",
+             "param_space_revision": "param-v1", "cost_model_revision": "cost-v1",
+             "validator_revision": "validator-v1"},
+            lambda _proposal: None,
+            lambda _proposal: {"status": "pending", "passed": False, "no_order": True,
+                               "live_authority_granted": False})
+alpaca.materialize_soxl_alpaca_input = materialize
+adapter.Rsi2OfflineInputPaths = Paths
+adapter.SoxlRsi2PromotionBinding = Binding
+adapter._COST_MODEL_REVISION = "cost-v1"
+adapter._PARAM_SPACE_REVISION = "param-v1"
+adapter._VALIDATOR_REVISION = "validator-v1"
+adapter.load_rsi2_offline_input = load
+adapter._validate_research_identity = lambda *_args: None
+adapter.make_soxl_rsi2_optimize = make_optimizer
+adapter.prepare_soxl_rsi2_promotion = prepare
+sys.modules[package.__name__] = package
+sys.modules[research.__name__] = research
+sys.modules[alpaca.__name__] = alpaca
+sys.modules[adapter.__name__] = adapter
+
+result = runner.run_fixed_soxl_rsi2_case(
+    p1_root=os.environ["P1_ROOT"], ues_repo_root=os.environ["UES_ROOT"],
+    run_root=os.environ["RUN_ROOT"],
+    diagnose=lambda _context, _budget: {"optimization_needed": True, "design": "fixture"},
+)
+print(json.dumps(result, sort_keys=True))
+'''
+    env = dict(os.environ)
+    env.update({
+        "P1_ROOT": str(p1_root), "P1_SHA": p1_sha, "UES_ROOT": str(ues_root),
+        "RUN_ROOT": str(run_root), "COUNT_PATH": str(count_path),
+        "UES_COMMIT": source_commit, "UES_BLOBS": json.dumps(source_blobs),
+    })
+    for _ in range(2):
+        completed = subprocess.run(
+            [sys.executable, "-c", child], cwd=Path(__file__).parents[1],
+            env=env, check=True, capture_output=True, text=True,
+        )
+        result = json.loads(completed.stdout)
+        assert result["live_authority_granted"] is False
+    assert result["optimizer_executions"] == 0
+    assert count_path.read_text(encoding="utf-8") == "1"
+    assert (run_root / "request.json").is_file()

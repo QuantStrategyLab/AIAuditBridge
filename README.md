@@ -73,8 +73,12 @@ checkout, materializes the optimization window `2022-01-03..2025-01-01` and
 promotion window `2023-09-12..2026-09-12` at 753 sessions each, runs the UES
 study once, freezes its real winner, and passes that proposal to the existing
 QPK cycle with the fixed three-fold plan and 20/20 purge/embargo. Intermediate
-input files are removed after the run; `PerformanceStore` is local-only and
-the shadow callback records an explicit no-order pending observation. A
+input files are removed after the run, while the first fixed-run request is
+retained under its `run_root` as `request.json`; later invocations revalidate
+that fixed identity and reuse the existing QPK ticket/proposal without
+rerunning a completed optimizer stage. Unknown, waiting, or terminal
+checkpoints remain parked and do not trigger new optimization. `PerformanceStore`
+is local-only and the shadow callback records an explicit no-order pending observation. A
 `NO_IMPROVEMENT` or parked result is a valid research outcome and grants no
 authority.
 
