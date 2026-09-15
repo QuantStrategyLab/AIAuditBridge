@@ -118,6 +118,7 @@ DEFAULT_SERVICE_CONTEXT_MAX_BYTES = 700_000
 DEFAULT_SERVICE_CONTEXT_MAX_FILE_BYTES = 80_000
 PLATFORM_BUGFIX_REQUIRED_CONTEXT_PATHS = (
     "application/rebalance_service.py",
+    "application/durable_execution_commands.py",
     "tests/test_rebalance_service.py",
 )
 PLATFORM_BUGFIX_REQUIRED_CONTEXT_MAX_FILE_BYTES = 256_000
@@ -1017,25 +1018,44 @@ def admit_automation(
     auto_merge: bool,
     *,
     task: str = DEFAULT_TASK,
+    manual_approval_id: str = "",
+    issue_number: int | None = None,
+    source_ref: str = "",
+    source_sha: str = "",
 ) -> tuple[str, bool, str | None]:
     """Fail closed when the service control plane does not admit a fix run."""
+    if manual_approval_id and (task != "platform_bugfix" or mode != "review_and_fix"):
+        raise BridgeError("manual approval is only valid for platform_bugfix review_and_fix")
     if mode == "review_only":
         return mode, False, None
 
     audience = env_value("CODEX_AUDIT_SERVICE_AUDIENCE", DEFAULT_SERVICE_AUDIENCE)
     try:
         service_url = normalize_codex_service_url(env_value("CODEX_AUDIT_SERVICE_URL"))
-        query = urllib.parse.urlencode({"repo": source_repo, "mode": mode})
+        query_values: dict[str, object] = {"repo": source_repo, "mode": mode}
+        if task == "platform_bugfix" and manual_approval_id:
+            query_values.update(
+                task=task,
+                issue_number=issue_number or "",
+                source_ref=source_ref,
+                source_sha=source_sha,
+                manual_approval_id=manual_approval_id,
+            )
+        query = urllib.parse.urlencode(query_values)
         response = request_codex_service_json(
             method="GET",
             url=f"{codex_service_api_url(service_url, '/v1/ai/automation/control')}?{query}",
             audience=audience,
         )
-    except (BridgeError, OSError, ValueError, json.JSONDecodeError):
+    except (BridgeError, OSError, ValueError, json.JSONDecodeError) as exc:
+        if manual_approval_id:
+            raise BridgeError(f"manual approval admission failed: {exc}") from exc
         return "review_only", False, "unavailable"
 
     control = response.get("control") if response.get("status") == "ok" else None
     if not isinstance(control, dict) or control.get("auto_fix_allowed") is not True:
+        if manual_approval_id:
+            raise BridgeError("manual approval was not admitted by the service control plane")
         return "review_only", False, "not_admitted"
     return mode, False if task == "platform_bugfix" else auto_merge, None
 
@@ -1049,6 +1069,8 @@ def request_codex_service(
     prompt: str,
     timeout_minutes: int,
     issue_number: int | None = None,
+    manual_approval_id: str = "",
+    source_sha: str = "",
 ) -> str:
     audience = env_value("CODEX_AUDIT_SERVICE_AUDIENCE", DEFAULT_SERVICE_AUDIENCE)
     service_url = normalize_codex_service_url(env_value("CODEX_AUDIT_SERVICE_URL"))
@@ -1066,6 +1088,8 @@ def request_codex_service(
         payload.update(model="gpt-5.6-luna", reasoning_effort="medium", complexity="medium")
     if issue_number is not None:
         payload["issue_number"] = issue_number
+    if manual_approval_id:
+        payload.update(manual_approval_id=manual_approval_id, source_sha=source_sha)
     submit_payload = request_codex_service_json(
         method="POST",
         url=codex_service_jobs_url(service_url),
@@ -1346,6 +1370,15 @@ def run_codex_service(
     issue_number: int | None = None,
 ) -> tuple[int, str, str]:
     try:
+        source_sha = ""
+        manual_approval_id = env_value("MANUAL_APPROVAL_ID")
+        expected_source_sha = env_value("EXPECTED_SOURCE_SHA")
+        if task == "platform_bugfix" and (manual_approval_id or expected_source_sha):
+            source_sha = run_checked(["git", "rev-parse", "HEAD"], cwd=repo_dir).strip()
+            if expected_source_sha and source_sha != expected_source_sha:
+                raise BridgeError(
+                    f"source checkout SHA mismatch before service request: expected {expected_source_sha}, got {source_sha}"
+                )
         service_prompt = build_service_prompt(repo_dir, prompt, task=task, mode=mode)
         output = request_codex_service(
             source_repo=source_repo,
@@ -1355,6 +1388,8 @@ def run_codex_service(
             prompt=service_prompt,
             timeout_minutes=timeout_minutes,
             issue_number=issue_number,
+            manual_approval_id=manual_approval_id,
+            source_sha=source_sha,
         )
         final_message = output
         if mode == "review_and_fix":
@@ -1710,8 +1745,15 @@ def prepare_remediation_workspace(
     task: str,
     mode: str,
     work_root: Path,
+    expected_source_sha: str = "",
 ) -> RemediationWorkspace:
     repo_dir = clone_source_repo(token, source_repo, source_ref, work_root)
+    if expected_source_sha:
+        actual_source_sha = run_checked(["git", "rev-parse", "HEAD"], cwd=repo_dir).strip()
+        if actual_source_sha != expected_source_sha:
+            raise BridgeError(
+                f"source checkout SHA mismatch: expected {expected_source_sha}, got {actual_source_sha}"
+            )
     baseline_auto_merge_policy = load_guarded_auto_merge_policy(
         repo_dir / ".github" / "codex_auto_merge_policy.json"
     )
@@ -3010,10 +3052,19 @@ def main() -> int:
     if not issue_number_raw.isdigit():
         raise BridgeError("ISSUE_NUMBER must be provided as an integer")
     issue_number = int(issue_number_raw)
+    manual_approval_id = env_value("MANUAL_APPROVAL_ID")
+    expected_source_sha = env_value("EXPECTED_SOURCE_SHA")
     timeout_minutes = int(env_value("CODEX_AUDIT_TIMEOUT_MINUTES", "45"))
     auto_merge = parse_bool(env_value("CODEX_AUDIT_AUTO_MERGE"))
     mode, auto_merge, admission_reason = admit_automation(
-        source_repo, mode, auto_merge, task=task
+        source_repo,
+        mode,
+        auto_merge,
+        task=task,
+        manual_approval_id=manual_approval_id,
+        issue_number=issue_number,
+        source_ref=source_ref,
+        source_sha=expected_source_sha,
     )
     if admission_reason:
         print(f"Automation admission {admission_reason}; downgraded to review_only.")
@@ -3078,6 +3129,7 @@ def main() -> int:
                 task,
                 mode,
                 Path(tmp),
+                expected_source_sha=expected_source_sha if task == "platform_bugfix" else "",
             )
             return_code, _codex_log, final_message = run_codex_backend(
                 workspace.repo_dir,

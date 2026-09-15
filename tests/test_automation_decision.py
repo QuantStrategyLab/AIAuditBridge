@@ -38,6 +38,54 @@ class TestAutomationDecision(unittest.TestCase):
         self.assertEqual(result["effective_mode"], MODE_REVIEW_AND_FIX)
         self.assertTrue(result["auto_fix_allowed"])
 
+    def test_valid_manual_approval_is_only_history_completeness_exception(self) -> None:
+        blocked = decide_automation_execution(
+            repo="QuantStrategyLab/LongBridgePlatform",
+            requested_mode=MODE_REVIEW_AND_FIX,
+            control_action=CONTROL_CONTINUE,
+            service_health="healthy",
+            quota_status="ok",
+            org_health_status="ok",
+            failure_history_complete=False,
+        )
+        approved = decide_automation_execution(
+            repo="QuantStrategyLab/LongBridgePlatform",
+            requested_mode=MODE_REVIEW_AND_FIX,
+            control_action=CONTROL_CONTINUE,
+            service_health="healthy",
+            quota_status="ok",
+            org_health_status="ok",
+            failure_history_complete=False,
+            manual_approval_valid=True,
+        )
+        self.assertEqual(blocked["action"], EXECUTION_HUMAN_REVIEW)
+        self.assertEqual(approved["action"], EXECUTION_RUN)
+        self.assertFalse(approved["failure_history_complete"])
+
+    def test_manual_approval_does_not_bypass_health_or_failure_threshold(self) -> None:
+        for service_health, recent_runs in (
+            ("unhealthy", []),
+            (
+                "healthy",
+                [
+                    {"task_state": "failed", "metadata": {"origin": "service_job", "source_repository": "repo"}}
+                ] * 3,
+            ),
+        ):
+            with self.subTest(service_health=service_health):
+                result = decide_automation_execution(
+                    repo="repo",
+                    requested_mode=MODE_REVIEW_AND_FIX,
+                    control_action=CONTROL_CONTINUE,
+                    service_health=service_health,
+                    quota_status="ok",
+                    org_health_status="healthy",
+                    recent_runs=recent_runs,
+                    failure_history_complete=False,
+                    manual_approval_valid=True,
+                )
+                self.assertEqual(result["action"], EXECUTION_HUMAN_REVIEW)
+
     def test_legacy_autonomy_modes_are_normalized(self) -> None:
         cases = {
             "manual": (MODE_REVIEW_ONLY, "manual", "manual", False),

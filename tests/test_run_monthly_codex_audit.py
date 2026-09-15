@@ -172,6 +172,31 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
                 ("review_only", False, "not_admitted"),
             )
 
+    def test_manual_approval_admission_never_downgrades_on_control_failure(self) -> None:
+        with patch(
+            "scripts.run_monthly_codex_audit.request_codex_service_json",
+            side_effect=BridgeError("synthetic control failure"),
+        ):
+            with self.assertRaisesRegex(BridgeError, "manual approval admission failed"):
+                admit_automation(
+                    "QuantStrategyLab/LongBridgePlatform",
+                    "review_and_fix",
+                    False,
+                    task="platform_bugfix",
+                    manual_approval_id="sg-history-482",
+                    issue_number=482,
+                    source_ref="ai-history-sg-claim-dedup-20260915",
+                    source_sha="26844fa9b909e98e867acf4c50120b90acc6c792",
+                )
+        with self.assertRaisesRegex(BridgeError, "only valid"):
+            admit_automation(
+                "QuantStrategyLab/LongBridgePlatform",
+                "review_only",
+                False,
+                task="platform_bugfix",
+                manual_approval_id="sg-history-482",
+            )
+
     def test_validate_repo_rejects_invalid_values(self) -> None:
         with self.assertRaises(Exception):
             validate_repo("QuantStrategyLab/CryptoLivePoolPipelines/extra")
@@ -267,7 +292,11 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
             "scripts.run_monthly_codex_audit.run_bounded_platform_bugfix_tests",
             side_effect=BridgeError("synthetic bounded regression failure"),
         ), patch("scripts.run_monthly_codex_audit.publish_remediation") as publish:
-            for relative in ("application/rebalance_service.py", "tests/test_rebalance_service.py"):
+            for relative in (
+                "application/rebalance_service.py",
+                "application/durable_execution_commands.py",
+                "tests/test_rebalance_service.py",
+            ):
                 path = Path(tmp) / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("synthetic source\n", encoding="utf-8")
@@ -666,7 +695,11 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
                 context_path=context_path,
                 mode="review_only",
             )
-            for rel in ("application/rebalance_service.py", "tests/test_rebalance_service.py"):
+            for rel in (
+                "application/rebalance_service.py",
+                "application/durable_execution_commands.py",
+                "tests/test_rebalance_service.py",
+            ):
                 path = repo_dir / rel
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("# supplied context\n", encoding="utf-8")
@@ -693,7 +726,11 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
                 context_path=Path(tmp) / "context.json",
                 mode="review_and_fix",
             )
-            for rel in ("application/rebalance_service.py", "tests/test_rebalance_service.py"):
+            for rel in (
+                "application/rebalance_service.py",
+                "application/durable_execution_commands.py",
+                "tests/test_rebalance_service.py",
+            ):
                 path = repo_dir / rel
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("# supplied context\n", encoding="utf-8")
@@ -711,6 +748,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
             repo_dir = Path(tmp)
             required = {
                 "application/rebalance_service.py": "A" * 46_290,
+                "application/durable_execution_commands.py": "C" * 2_000,
                 "tests/test_rebalance_service.py": "B" * 175_718,
             }
             for rel, content in required.items():
@@ -729,6 +767,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
             )
             self.assertIn("A" * 46_290, context)
             self.assertIn("B" * 175_718, context)
+            self.assertIn("C" * 2_000, context)
 
     def test_platform_bugfix_rejects_missing_required_context_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, patch(

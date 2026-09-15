@@ -125,6 +125,85 @@ def test_platform_bugfix_gateway_allows_history_downgrade_to_review_only():
     assert payload['reasoning_effort'] == 'medium'
 
 
+def test_platform_bugfix_manual_approval_requires_exact_oidc_identity_and_case_fields():
+    approval = {
+        "approval_id": "sg-history-482",
+        "source_repository": "QuantStrategyLab/LongBridgePlatform",
+        "issue_number": 482,
+        "source_ref": "ai-history-sg-claim-dedup-20260915",
+        "source_sha": "26844fa9b909e98e867acf4c50120b90acc6c792",
+        "actor": "Pigbibi",
+        "workflow_repository": "QuantStrategyLab/AIAuditBridge",
+        "workflow_ref": "QuantStrategyLab/AIAuditBridge/.github/workflows/codex_audit.yml@refs/heads/main",
+        "workflow_sha": "9" * 40,
+        "expires_at": 4_000_000_000,
+    }
+    claims = {
+        "auth_method": "github_oidc",
+        "repository": approval["workflow_repository"].split("/.github")[0],
+        "actor": approval["actor"],
+        "workflow_ref": approval["workflow_ref"],
+        "workflow_sha": approval["workflow_sha"],
+        "event_name": "workflow_dispatch",
+    }
+    kwargs = dict(
+        policy={"platform_bugfix_manual_approval": approval},
+        claims=claims,
+        task="platform_bugfix",
+        mode="review_and_fix",
+        source_repository=approval["source_repository"],
+        issue_number=approval["issue_number"],
+        source_ref=approval["source_ref"],
+        source_sha=approval["source_sha"],
+        manual_approval_id=approval["approval_id"],
+    )
+    assert gateway._manual_approval_policy_matches(**kwargs)
+    with pytest.raises(PermissionError):
+        gateway._manual_approval_policy_matches(**{**kwargs, "claims": {**claims, "event_name": "schedule"}})
+    with pytest.raises(PermissionError):
+        gateway._manual_approval_policy_matches(**{**kwargs, "source_sha": "0" * 40})
+    with pytest.raises(PermissionError):
+        gateway._manual_approval_policy_matches(**{**kwargs, "task": "execute"})
+
+
+def test_manual_approval_claim_is_atomic_and_persistent(tmp_path):
+    payload = {
+        "task": "platform_bugfix",
+        "mode": "review_and_fix",
+        "source_repository": "QuantStrategyLab/LongBridgePlatform",
+        "source_ref": "ai-history-sg-claim-dedup-20260915",
+        "source_sha": "26844fa9b909e98e867acf4c50120b90acc6c792",
+        "issue_number": 482,
+        "prompt": "fixed prompt",
+    }
+    claims = {"run_id": "123", "run_attempt": "1"}
+    with patch.object(gateway, "_job_dir", return_value=tmp_path), patch.object(
+        gateway,
+        "_read_job",
+        return_value={"job_id": "job-1", "manual_approval_id": "sg-history-482", "status": "queued"},
+    ) as read_job:
+        assert gateway._claim_manual_approval(
+            approval_id="sg-history-482", payload=payload, claims=claims, job_id="job-1"
+        ) is None
+        claim_path = tmp_path / "manual-approvals" / "sg-history-482.json"
+        assert claim_path.stat().st_mode & 0o777 == 0o600
+        existing = gateway._claim_manual_approval(
+            approval_id="sg-history-482", payload=payload, claims=claims, job_id="job-2"
+        )
+        assert existing["job_id"] == "job-1"
+        with pytest.raises(PermissionError):
+            gateway._claim_manual_approval(
+                approval_id="sg-history-482", payload={**payload, "prompt": "different"}, claims=claims, job_id="job-3"
+            )
+        original_claim = claim_path.read_bytes()
+        read_job.side_effect = FileNotFoundError("job-1")
+        with pytest.raises(PermissionError, match="corrupt or its job is missing"):
+            gateway._claim_manual_approval(
+                approval_id="sg-history-482", payload=payload, claims=claims, job_id="job-4"
+            )
+        assert claim_path.read_bytes() == original_claim
+
+
 def test_cursor_route_requires_fresh_account_and_explicit_spend_quality_policy():
     from service.cursor_account import resolve_cursor_route
     roster = {'status': 'available', 'source': 'cursor_cli_account', 'updated_at': 900,
