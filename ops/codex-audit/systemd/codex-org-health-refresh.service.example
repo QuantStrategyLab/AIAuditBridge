@@ -1,0 +1,13 @@
+[Unit]
+Description=Refresh the scoped GitHub App token for org-health
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/bin/python3 /usr/local/lib/codex-org-health/refresh_org_health_github_token.py
+
+[Install]
+WantedBy=multi-user.target

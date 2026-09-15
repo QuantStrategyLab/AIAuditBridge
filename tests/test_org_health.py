@@ -1,5 +1,6 @@
 import json
 import os
+import stat
 import tempfile
 import threading
 import time
@@ -7,6 +8,7 @@ import unittest
 import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from service import org_health
@@ -51,6 +53,35 @@ class OrgHealthTest(unittest.TestCase):
             result = read_org_health()
         self.assertEqual(result["status"], "unavailable")
         self.assertEqual(result["provider"]["reason"], "needs_token")
+
+    def test_token_file_has_priority_and_requires_future_expiry(self) -> None:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as handle:
+            json.dump({"token": "ghs_file", "expires_at": time.time() + 600}, handle)
+            handle.flush()
+            file_stat = SimpleNamespace(st_mode=stat.S_IFREG | 0o640, st_uid=0)
+            with patch.dict(os.environ, {
+                org_health.TOKEN_FILE_ENV: handle.name,
+                "CODEX_AUDIT_SERVICE_GITHUB_TOKEN": "legacy-token",
+            }, clear=False), patch("service.org_health.os.lstat", return_value=file_stat):
+                token, source, reason = org_health._github_token()
+        self.assertEqual((token, source, reason), ("ghs_file", org_health.TOKEN_FILE_ENV, ""))
+
+    def test_expired_token_file_does_not_serve_cached_ok_snapshot(self) -> None:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as handle:
+            json.dump({"token": "ghs_expired", "expires_at": time.time() - 1}, handle)
+            handle.flush()
+            cache_key = (("QuantStrategyLab/cached",), org_health.TOKEN_FILE_ENV, "token", "all")
+            org_health._CACHE[cache_key] = (time.time(), {"status": "ok"})
+            file_stat = SimpleNamespace(st_mode=stat.S_IFREG | 0o640, st_uid=0)
+            with patch.dict(os.environ, {
+                org_health.TOKEN_FILE_ENV: handle.name,
+                "CODEX_AUDIT_SERVICE_ORG_HEALTH_REPOSITORIES": "cached",
+            }, clear=False), patch("service.org_health.os.lstat", return_value=file_stat), patch(
+                "service.org_health.urlopen", side_effect=AssertionError("expired token must fail closed")
+            ):
+                result = read_org_health()
+        self.assertEqual(result["status"], "unavailable")
+        self.assertEqual(result["provider"]["reason"], "token_file_expired")
 
     def test_read_org_health_counts_failed_and_running_repos(self) -> None:
         responses = {

@@ -1,0 +1,10 @@
+[Unit]
+Description=Refresh the scoped GitHub App token for org-health every 40 minutes
+
+[Timer]
+OnActiveSec=40min
+OnUnitActiveSec=40min
+Unit=codex-org-health-refresh.service
+
+[Install]
+WantedBy=timers.target
