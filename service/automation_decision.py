@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
 import stat
 from typing import Any
 
@@ -34,6 +35,11 @@ EXECUTION_POLICY_OWNER_ENV = "CODEX_AUDIT_SERVICE_EXECUTION_POLICY_OWNER"
 POLICY_LOAD_ERROR_KEY = "_load_error"
 TRUSTED_FAILURE_ORIGINS = frozenset({"service_job", "external_workflow"})
 POLICY_ALLOWED_KEYS = frozenset({"max_autonomy", "max_consecutive_failures", "low_cost_model", "low_cost_provider", "quota_low_behavior"})
+MANUAL_APPROVAL_POLICY_KEY = "platform_bugfix_manual_approval"
+MANUAL_APPROVAL_REQUIRED_KEYS = frozenset({
+    "approval_id", "source_repository", "issue_number", "source_ref", "source_sha",
+    "actor", "workflow_repository", "workflow_ref", "workflow_sha", "expires_at",
+})
 POLICY_REQUIRED_DEFAULT_KEYS = frozenset({"max_autonomy", "max_consecutive_failures", "low_cost_model", "low_cost_provider"})
 POLICY_LOW_QUOTA_BEHAVIORS = frozenset({"low_cost_model", "defer"})
 POLICY_PROVIDERS = frozenset({"auto", "openai", "anthropic", "api", "codex"})
@@ -198,6 +204,9 @@ def _read_trusted_policy_file(path: Path) -> tuple[str, str]:
 
 
 def _validate_execution_policy(payload: dict[str, Any]) -> str:
+    unknown_top_level = set(payload) - {"default", "repositories", MANUAL_APPROVAL_POLICY_KEY}
+    if unknown_top_level:
+        return "execution policy has unknown top-level keys"
     default_policy = payload.get("default")
     if not isinstance(default_policy, dict):
         return "execution policy default section is invalid"
@@ -215,6 +224,26 @@ def _validate_execution_policy(payload: dict[str, Any]) -> str:
         repo_error = _validate_policy_section(repo_policy, section_name=f"override for {repo!r}", require_defaults=False)
         if repo_error:
             return repo_error
+    if MANUAL_APPROVAL_POLICY_KEY in payload:
+        approval = payload[MANUAL_APPROVAL_POLICY_KEY]
+        if not isinstance(approval, dict):
+            return "execution policy platform_bugfix_manual_approval is invalid"
+        if set(approval) != MANUAL_APPROVAL_REQUIRED_KEYS:
+            return "execution policy platform_bugfix_manual_approval has invalid keys"
+        for key in MANUAL_APPROVAL_REQUIRED_KEYS - {"issue_number", "expires_at"}:
+            if not isinstance(approval.get(key), str) or not approval[key].strip():
+                return f"execution policy platform_bugfix_manual_approval has invalid {key}"
+        if not re.fullmatch(r"[A-Za-z0-9._:-]{1,160}", approval["approval_id"].strip()):
+            return "execution policy platform_bugfix_manual_approval has invalid approval_id"
+        if not re.fullmatch(r"[0-9a-fA-F]{40}", approval["source_sha"].strip()):
+            return "execution policy platform_bugfix_manual_approval has invalid source_sha"
+        if not re.fullmatch(r"[0-9a-fA-F]{40}", approval["workflow_sha"].strip()):
+            return "execution policy platform_bugfix_manual_approval has invalid workflow_sha"
+        try:
+            if int(approval["issue_number"]) <= 0 or float(approval["expires_at"]) <= 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            return "execution policy platform_bugfix_manual_approval has invalid issue_number or expires_at"
     return ""
 
 
@@ -332,6 +361,7 @@ def decide_automation_execution(
     org_health_status: Any = "",
     recent_runs: list[dict[str, Any]] | None = None,
     failure_history_complete: bool = True,
+    manual_approval_valid: bool = False,
     policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Produce a safe execution decision from health, quota, failures, and repo policy."""
@@ -388,7 +418,7 @@ def decide_automation_execution(
         effective_mode = MODE_REVIEW_ONLY
         human_review_required = True
         reasons.append(f"consecutive failures reached {failures}/{max_failures}")
-    elif not failure_history_complete:
+    elif not failure_history_complete and not manual_approval_valid:
         action = EXECUTION_HUMAN_REVIEW
         effective_mode = MODE_REVIEW_ONLY
         human_review_required = True

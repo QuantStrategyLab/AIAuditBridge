@@ -81,7 +81,14 @@ from service.automation_run_ledger import (
     get_automation_run_ledger,
     suggest_control_action,
 )
-from service.automation_decision import EXECUTION_DEFER, EXECUTION_HUMAN_REVIEW, EXECUTION_REVIEW_ONLY, decide_automation_execution, load_execution_policy
+from service.automation_decision import (
+    EXECUTION_DEFER,
+    EXECUTION_HUMAN_REVIEW,
+    EXECUTION_REVIEW_ONLY,
+    MANUAL_APPROVAL_POLICY_KEY,
+    decide_automation_execution,
+    load_execution_policy,
+)
 from service.strategy_automation_registry import (
     apply_strategy_registry_guard,
     summarize_strategy_registry_context,
@@ -342,10 +349,65 @@ def _validate_platform_bugfix_payload(payload: dict[str, Any]) -> None:
     payload.update(provider="codex", model=PLATFORM_BUGFIX_MODEL, reasoning_effort="medium", complexity="medium")
 
 
+def _manual_approval_policy_matches(
+    *,
+    policy: dict[str, Any],
+    claims: dict[str, Any],
+    task: str,
+    mode: str,
+    source_repository: str,
+    issue_number: Any,
+    source_ref: str,
+    source_sha: str,
+    manual_approval_id: str,
+) -> bool:
+    if task != PLATFORM_BUGFIX_TASK or mode != MODE_REVIEW_AND_FIX:
+        raise PermissionError("manual approval is only valid for platform_bugfix review_and_fix")
+    approval = policy.get(MANUAL_APPROVAL_POLICY_KEY)
+    if not isinstance(approval, dict) or not manual_approval_id:
+        raise PermissionError("platform_bugfix manual approval is unavailable")
+    if str(claims.get("auth_method") or "") != "github_oidc":
+        raise PermissionError("platform_bugfix manual approval requires GitHub OIDC")
+    try:
+        issue_matches = int(issue_number) == int(approval["issue_number"])
+    except (TypeError, ValueError, KeyError):
+        issue_matches = False
+    request_matches = (
+        manual_approval_id == str(approval.get("approval_id") or "")
+        and source_repository == str(approval.get("source_repository") or "")
+        and source_ref == str(approval.get("source_ref") or "")
+        and source_sha == str(approval.get("source_sha") or "")
+        and issue_matches
+    )
+    claim_matches = all(
+        str(claims.get(claim) or "") == str(approval.get(expected) or "")
+        for claim, expected in (
+            ("repository", "workflow_repository"),
+            ("actor", "actor"),
+            ("workflow_ref", "workflow_ref"),
+            ("workflow_sha", "workflow_sha"),
+        )
+    ) and str(claims.get("event_name") or "") == "workflow_dispatch"
+    try:
+        not_expired = time.time() < float(approval["expires_at"])
+    except (TypeError, ValueError, KeyError):
+        not_expired = False
+    if not request_matches or not claim_matches or not not_expired:
+        raise PermissionError("platform_bugfix manual approval does not match request or OIDC identity")
+    return True
+
+
 def _platform_bugfix_readonly_mode(payload: dict[str, Any]) -> bool:
     return (
         str(payload.get("task") or "").strip() == PLATFORM_BUGFIX_TASK
         and str(payload.get("mode") or MODE_REVIEW_AND_FIX).strip().lower() == MODE_REVIEW_ONLY
+    )
+
+
+def _platform_bugfix_manual_mode(payload: dict[str, Any]) -> bool:
+    return (
+        str(payload.get("task") or "").strip() == PLATFORM_BUGFIX_TASK
+        and bool(str(payload.get("manual_approval_id") or "").strip())
     )
 
 
@@ -536,6 +598,85 @@ def _new_job_id() -> str:
     return secrets.token_urlsafe(24)
 
 
+def _manual_approval_claim_path(approval_id: str) -> Path:
+    if not re.fullmatch(r"[A-Za-z0-9._:-]{1,160}", approval_id):
+        raise PermissionError("manual approval id is invalid")
+    directory = _job_dir() / "manual-approvals"
+    existed = directory.exists()
+    directory.mkdir(mode=0o700, exist_ok=True)
+    directory.chmod(0o700)
+    if not existed:
+        directory_fd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        parent_fd = os.open(directory.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
+    return directory / f"{approval_id}.json"
+
+
+def _manual_approval_request_hash(payload: dict[str, Any]) -> str:
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _claim_manual_approval(
+    *,
+    approval_id: str,
+    payload: dict[str, Any],
+    claims: dict[str, Any],
+    job_id: str,
+) -> dict[str, Any] | None:
+    path = _manual_approval_claim_path(approval_id)
+    request_hash = _manual_approval_request_hash(payload)
+    claim = {
+        "approval_id": approval_id,
+        "request_hash": request_hash,
+        "run_id": str(claims.get("run_id") or ""),
+        "run_attempt": str(claims.get("run_attempt") or ""),
+        "job_id": job_id,
+        "claimed_at": _now(),
+    }
+    encoded = (json.dumps(claim, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags, 0o600)
+    except FileExistsError:
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+            existing_job_id = str(existing.get("job_id") or "")
+            existing_job = _read_job(existing_job_id)
+        except (OSError, ValueError, json.JSONDecodeError, KeyError):
+            raise PermissionError("manual approval claim is corrupt or its job is missing") from None
+        if (
+            existing.get("request_hash") != request_hash
+            or str(existing.get("run_id") or "") != str(claims.get("run_id") or "")
+            or str(existing.get("run_attempt") or "") != str(claims.get("run_attempt") or "")
+            or str(existing.get("approval_id") or "") != approval_id
+            or str(existing_job.get("manual_approval_id") or "") != approval_id
+        ):
+            raise PermissionError("manual approval was already claimed by another request")
+        return existing_job
+    try:
+        os.fchmod(fd, 0o600)
+        os.write(fd, encoded)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+    return None
+
+
 def _write_job(job: dict[str, Any]) -> None:
     path = _job_path(str(job["job_id"]))
     payload = json.dumps(job, ensure_ascii=False, sort_keys=True).encode("utf-8")
@@ -669,6 +810,11 @@ def _automation_control_snapshot(
     task_name: str = "",
     requested_mode: str = MODE_REVIEW_AND_FIX,
     pending_run: dict[str, Any] | None = None,
+    manual_approval_valid: bool = False,
+    manual_approval_id: str = "",
+    issue_number: Any = "",
+    source_ref: str = "",
+    source_sha: str = "",
 ) -> dict[str, Any]:
     try:
         org_health = read_org_health()
@@ -716,6 +862,7 @@ def _automation_control_snapshot(
         and (not bool(retention.get("history_completeness_unknown")) or repo_history_has_terminal_boundary)
         and (repo_evictions <= 0 or repo_history_has_terminal_boundary)
     )
+    manual_approval_valid = manual_approval_valid and not ledger_unavailable and not storage_unavailable
     execution = decide_automation_execution(
         repo=repo or "unknown",
         task_name=task_name,
@@ -726,6 +873,7 @@ def _automation_control_snapshot(
         org_health_status=control.get("org_health_status"),
         recent_runs=recent_runs,
         failure_history_complete=failure_history_complete,
+        manual_approval_valid=manual_approval_valid,
         policy=load_execution_policy(),
     )
     if ledger_unavailable:
@@ -760,6 +908,13 @@ def _automation_control_snapshot(
     control["auto_merge_allowed"] = bool(execution.get("auto_merge_allowed")) and strict_action == CONTROL_CONTINUE
     control["requires_human_review"] = strict_action != CONTROL_CONTINUE or bool(execution.get("human_review_required"))
     control["execution"] = execution
+    control.update(
+        task=task_name,
+        issue_number=issue_number,
+        source_ref=source_ref,
+        source_sha=source_sha,
+        manual_approval_id=manual_approval_id,
+    )
     return control
 
 
@@ -1312,7 +1467,9 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
             "timeout": int(payload.get("timeout_seconds", 2700)),
         }
         if payload.get("provider") != "cursor":
-            execute_kwargs["shell_tool_enabled"] = not _platform_bugfix_readonly_mode(payload)
+            execute_kwargs["shell_tool_enabled"] = not (
+                _platform_bugfix_readonly_mode(payload) or _platform_bugfix_manual_mode(payload)
+            )
         result = adapter.execute(**execute_kwargs)
         job = _read_job(job_id)
         if result.success:
@@ -1419,6 +1576,8 @@ def _submit_job(claims: dict[str, Any], payload: dict[str, Any], *, request_dedu
             "request_authority": _request_authority(claims),
             "source_repository": str(payload.get("source_repository") or ""),
             "source_ref": str(payload.get("source_ref") or ""),
+            "source_sha": str(payload.get("source_sha") or ""),
+            "issue_number": str(payload.get("issue_number") or ""),
             "task": str(payload.get("task") or TASK_EXECUTE),
             "mode": str(payload.get("mode") or MODE_REVIEW_ONLY),
             "provider": str(payload.get("provider") or "codex"),
@@ -1426,6 +1585,19 @@ def _submit_job(claims: dict[str, Any], payload: dict[str, Any], *, request_dedu
             "dedupe_key": dedupe_key,
             "request_dedupe_key": request_dedupe_key,
         }
+        manual_approval_id = str(payload.get("manual_approval_id") or "")
+        if manual_approval_id:
+            job["manual_approval_id"] = manual_approval_id
+            existing_manual_job = _claim_manual_approval(
+                approval_id=manual_approval_id,
+                payload=payload,
+                claims=claims,
+                job_id=job_id,
+            )
+            if existing_manual_job is not None:
+                public = _public_job_payload(existing_manual_job)
+                public["deduped"] = True
+                return public
         if payload.get("research_stage"):
             job.update({key: payload[key] for key in ("research_stage", "model", "reasoning_effort")})
         _write_job(job)
@@ -1728,6 +1900,31 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             max_active = _positive_int_env("CODEX_AUDIT_SERVICE_MAX_ACTIVE_JOBS", DEFAULT_JOB_MAX_ACTIVE)
             if _active_job_count() >= max_active:
                 raise PermissionError(f"too many active jobs: max {max_active}. Wait for existing jobs to complete.")
+            manual_approval_id = str(payload.get("manual_approval_id") or "")
+            if manual_approval_id:
+                manual_approval_valid = _manual_approval_policy_matches(
+                    policy=load_execution_policy(),
+                    claims=claims,
+                    task=str(payload.get("task") or ""),
+                    mode=str(payload.get("mode") or MODE_REVIEW_AND_FIX),
+                    source_repository=source_repo,
+                    issue_number=payload.get("issue_number"),
+                    source_ref=str(payload.get("source_ref") or ""),
+                    source_sha=str(payload.get("source_sha") or ""),
+                    manual_approval_id=manual_approval_id,
+                )
+                control = _automation_control_snapshot(
+                    source_repo,
+                    task_name=str(payload.get("task") or ""),
+                    requested_mode=str(payload.get("mode") or MODE_REVIEW_AND_FIX),
+                    manual_approval_valid=manual_approval_valid,
+                    manual_approval_id=manual_approval_id,
+                    issue_number=payload.get("issue_number"),
+                    source_ref=str(payload.get("source_ref") or ""),
+                    source_sha=str(payload.get("source_sha") or ""),
+                )
+                if control.get("auto_fix_allowed") is not True or control.get("auto_merge_allowed") is True:
+                    raise PermissionError("platform_bugfix manual approval does not satisfy current execution policy")
             denial = _admit_codex_execute(quota, quota_repo, payload)
             if denial:
                 _json_response(self, HTTPStatus.TOO_MANY_REQUESTS, denial)
@@ -1743,6 +1940,8 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         """POST /v1/ai/execute — sync Codex execution (backward compat)."""
         started = time.time()
         req = parse_execute_request(payload)
+        if payload.get("manual_approval_id"):
+            raise PermissionError("platform_bugfix manual approval requires the async execute endpoint")
         source_repo = str(payload.get("source_repository") or "")
         if source_repo:
             _validate_source_repo(source_repo)
@@ -1751,6 +1950,31 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         quota = get_quota_manager()
         # Keep the subscription admission and reservation atomic across HTTP threads.
         with _JOB_WRITE_LOCK:
+            manual_approval_id = str(payload.get("manual_approval_id") or "")
+            if manual_approval_id:
+                manual_approval_valid = _manual_approval_policy_matches(
+                    policy=load_execution_policy(),
+                    claims=claims,
+                    task=str(payload.get("task") or ""),
+                    mode=str(payload.get("mode") or MODE_REVIEW_AND_FIX),
+                    source_repository=source_repo,
+                    issue_number=payload.get("issue_number"),
+                    source_ref=str(payload.get("source_ref") or ""),
+                    source_sha=str(payload.get("source_sha") or ""),
+                    manual_approval_id=manual_approval_id,
+                )
+                control = _automation_control_snapshot(
+                    source_repo,
+                    task_name=str(payload.get("task") or ""),
+                    requested_mode=str(payload.get("mode") or MODE_REVIEW_AND_FIX),
+                    manual_approval_valid=manual_approval_valid,
+                    manual_approval_id=manual_approval_id,
+                    issue_number=payload.get("issue_number"),
+                    source_ref=str(payload.get("source_ref") or ""),
+                    source_sha=str(payload.get("source_sha") or ""),
+                )
+                if control.get("auto_fix_allowed") is not True or control.get("auto_merge_allowed") is True:
+                    raise PermissionError("platform_bugfix manual approval does not satisfy current execution policy")
             denial = _admit_codex_execute(quota, quota_repo, payload)
             if denial:
                 _json_response(self, HTTPStatus.TOO_MANY_REQUESTS, denial)
@@ -1767,7 +1991,9 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             "timeout": req.timeout_seconds,
         }
         if payload.get("provider") != "cursor":
-            execute_kwargs["shell_tool_enabled"] = not _platform_bugfix_readonly_mode(payload)
+            execute_kwargs["shell_tool_enabled"] = not (
+                _platform_bugfix_readonly_mode(payload) or _platform_bugfix_manual_mode(payload)
+            )
         result = adapter.execute(**execute_kwargs)
         get_health_monitor().record("/v1/ai/execute", time.time() - started, result.success, result.error if not result.success else "")
         if result.success:
@@ -1987,7 +2213,41 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         if not mode:
             _json_response(self, HTTPStatus.BAD_REQUEST, {"status": "error", "error": "invalid mode"})
             return
-        _json_response(self, HTTPStatus.OK, {"status": "ok", "control": _automation_control_snapshot(repo, requested_mode=mode)})
+        task = str(params.get("task", [""])[0] or "")
+        issue_number = str(params.get("issue_number", [""])[0] or "")
+        source_ref = str(params.get("source_ref", [""])[0] or "")
+        source_sha = str(params.get("source_sha", [""])[0] or "")
+        manual_approval_id = str(params.get("manual_approval_id", [""])[0] or "")
+        manual_approval_valid = False
+        if manual_approval_id:
+            manual_approval_valid = _manual_approval_policy_matches(
+                policy=load_execution_policy(),
+                claims=claims,
+                task=task,
+                mode=mode,
+                source_repository=repo,
+                issue_number=issue_number,
+                source_ref=source_ref,
+                source_sha=source_sha,
+                manual_approval_id=manual_approval_id,
+            )
+        _json_response(
+            self,
+            HTTPStatus.OK,
+            {
+                "status": "ok",
+                "control": _automation_control_snapshot(
+                    repo,
+                    task_name=task,
+                    requested_mode=mode,
+                    manual_approval_valid=manual_approval_valid,
+                    manual_approval_id=manual_approval_id,
+                    issue_number=issue_number,
+                    source_ref=source_ref,
+                    source_sha=source_sha,
+                ),
+            },
+        )
 
     def _handle_automation_triage(self, claims: dict[str, Any], payload: dict[str, Any]) -> None:
         from urllib.parse import parse_qs, urlparse

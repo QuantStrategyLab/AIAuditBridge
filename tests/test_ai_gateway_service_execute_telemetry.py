@@ -221,6 +221,7 @@ class AiGatewayExecuteTelemetryTests(unittest.TestCase):
                 ("platform_bugfix", "review_only", False),
                 (" platform_bugfix ", " REVIEW_ONLY ", False),
                 ("platform_bugfix", "review_and_fix", True),
+                ("platform_bugfix", "review_and_fix", False),
                 ("execute", "review_only", True),
             ):
                 with self.subTest(task=task, mode=mode), patch.object(
@@ -228,7 +229,10 @@ class AiGatewayExecuteTelemetryTests(unittest.TestCase):
                     "_read_job",
                     return_value={"job_id": "job-1", "status": "queued", "task": task, "mode": mode},
                 ):
-                    gateway._run_job("job-1", {"prompt": "review", "task": task, "mode": mode})
+                    payload = {"prompt": "review", "task": task, "mode": mode}
+                    if task == "platform_bugfix" and mode == "review_and_fix" and not expected:
+                        payload["manual_approval_id"] = "sg-history-482"
+                    gateway._run_job("job-1", payload)
                 self.assertEqual(adapter.return_value.execute.call_args.kwargs["shell_tool_enabled"], expected)
 
 
