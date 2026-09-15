@@ -94,7 +94,6 @@ def test_platform_bugfix_gateway_binds_longbridge_luna_medium():
     {'allowed_providers': ['codex', 'cursor']},
     {'model': 'gpt-5.5'},
     {'reasoning_effort': 'high'},
-    {'mode': 'review_only'},
 ])
 def test_platform_bugfix_gateway_rejects_route_mutation(mutation):
     quota = Mock()
@@ -108,6 +107,22 @@ def test_platform_bugfix_gateway_rejects_route_mutation(mutation):
     }
     with pytest.raises((PermissionError, ValueError)):
         gateway._admit_codex_execute(quota, 'QuantStrategyLab/LongBridgePlatform', payload)
+
+
+def test_platform_bugfix_gateway_allows_history_downgrade_to_review_only():
+    quota = Mock()
+    quota.check.return_value = {'allowed': True}
+    payload = {
+        'prompt': 'synthetic platform diagnosis',
+        'task': 'platform_bugfix',
+        'source_repository': 'QuantStrategyLab/LongBridgePlatform',
+        'mode': 'review_only',
+        'allowed_providers': ['codex'],
+    }
+    assert gateway._admit_codex_execute(quota, 'QuantStrategyLab/LongBridgePlatform', payload) is None
+    assert payload['provider'] == 'codex'
+    assert payload['model'] == 'gpt-5.6-luna'
+    assert payload['reasoning_effort'] == 'medium'
 
 
 def test_cursor_route_requires_fresh_account_and_explicit_spend_quality_policy():
