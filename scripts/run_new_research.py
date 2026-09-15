@@ -43,7 +43,7 @@ _REQUIRED = frozenset({
     "request", "worker_manifest", "source_receipts", "research_identity",
     "source_commit", "source_blobs", "input_paths", "output_root", "ticket_dir",
 })
-_OPTIONAL = frozenset({"ues_repo_root", "caller_ref", "strategy_facts"})
+_OPTIONAL = frozenset({"ues_repo_root", "caller_ref", "strategy_facts", "fixed_input_identity"})
 SOXL_P1_MANIFEST_SHA256 = "b39008e05eeebd4a126eefe289a18bcae05869d937dc76e6040b71d3b0daf36d"
 SOXL_P1_MANIFEST_URL = "https://storage.googleapis.com/qsl-runtime-logs-shared/soxl-p1-p3/b39008e05eeebd4a126eefe289a18bcae05869d937dc76e6040b71d3b0daf36d/manifest.json"
 SOXL_UES_COMMIT = "d6b37b77c309e1fb7f25263271b6b0f653f7e7b8"
@@ -52,6 +52,11 @@ _SOXL_PROVENANCE_PATHS = (
     "src/us_equity_strategies/research/soxl_core_optimization.py",
     "src/us_equity_strategies/research/soxl_soxx_offline_input_contract.py",
     "src/us_equity_strategies/research/soxl_soxx_typed_baseline_result.py",
+)
+_FIXED_REQUEST_FILENAME = "request.json"
+_FIXED_REQUEST_IDENTITY_FIELDS = (
+    "request", "worker_manifest", "source_receipts", "research_identity",
+    "source_commit", "source_blobs", "strategy_facts", "caller_ref", "fixed_input_identity",
 )
 
 
@@ -98,6 +103,187 @@ def _read_aab_caller_revision() -> str:
     return revision
 
 
+def _canonical_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def _load_fixed_request(path: Path) -> dict[str, Any]:
+    raw = _read_json(path)
+    if (not isinstance(raw, Mapping) or not _REQUIRED <= set(raw)
+            or set(raw) - _REQUIRED - _OPTIONAL):
+        raise NewResearchInputError("fixed_research_request_invalid")
+    try:
+        _worker(raw["worker_manifest"])
+        receipts = raw["source_receipts"]
+        if not isinstance(receipts, list) or len(receipts) != 1:
+            raise NewResearchInputError("fixed_research_request_invalid")
+        parsed_receipts = [_receipt(receipts[0])]
+        expected_receipt = build_soxl_p1_source_receipt(
+            retrieved_at=parsed_receipts[0].retrieved_at,
+        )
+        if parsed_receipts[0].to_dict() != expected_receipt:
+            raise NewResearchInputError("fixed_research_input_mismatch")
+        _request(raw["request"], parsed_receipts)
+        _identity(raw["research_identity"])
+        _digest_map(raw["source_blobs"])
+        fixed_input_identity = raw.get("fixed_input_identity")
+        if (not isinstance(fixed_input_identity, Mapping)
+                or set(fixed_input_identity) != {
+                    "p1_manifest_sha256", "optimization_input_digest", "promotion_input_digest",
+                }
+                or any(not isinstance(value, str) or not value.strip()
+                       for value in fixed_input_identity.values())):
+            raise NewResearchInputError("fixed_research_request_invalid")
+    except NewResearchInputError:
+        raise
+    except Exception:
+        raise NewResearchInputError("fixed_research_request_invalid") from None
+    return dict(raw)
+
+
+def _save_fixed_request(path: Path, payload: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    encoded = json.dumps(
+        dict(payload), ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False,
+    ) + "\n"
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(encoded)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except (OSError, TypeError, ValueError):
+        raise NewResearchInputError("fixed_research_request_unavailable") from None
+
+
+def _fixed_request_identity(payload: Mapping[str, Any]) -> dict[str, Any]:
+    return {key: payload.get(key) for key in _FIXED_REQUEST_IDENTITY_FIELDS}
+
+
+def _assert_fixed_request_unchanged(
+    saved_payload: Mapping[str, Any], current_payload: Mapping[str, Any],
+) -> None:
+    if _canonical_json(_fixed_request_identity(saved_payload)) != _canonical_json(
+        _fixed_request_identity(current_payload)
+    ):
+        raise NewResearchInputError("fixed_research_input_mismatch")
+
+
+def _matching_fixed_ticket(
+    ticket_dir: Path, *, request: NewResearchRequest,
+    research_identity: Mapping[str, str],
+) -> Any | None:
+    """Read only this request's existing QPK checkpoints.
+
+    The pinned QPK loader validates the ticket shape and authority flag. A
+    saved ticket with a different fixed identity is a mismatch, never a reason
+    to start another optimizer run in the same run root.
+    """
+    if not ticket_dir.exists():
+        return None
+    try:
+        from quant_platform_kit.strategy_lifecycle.research_promotion_cycle import (
+            load_research_promotion_ticket,
+        )
+    except ImportError as exc:
+        raise NewResearchInputError("fixed_research_checkpoint_unavailable") from exc
+    match = None
+    expected_request = request.to_dict()
+    fixed_revision_fields = (
+        "code_revision", "param_space_revision", "cost_model_revision", "validator_revision",
+    )
+    try:
+        paths = sorted(ticket_dir.glob("*.json"))
+    except OSError:
+        raise NewResearchInputError("fixed_research_checkpoint_unavailable") from None
+    for path in paths:
+        try:
+            ticket = load_research_promotion_ticket(path)
+        except Exception as exc:
+            raise NewResearchInputError("fixed_research_checkpoint_invalid") from exc
+        progress = getattr(ticket, "research_progress", {})
+        saved_identity = progress.get("identity") if isinstance(progress, Mapping) else None
+        if not isinstance(saved_identity, Mapping):
+            continue
+        saved_request = saved_identity.get("request")
+        if saved_request != expected_request:
+            raise NewResearchInputError("fixed_research_checkpoint_mismatch")
+        revisions = saved_identity.get("revisions")
+        if not isinstance(revisions, Mapping):
+            raise NewResearchInputError("fixed_research_checkpoint_invalid")
+        if any(revisions.get(field) != research_identity.get(field) for field in fixed_revision_fields):
+            raise NewResearchInputError("fixed_research_checkpoint_mismatch")
+        if match is not None:
+            raise NewResearchInputError("fixed_research_checkpoint_duplicate")
+        match = ticket
+    return match
+
+
+def _proposal_from_fixed_ticket(ticket: Any, request: NewResearchRequest) -> Any | None:
+    if ticket is None:
+        return None
+    progress = getattr(ticket, "research_progress", {})
+    stages = progress.get("stages", {}) if isinstance(progress, Mapping) else {}
+    optimize = stages.get("optimize", {}) if isinstance(stages, Mapping) else {}
+    if optimize.get("status") != "completed" or not isinstance(optimize.get("result"), Mapping):
+        return None
+    try:
+        from quant_platform_kit.strategy_lifecycle.research_promotion_cycle import _saved_proposal
+        proposal = _saved_proposal(optimize["result"])
+    except Exception:
+        raise NewResearchInputError("fixed_research_checkpoint_invalid") from None
+    if (proposal.strategy_profile != request.strategy_profile
+            or proposal.domain != request.domain):
+        raise NewResearchInputError("fixed_research_checkpoint_mismatch")
+    return proposal
+
+
+def _fixed_ticket_summary(ticket: Any) -> dict[str, Any]:
+    if ticket is None:
+        raise NewResearchInputError("fixed_research_checkpoint_invalid")
+    progress = getattr(ticket, "research_progress", {})
+    stages = progress.get("stages", {}) if isinstance(progress, Mapping) else {}
+    unknown = any(isinstance(value, Mapping) and value.get("status") in {"running", "unknown"}
+                  for value in stages.values())
+    state = getattr(getattr(ticket, "state", None), "value", "parked")
+    raw = ticket.to_dict(include_progress=True)
+    terminal = state in {"parked", "human_accepted", "human_rejected"}
+    reason = (
+        "research_outcome_unknown" if unknown
+        else "saved_research_ticket_terminal" if terminal
+        else "research_checkpoint_invalid"
+    )
+    return {
+        "status": "parked",
+        "reason": reason,
+        "resumed": True,
+        "live_authority_granted": False,
+        "optimizer_executions": 0,
+        "optimizer_candidate_id": None,
+        "ticket": raw,
+        "state": state,
+        "drift_status": raw.get("drift_status"),
+        "drift_score": raw.get("drift_score"),
+        "notes": raw.get("notes", []),
+    }
+
+
+def _fixed_ticket_requires_no_optimizer(ticket: Any) -> bool:
+    if ticket is None:
+        return False
+    progress = getattr(ticket, "research_progress", {})
+    stages = progress.get("stages", {}) if isinstance(progress, Mapping) else {}
+    if not isinstance(stages, Mapping):
+        raise NewResearchInputError("fixed_research_checkpoint_invalid")
+    if any(isinstance(value, Mapping) and value.get("status") in {"running", "unknown"}
+           for value in stages.values()):
+        return True
+    state = getattr(getattr(ticket, "state", None), "value", "")
+    return bool(stages) or state in {
+        "parked", "shadow_recorded", "awaiting_human", "human_accepted", "human_rejected",
+    }
+
+
 def run_fixed_soxl_rsi2_case(
     *, p1_root: str | Path, ues_repo_root: str | Path, run_root: str | Path,
     as_of: date | None = None, diagnose=None, summarize=None,
@@ -141,17 +327,34 @@ def run_fixed_soxl_rsi2_case(
         worker = ResearchWorkerManifest.expected(
             worker_id="soxl-rsi2-controlled-case", role=ResearchWorkerRole.PLANNER_BUILDER,
         )
-        receipt = build_soxl_p1_source_receipt(retrieved_at=datetime.now(timezone.utc))
         identity = {
             "code_revision": source_commit, "input_revision": optimization.input_digest,
             "param_space_revision": _PARAM_SPACE_REVISION,
             "cost_model_revision": _COST_MODEL_REVISION,
             "validator_revision": _VALIDATOR_REVISION,
         }
-        payload = {
+        request_path = root / _FIXED_REQUEST_FILENAME
+        saved_payload = None
+        if request_path.exists():
+            saved_payload = _load_fixed_request(request_path)
+            saved_request = _request(
+                saved_payload["request"],
+                [_receipt(item) for item in saved_payload["source_receipts"]],
+            )
+            if as_of is not None and as_of != saved_request.as_of:
+                raise NewResearchInputError("fixed_research_as_of_mismatch")
+            _receipt(saved_payload["source_receipts"][0])
+            receipt = dict(saved_payload["source_receipts"][0])
+            request_as_of = saved_request.as_of
+        else:
+            if as_of is not None and type(as_of) is not date:
+                raise NewResearchInputError("fixed_research_as_of_invalid")
+            receipt = build_soxl_p1_source_receipt(retrieved_at=datetime.now(timezone.utc))
+            request_as_of = as_of or datetime.now(timezone.utc).date()
+        current_payload = {
             "request": {
                 "strategy_profile": "soxl_rsi2_mean_reversion", "domain": "us_equity",
-                "as_of": (as_of or datetime.now(timezone.utc).date()).isoformat(),
+                "as_of": request_as_of.isoformat(),
                 "source_revision": optimization.source_revision,
                 "research_intent": "fixed_soxl_rsi2_dual_window",
             },
@@ -163,6 +366,11 @@ def run_fixed_soxl_rsi2_case(
             },
             "source_receipts": [receipt], "research_identity": identity,
             "source_commit": source_commit, "source_blobs": source_blobs,
+            "fixed_input_identity": {
+                "p1_manifest_sha256": SOXL_P1_MANIFEST_SHA256,
+                "optimization_input_digest": optimization.input_digest,
+                "promotion_input_digest": promotion.input_digest,
+            },
             "ues_repo_root": str(ues_repo_root), "strategy_facts": _LOCAL_STRATEGY_FACTS,
             "caller_ref": caller_revision,
             "input_paths": {"manifest": str(optimization_paths.manifest),
@@ -170,6 +378,16 @@ def run_fixed_soxl_rsi2_case(
                             "readback": str(optimization_paths.readback)},
             "output_root": str(result_root), "ticket_dir": str(ticket_root),
         }
+        if saved_payload is None:
+            _save_fixed_request(request_path, current_payload)
+            payload = current_payload
+        else:
+            _assert_fixed_request_unchanged(saved_payload, current_payload)
+            payload = dict(saved_payload)
+            payload["input_paths"] = current_payload["input_paths"]
+            payload["output_root"] = current_payload["output_root"]
+            payload["ticket_dir"] = current_payload["ticket_dir"]
+            payload["ues_repo_root"] = current_payload["ues_repo_root"]
         request = _request(payload["request"], [_receipt(receipt)])
         folds = tuple(PurgedWalkForwardFold(*values) for values in SOXL_RSI2_FOLDS)
         cost_model = PromotionCostModel("C2_5", 2.0, 5.0)
@@ -178,14 +396,23 @@ def run_fixed_soxl_rsi2_case(
             folds, locked_oos_start=date(2025, 8, 1), locked_oos_end=date(2026, 9, 11),
             purge_days=20, embargo_days=20, source_revision=source_commit, cost_model=cost_model,
         )
-        optimizer = make_soxl_rsi2_optimize(
-            input_paths=Rsi2OfflineInputPaths(
-                optimization_paths.manifest, optimization_paths.artifact, optimization_paths.readback,
-            ), output_root=result_root, source_commit=source_commit,
-            source_blobs=source_blobs, ues_repo_root=ues_repo_root,
-            source=optimization, expected_identity=identity,
+        ticket = _matching_fixed_ticket(
+            ticket_root, request=request, research_identity=identity,
         )
-        proposal = optimizer(request, ResearchPromotionBudget(max_search_iterations=4, max_param_keys=1))
+        proposal = _proposal_from_fixed_ticket(ticket, request)
+        optimizer_executions = 0
+        if proposal is None and _fixed_ticket_requires_no_optimizer(ticket):
+            return _fixed_ticket_summary(ticket)
+        if proposal is None:
+            optimizer = make_soxl_rsi2_optimize(
+                input_paths=Rsi2OfflineInputPaths(
+                    optimization_paths.manifest, optimization_paths.artifact, optimization_paths.readback,
+                ), output_root=result_root, source_commit=source_commit,
+                source_blobs=source_blobs, ues_repo_root=ues_repo_root,
+                source=optimization, expected_identity=identity,
+            )
+            proposal = optimizer(request, ResearchPromotionBudget(max_search_iterations=4, max_param_keys=1))
+            optimizer_executions = 1
         candidate_id = dict(proposal.proposed_params or {}).get("candidate_id")
         if not isinstance(candidate_id, str) or not candidate_id:
             raise NewResearchInputError("rsi2_candidate_invalid")
@@ -217,7 +444,7 @@ def run_fixed_soxl_rsi2_case(
             on_formal_backtest=lambda: formal_backtest_started.__setitem__("value", True),
         )
         result.update({
-            "optimizer_executions": 1,
+            "optimizer_executions": optimizer_executions,
             "optimizer_candidate_id": candidate_id,
             "optimizer_recommendation": proposal.recommendation,
             "optimization_input_digest": optimization.input_digest,
