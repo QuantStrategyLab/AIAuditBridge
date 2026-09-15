@@ -13,6 +13,7 @@ import os
 import re
 import subprocess
 import shutil
+import sys
 import tarfile
 import tempfile
 import time
@@ -846,6 +847,15 @@ def _candidate_process_env(candidate_root: Path) -> dict[str, str]:
     return env
 
 
+def _report_opt_in_docker_output(label: str, completed: Any) -> None:
+    """Expose bounded fixture diagnostics without changing production errors."""
+    if os.environ.get("AAB_RUN_DOCKER_INTEGRATION") != "1":
+        return
+    detail = (getattr(completed, "stderr", "") or getattr(completed, "stdout", "") or "").strip()
+    if detail:
+        print(f"[AAB synthetic Docker fixture] {label}:\n{detail[-2000:]}", file=sys.stderr)
+
+
 def _run_codegen_candidate_tests(
     candidate_root: Path, *, baseline_root: Path, timeout: int = 300,
 ) -> dict[str, Any]:
@@ -871,7 +881,7 @@ def _run_codegen_candidate_tests(
             "    && rm -rf /var/lib/apt/lists/* \\\n"
             "    && pip install --no-cache-dir uv \\\n"
             "    && uv sync --frozen --no-install-project \\\n"
-            "    && pip install --no-cache-dir pytest\n",
+            "    && uv pip install --python /opt/ues/.venv/bin/python pytest\n",
             encoding="utf-8",
         )
         image = f"aab-soxl-rsi2-test:{os.getpid()}-{time.monotonic_ns()}"
@@ -886,8 +896,8 @@ def _run_codegen_candidate_tests(
             except (OSError, subprocess.TimeoutExpired):
                 raise NewResearchInputError("codegen_dependency_build_failed") from None
             if built.returncode != 0:
-                detail = (built.stderr or built.stdout or "").strip()[-1000:]
-                raise NewResearchInputError(f"codegen_dependency_build_failed:{detail}")
+                _report_opt_in_docker_output("dependency build", built)
+                raise NewResearchInputError("codegen_dependency_build_failed")
 
             def run_one(
                 root: Path, label: str, *, test_path: str,
@@ -922,6 +932,7 @@ def _run_codegen_candidate_tests(
                 except (OSError, subprocess.TimeoutExpired):
                     raise NewResearchInputError(f"codegen_{label}_tests_failed") from None
                 if tested.returncode != 0:
+                    _report_opt_in_docker_output(f"{label} tests", tested)
                     raise NewResearchInputError(f"codegen_{label}_tests_failed")
 
             run_one(
@@ -985,7 +996,7 @@ def _run_codegen_candidate_research(
             "    && rm -rf /var/lib/apt/lists/* \\\n"
             "    && pip install --no-cache-dir uv \\\n"
             "    && uv sync --frozen --no-install-project \\\n"
-            "    && pip install --no-cache-dir pytest\n",
+            "    && uv pip install --python /opt/ues/.venv/bin/python pytest\n",
             encoding="utf-8",
         )
         request_file = root / "research_payload.json"
@@ -1077,14 +1088,15 @@ def _run_codegen_candidate_research(
         except (OSError, subprocess.TimeoutExpired):
             fail("codegen_dependency_build_failed")
         if built.returncode != 0:
-            detail = (built.stderr or built.stdout or "").strip()[-1000:]
-            fail(f"codegen_dependency_build_failed:{detail}")
+            _report_opt_in_docker_output("dependency build", built)
+            fail("codegen_dependency_build_failed")
         try:
             try:
                 completed = subprocess.run(command, env=env, capture_output=True, text=True, timeout=timeout, check=False)
             except (OSError, subprocess.TimeoutExpired):
                 fail("codegen_research_failed")
             if completed.returncode != 0:
+                _report_opt_in_docker_output("research", completed)
                 fail("codegen_research_failed")
             try:
                 result = json.loads(completed.stdout.strip())
