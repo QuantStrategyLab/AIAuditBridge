@@ -84,6 +84,7 @@ on:
         options:
           - monthly_snapshot_audit
           - long_horizon_signal_shadow
+          - platform_bugfix
       auto_merge:
         description: "Request guarded source-repository auto-merge for generated PRs"
         required: false

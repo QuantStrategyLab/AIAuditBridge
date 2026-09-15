@@ -114,6 +114,9 @@ DEFAULT_AUDIENCE = "quant-codex-audit"
 DEFAULT_MAX_REQUEST_BYTES = 2_000_000
 DEFAULT_JOB_TTL_SECONDS = 86_400
 DEFAULT_JOB_MAX_ACTIVE = 10
+PLATFORM_BUGFIX_TASK = "platform_bugfix"
+PLATFORM_BUGFIX_SOURCE_REPO = "QuantStrategyLab/LongBridgePlatform"
+PLATFORM_BUGFIX_MODEL = "gpt-5.6-luna"
 ACTIVE_JOB_STATUSES = frozenset({"queued", "running"})
 REUSABLE_RESEARCH_JOB_STATUSES = frozenset({"queued", "running", "succeeded", "failed"})
 REQUEST_AUTHORITY_FIELDS = (
@@ -281,6 +284,7 @@ def _resolve_codex_reasoning_effort(payload: dict[str, Any], task: str) -> str:
 def _admit_codex_execute(quota: Any, repo: str, payload: dict[str, Any]) -> dict[str, Any] | None:
     """Choose a Codex research route before consuming quota or starting a job."""
     providers = payload.get("allowed_providers", ["codex"])
+    _validate_platform_bugfix_payload(payload)
     payload["provider"] = "codex"
     if "cursor" in providers and not payload.get("research_stage"):
         return {"status": "deferred", "error": "cursor_research_stage_required", "retry_at": None, "execution_started": False}
@@ -310,6 +314,31 @@ def _admit_codex_execute(quota: Any, repo: str, payload: dict[str, Any]) -> dict
     if not result["allowed"]:
         return {"status": "error", "error": result["reason"], "remaining_usd": result.get("remaining_usd", 0)}
     return None
+
+
+def _validate_platform_bugfix_payload(payload: dict[str, Any]) -> None:
+    """Keep the LongBridge one-shot fix on the Codex/Luna bounded route."""
+    if str(payload.get("task") or "").strip() != PLATFORM_BUGFIX_TASK:
+        return
+    if str(payload.get("source_repository") or "").strip() != PLATFORM_BUGFIX_SOURCE_REPO:
+        raise PermissionError("platform_bugfix is restricted to LongBridgePlatform")
+    providers = payload.get("allowed_providers", ["codex"])
+    if providers != ["codex"]:
+        raise PermissionError("platform_bugfix permits only the Codex provider")
+    requested_provider = str(payload.get("provider") or "codex").strip().lower()
+    if requested_provider not in {"", "codex"}:
+        raise PermissionError("platform_bugfix permits only the Codex provider")
+    requested_model = str(payload.get("model") or "").strip().lower()
+    if requested_model not in {"", "auto", PLATFORM_BUGFIX_MODEL}:
+        raise PermissionError("platform_bugfix requires the pinned Luna model")
+    requested_effort = str(payload.get("reasoning_effort") or "").strip().lower()
+    if requested_effort not in {"", "auto", "medium"}:
+        raise PermissionError("platform_bugfix requires medium reasoning effort")
+    if str(payload.get("mode") or "review_and_fix").strip().lower() != "review_and_fix":
+        raise ValueError("platform_bugfix requires review_and_fix mode")
+    if payload.get("auto_merge") is True:
+        raise PermissionError("platform_bugfix does not permit auto-merge")
+    payload.update(provider="codex", model=PLATFORM_BUGFIX_MODEL, reasoning_effort="medium", complexity="medium")
 
 
 def _admit_cursor_execute(quota: Any, repo: str, payload: dict[str, Any]) -> dict[str, Any] | None:

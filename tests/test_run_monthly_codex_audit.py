@@ -64,6 +64,7 @@ from scripts.run_monthly_codex_audit import (
     run_configured_api_reviews,
     run_api_patch_provider,
     run_auto_provider_fallback,
+    run_codex_service,
     service_failure_category,
     is_service_infrastructure_failure,
     safe_branch_component,
@@ -182,6 +183,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
             "QuantStrategyLab/HkEquitySnapshotPipelines": "monthly_snapshot_audit",
             "QuantStrategyLab/ResearchSignalContextPipelines": "long_horizon_signal_shadow",
             "QuantStrategyLab/UsEquitySnapshotPipelines": "monthly_snapshot_audit",
+            "QuantStrategyLab/LongBridgePlatform": "platform_bugfix",
         }
 
         self.assertEqual(set(SOURCE_REPO_TASKS), set(expected))
@@ -216,6 +218,71 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertEqual(validate_provider("auto"), "auto")
         with self.assertRaises(Exception):
             validate_provider("claude")
+        self.assertEqual(validate_provider("task_default", task="platform_bugfix"), "codex")
+        with self.assertRaises(BridgeError):
+            validate_provider("auto", task="platform_bugfix")
+
+    def test_platform_bugfix_requires_exact_two_file_patch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            with patch("scripts.run_monthly_codex_audit.run_bounded_platform_bugfix_tests") as bounded:
+                paths = apply_service_changes(
+                    repo,
+                    [
+                        {"path": "application/rebalance_service.py", "content": "fixed\n"},
+                        {"path": "tests/test_rebalance_service.py", "content": "test\n"},
+                    ],
+                    task="platform_bugfix",
+                )
+            self.assertEqual(set(paths), {
+                "application/rebalance_service.py",
+                "tests/test_rebalance_service.py",
+            })
+            bounded.assert_called_once_with(repo)
+            with self.assertRaises(BridgeError):
+                apply_service_changes(
+                    repo,
+                    [
+                        {"path": "application/rebalance_service.py", "content": "fixed\n"},
+                        {"path": "tests/test_rebalance_service.py", "content": "test\n"},
+                        {"path": "README.md", "content": "no\n"},
+                    ],
+                    task="platform_bugfix",
+                )
+
+    def test_platform_bugfix_fake_service_output_stops_at_bounded_test_failure(self) -> None:
+        payload = json.dumps(
+            {
+                "final_message": "synthetic fix",
+                "changes": [
+                    {"path": "application/rebalance_service.py", "content": "fixed\n"},
+                    {"path": "tests/test_rebalance_service.py", "content": "test\n"},
+                ],
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "scripts.run_monthly_codex_audit.request_codex_service", return_value=payload
+        ), patch(
+            "scripts.run_monthly_codex_audit.run_bounded_platform_bugfix_tests",
+            side_effect=BridgeError("synthetic bounded regression failure"),
+        ), patch("scripts.run_monthly_codex_audit.publish_remediation") as publish:
+            for relative in ("application/rebalance_service.py", "tests/test_rebalance_service.py"):
+                path = Path(tmp) / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("synthetic source\n", encoding="utf-8")
+            result = run_codex_service(
+                Path(tmp),
+                "synthetic",
+                1,
+                source_repo="QuantStrategyLab/LongBridgePlatform",
+                source_ref="26844fa9b909e98e867acf4c50120b90acc6c792",
+                task="platform_bugfix",
+                mode="review_and_fix",
+            )
+            self.assertNotEqual(result[0], 0)
+            self.assertIn("synthetic bounded regression failure", result[1])
+            self.assertEqual((Path(tmp) / "application/rebalance_service.py").read_text(), "fixed\n")
+            publish.assert_not_called()
 
     def test_default_provider_for_task_is_task_specific(self) -> None:
         self.assertEqual(default_provider_for_task("monthly_snapshot_audit"), "auto")
@@ -580,6 +647,51 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertIn("Service patch contract", prompt)
         self.assertNotIn("api-token.md", prompt)
         self.assertNotIn("should not be included", prompt)
+
+    def test_platform_bugfix_prioritizes_complete_large_required_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            required = {
+                "application/rebalance_service.py": "A" * 46_290,
+                "tests/test_rebalance_service.py": "B" * 175_718,
+            }
+            for rel, content in required.items():
+                path = repo_dir / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
+            with patch(
+                "scripts.run_monthly_codex_audit.service_context_file_paths",
+                return_value=[*required, "README.md"],
+            ):
+                context = build_service_repository_context(repo_dir, task="platform_bugfix")
+            self.assertLessEqual(len(context.encode("utf-8")), 700_000)
+            self.assertLess(
+                context.index('context path="application/rebalance_service.py"'),
+                context.index('context path="tests/test_rebalance_service.py"'),
+            )
+            self.assertIn("A" * 46_290, context)
+            self.assertIn("B" * 175_718, context)
+
+    def test_platform_bugfix_rejects_missing_required_context_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "scripts.run_monthly_codex_audit.service_context_file_paths",
+            return_value=["application/rebalance_service.py"],
+        ):
+            with self.assertRaisesRegex(BridgeError, "required context file"):
+                build_service_repository_context(Path(tmp), task="platform_bugfix")
+
+    def test_large_files_remain_omittable_for_existing_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            large = repo_dir / "README.md"
+            large.write_text("X" * 90_000, encoding="utf-8")
+            with patch(
+                "scripts.run_monthly_codex_audit.service_context_file_paths",
+                return_value=["README.md"],
+            ):
+                context = build_service_repository_context(repo_dir, task="monthly_snapshot_audit")
+            self.assertNotIn("X" * 1_000, context)
+            self.assertIn("omitted", context)
 
     def test_service_context_omits_absolute_and_relative_file_symlinks(self) -> None:
         for target_kind in ("absolute", "relative", "inside"):
@@ -2148,6 +2260,24 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
 
         payload = request.call_args.args[3]
         self.assertTrue(payload["body"].startswith("<!-- custom-remediation:issue-7 -->"))
+        self.assertNotIn("draft", payload)
+
+    def test_create_pull_request_marks_platform_bugfix_as_draft(self) -> None:
+        with patch(
+            "scripts.run_monthly_codex_audit.github_request",
+            return_value={"number": 12, "html_url": "https://example.test/pr/12"},
+        ) as request:
+            create_pull_request(
+                "token",
+                "QuantStrategyLab/LongBridgePlatform",
+                {"number": 7, "html_url": "https://example.test/issues/7"},
+                "codex/platform-bugfix-issue-7",
+                "main",
+                "review",
+                ["application/rebalance_service.py", "tests/test_rebalance_service.py"],
+                task="platform_bugfix",
+            )
+        self.assertTrue(request.call_args.args[3]["draft"])
 
     def test_request_guarded_auto_merge_rejects_high_risk_paths_before_labeling(self) -> None:
         with (

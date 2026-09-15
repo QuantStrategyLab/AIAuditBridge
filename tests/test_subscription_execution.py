@@ -72,6 +72,44 @@ def test_cursor_admission_is_not_inferred_from_request_alone():
     assert denial['execution_started'] is False
 
 
+def test_platform_bugfix_gateway_binds_longbridge_luna_medium():
+    quota = Mock()
+    quota.check.return_value = {'allowed': True}
+    payload = {
+        'prompt': 'synthetic platform fix',
+        'task': 'platform_bugfix',
+        'source_repository': 'QuantStrategyLab/LongBridgePlatform',
+        'mode': 'review_and_fix',
+        'allowed_providers': ['codex'],
+    }
+    assert gateway._admit_codex_execute(quota, 'QuantStrategyLab/LongBridgePlatform', payload) is None
+    assert payload['provider'] == 'codex'
+    assert payload['model'] == 'gpt-5.6-luna'
+    assert payload['reasoning_effort'] == 'medium'
+    assert payload['complexity'] == 'medium'
+
+
+@pytest.mark.parametrize('mutation', [
+    {'source_repository': 'QuantStrategyLab/CryptoLivePoolPipelines'},
+    {'allowed_providers': ['codex', 'cursor']},
+    {'model': 'gpt-5.5'},
+    {'reasoning_effort': 'high'},
+    {'mode': 'review_only'},
+])
+def test_platform_bugfix_gateway_rejects_route_mutation(mutation):
+    quota = Mock()
+    payload = {
+        'prompt': 'synthetic platform fix',
+        'task': 'platform_bugfix',
+        'source_repository': 'QuantStrategyLab/LongBridgePlatform',
+        'mode': 'review_and_fix',
+        'allowed_providers': ['codex'],
+        **mutation,
+    }
+    with pytest.raises((PermissionError, ValueError)):
+        gateway._admit_codex_execute(quota, 'QuantStrategyLab/LongBridgePlatform', payload)
+
+
 def test_cursor_route_requires_fresh_account_and_explicit_spend_quality_policy():
     from service.cursor_account import resolve_cursor_route
     roster = {'status': 'available', 'source': 'cursor_cli_account', 'updated_at': 900,
