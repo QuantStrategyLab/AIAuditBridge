@@ -870,7 +870,8 @@ def _run_codegen_candidate_tests(
             "    && apt-get install -y --no-install-recommends git \\\n"
             "    && rm -rf /var/lib/apt/lists/* \\\n"
             "    && pip install --no-cache-dir uv \\\n"
-            "    && uv sync --frozen --extra test --no-install-project\n",
+            "    && uv sync --frozen --no-install-project \\\n"
+            "    && pip install --no-cache-dir pytest\n",
             encoding="utf-8",
         )
         image = f"aab-soxl-rsi2-test:{os.getpid()}-{time.monotonic_ns()}"
@@ -885,7 +886,8 @@ def _run_codegen_candidate_tests(
             except (OSError, subprocess.TimeoutExpired):
                 raise NewResearchInputError("codegen_dependency_build_failed") from None
             if built.returncode != 0:
-                raise NewResearchInputError("codegen_dependency_build_failed")
+                detail = (built.stderr or built.stdout or "").strip()[-1000:]
+                raise NewResearchInputError(f"codegen_dependency_build_failed:{detail}")
 
             def run_one(
                 root: Path, label: str, *, test_path: str,
@@ -982,7 +984,8 @@ def _run_codegen_candidate_research(
             "    && apt-get install -y --no-install-recommends git \\\n"
             "    && rm -rf /var/lib/apt/lists/* \\\n"
             "    && pip install --no-cache-dir uv \\\n"
-            "    && uv sync --frozen --extra test --no-install-project\n",
+            "    && uv sync --frozen --no-install-project \\\n"
+            "    && pip install --no-cache-dir pytest\n",
             encoding="utf-8",
         )
         request_file = root / "research_payload.json"
@@ -1074,7 +1077,8 @@ def _run_codegen_candidate_research(
         except (OSError, subprocess.TimeoutExpired):
             fail("codegen_dependency_build_failed")
         if built.returncode != 0:
-            fail("codegen_dependency_build_failed")
+            detail = (built.stderr or built.stdout or "").strip()[-1000:]
+            fail(f"codegen_dependency_build_failed:{detail}")
         try:
             try:
                 completed = subprocess.run(command, env=env, capture_output=True, text=True, timeout=timeout, check=False)
