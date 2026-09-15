@@ -214,6 +214,26 @@ def test_codegen_cli_requires_fixed_case_roots(tmp_path):
     assert error.value.code == 2
 
 
+def test_codegen_cli_persists_sanitized_gateway_failure(tmp_path, monkeypatch):
+    from scripts import run_new_research as module
+    monkeypatch.setattr(module, "run_soxl_rsi2_codegen_case", lambda **_kwargs: (_ for _ in ()).throw(
+        NewResearchInputError("codegen_gateway_deferred")
+    ))
+    output = tmp_path / "result.json"
+    assert main([
+        "--soxl-rsi2-codegen", "--p1-root", str(tmp_path),
+        "--ues-repo-root", str(tmp_path), "--run-root", str(tmp_path / "run"),
+        "--output", str(output),
+    ]) == 0
+    saved = json.loads(output.read_text(encoding="utf-8"))
+    assert saved == {
+        "status": "deferred", "reason": "codegen_gateway_deferred",
+        "research_executed": False, "learning_only": True,
+        "no_order": True, "promotion_eligible": False,
+        "live_authority_granted": False,
+    }
+
+
 def test_soxl_rsi2_codegen_validates_patch_in_git_archive_candidate(tmp_path, monkeypatch):
     root = tmp_path / "ues"
     (root / "src/us_equity_strategies/research").mkdir(parents=True)

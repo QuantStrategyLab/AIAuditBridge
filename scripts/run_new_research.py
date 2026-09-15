@@ -1318,6 +1318,14 @@ def soxl_rsi2_codegen(
             except (OSError, TypeError, ValueError):
                 raise NewResearchInputError("codegen_saved_response_unavailable") from None
     raw = response.raw if hasattr(response, "raw") and isinstance(response.raw, Mapping) else {}
+    if getattr(response, "success", False) is not True:
+        if raw.get("status") == "deferred":
+            raise NewResearchInputError("codegen_gateway_deferred")
+        if raw.get("failure_category") in {
+            "auth_or_config_failure", "quota_or_capacity_failure",
+            "transient_service_failure", "service_unavailable",
+        }:
+            raise NewResearchInputError("codegen_gateway_unavailable")
     if not (getattr(response, "success", False) is True
             and getattr(response, "provider", "") == "codex"
             and raw.get("status") == "succeeded"
@@ -1833,8 +1841,19 @@ def main(argv: list[str] | None = None) -> int:
         args.output.write_text(json.dumps(result, ensure_ascii=False, sort_keys=True), encoding="utf-8")
         return 0
     except NewResearchInputError as exc:
+        if args.soxl_rsi2_codegen:
+            try:
+                deferred = str(exc) == "codegen_gateway_deferred"
+                args.output.write_text(json.dumps({
+                    "status": "deferred" if deferred else "failed", "reason": str(exc),
+                    "research_executed": False if deferred else "unknown", "learning_only": True,
+                    "no_order": True, "promotion_eligible": False,
+                    "live_authority_granted": False,
+                }, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+            except OSError:
+                pass
         print(f"new_research_{exc}")
-        return 2
+        return 0 if args.soxl_rsi2_codegen and str(exc) == "codegen_gateway_deferred" else 2
     except Exception:
         print("new_research_unavailable")
         return 3
