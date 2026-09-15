@@ -334,8 +334,9 @@ def _validate_platform_bugfix_payload(payload: dict[str, Any]) -> None:
     requested_effort = str(payload.get("reasoning_effort") or "").strip().lower()
     if requested_effort not in {"", "auto", "medium"}:
         raise PermissionError("platform_bugfix requires medium reasoning effort")
-    if str(payload.get("mode") or "review_and_fix").strip().lower() != "review_and_fix":
-        raise ValueError("platform_bugfix requires review_and_fix mode")
+    requested_mode = str(payload.get("mode") or "review_and_fix").strip().lower()
+    if requested_mode not in {"review_only", "review_and_fix"}:
+        raise ValueError("platform_bugfix requires review_only or review_and_fix mode")
     if payload.get("auto_merge") is True:
         raise PermissionError("platform_bugfix does not permit auto-merge")
     payload.update(provider="codex", model=PLATFORM_BUGFIX_MODEL, reasoning_effort="medium", complexity="medium")
