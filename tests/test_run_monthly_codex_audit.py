@@ -64,6 +64,7 @@ from scripts.run_monthly_codex_audit import (
     run_configured_api_reviews,
     run_api_patch_provider,
     run_auto_provider_fallback,
+    run_codex_service,
     service_failure_category,
     is_service_infrastructure_failure,
     safe_branch_component,
@@ -182,6 +183,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
             "QuantStrategyLab/HkEquitySnapshotPipelines": "monthly_snapshot_audit",
             "QuantStrategyLab/ResearchSignalContextPipelines": "long_horizon_signal_shadow",
             "QuantStrategyLab/UsEquitySnapshotPipelines": "monthly_snapshot_audit",
+            "QuantStrategyLab/LongBridgePlatform": "platform_bugfix",
         }
 
         self.assertEqual(set(SOURCE_REPO_TASKS), set(expected))
@@ -216,6 +218,67 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertEqual(validate_provider("auto"), "auto")
         with self.assertRaises(Exception):
             validate_provider("claude")
+        self.assertEqual(validate_provider("task_default", task="platform_bugfix"), "codex")
+        with self.assertRaises(BridgeError):
+            validate_provider("auto", task="platform_bugfix")
+
+    def test_platform_bugfix_requires_exact_two_file_patch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            with patch("scripts.run_monthly_codex_audit.run_bounded_platform_bugfix_tests") as bounded:
+                paths = apply_service_changes(
+                    repo,
+                    [
+                        {"path": "application/rebalance_service.py", "content": "fixed\n"},
+                        {"path": "tests/test_rebalance_service.py", "content": "test\n"},
+                    ],
+                    task="platform_bugfix",
+                )
+            self.assertEqual(set(paths), {
+                "application/rebalance_service.py",
+                "tests/test_rebalance_service.py",
+            })
+            bounded.assert_called_once_with(repo)
+            with self.assertRaises(BridgeError):
+                apply_service_changes(
+                    repo,
+                    [
+                        {"path": "application/rebalance_service.py", "content": "fixed\n"},
+                        {"path": "tests/test_rebalance_service.py", "content": "test\n"},
+                        {"path": "README.md", "content": "no\n"},
+                    ],
+                    task="platform_bugfix",
+                )
+
+    def test_platform_bugfix_fake_service_output_stops_at_bounded_test_failure(self) -> None:
+        payload = json.dumps(
+            {
+                "final_message": "synthetic fix",
+                "changes": [
+                    {"path": "application/rebalance_service.py", "content": "fixed\n"},
+                    {"path": "tests/test_rebalance_service.py", "content": "test\n"},
+                ],
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "scripts.run_monthly_codex_audit.request_codex_service", return_value=payload
+        ), patch(
+            "scripts.run_monthly_codex_audit.run_bounded_platform_bugfix_tests",
+            side_effect=BridgeError("synthetic bounded regression failure"),
+        ), patch("scripts.run_monthly_codex_audit.publish_remediation") as publish:
+            result = run_codex_service(
+                Path(tmp),
+                "synthetic",
+                1,
+                source_repo="QuantStrategyLab/LongBridgePlatform",
+                source_ref="26844fa9b909e98e867acf4c50120b90acc6c792",
+                task="platform_bugfix",
+                mode="review_and_fix",
+            )
+            self.assertEqual(result[0], 1)
+            self.assertIn("synthetic bounded regression failure", result[1])
+            self.assertEqual((Path(tmp) / "application/rebalance_service.py").read_text(), "fixed\n")
+            publish.assert_not_called()
 
     def test_default_provider_for_task_is_task_specific(self) -> None:
         self.assertEqual(default_provider_for_task("monthly_snapshot_audit"), "auto")

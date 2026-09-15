@@ -8,6 +8,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 from string import Template
@@ -30,6 +31,7 @@ API_BASE = "https://api.github.com"
 PROMPT_TEMPLATES = {
     "monthly_snapshot_audit": ROOT / "prompts" / "monthly_crypto_snapshot_audit.md",
     "long_horizon_signal_shadow": ROOT / "prompts" / "long_horizon_signal_shadow.md",
+    "platform_bugfix": ROOT / "prompts" / "platform_bugfix.md",
 }
 DEFAULT_SOURCE_REPO = "QuantStrategyLab/CryptoLivePoolPipelines"
 SOURCE_REPO_TASKS = {
@@ -37,6 +39,7 @@ SOURCE_REPO_TASKS = {
     "QuantStrategyLab/HkEquitySnapshotPipelines": frozenset({"monthly_snapshot_audit"}),
     "QuantStrategyLab/ResearchSignalContextPipelines": frozenset({"long_horizon_signal_shadow"}),
     "QuantStrategyLab/UsEquitySnapshotPipelines": frozenset({"monthly_snapshot_audit"}),
+    "QuantStrategyLab/LongBridgePlatform": frozenset({"platform_bugfix"}),
 }
 ALLOWED_SOURCE_REPOS = frozenset(SOURCE_REPO_TASKS)
 REPO_TASKS = SOURCE_REPO_TASKS
@@ -47,7 +50,11 @@ TASK_DEFAULT_PROVIDER = "task_default"
 TASK_DEFAULT_PROVIDERS = {
     "monthly_snapshot_audit": "auto",
     "long_horizon_signal_shadow": "codex",
+    "platform_bugfix": "codex",
 }
+PLATFORM_BUGFIX_ALLOWED_PATHS = frozenset(
+    {"application/rebalance_service.py", "tests/test_rebalance_service.py"}
+)
 API_PATCH_SYSTEM_PROMPT = (
     "You are AIAuditBridge's API fallback patch provider. "
     "Return exactly one JSON object that matches the service patch contract. "
@@ -397,7 +404,9 @@ def validate_task(task: str, source_repo: str) -> str:
 def validate_provider(provider: str, task: str = DEFAULT_TASK) -> str:
     normalized = (provider or TASK_DEFAULT_PROVIDER).strip().lower()
     if normalized == TASK_DEFAULT_PROVIDER:
-        return default_provider_for_task(task)
+        normalized = default_provider_for_task(task)
+    if task == "platform_bugfix" and normalized != "codex":
+        raise BridgeError("platform_bugfix requires the Codex service provider")
     if normalized not in SUPPORTED_PROVIDERS:
         raise BridgeError(f"Unsupported CODEX_AUDIT_PROVIDER: {provider!r}")
     return normalized
@@ -956,6 +965,8 @@ def admit_automation(
     source_repo: str,
     mode: str,
     auto_merge: bool,
+    *,
+    task: str = DEFAULT_TASK,
 ) -> tuple[str, bool, str | None]:
     """Fail closed when the service control plane does not admit a fix run."""
     if mode == "review_only":
@@ -976,7 +987,7 @@ def admit_automation(
     control = response.get("control") if response.get("status") == "ok" else None
     if not isinstance(control, dict) or control.get("auto_fix_allowed") is not True:
         return "review_only", False, "not_admitted"
-    return mode, auto_merge, None
+    return mode, False if task == "platform_bugfix" else auto_merge, None
 
 
 def request_codex_service(
@@ -991,15 +1002,18 @@ def request_codex_service(
 ) -> str:
     audience = env_value("CODEX_AUDIT_SERVICE_AUDIENCE", DEFAULT_SERVICE_AUDIENCE)
     service_url = normalize_codex_service_url(env_value("CODEX_AUDIT_SERVICE_URL"))
+    route = {} if task == "platform_bugfix" else route_model(task)
     payload = {
         "source_repository": source_repo,
         "source_ref": source_ref,
         "task": task,
         "mode": mode,
         "prompt": prompt,
-        "model": route_model(task).get("model", ""),
+        "model": route.get("model", ""),
         "timeout_seconds": timeout_minutes * 60,
     }
+    if task == "platform_bugfix":
+        payload.update(model="gpt-5.6-luna", reasoning_effort="medium", complexity="medium")
     if issue_number is not None:
         payload["issue_number"] = issue_number
     submit_payload = request_codex_service_json(
@@ -1139,6 +1153,15 @@ def apply_service_changes(repo_dir: Path, changes: list[dict[str, str]], *, task
         raise BridgeError(f"Service patch contains {len(changes)} changes; limit is {max_changes}")
 
     validated_paths = [validate_service_change_path(change["path"]) for change in changes]
+    if task == "platform_bugfix":
+        if (
+            set(validated_paths) != PLATFORM_BUGFIX_ALLOWED_PATHS
+            or len(validated_paths) != len(PLATFORM_BUGFIX_ALLOWED_PATHS)
+        ):
+            raise BridgeError(
+                "platform_bugfix requires exactly application/rebalance_service.py and "
+                "tests/test_rebalance_service.py"
+            )
     policy_paths = [change["path"] for change in changes] if task == "long_horizon_signal_shadow" else validated_paths
     denied = blocked_paths(policy_paths, task=task)
     if denied:
@@ -1151,7 +1174,114 @@ def apply_service_changes(repo_dir: Path, changes: list[dict[str, str]], *, task
     for change, target in zip(changes, targets, strict=True):
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(change["content"], encoding="utf-8")
+    if task == "platform_bugfix":
+        run_bounded_platform_bugfix_tests(repo_dir)
     return validated_paths
+
+
+def run_bounded_platform_bugfix_tests(repo_dir: Path) -> None:
+    """Run the fixed LongBridge regression test in a locked-down Docker job."""
+    docker = shutil.which("docker")
+    if not docker:
+        raise BridgeError("platform_bugfix requires Docker for the bounded test")
+
+    with tempfile.TemporaryDirectory(prefix="codex-platform-bugfix-test-") as tmp:
+        tmp_root = Path(tmp)
+        base = tmp_root / "base"
+        sandbox = tmp_root / "source"
+        base.mkdir()
+        for target in (base, sandbox):
+            target.mkdir(exist_ok=True)
+            archive = subprocess.run(
+                ["git", "archive", "--format=tar", "HEAD"],
+                cwd=repo_dir,
+                capture_output=True,
+                check=True,
+                timeout=60,
+            )
+            subprocess.run(["tar", "-xf", "-", "-C", str(target)], input=archive.stdout, check=True)
+        for relative in PLATFORM_BUGFIX_ALLOWED_PATHS:
+            source = repo_dir / relative
+            target = sandbox / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+        if any(path.is_symlink() for path in sandbox.rglob("*")):
+            raise BridgeError("platform_bugfix test sandbox contains a symlink")
+        def forbidden(path: Path) -> bool:
+            name = path.name.lower()
+            return name == ".git" or name == ".env" or (name.startswith(".env.") and name != ".env.example") or "credential" in name
+
+        if any(forbidden(path) for path in base.rglob("*")) or any(forbidden(path) for path in sandbox.rglob("*")):
+            raise BridgeError("platform_bugfix trusted test base contains a forbidden file")
+        dockerfile = base / "Dockerfile.codex-platform-bugfix-test"
+        dockerfile.write_text(
+            "FROM python:3.12-slim-trixie\n"
+            "WORKDIR /opt/longbridge\n"
+            "COPY . /opt/longbridge\n"
+            "RUN apt-get update \\\n"
+            "    && apt-get install -y --no-install-recommends git \\\n"
+            "    && rm -rf /var/lib/apt/lists/* \\\n"
+            "    && python -m pip install --no-cache-dir uv \\\n"
+            "    && uv sync --frozen --extra test\n",
+            encoding="utf-8",
+        )
+        image = f"qsl-platform-bugfix-test:{os.getpid()}-{time.monotonic_ns()}"
+        context_host = subprocess.check_output(
+            [docker, "context", "inspect", "--format", "{{.Endpoints.docker.Host}}"],
+            text=True,
+            timeout=30,
+        ).strip()
+        docker_env = {"PATH": os.environ.get("PATH", ""), "DOCKER_HOST": context_host}
+        container = f"qsl-platform-bugfix-test-{os.getpid()}-{time.monotonic_ns()}"
+        try:
+            built = subprocess.run(
+                [docker, "build", "--network=default", "-f", str(dockerfile), "-t", image, str(base)],
+                env=docker_env,
+                capture_output=True,
+                text=True,
+                timeout=1800,
+                check=False,
+            )
+            if built.returncode != 0:
+                raise BridgeError("platform_bugfix trusted dependency image build failed")
+            command = [
+                docker,
+                "run",
+                "--rm",
+                "--name",
+                container,
+                "--network=none",
+                "--read-only",
+                "--cap-drop=ALL",
+                "--security-opt=no-new-privileges",
+                "--pids-limit=256",
+                "--memory=2g",
+                "--cpus=2",
+                "--tmpfs=/tmp:rw,noexec,nosuid,size=64m",
+                "-v",
+                f"{sandbox}:/workspace:ro",
+                "-w",
+                "/workspace",
+                image,
+                "/opt/longbridge/.venv/bin/python",
+                "-m",
+                "pytest",
+                "tests/test_rebalance_service.py",
+                "-q",
+            ]
+            tested = subprocess.run(
+                command,
+                env=docker_env,
+                capture_output=True,
+                text=True,
+                timeout=600,
+                check=False,
+            )
+            if tested.returncode != 0:
+                raise BridgeError("platform_bugfix bounded test failed; no PR may be created")
+        finally:
+            subprocess.run([docker, "rm", "--force", container], env=docker_env, capture_output=True, check=False)
+            subprocess.run([docker, "rmi", "--force", image], env=docker_env, capture_output=True, check=False)
 
 
 def run_codex_service(
@@ -1535,7 +1665,7 @@ def prepare_remediation_workspace(
     baseline_auto_merge_policy = load_guarded_auto_merge_policy(
         repo_dir / ".github" / "codex_auto_merge_policy.json"
     )
-    feedback_retry_pr = resolve_feedback_retry_pr(
+    feedback_retry_pr = None if task == "platform_bugfix" else resolve_feedback_retry_pr(
         token,
         source_repo,
         issue_number,
@@ -1637,6 +1767,12 @@ def publish_remediation(
 ) -> int:
     status = git_status(workspace.repo_dir, task=task)
     paths = changed_paths(status)
+    if task == "platform_bugfix" and auto_merge:
+        raise BridgeError("platform_bugfix publication cannot enable auto-merge")
+    if task == "platform_bugfix" and paths and (
+        len(paths) != len(PLATFORM_BUGFIX_ALLOWED_PATHS) or set(paths) != PLATFORM_BUGFIX_ALLOWED_PATHS
+    ):
+        raise BridgeError("platform_bugfix publication requires exactly the two approved source files")
     if not paths:
         review_message = format_codex_message(final_message, workspace.repo_dir, source_repo, source_ref)
         body = truncate_markdown(review_message or "Codex found no safe code changes to make.")
@@ -2825,7 +2961,9 @@ def main() -> int:
     issue_number = int(issue_number_raw)
     timeout_minutes = int(env_value("CODEX_AUDIT_TIMEOUT_MINUTES", "45"))
     auto_merge = parse_bool(env_value("CODEX_AUDIT_AUTO_MERGE"))
-    mode, auto_merge, admission_reason = admit_automation(source_repo, mode, auto_merge)
+    mode, auto_merge, admission_reason = admit_automation(
+        source_repo, mode, auto_merge, task=task
+    )
     if admission_reason:
         print(f"Automation admission {admission_reason}; downgraded to review_only.")
     token = resolve_source_repo_token(source_repo)
