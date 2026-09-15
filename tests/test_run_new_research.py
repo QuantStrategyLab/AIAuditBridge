@@ -15,7 +15,9 @@ import pytest
 from quant_platform_kit.research_factory import ResearchSourceReceipt, ResearchWorkerManifest, ResearchWorkerRole
 from quant_platform_kit.strategy_lifecycle.contracts import OptimizationProposal
 from scripts.run_new_research import (
-    NewResearchInputError, _LOCAL_STRATEGY_FACTS, run_request,
+    NewResearchInputError, SOXL_RSI2_CODEGEN_SOURCE_URLS, _LOCAL_STRATEGY_FACTS,
+    fetch_soxl_rsi2_codegen_sources, run_request, soxl_rsi2_codegen,
+    validate_soxl_rsi2_codegen_change,
     run_trusted_soxl_rsi2_dual_window,
 )
 
@@ -28,6 +30,354 @@ def _receipt() -> dict:
         declared_license="CC-BY-4.0", usage_scope="candidate_copy", license_review_id="review-1",
     )
     return value.to_dict()
+
+
+def _codegen_core() -> str:
+    return (
+        "from typing import Any\n\n"
+        "def _rsi2_research_target(*, held: bool, lagged_rsi: float | None, entry_threshold: float, prior_closes: tuple[float, ...]) -> bool:\n"
+        "    if not held:\n"
+        "        return lagged_rsi is not None and lagged_rsi <= entry_threshold\n"
+        "    if lagged_rsi is not None and lagged_rsi >= 70.0:\n"
+        "        return False\n"
+        "    return True\n"
+        "\nTAIL = 1\n"
+    )
+
+
+def _init_codegen_fixture_git(root: Path) -> None:
+    (root / "src/us_equity_strategies/__init__.py").write_text("", encoding="utf-8")
+    (root / "src/us_equity_strategies/research/__init__.py").write_text("", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(
+        ["git", "-c", "user.name=fixture", "-c", "user.email=fixture@example.test",
+         "commit", "-qm", "base"], cwd=root, check=True,
+    )
+
+
+def test_codegen_sources_are_fixed_bounded_and_citation_only(monkeypatch):
+    class Response:
+        def __init__(self, url, body): self.url, self.body = url, body
+        def __enter__(self): return self
+        def __exit__(self, *_args): return None
+        def geturl(self): return self.url
+        def read(self, _limit): return self.body
+    bodies = {url: f"fixture:{url}".encode() for url in SOXL_RSI2_CODEGEN_SOURCE_URLS}
+    class Opener:
+        def open(self, request, timeout):
+            assert timeout == 15
+            return Response(request.full_url, bodies[request.full_url])
+    monkeypatch.setattr("urllib.request.build_opener", lambda _handler: Opener())
+    receipts = fetch_soxl_rsi2_codegen_sources(retrieved_at=datetime(2026, 9, 15, tzinfo=timezone.utc))
+    assert [item["source_url"] for item in receipts] == list(SOXL_RSI2_CODEGEN_SOURCE_URLS)
+    assert all(item["usage_scope"] == "citation_or_summary" for item in receipts)
+
+
+def test_codegen_helper_validator_rejects_signature_and_outside_bytes_changes():
+    original = _codegen_core()
+    updated = original.replace("return True", "return bool(True)")
+    with pytest.raises(NewResearchInputError, match="codegen_helper_expression_invalid"):
+        validate_soxl_rsi2_codegen_change(
+            "src/us_equity_strategies/research/soxl_core_optimization.py", original, updated,
+        )
+    malicious = original.replace("entry_threshold: float", "entry_threshold: float = evil()")
+    with pytest.raises(NewResearchInputError, match="codegen_helper_signature_changed"):
+        validate_soxl_rsi2_codegen_change(
+            "src/us_equity_strategies/research/soxl_core_optimization.py", original, malicious,
+        )
+    outside = original.replace("TAIL = 1", "TAIL = 2")
+    with pytest.raises(NewResearchInputError, match="codegen_core_bytes_outside_helper_changed"):
+        validate_soxl_rsi2_codegen_change(
+            "src/us_equity_strategies/research/soxl_core_optimization.py", original, outside,
+        )
+
+
+def test_soxl_rsi2_codegen_uses_fixed_gateway_contract_and_can_stop_empty(tmp_path, monkeypatch):
+    root = tmp_path / "ues"
+    (root / "src/us_equity_strategies/research").mkdir(parents=True)
+    (root / "tests").mkdir()
+    (root / "src/us_equity_strategies/research/soxl_core_optimization.py").write_text(_codegen_core(), encoding="utf-8")
+    (root / "tests/test_soxl_rsi2_mean_reversion.py").write_text("# fixed test\n", encoding="utf-8")
+    for relative in (
+        "src/us_equity_strategies/research/soxl_soxx_offline_input_contract.py",
+        "src/us_equity_strategies/research/soxl_soxx_typed_baseline_result.py",
+    ):
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("# provenance\n", encoding="utf-8")
+    _init_codegen_fixture_git(root)
+    approved_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+    bodies = {url: f"UNTRUSTED_BODY:{url}".encode() for url in SOXL_RSI2_CODEGEN_SOURCE_URLS}
+    class Response:
+        def __init__(self, url): self.url = url
+        def __enter__(self): return self
+        def __exit__(self, *_args): return None
+        def geturl(self): return self.url
+        def read(self, _limit): return bodies[self.url]
+    class Opener:
+        def open(self, request, timeout): return Response(request.full_url)
+    monkeypatch.setattr("urllib.request.build_opener", lambda _handler: Opener())
+    captured = {}
+    response = types.SimpleNamespace(
+        success=True, provider="codex", raw={"status": "succeeded", "provider": "codex", "research_stage": "optimization"},
+        output=json.dumps({"final_message": "no patch", "changes": []}),
+    )
+    def execute(prompt):
+        captured["prompt"] = prompt
+        return response
+    result = soxl_rsi2_codegen(
+        ues_repo_root=root, source_ref="a" * 40,
+        approved_commit=approved_commit,
+        retrieved_at=datetime(2026, 9, 15, tzinfo=timezone.utc),
+        execute=execute,
+    )
+    assert result["status"] == "no_changes"
+    assert "UNTRUSTED_BODY" not in captured["prompt"]
+    assert result["source_receipts"][0]["usage_scope"] == "citation_or_summary"
+
+
+def test_soxl_rsi2_codegen_validates_patch_in_git_archive_candidate(tmp_path, monkeypatch):
+    root = tmp_path / "ues"
+    (root / "src/us_equity_strategies/research").mkdir(parents=True)
+    (root / "tests").mkdir()
+    core = _codegen_core()
+    (root / "src/us_equity_strategies/research/soxl_core_optimization.py").write_text(core, encoding="utf-8")
+    (root / "tests/test_soxl_rsi2_mean_reversion.py").write_text("# fixed test\n", encoding="utf-8")
+    for relative in (
+        "src/us_equity_strategies/research/soxl_soxx_offline_input_contract.py",
+        "src/us_equity_strategies/research/soxl_soxx_typed_baseline_result.py",
+    ):
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("# provenance\n", encoding="utf-8")
+    _init_codegen_fixture_git(root)
+    approved_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+    opener = type("Opener", (), {"open": lambda self, request, timeout: type("Response", (), {
+        "__enter__": lambda self: self, "__exit__": lambda self, *_args: None,
+        "geturl": lambda self: request.full_url, "read": lambda self, _limit: b"fixture",
+    })()})()
+    monkeypatch.setattr("urllib.request.build_opener", lambda _handler: opener)
+    helper_start = core.index("def _rsi2_research_target")
+    helper_end = core.index("\nTAIL = 1")
+    old = core[helper_start:helper_end]
+    new = old.replace("return True", "return not False")
+    response = types.SimpleNamespace(
+        success=True, provider="codex", raw={"status": "succeeded", "provider": "codex", "research_stage": "optimization"},
+        output=json.dumps({"final_message": "bounded patch", "changes": [{
+            "path": "src/us_equity_strategies/research/soxl_core_optimization.py",
+            "base_sha256": hashlib.sha256(core.encode()).hexdigest(),
+            "edits": [{"old": old, "new": new}],
+        }]}),
+    )
+    input_paths = {}
+    for key in ("manifest", "artifact", "readback"):
+        path = tmp_path / f"{key}.json"
+        path.write_text("{}", encoding="utf-8")
+        input_paths[key] = str(path)
+    research_payload = {"input_paths": input_paths, "request": {"as_of": "2026-09-15"},
+                        "research_identity": {"input_revision": "input-v1"}}
+    captured_research = {}
+    def research_runner(_candidate, **kwargs):
+        captured_research.update(kwargs)
+        return {"status": "parked", "live_authority_granted": False}
+    result = soxl_rsi2_codegen(
+        ues_repo_root=root, source_ref="a" * 40,
+        approved_commit=approved_commit,
+        retrieved_at=datetime(2026, 9, 15, tzinfo=timezone.utc),
+        execute=lambda _prompt: response,
+        candidate_test_runner=lambda _candidate, **_kwargs: {"status": "passed", "execution_isolation": "mock"},
+        research_payload=research_payload, run_root=tmp_path / "run",
+        candidate_research_runner=research_runner,
+    )
+    assert result["status"] == "patch_validated"
+    assert result["integration_status"] == "research_completed"
+    assert result["live_authority_granted"] is False
+    assert len(result["source_commit"]) == 40
+    assert captured_research["payload"]["source_commit"] == result["source_commit"]
+    assert captured_research["payload"]["source_blobs"] == result["source_blobs"]
+    assert captured_research["payload"]["research_identity"]["code_revision"] == result["source_commit"]
+
+
+def test_codegen_candidate_tests_runs_two_locked_down_docker_containers(tmp_path, monkeypatch):
+    from scripts import run_new_research as module
+    baseline = tmp_path / "baseline"
+    candidate = tmp_path / "candidate"
+    for root in (baseline, candidate):
+        (root / "tests").mkdir(parents=True)
+        (root / "src").mkdir()
+    (baseline / "pyproject.toml").write_text("[project]\nname='fixture'\nversion='0'\n", encoding="utf-8")
+    (baseline / "uv.lock").write_text("version = 1\n", encoding="utf-8")
+    calls = []
+    class Completed:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+    monkeypatch.setattr(module.shutil, "which", lambda name: "/usr/bin/docker")
+    monkeypatch.setattr(module.subprocess, "run", lambda command, **kwargs: (calls.append(command) or Completed()))
+    result = module._run_codegen_candidate_tests(candidate, baseline_root=baseline)
+    runs = [call for call in calls if call[1] == "run"]
+    assert result["execution_isolation"] == "docker"
+    assert len(runs) == 2
+    for command in runs:
+        assert "--network=none" in command
+        assert "--read-only" in command
+        assert "--cap-drop=ALL" in command
+        assert "--security-opt=no-new-privileges" in command
+        assert "-v" in command and any(item.endswith(":/workspace:ro") for item in command)
+    assert f"{candidate}:/workspace:ro" in runs[0]
+    assert f"{candidate}:/workspace:ro" in runs[1]
+    assert any(item.endswith(":/trusted/test_soxl_rsi2_mean_reversion.py:ro") for item in runs[0])
+    assert not any(item.endswith(":/trusted/test_soxl_rsi2_mean_reversion.py:ro") for item in runs[1])
+
+
+def test_codegen_candidate_tests_stops_after_baseline_failure(tmp_path, monkeypatch):
+    from scripts import run_new_research as module
+    baseline = tmp_path / "baseline"
+    candidate = tmp_path / "candidate"
+    for root in (baseline, candidate):
+        (root / "tests").mkdir(parents=True)
+        (root / "src").mkdir()
+    (baseline / "pyproject.toml").write_text("[project]\nname='fixture'\nversion='0'\n", encoding="utf-8")
+    (baseline / "uv.lock").write_text("version = 1\n", encoding="utf-8")
+    calls = []
+    class Completed:
+        stdout = ""
+        stderr = ""
+        def __init__(self, returncode): self.returncode = returncode
+    monkeypatch.setattr(module.shutil, "which", lambda name: "/usr/bin/docker")
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return Completed(1 if command[1] == "run" and sum(item[1] == "run" for item in calls) == 1 else 0)
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    with pytest.raises(NewResearchInputError, match="codegen_trusted_tests_failed"):
+        module._run_codegen_candidate_tests(candidate, baseline_root=baseline)
+    assert sum(command[1] == "run" for command in calls) == 1
+
+
+def test_codegen_research_runner_is_docker_only_and_reentrant(tmp_path, monkeypatch):
+    from scripts import run_new_research as module
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    (candidate / "pyproject.toml").write_text("[project]\nname='fixture'\nversion='0'\n", encoding="utf-8")
+    (candidate / "uv.lock").write_text("version = 1\n", encoding="utf-8")
+    inputs = {}
+    for key in ("manifest", "artifact", "readback"):
+        path = tmp_path / f"{key}.json"
+        path.write_text("{}", encoding="utf-8")
+        inputs[key] = str(path)
+    payload = {
+        "source_commit": "a" * 40,
+        "source_blobs": {"core": "b" * 40, "input": "c" * 40, "baseline": "d" * 40},
+        "input_paths": inputs,
+    }
+    calls = []
+    class Completed:
+        returncode = 0
+        stdout = json.dumps({"status": "parked", "live_authority_granted": False})
+        stderr = ""
+    monkeypatch.setattr(module.shutil, "which", lambda name: "/usr/bin/docker")
+    monkeypatch.setattr(module.subprocess, "run", lambda command, **kwargs: (calls.append(command) or Completed()))
+    run_root = tmp_path / "run"
+    result = module._run_codegen_candidate_research(
+        candidate, payload=payload, run_root=run_root, source_commit="a" * 40,
+    )
+    assert result["execution_isolation"] == "docker"
+    assert any(command[1] == "build" for command in calls)
+    run_command = next(command for command in calls if command[1] == "run")
+    assert "--network=none" in run_command
+    assert "--read-only" in run_command
+    assert "--cap-drop=ALL" in run_command
+    assert "--security-opt=no-new-privileges" in run_command
+    assert f"{candidate}:/workspace:ro" in run_command
+    assert any(item.endswith(":/aab:ro") for item in run_command)
+    assert "/Users/lisiyi/Projects/.worktrees/aab-rsi2-codegen-20260915:/aab:ro" not in run_command
+    call_count = len(calls)
+    assert module._run_codegen_candidate_research(
+        candidate, payload=payload, run_root=run_root, source_commit="a" * 40,
+    ) == result
+    assert len(calls) == call_count
+    changed = dict(payload)
+    changed["source_blobs"] = {**payload["source_blobs"], "core": "e" * 40}
+    with pytest.raises(NewResearchInputError, match="saved_input_mismatch"):
+        module._run_codegen_candidate_research(
+            candidate, payload=changed, run_root=run_root, source_commit="a" * 40,
+        )
+
+
+def test_codegen_docker_integration_fixture(tmp_path):
+    """Opt-in CI fixture: real Docker, UES optimizer and QPK cycle, no model/network."""
+    if os.environ.get("AAB_RUN_DOCKER_INTEGRATION") != "1":
+        pytest.skip("Docker integration is opt-in and runs only in the dedicated CI step")
+    from scripts import run_new_research as module
+    approved_root = Path(os.environ["AAB_SOXL_APPROVED_REPO"]).resolve()
+    approved_commit = os.environ["AAB_SOXL_APPROVED_COMMIT"]
+    assert subprocess.check_output(
+        ["git", "-C", str(approved_root), "rev-parse", "HEAD"], text=True,
+    ).strip() == approved_commit
+    from us_equity_strategies.research.soxl_alpaca_input_adapter import materialize_soxl_alpaca_input
+    from us_equity_strategies.research.soxl_rsi2_research_adapter import (
+        _COST_MODEL_REVISION, _PARAM_SPACE_REVISION, _VALIDATOR_REVISION,
+        load_rsi2_offline_input, Rsi2OfflineInputPaths,
+    )
+    source_root = _alpaca_source_root(tmp_path)
+    paths = materialize_soxl_alpaca_input(
+        source_root, tmp_path / "alpaca-pack", start="2022-01-03",
+        end_exclusive="2024-01-26", expected_sessions=753,
+    )
+    source = load_rsi2_offline_input(Rsi2OfflineInputPaths(
+        paths.manifest, paths.artifact, paths.readback,
+    ))
+    core = (approved_root / "src/us_equity_strategies/research/soxl_core_optimization.py").read_text(encoding="utf-8")
+    start = core.index("def _rsi2_research_target")
+    end = core.index("\ndef ", start + 1)
+    old = core[start:end]
+    new = old.replace("return True", "return not False")
+    response = types.SimpleNamespace(
+        success=True, provider="codex",
+        raw={"status": "succeeded", "provider": "codex", "research_stage": "optimization"},
+        output=json.dumps({"final_message": "synthetic Docker fixture", "changes": [{
+            "path": "src/us_equity_strategies/research/soxl_core_optimization.py",
+            "base_sha256": hashlib.sha256(core.encode()).hexdigest(),
+            "edits": [{"old": old, "new": new}],
+        }]}),
+    )
+    blobs = {
+        path: subprocess.check_output(
+            ["git", "-C", str(approved_root), "rev-parse", f"HEAD:{path}"], text=True,
+        ).strip()
+        for path in module._SOXL_PROVENANCE_PATHS
+    }
+    payload = _payload(tmp_path)
+    payload.update({
+        "source_commit": approved_commit, "source_blobs": blobs,
+        "request": {**payload["request"], "source_revision": source.source_revision},
+        "research_identity": {
+            "code_revision": approved_commit, "input_revision": source.input_digest,
+            "param_space_revision": _PARAM_SPACE_REVISION,
+            "cost_model_revision": _COST_MODEL_REVISION,
+            "validator_revision": _VALIDATOR_REVISION,
+        },
+        "input_paths": {"manifest": str(paths.manifest), "artifact": str(paths.artifact), "readback": str(paths.readback)},
+        "output_root": str(tmp_path / "output"), "ticket_dir": str(tmp_path / "tickets"),
+        "ues_repo_root": str(approved_root),
+    })
+    run_root = tmp_path / "codegen-run"
+    first = module.soxl_rsi2_codegen(
+        ues_repo_root=approved_root, approved_commit=approved_commit,
+        source_ref="e" * 40, execute=lambda _prompt: response,
+        research_payload=payload, run_root=run_root,
+    )
+    assert first["status"] == "patch_validated"
+    assert first["research_result"]["live_authority_granted"] is False
+    assert first["source_commit"] != approved_commit
+    assert len(first["source_blobs"]) == 3
+    second = module.soxl_rsi2_codegen(
+        ues_repo_root=approved_root, approved_commit=approved_commit,
+        source_ref="e" * 40, execute=lambda _prompt: pytest.fail("re-entry must not call model"),
+        research_payload=payload, run_root=run_root,
+    )
+    assert second == first
 
 
 def _payload(tmp_path):

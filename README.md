@@ -82,6 +82,13 @@ is local-only and the shadow callback records an explicit no-order pending obser
 `NO_IMPROVEMENT` or parked result is a valid research outcome and grants no
 authority.
 
+The explicit `soxl_rsi2_research_codegen` mode has Docker-only candidate test
+and research runners. Focused tests verify the generated Docker commands,
+candidate source loading, input/output mounts, and re-entry result reuse; Docker
+has not been run in this workspace, so real backtest/research completion is
+unverified. No result has been deployed or published, and this mode grants no
+authority.
+
 The `strategy_optimization_watcher.yml` workflow keeps its scheduled learning
 job unchanged. A one-shot manual run is available only when dispatching with
 `run_soxl_rsi2=true`; it uses the same WIF and exact P1 object prefix, uploads

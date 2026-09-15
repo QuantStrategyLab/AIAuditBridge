@@ -56,6 +56,11 @@ TASK_DEFAULT_PROVIDERS = {
 PLATFORM_BUGFIX_ALLOWED_PATHS = frozenset(
     {"application/rebalance_service.py", "tests/test_rebalance_service.py"}
 )
+SOXL_RSI2_CODEGEN_TASK = "soxl_rsi2_research_codegen"
+SOXL_RSI2_CODEGEN_ALLOWED_PATHS = frozenset({
+    "src/us_equity_strategies/research/soxl_core_optimization.py",
+    "tests/test_soxl_rsi2_mean_reversion.py",
+})
 PLATFORM_BUGFIX_MAX_EDITS_PER_FILE = 20
 PLATFORM_BUGFIX_MAX_REPLACEMENT_BYTES = 128 * 1024
 API_PATCH_SYSTEM_PROMPT = (
@@ -1312,9 +1317,9 @@ def parse_service_patch_response(
         if not isinstance(path, str) or not path.strip():
             raise BridgeError(f"Service patch response change #{index + 1} has an invalid path")
         normalized_path = path.strip()
-        if task == "platform_bugfix":
+        if task in {"platform_bugfix", SOXL_RSI2_CODEGEN_TASK}:
             if "content" in item:
-                raise BridgeError("platform_bugfix requires targeted edits, not complete file contents")
+                raise BridgeError(f"{task} requires targeted edits, not complete file contents")
             base_sha256 = item.get("base_sha256")
             edits = item.get("edits")
             if not isinstance(base_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", base_sha256):
@@ -1410,19 +1415,25 @@ def _platform_bugfix_replacement(
     return updated
 
 
-def apply_service_changes(repo_dir: Path, changes: list[dict[str, Any]], *, task: str) -> list[str]:
+def apply_service_changes(
+    repo_dir: Path,
+    changes: list[dict[str, Any]],
+    *,
+    task: str,
+    validate_updated=None,
+) -> list[str]:
     max_changes = int_env("CODEX_AUDIT_SERVICE_MAX_CHANGES", DEFAULT_SERVICE_MAX_CHANGES)
     if len(changes) > max_changes:
         raise BridgeError(f"Service patch contains {len(changes)} changes; limit is {max_changes}")
 
     validated_paths = [validate_service_change_path(change["path"]) for change in changes]
-    if task == "platform_bugfix":
+    if task in {"platform_bugfix", SOXL_RSI2_CODEGEN_TASK}:
         if len(set(validated_paths)) != len(validated_paths):
-            raise BridgeError("platform_bugfix changes must not repeat a file")
-        if (
-            set(validated_paths) != PLATFORM_BUGFIX_ALLOWED_PATHS
-            or len(validated_paths) != len(PLATFORM_BUGFIX_ALLOWED_PATHS)
-        ):
+            raise BridgeError(f"{task} changes must not repeat a file")
+        allowed_paths = PLATFORM_BUGFIX_ALLOWED_PATHS if task == "platform_bugfix" else SOXL_RSI2_CODEGEN_ALLOWED_PATHS
+        if not set(validated_paths) <= allowed_paths:
+            raise BridgeError(f"{task} includes a path outside its exact allowlist")
+        if task == "platform_bugfix" and set(validated_paths) != allowed_paths:
             raise BridgeError(
                 "platform_bugfix requires exactly application/rebalance_service.py and "
                 "tests/test_rebalance_service.py"
@@ -1434,12 +1445,12 @@ def apply_service_changes(repo_dir: Path, changes: list[dict[str, Any]], *, task
         raise BridgeError(f"Service patch includes blocked paths: {denied_list}")
 
     repo_root = repo_dir.resolve()
-    if task == "platform_bugfix":
+    if task in {"platform_bugfix", SOXL_RSI2_CODEGEN_TASK}:
         prepared: list[tuple[Path, bytes]] = []
         total_replacement_bytes = 0
         for change, path in zip(changes, validated_paths, strict=True):
             if "content" in change:
-                raise BridgeError("platform_bugfix requires targeted edits, not complete file contents")
+                raise BridgeError(f"{task} requires targeted edits, not complete file contents")
             base_sha256 = change.get("base_sha256")
             edits = change.get("edits")
             if not isinstance(base_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", base_sha256):
@@ -1458,6 +1469,8 @@ def apply_service_changes(repo_dir: Path, changes: list[dict[str, Any]], *, task
             except UnicodeDecodeError as exc:
                 raise BridgeError(f"platform_bugfix target is not valid UTF-8: {path!r}") from exc
             replacement = _platform_bugfix_replacement(original_text, edits, path=path)
+            if validate_updated is not None:
+                validate_updated(path, original_text, replacement)
             replacement_bytes = _strict_utf8_bytes(replacement, label=f"platform_bugfix output for {path}")
             total_replacement_bytes += sum(
                 len(_strict_utf8_bytes(str(edit.get("new")), label="platform_bugfix edit new"))
@@ -1470,7 +1483,8 @@ def apply_service_changes(repo_dir: Path, changes: list[dict[str, Any]], *, task
             prepared.append((target, replacement_bytes))
         for target, replacement_bytes in prepared:
             target.write_bytes(replacement_bytes)
-        run_bounded_platform_bugfix_tests(repo_dir)
+        if task == "platform_bugfix":
+            run_bounded_platform_bugfix_tests(repo_dir)
         return validated_paths
 
     # Preflight the entire patch before the first write, for every task.
