@@ -25,6 +25,16 @@ class AiGatewayExecuteTelemetryTests(unittest.TestCase):
         self.assertIn("--sandbox", readonly_review_command)
         self.assertEqual(readonly_review_command[readonly_review_command.index("--sandbox") + 1], "read-only")
 
+    def test_codegen_service_route_is_separate_and_fail_closed(self) -> None:
+        blocked = {
+            "task": gateway.SOXL_RSI2_CODEGEN_TASK,
+            "source_repository": gateway.SOXL_RSI2_CODEGEN_SOURCE_REPO,
+            "allowed_providers": ["codex"], "provider": "codex", "mode": "review_only",
+            "research_stage": "optimization", "sandbox": "read-only",
+        }
+        with self.assertRaisesRegex(PermissionError, "integration is not implemented"):
+            gateway._validate_soxl_rsi2_codegen_payload(blocked)
+
     def test_diagnosis_ledger_exposes_only_bounded_success_summary(self):
         base = {"job_id": "a" * 32, "task": "operational_data_diagnosis",
                 "source_repository": "QuantStrategyLab/AIAuditBridge", "mode": "review_only",

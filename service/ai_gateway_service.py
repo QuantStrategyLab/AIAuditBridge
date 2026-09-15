@@ -124,6 +124,8 @@ DEFAULT_JOB_MAX_ACTIVE = 10
 PLATFORM_BUGFIX_TASK = "platform_bugfix"
 PLATFORM_BUGFIX_SOURCE_REPO = "QuantStrategyLab/LongBridgePlatform"
 PLATFORM_BUGFIX_MODEL = "gpt-5.6-luna"
+SOXL_RSI2_CODEGEN_TASK = "soxl_rsi2_research_codegen"
+SOXL_RSI2_CODEGEN_SOURCE_REPO = "QuantStrategyLab/AIAuditBridge"
 ACTIVE_JOB_STATUSES = frozenset({"queued", "running"})
 REUSABLE_RESEARCH_JOB_STATUSES = frozenset({"queued", "running", "succeeded", "failed"})
 REQUEST_AUTHORITY_FIELDS = (
@@ -292,6 +294,7 @@ def _admit_codex_execute(quota: Any, repo: str, payload: dict[str, Any]) -> dict
     """Choose a Codex research route before consuming quota or starting a job."""
     providers = payload.get("allowed_providers", ["codex"])
     _validate_platform_bugfix_payload(payload)
+    _validate_soxl_rsi2_codegen_payload(payload)
     payload["provider"] = "codex"
     if "cursor" in providers and not payload.get("research_stage"):
         return {"status": "deferred", "error": "cursor_research_stage_required", "retry_at": None, "execution_started": False}
@@ -347,6 +350,13 @@ def _validate_platform_bugfix_payload(payload: dict[str, Any]) -> None:
     if payload.get("auto_merge") is True:
         raise PermissionError("platform_bugfix does not permit auto-merge")
     payload.update(provider="codex", model=PLATFORM_BUGFIX_MODEL, reasoning_effort="medium", complexity="medium")
+
+
+def _validate_soxl_rsi2_codegen_payload(payload: dict[str, Any]) -> None:
+    """Keep research code generation on the isolated, read-only Codex route."""
+    if str(payload.get("task") or "").strip() != SOXL_RSI2_CODEGEN_TASK:
+        return
+    raise PermissionError("soxl_rsi2_research_codegen integration is not implemented")
 
 
 def _manual_approval_policy_matches(
@@ -1518,7 +1528,8 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
         }
         if payload.get("provider") != "cursor":
             execute_kwargs["shell_tool_enabled"] = not (
-                _platform_bugfix_readonly_mode(payload) or _platform_bugfix_manual_mode(payload)
+                _platform_bugfix_readonly_mode(payload)
+                or _platform_bugfix_manual_mode(payload)
             )
         result = adapter.execute(**execute_kwargs)
         job = _read_job(job_id)
@@ -2042,7 +2053,8 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         }
         if payload.get("provider") != "cursor":
             execute_kwargs["shell_tool_enabled"] = not (
-                _platform_bugfix_readonly_mode(payload) or _platform_bugfix_manual_mode(payload)
+                _platform_bugfix_readonly_mode(payload)
+                or _platform_bugfix_manual_mode(payload)
             )
         result = adapter.execute(**execute_kwargs)
         get_health_monitor().record("/v1/ai/execute", time.time() - started, result.success, result.error if not result.success else "")
