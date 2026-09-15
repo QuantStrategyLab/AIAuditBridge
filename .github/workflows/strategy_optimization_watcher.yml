@@ -29,6 +29,10 @@ on:
         required: false
         type: boolean
         default: false
+      research_objective:
+        description: "Optional bounded research objective for the SOXL RSI2 codegen case"
+        required: false
+        default: ""
       metrics_filename:
         description: "Sanitized metrics filename inside each source artifact"
         required: false
@@ -1032,6 +1036,7 @@ jobs:
       P1_MANIFEST_SHA256: b39008e05eeebd4a126eefe289a18bcae05869d937dc76e6040b71d3b0daf36d
       UES_COMMIT: 86aa4e03c30eb2fb561748d6e9c22e68d3267cfa
       CASE_ROOT: ${{ github.workspace }}/.aab-soxl-codegen-${{ github.run_id }}-${{ github.run_attempt }}
+      SOXL_RESEARCH_OBJECTIVE: ${{ inputs.research_objective || '' }}
       WIF_PROVIDER: ${{ vars.SOXL_WATCHER_GCP_WIF_PROVIDER }}
       GCP_PROJECT_ID: ${{ vars.SOXL_WATCHER_GCP_PROJECT_ID }}
       CODEX_AUDIT_SERVICE_URL: ${{ secrets.CODEX_AUDIT_SERVICE_URL }}
@@ -1123,7 +1128,8 @@ jobs:
           if ! "$CASE_ROOT/venv/bin/python" -m scripts.run_new_research \
             --soxl-rsi2-codegen --p1-root "$CASE_ROOT/p1-root" \
             --ues-repo-root "$GITHUB_WORKSPACE/ues-source" \
-            --run-root "$CASE_ROOT/run" --output "$CASE_ROOT/result.json"; then
+            --run-root "$CASE_ROOT/run" --output "$CASE_ROOT/result.json" \
+            --research-objective "$SOXL_RESEARCH_OBJECTIVE"; then
             result_status="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("status"))' "$CASE_ROOT/result.json" 2>/dev/null || true)"
             if [ "$result_status" != "failed" ]; then
               printf '%s\n' '{"schema_version":"qsl.soxl-rsi2-codegen-run.v1","status":"failed","reason":"codegen_entry_failed","research_executed":"unknown","learning_only":true,"no_order":true,"promotion_eligible":false,"live_authority_granted":false}' > "$CASE_ROOT/result.json"
