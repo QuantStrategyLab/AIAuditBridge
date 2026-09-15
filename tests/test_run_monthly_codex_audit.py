@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import subprocess
 import sys
@@ -20,6 +21,8 @@ from scripts.run_monthly_codex_audit import (
     GUARDED_AUTO_MERGE_LABEL,
     HUMAN_REVIEW_LABEL,
     GitHubRequestError,
+    PLATFORM_BUGFIX_MAX_EDITS_PER_FILE,
+    PLATFORM_BUGFIX_MAX_REPLACEMENT_BYTES,
     SOURCE_REPO_TASKS,
     api_fallback_allowed_source_repos,
     api_fallback_allow_fix,
@@ -95,6 +98,18 @@ def _normalized_policy(policy: dict[str, object]) -> dict[str, object]:
     risk_policy["medium"] = medium
     normalized["risk_policy"] = risk_policy
     return normalized
+
+
+def _platform_sources(repo: Path, *, application: bytes = b"application\n", tests: bytes = b"tests\n") -> dict[str, bytes]:
+    sources = {
+        "application/rebalance_service.py": application,
+        "tests/test_rebalance_service.py": tests,
+    }
+    for relative, content in sources.items():
+        path = repo / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+    return sources
 
 
 class RunMonthlyCodexAuditTests(unittest.TestCase):
@@ -251,12 +266,28 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
     def test_platform_bugfix_requires_exact_two_file_patch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
+            originals = {
+                "application/rebalance_service.py": "original application\n",
+                "tests/test_rebalance_service.py": "original tests\n",
+            }
+            for relative, content in originals.items():
+                path = repo / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(content.encode("utf-8"))
             with patch("scripts.run_monthly_codex_audit.run_bounded_platform_bugfix_tests") as bounded:
                 paths = apply_service_changes(
                     repo,
                     [
-                        {"path": "application/rebalance_service.py", "content": "fixed\n"},
-                        {"path": "tests/test_rebalance_service.py", "content": "test\n"},
+                        {
+                            "path": "application/rebalance_service.py",
+                            "base_sha256": hashlib.sha256(originals["application/rebalance_service.py"].encode()).hexdigest(),
+                            "edits": [{"old": "original application", "new": "fixed application"}],
+                        },
+                        {
+                            "path": "tests/test_rebalance_service.py",
+                            "base_sha256": hashlib.sha256(originals["tests/test_rebalance_service.py"].encode()).hexdigest(),
+                            "edits": [{"old": "original tests", "new": "fixed tests"}],
+                        },
                     ],
                     task="platform_bugfix",
                 )
@@ -276,13 +307,173 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
                     task="platform_bugfix",
                 )
 
+    def test_platform_bugfix_parser_accepts_targeted_edit_contract(self) -> None:
+        final_message, changes = parse_service_patch_response(
+            json.dumps(
+                {
+                    "final_message": "targeted fix",
+                    "changes": [
+                        {
+                            "path": "application/rebalance_service.py",
+                            "base_sha256": hashlib.sha256(b"alpha\n").hexdigest(),
+                            "edits": [{"old": "alpha", "new": "beta"}],
+                        },
+                        {
+                            "path": "tests/test_rebalance_service.py",
+                            "base_sha256": hashlib.sha256(b"test\n").hexdigest(),
+                            "edits": [{"old": "test", "new": "check"}],
+                        },
+                    ],
+                }
+            ),
+            task="platform_bugfix",
+        )
+
+        self.assertEqual(final_message, "targeted fix")
+        self.assertEqual(changes[0]["edits"], [{"old": "alpha", "new": "beta"}])
+
+    def test_platform_bugfix_targeted_edits_preserve_large_file_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "scripts.run_monthly_codex_audit.run_bounded_platform_bugfix_tests"
+        ):
+            repo = Path(tmp)
+            application = b"prefix\r\n" + (b"x" * 180_000) + b"\r\nTARGET\r\ntrailer\n"
+            sources = _platform_sources(repo, application=application, tests=b"test TARGET\r\n")
+            changes = [
+                {
+                    "path": path,
+                    "base_sha256": hashlib.sha256(content).hexdigest(),
+                    "edits": [{"old": "TARGET", "new": "REPLACED"}],
+                }
+                for path, content in sources.items()
+            ]
+
+            apply_service_changes(repo, changes, task="platform_bugfix")
+
+            self.assertEqual(
+                (repo / "application/rebalance_service.py").read_bytes(),
+                application.replace(b"TARGET", b"REPLACED"),
+            )
+            self.assertEqual(
+                (repo / "tests/test_rebalance_service.py").read_bytes(),
+                b"test REPLACED\r\n",
+            )
+
+    def test_platform_bugfix_rejects_hash_and_second_file_before_any_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "scripts.run_monthly_codex_audit.run_bounded_platform_bugfix_tests"
+        ):
+            repo = Path(tmp)
+            sources = _platform_sources(repo)
+            changes = [
+                {
+                    "path": path,
+                    "base_sha256": hashlib.sha256(content).hexdigest(),
+                    "edits": [{"old": "application" if path.startswith("application/") else "tests", "new": "changed"}],
+                }
+                for path, content in sources.items()
+            ]
+            changes[0]["base_sha256"] = "0" * 64
+            with self.assertRaisesRegex(BridgeError, "base_sha256 mismatch"):
+                apply_service_changes(repo, changes, task="platform_bugfix")
+            self.assertEqual((repo / "application/rebalance_service.py").read_bytes(), sources["application/rebalance_service.py"])
+            self.assertEqual((repo / "tests/test_rebalance_service.py").read_bytes(), sources["tests/test_rebalance_service.py"])
+
+            changes[0]["base_sha256"] = hashlib.sha256(sources["application/rebalance_service.py"]).hexdigest()
+            changes[1]["base_sha256"] = "f" * 64
+            with self.assertRaisesRegex(BridgeError, "base_sha256 mismatch"):
+                apply_service_changes(repo, changes, task="platform_bugfix")
+            self.assertEqual((repo / "application/rebalance_service.py").read_bytes(), sources["application/rebalance_service.py"])
+
+    def test_platform_bugfix_rejects_multiple_zero_overlapping_and_noop_edits(self) -> None:
+        cases = (
+            (b"aaa\n", [{"old": "aa", "new": "bb"}], "exactly once"),
+            (b"abcd\n", [{"old": "missing", "new": "bb"}], "exactly once"),
+            (b"abcd\n", [{"old": "abc", "new": "x"}, {"old": "bcd", "new": "y"}], "overlap"),
+            (b"abcd\n", [{"old": "abc", "new": "abc"}], "no-op"),
+        )
+        for original, edits, reason in cases:
+            with self.subTest(reason=reason), tempfile.TemporaryDirectory() as tmp, patch(
+                "scripts.run_monthly_codex_audit.run_bounded_platform_bugfix_tests"
+            ):
+                repo = Path(tmp)
+                sources = _platform_sources(repo, application=original)
+                changes = [
+                    {
+                        "path": path,
+                        "base_sha256": hashlib.sha256(content).hexdigest(),
+                        "edits": edits if path.startswith("application/") else [{"old": "tests", "new": "checked"}],
+                    }
+                    for path, content in sources.items()
+                ]
+                with self.assertRaises(BridgeError):
+                    apply_service_changes(repo, changes, task="platform_bugfix")
+                self.assertEqual((repo / "application/rebalance_service.py").read_bytes(), original)
+
+    def test_platform_bugfix_rejects_symlink_duplicate_and_limits_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            sources = _platform_sources(repo)
+            outside = repo.parent / "outside-platform.py"
+            outside.write_bytes(b"outside\n")
+            (repo / "application/rebalance_service.py").unlink()
+            (repo / "application/rebalance_service.py").symlink_to(outside)
+            valid = {
+                "path": "tests/test_rebalance_service.py",
+                "base_sha256": hashlib.sha256(sources["tests/test_rebalance_service.py"]).hexdigest(),
+                "edits": [{"old": "tests", "new": "checked"}],
+            }
+            duplicate = [valid, dict(valid)]
+            with self.assertRaisesRegex(BridgeError, "repeat"):
+                apply_service_changes(repo, duplicate, task="platform_bugfix")
+            with self.assertRaises(BridgeError):
+                apply_service_changes(
+                    repo,
+                    [
+                        {
+                            "path": "application/rebalance_service.py",
+                            "base_sha256": hashlib.sha256(b"outside\n").hexdigest(),
+                            "edits": [{"old": "outside", "new": "changed"}],
+                        },
+                        valid,
+                    ],
+                    task="platform_bugfix",
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            sources = _platform_sources(repo)
+            too_many = [{"old": "application", "new": f"change-{index}"} for index in range(PLATFORM_BUGFIX_MAX_EDITS_PER_FILE + 1)]
+            too_large = [{"old": "application", "new": "x" * (PLATFORM_BUGFIX_MAX_REPLACEMENT_BYTES + 1)}]
+            for edits in (too_many, too_large):
+                with self.subTest(limit=len(edits)):
+                    changes = [
+                        {
+                            "path": path,
+                            "base_sha256": hashlib.sha256(content).hexdigest(),
+                            "edits": edits if path.startswith("application/") else [{"old": "tests", "new": "checked"}],
+                        }
+                        for path, content in sources.items()
+                    ]
+                    with self.assertRaises(BridgeError):
+                        apply_service_changes(repo, changes, task="platform_bugfix")
+                    self.assertEqual((repo / "application/rebalance_service.py").read_bytes(), sources["application/rebalance_service.py"])
+
     def test_platform_bugfix_fake_service_output_stops_at_bounded_test_failure(self) -> None:
         payload = json.dumps(
             {
                 "final_message": "synthetic fix",
                 "changes": [
-                    {"path": "application/rebalance_service.py", "content": "fixed\n"},
-                    {"path": "tests/test_rebalance_service.py", "content": "test\n"},
+                    {
+                        "path": "application/rebalance_service.py",
+                        "base_sha256": hashlib.sha256(b"synthetic source\n").hexdigest(),
+                        "edits": [{"old": "synthetic source", "new": "fixed source"}],
+                    },
+                    {
+                        "path": "tests/test_rebalance_service.py",
+                        "base_sha256": hashlib.sha256(b"synthetic source\n").hexdigest(),
+                        "edits": [{"old": "synthetic source", "new": "fixed test"}],
+                    },
                 ],
             }
         )
@@ -311,7 +502,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
             )
             self.assertNotEqual(result[0], 0)
             self.assertIn("synthetic bounded regression failure", result[1])
-            self.assertEqual((Path(tmp) / "application/rebalance_service.py").read_text(), "fixed\n")
+            self.assertEqual((Path(tmp) / "application/rebalance_service.py").read_text(), "fixed source\n")
             publish.assert_not_called()
 
     def test_default_provider_for_task_is_task_specific(self) -> None:
@@ -768,6 +959,27 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
             self.assertIn("A" * 46_290, context)
             self.assertIn("B" * 175_718, context)
             self.assertIn("C" * 2_000, context)
+            self.assertIn(f"sha256: {hashlib.sha256(required['application/rebalance_service.py'].encode()).hexdigest()}", context)
+            self.assertIn(f"sha256: {hashlib.sha256(required['tests/test_rebalance_service.py'].encode()).hexdigest()}", context)
+
+    def test_platform_bugfix_context_rejects_invalid_utf8_in_allowed_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "application/rebalance_service.py"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"\xff\n")
+            (Path(tmp) / "application/durable_execution_commands.py").write_text("durable\n", encoding="utf-8")
+            with patch(
+                "scripts.run_monthly_codex_audit.service_context_file_paths",
+                return_value=[
+                    "application/rebalance_service.py",
+                    "application/durable_execution_commands.py",
+                    "tests/test_rebalance_service.py",
+                ],
+            ):
+                (Path(tmp) / "tests").mkdir(parents=True, exist_ok=True)
+                (Path(tmp) / "tests/test_rebalance_service.py").write_text("test\n", encoding="utf-8")
+                with self.assertRaisesRegex(BridgeError, "not valid UTF-8"):
+                    build_service_repository_context(Path(tmp), task="platform_bugfix")
 
     def test_platform_bugfix_rejects_missing_required_context_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, patch(
@@ -879,6 +1091,17 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
 
         self.assertEqual(final_message, "Reviewed.")
         self.assertEqual(changes, [{"path": "README.md", "content": "# Title\n"}])
+
+    def test_platform_bugfix_parser_rejects_legacy_complete_content(self) -> None:
+        payload = {
+            "final_message": "legacy",
+            "changes": [
+                {"path": "application/rebalance_service.py", "content": "bad"},
+                {"path": "tests/test_rebalance_service.py", "content": "bad"},
+            ],
+        }
+        with self.assertRaisesRegex(BridgeError, "targeted edits"):
+            parse_service_patch_response(json.dumps(payload), task="platform_bugfix")
 
     def test_apply_service_changes_writes_allowed_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
