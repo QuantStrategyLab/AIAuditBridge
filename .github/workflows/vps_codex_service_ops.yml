@@ -155,7 +155,7 @@ jobs:
           set -euo pipefail
           stage="/run/codex-org-health-provision/${GITHUB_RUN_ID}"
           [ -n "${APP_ID:-}" ] && [ -n "${APP_PRIVATE_KEY:-}" ] || { echo "GitHub App configuration is missing" >&2; exit 1; }
-          printf '%s' "$APP_PRIVATE_KEY" | sudo -n "$stage/provision_org_health_github_app.sh" \
+          printf '%s' "$APP_PRIVATE_KEY" | sudo -n /bin/bash "$stage/provision_org_health_github_app.sh" \
             --app-id "$APP_ID" \
             --installation-id "$INSTALLATION_ID" \
             --service-name codex-audit-service \

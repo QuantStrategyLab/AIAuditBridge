@@ -112,7 +112,7 @@ class OrgHealthGithubTokenTest(unittest.TestCase):
         self.assertNotIn("systemctl start codex-audit-service", job)
         self.assertNotIn("scripts/deploy_codex_audit_service.sh", job)
         self.assertIn("APP_PRIVATE_KEY: ${{ secrets.CROSS_REPO_GITHUB_APP_PRIVATE_KEY }}", job)
-        self.assertIn("printf '%s' \"$APP_PRIVATE_KEY\" | sudo -n", job)
+        self.assertIn("printf '%s' \"$APP_PRIVATE_KEY\" | sudo -n /bin/bash \"$stage/provision_org_health_github_app.sh\"", job)
 
     def test_refresh_units_do_not_repeat_the_first_mint_immediately(self) -> None:
         root = Path(__file__).resolve().parents[1] / "ops/codex-audit/systemd"
