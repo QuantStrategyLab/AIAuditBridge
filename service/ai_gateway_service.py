@@ -2194,6 +2194,33 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         params = parse_qs(parsed.query, keep_blank_values=True)
         repo = str(params.get("repo", [""])[0] or "")
+        task = str(params.get("task", [""])[0] or "")
+        issue_number = str(params.get("issue_number", [""])[0] or "")
+        source_ref = str(params.get("source_ref", [""])[0] or "")
+        source_sha = str(params.get("source_sha", [""])[0] or "")
+        manual_approval_id = str(params.get("manual_approval_id", [""])[0] or "")
+        manual_approval_valid = False
+        raw_mode = params["mode"][0] if "mode" in params else MODE_REVIEW_AND_FIX
+        mode = _normalize_control_mode_param(str(raw_mode if raw_mode is not None else ""))
+        if not mode:
+            _json_response(self, HTTPStatus.BAD_REQUEST, {"status": "error", "error": "invalid mode"})
+            return
+        if manual_approval_id:
+            try:
+                manual_approval_valid = _manual_approval_policy_matches(
+                    policy=load_execution_policy(),
+                    claims=claims,
+                    task=task,
+                    mode=mode,
+                    source_repository=repo,
+                    issue_number=issue_number,
+                    source_ref=source_ref,
+                    source_sha=source_sha,
+                    manual_approval_id=manual_approval_id,
+                )
+            except PermissionError as exc:
+                _json_response(self, HTTPStatus.UNAUTHORIZED, {"status": "error", "error": str(exc)})
+                return
         if not _automation_operator_claims(claims):
             claims_repo = str(claims.get("repository") or "")
             if str(claims.get("auth_method") or "") == "static_token":
@@ -2203,34 +2230,12 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             elif repo and _dashboard_repository_allowed(claims, repo):
                 pass
             elif repo and repo != claims_repo:
-                _json_response(self, HTTPStatus.UNAUTHORIZED, {"status": "error", "error": "repo is not allowed"})
-                return
+                if not manual_approval_valid:
+                    _json_response(self, HTTPStatus.UNAUTHORIZED, {"status": "error", "error": "repo is not allowed"})
+                    return
             else:
                 repo = claims_repo
         repo = repo or "unknown"
-        raw_mode = params["mode"][0] if "mode" in params else MODE_REVIEW_AND_FIX
-        mode = _normalize_control_mode_param(str(raw_mode if raw_mode is not None else ""))
-        if not mode:
-            _json_response(self, HTTPStatus.BAD_REQUEST, {"status": "error", "error": "invalid mode"})
-            return
-        task = str(params.get("task", [""])[0] or "")
-        issue_number = str(params.get("issue_number", [""])[0] or "")
-        source_ref = str(params.get("source_ref", [""])[0] or "")
-        source_sha = str(params.get("source_sha", [""])[0] or "")
-        manual_approval_id = str(params.get("manual_approval_id", [""])[0] or "")
-        manual_approval_valid = False
-        if manual_approval_id:
-            manual_approval_valid = _manual_approval_policy_matches(
-                policy=load_execution_policy(),
-                claims=claims,
-                task=task,
-                mode=mode,
-                source_repository=repo,
-                issue_number=issue_number,
-                source_ref=source_ref,
-                source_sha=source_sha,
-                manual_approval_id=manual_approval_id,
-            )
         _json_response(
             self,
             HTTPStatus.OK,
