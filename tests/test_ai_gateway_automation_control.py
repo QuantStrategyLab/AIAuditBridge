@@ -27,7 +27,7 @@ class TestAutomationControlSnapshot(unittest.TestCase):
         ledger = type("Ledger", (), {"snapshot": lambda self, limit=None: {"runs": []}})()
 
         with (
-            patch("service.ai_gateway_service.read_org_health", return_value={"status": "ok"}),
+            patch("service.ai_gateway_service.read_org_health", return_value={"status": "ok"}) as read_health,
             patch("service.ai_gateway_service.get_health_monitor", return_value=health),
             patch("service.ai_gateway_service.get_quota_manager", return_value=quota),
             patch("service.ai_gateway_service.get_automation_run_ledger", return_value=ledger),
@@ -36,6 +36,7 @@ class TestAutomationControlSnapshot(unittest.TestCase):
             control = _automation_control_snapshot("QuantStrategyLab/TargetRepo")
 
         self.assertTrue(control["execution"]["auto_fix_allowed"])
+        self.assertEqual(read_health.call_args.kwargs, {"wait_for_ready": False})
 
     def test_manual_platform_bugfix_uses_healthy_target_scope_when_global_org_is_unhealthy(self) -> None:
         repo = "QuantStrategyLab/ScopedTarget"
@@ -57,7 +58,7 @@ class TestAutomationControlSnapshot(unittest.TestCase):
             patch(
                 "service.ai_gateway_service.read_org_health",
                 return_value=_org_health_snapshot(repositories=[target]),
-            ),
+            ) as read_health,
             patch("service.ai_gateway_service.get_health_monitor", return_value=health),
             patch("service.ai_gateway_service.get_quota_manager", return_value=quota),
             patch("service.ai_gateway_service.get_automation_run_ledger", return_value=ledger),
@@ -79,6 +80,7 @@ class TestAutomationControlSnapshot(unittest.TestCase):
         self.assertEqual(control["execution_health_status"], "healthy")
         self.assertEqual(control["effective_action"], "continue")
         self.assertTrue(control["auto_fix_allowed"])
+        self.assertEqual(read_health.call_args.kwargs, {"wait_for_ready": True})
 
     def test_manual_platform_bugfix_scope_requires_complete_healthy_target_snapshot(self) -> None:
         repo = "QuantStrategyLab/ScopedTarget"

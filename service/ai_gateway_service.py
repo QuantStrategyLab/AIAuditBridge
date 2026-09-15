@@ -816,8 +816,16 @@ def _automation_control_snapshot(
     source_ref: str = "",
     source_sha: str = "",
 ) -> dict[str, Any]:
+    manual_scope_requested = (
+        bool(manual_approval_valid)
+        and str(task_name or "").strip() == PLATFORM_BUGFIX_TASK
+        and str(requested_mode or "").strip().lower() == MODE_REVIEW_AND_FIX
+        and bool(str(manual_approval_id or "").strip())
+        and bool(str(source_ref or "").strip())
+        and bool(str(source_sha or "").strip())
+    )
     try:
-        org_health = read_org_health()
+        org_health = read_org_health(wait_for_ready=manual_scope_requested)
     except Exception:
         org_health = {"status": "unavailable"}
     try:
@@ -830,14 +838,6 @@ def _automation_control_snapshot(
     execution_health_scope = "global"
     execution_health_status = global_org_health_status
     execution_action = global_action
-    manual_scope_requested = (
-        bool(manual_approval_valid)
-        and str(task_name or "").strip() == PLATFORM_BUGFIX_TASK
-        and str(requested_mode or "").strip().lower() == MODE_REVIEW_AND_FIX
-        and bool(str(manual_approval_id or "").strip())
-        and bool(str(source_ref or "").strip())
-        and bool(str(source_sha or "").strip())
-    )
     if manual_scope_requested:
         snapshot = org_health if isinstance(org_health, dict) else {}
         snapshot_status = str(snapshot.get("status") or "").strip().lower()
