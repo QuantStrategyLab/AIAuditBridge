@@ -558,6 +558,94 @@ class OrgHealthTest(unittest.TestCase):
             time.sleep(0.01)
         self.assertIs(org_health._CACHE[cache_key][1], refreshed_result)
 
+    def test_read_org_health_wait_for_ready_joins_existing_cold_refresh(self) -> None:
+        cache_key = (("QuantStrategyLab/one", "QuantStrategyLab/two"), "CODEX_AUDIT_SERVICE_GITHUB_TOKEN", "token", "all")
+        refreshed_result = {
+            "status": "unhealthy",
+            "provider": {"status": "available"},
+            "repositories": [],
+        }
+        started = threading.Event()
+        release = threading.Event()
+        calls = []
+
+        def fake_build(*args, **kwargs):
+            calls.append(1)
+            started.set()
+            release.wait(timeout=1)
+            return refreshed_result
+
+        with patch.dict(os.environ, {
+            "CODEX_AUDIT_SERVICE_GITHUB_TOKEN": "ghs_test",
+            "CODEX_AUDIT_SERVICE_ORG_HEALTH_REPOSITORIES": "one,two",
+            "CODEX_AUDIT_SERVICE_ORG_HEALTH_CACHE_SECONDS": "60",
+            "CODEX_AUDIT_SERVICE_ORG_HEALTH_COLD_ASYNC_REPOSITORIES": "1",
+        }, clear=False), patch("service.org_health._build_org_health_snapshot", fake_build):
+            placeholder = read_org_health()
+            self.assertEqual(placeholder["provider"]["status"], "refreshing")
+            self.assertTrue(started.wait(timeout=1))
+            result_holder = []
+            waiter = threading.Thread(target=lambda: result_holder.append(read_org_health(wait_for_ready=True)))
+            waiter.start()
+            time.sleep(0.02)
+            self.assertTrue(waiter.is_alive())
+            release.set()
+            waiter.join(timeout=1)
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(result_holder), 1)
+        self.assertIs(result_holder[0], refreshed_result)
+        self.assertIs(org_health._CACHE[cache_key][1], refreshed_result)
+
+    def test_read_org_health_wait_for_ready_fails_closed_after_refresh_error(self) -> None:
+        cache_key = (("QuantStrategyLab/one", "QuantStrategyLab/two"), "CODEX_AUDIT_SERVICE_GITHUB_TOKEN", "token", "all")
+        calls = []
+
+        def failed_build(*args, **kwargs):
+            calls.append(1)
+            raise RuntimeError("refresh failed")
+
+        with patch.dict(os.environ, {
+            "CODEX_AUDIT_SERVICE_GITHUB_TOKEN": "ghs_test",
+            "CODEX_AUDIT_SERVICE_ORG_HEALTH_REPOSITORIES": "one,two",
+            "CODEX_AUDIT_SERVICE_ORG_HEALTH_CACHE_SECONDS": "60",
+            "CODEX_AUDIT_SERVICE_ORG_HEALTH_COLD_ASYNC_REPOSITORIES": "1",
+        }, clear=False), patch("service.org_health._build_org_health_snapshot", failed_build):
+            result = read_org_health(wait_for_ready=True)
+
+        self.assertEqual(result["status"], "unavailable")
+        self.assertEqual(result["provider"]["reason"], "refresh_failed")
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn(cache_key, org_health._CACHE)
+
+    def test_read_org_health_wait_for_ready_returns_refreshing_on_bounded_timeout(self) -> None:
+        started = threading.Event()
+        release = threading.Event()
+
+        def blocked_build(*args, **kwargs):
+            started.set()
+            release.wait(timeout=1)
+            return {"status": "ok", "provider": {"status": "available"}, "repositories": []}
+
+        with patch.dict(os.environ, {
+            "CODEX_AUDIT_SERVICE_GITHUB_TOKEN": "ghs_test",
+            "CODEX_AUDIT_SERVICE_ORG_HEALTH_REPOSITORIES": "one,two",
+            "CODEX_AUDIT_SERVICE_ORG_HEALTH_CACHE_SECONDS": "60",
+            "CODEX_AUDIT_SERVICE_ORG_HEALTH_COLD_ASYNC_REPOSITORIES": "1",
+        }, clear=False), patch("service.org_health._build_org_health_snapshot", blocked_build), patch(
+            "service.org_health._refresh_deadline_seconds", return_value=0.05
+        ):
+            result = read_org_health(wait_for_ready=True)
+            self.assertTrue(started.is_set())
+            self.assertEqual(result["status"], "unknown")
+            self.assertEqual(result["provider"]["status"], "refreshing")
+            release.set()
+
+        deadline = time.time() + 1
+        while time.time() < deadline and org_health._REFRESH_EVENTS:
+            time.sleep(0.01)
+        self.assertFalse(org_health._REFRESH_EVENTS)
+
     def test_org_health_endpoint_returns_unavailable_without_github_token(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {
             "CODEX_AUDIT_SERVICE_AUTH": "none",

@@ -633,7 +633,7 @@ def _start_background_refresh(
     thread.start()
 
 
-def read_org_health(timeout_seconds: float = 3.0) -> dict[str, Any]:
+def read_org_health(timeout_seconds: float = 3.0, *, wait_for_ready: bool = False) -> dict[str, Any]:
     """Return a GitHub Actions health snapshot for the configured repositories."""
     repos = _repository_targets()
     token, token_source, token_reason = _github_token()
@@ -663,15 +663,23 @@ def read_org_health(timeout_seconds: float = 3.0) -> dict[str, Any]:
                 _REFRESH_EVENTS[cache_key] = threading.Event()
                 if _should_return_cold_placeholder(repos, token, ttl_seconds):
                     _start_background_refresh(cache_key, repos, token, token_source, token_reason, ttl_seconds, timeout_seconds)
-                    return _refreshing_snapshot(repos, token_source)
+                    if not wait_for_ready:
+                        return _refreshing_snapshot(repos, token_source)
+                    wait_for_refresh = _REFRESH_EVENTS[cache_key]
     if wait_for_refresh:
-        if _should_return_cold_placeholder(repos, token, ttl_seconds):
+        if not wait_for_ready and _should_return_cold_placeholder(repos, token, ttl_seconds):
             return _refreshing_snapshot(repos, token_source)
-        wait_for_refresh.wait(timeout=max(5.0, timeout_seconds * 3))
+        wait_timeout = _refresh_deadline_seconds() if wait_for_ready else max(5.0, timeout_seconds * 3)
+        wait_for_refresh.wait(timeout=wait_timeout)
         with _CACHE_LOCK:
             cached = _CACHE.get(cache_key)
             if cached:
                 return cached[1]
+            refresh_active = _REFRESH_EVENTS.get(cache_key) is wait_for_refresh
+        if wait_for_ready:
+            if refresh_active:
+                return _refreshing_snapshot(repos, token_source)
+            return _unavailable_snapshot(repos, "refresh_failed")
     try:
         result = _build_org_health_snapshot(repos, token, token_source, token_reason, timeout_seconds)
     except Exception:
