@@ -310,7 +310,19 @@ def test_codegen_docker_integration_fixture(tmp_path, monkeypatch):
     if os.environ.get("AAB_RUN_DOCKER_INTEGRATION") != "1":
         pytest.skip("Docker integration is opt-in and runs only in the dedicated CI step")
     from scripts import run_new_research as module
-    monkeypatch.setattr(module, "fetch_soxl_rsi2_codegen_sources", lambda **_: [_receipt()])
+    def synthetic_receipts(**_kwargs):
+        value = ResearchSourceReceipt(
+            schema_version="research_source_receipt.v1",
+            source_id="synthetic-soxl-codegen",
+            source_url=module.SOXL_RSI2_CODEGEN_SOURCE_URLS[0],
+            publisher="synthetic-fixture",
+            retrieved_at=datetime(2026, 9, 15, tzinfo=timezone.utc),
+            content_sha256=hashlib.sha256(b"synthetic-fixture").hexdigest(),
+            declared_license=None, usage_scope="citation_or_summary",
+            license_review_id=None, untrusted=True,
+        )
+        return [value.to_dict()]
+    monkeypatch.setattr(module, "fetch_soxl_rsi2_codegen_sources", synthetic_receipts)
     approved_root = Path(os.environ["AAB_SOXL_APPROVED_REPO"]).resolve()
     approved_commit = os.environ["AAB_SOXL_APPROVED_COMMIT"]
     assert subprocess.check_output(
