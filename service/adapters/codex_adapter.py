@@ -47,6 +47,7 @@ def _codex_command(
     cwd: Path | None = None,
     images: list[Path] | None = None,
     shell_tool_enabled: bool = True,
+    tools_disabled: bool = False,
 ) -> list[str]:
     codex = shutil.which(os.environ.get("CODEX_AUDIT_SERVICE_CODEX_BIN", "codex"))
     if not codex:
@@ -63,6 +64,14 @@ def _codex_command(
     ]
     if not shell_tool_enabled:
         command.extend(["--disable", "shell_tool"])
+    if tools_disabled:
+        command.extend([
+            "--disable", "plugins",
+            "--disable", "apps",
+            "--disable", "shell_tool",
+            "--ignore-user-config", "--ephemeral",
+            "-c", 'web_search="disabled"',
+        ])
     selected_model = model or os.environ.get("CODEX_AUDIT_SERVICE_MODEL", "").strip()
     if selected_model:
         command.extend(["--model", selected_model])
@@ -108,6 +117,7 @@ class CodexAdapter:
         cwd: Path | None = None,
         images: list[Path] | None = None,
         shell_tool_enabled: bool = True,
+        tools_disabled: bool = False,
     ) -> CodexResult:
         """Run ``codex exec`` synchronously and return the result.
 
@@ -124,27 +134,34 @@ class CodexAdapter:
             import sys
             print("[codex-adapter] WARNING: CODEX_AUDIT_SERVICE_FAKE_OUTPUT ignored in production", file=sys.stderr)
 
-        with tempfile.TemporaryDirectory() as tmp:
-            output_last_message = Path(tmp) / "codex-final-message.md"
+        with tempfile.TemporaryDirectory(prefix="codex-tools-disabled-") as tmp:
+            root = Path(tmp)
+            output_last_message = root / "codex-final-message.md"
+            isolated_cwd = root / "cwd"
+            isolated_cwd.mkdir()
+            command_cwd = isolated_cwd if tools_disabled else cwd
+            command = _codex_command(
+                output_last_message,
+                sandbox=sandbox,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                output_schema=output_schema,
+                cwd=command_cwd,
+                images=images,
+                shell_tool_enabled=shell_tool_enabled,
+                tools_disabled=tools_disabled,
+            )
+            env = _codex_env()
             try:
                 completed = subprocess.run(
-                    _codex_command(
-                        output_last_message,
-                        sandbox=sandbox,
-                        model=model,
-                        reasoning_effort=reasoning_effort,
-                        output_schema=output_schema,
-                        cwd=cwd,
-                        images=images,
-                        shell_tool_enabled=shell_tool_enabled,
-                    ),
+                    command,
                     input=prompt,
                     text=True,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     check=False,
                     timeout=timeout,
-                    env=_codex_env(),
+                    env=env,
                 )
             except subprocess.TimeoutExpired:
                 return CodexResult(success=False, error=f"codex exec timed out after {timeout}s")

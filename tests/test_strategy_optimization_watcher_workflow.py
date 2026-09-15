@@ -119,6 +119,20 @@ class StrategyOptimizationWatcherWorkflowTest(unittest.TestCase):
         self.assertIn("name: soxl-watcher-validation-${{ github.run_id }}-${{ github.run_attempt }}", text)
         self.assertIn("vars.SOXL_WATCHER_VALIDATION_CONSUMER_REVISION != ''", text)
 
+    def test_codegen_dispatch_is_mutually_exclusive_and_preserves_candidate_artifact(self) -> None:
+        text = WORKFLOW_PATH.read_text(encoding="utf-8")
+        self.assertIn("run_soxl_codegen:", text)
+        self.assertIn("inputs.run_soxl_codegen == true", text)
+        self.assertIn("inputs.run_soxl_rsi2 != true", text)
+        self.assertIn("soxl-rsi2-codegen:", text)
+        self.assertIn("runs-on: ubuntu-latest", text)
+        self.assertIn("UES_COMMIT: 86aa4e03c30eb2fb561748d6e9c22e68d3267cfa", text)
+        self.assertIn("--soxl-rsi2-codegen --p1-root", text)
+        self.assertIn("Archive verified candidate source", text)
+        self.assertIn('= "patch_validated"', text)
+        self.assertIn("candidate-source.tar.gz", text)
+        self.assertIn("-C \"$CASE_ROOT/run\" candidate", text)
+
 
 if __name__ == "__main__":
     unittest.main()

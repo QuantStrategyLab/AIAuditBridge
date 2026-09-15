@@ -24,6 +24,11 @@ on:
         required: false
         type: boolean
         default: false
+      run_soxl_codegen:
+        description: "Run the fixed SOXL RSI2 Codex codegen case once"
+        required: false
+        type: boolean
+        default: false
       metrics_filename:
         description: "Sanitized metrics filename inside each source artifact"
         required: false
@@ -49,7 +54,7 @@ concurrency:
 
 jobs:
   strategy-optimization-watcher:
-    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.run_soxl_rsi2 == true) }}
+    if: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.run_soxl_rsi2 == true || inputs.run_soxl_codegen == true)) }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
@@ -878,7 +883,7 @@ jobs:
 
   soxl-rsi2-controlled:
     if: >-
-      github.event_name == 'workflow_dispatch' && inputs.run_soxl_rsi2 == true &&
+      github.event_name == 'workflow_dispatch' && inputs.run_soxl_rsi2 == true && inputs.run_soxl_codegen != true &&
       github.repository == 'QuantStrategyLab/AIAuditBridge' &&
       github.ref == 'refs/heads/main' &&
       github.run_attempt == 1 &&
@@ -1008,6 +1013,138 @@ jobs:
           if-no-files-found: warn
           retention-days: 35
       - name: Remove controlled research workspace
+        if: always()
+        run: rm -rf -- "$CASE_ROOT"
+
+  soxl-rsi2-codegen:
+    if: >-
+      github.event_name == 'workflow_dispatch' && inputs.run_soxl_codegen == true &&
+      inputs.run_soxl_rsi2 != true && github.repository == 'QuantStrategyLab/AIAuditBridge' &&
+      github.ref == 'refs/heads/main' && github.run_attempt == 1 &&
+      vars.SOXL_WATCHER_GCP_WIF_PROVIDER != '' && vars.SOXL_WATCHER_GCP_PROJECT_ID != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    env:
+      P1_MANIFEST_SHA256: b39008e05eeebd4a126eefe289a18bcae05869d937dc76e6040b71d3b0daf36d
+      UES_COMMIT: 86aa4e03c30eb2fb561748d6e9c22e68d3267cfa
+      CASE_ROOT: ${{ github.workspace }}/.aab-soxl-codegen-${{ github.run_id }}-${{ github.run_attempt }}
+      WIF_PROVIDER: ${{ vars.SOXL_WATCHER_GCP_WIF_PROVIDER }}
+      GCP_PROJECT_ID: ${{ vars.SOXL_WATCHER_GCP_PROJECT_ID }}
+      CODEX_AUDIT_SERVICE_URL: ${{ secrets.CODEX_AUDIT_SERVICE_URL }}
+      CODEX_AUDIT_SERVICE_AUDIENCE: ${{ vars.CODEX_AUDIT_SERVICE_AUDIENCE || 'quant-codex-audit' }}
+      AI_GATEWAY_SOURCE_REPO: QuantStrategyLab/AIAuditBridge
+      AI_GATEWAY_RESEARCH_PROVIDERS: codex
+    steps:
+      - name: Initialize codegen terminal
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$CASE_ROOT"
+          printf '%s\n' '{"schema_version":"qsl.soxl-rsi2-codegen-run.v1","status":"parked","research_executed":false,"learning_only":true,"no_order":true,"promotion_eligible":false,"live_authority_granted":false}' > "$CASE_ROOT/result.json"
+      - name: Checkout Bridge
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          path: bridge
+          persist-credentials: false
+      - name: Checkout approved UES source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          repository: QuantStrategyLab/UsEquityStrategies
+          ref: ${{ env.UES_COMMIT }}
+          path: ues-source
+          persist-credentials: false
+      - name: Checkout pinned UESP verifier
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          repository: QuantStrategyLab/UsEquitySnapshotPipelines
+          ref: ddce45441ef3a1306db30f502b3773a4eb81f4f8
+          path: uesp-source
+          persist-credentials: false
+      - name: Install pinned codegen runtime
+        run: |
+          set -euo pipefail
+          python3 -m venv "$CASE_ROOT/tools"
+          "$CASE_ROOT/tools/bin/python" -m pip install --quiet 'uv==0.11.19'
+          cd uesp-source
+          UV_PROJECT_ENVIRONMENT="$CASE_ROOT/uesp-env" env -u UV_PYTHON -u VIRTUAL_ENV \
+            "$CASE_ROOT/tools/bin/uv" sync --locked --no-dev --no-editable --python 3.11
+          cd ..
+          "$CASE_ROOT/tools/bin/uv" venv --python 3.11 --seed "$CASE_ROOT/venv"
+          "$CASE_ROOT/venv/bin/python" -m pip install --quiet \
+            "quant-platform-kit @ git+https://github.com/QuantStrategyLab/QuantPlatformKit.git@de13e486da1bdba60f425e576e944591fc97b809" \
+            ./ues-source ./bridge
+      - name: Authenticate for task-bound immutable P1 read only
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          create_credentials_file: true
+          export_environment_variables: true
+          cleanup_credentials: true
+      - name: Read and verify exact P1 root
+        env:
+          CLOUDSDK_CORE_DISABLE_PROMPTS: '1'
+          CLOUDSDK_CORE_DISABLE_USAGE_REPORTING: 'true'
+        run: |
+          set -euo pipefail
+          umask 077
+          root="$CASE_ROOT/p1-root"
+          completion="$CASE_ROOT/p1-complete.json"
+          source="gs://qsl-runtime-logs-shared/soxl-p1-p3/${P1_MANIFEST_SHA256}"
+          mkdir -p "$root"
+          declare -A max_size=( [binding.json]=$((1024*1024)) [bars.json]=$((32*1024*1024)) [manifest.json]=$((1024*1024)) [p1-complete.json]=$((1024*1024)) )
+          total=0
+          for member in binding.json bars.json manifest.json p1-complete.json; do
+            meta="$(gcloud storage objects describe "$source/$member" --raw --format=json)"
+            size="$(python3 -c 'import json,sys; print(int(json.loads(sys.stdin.read())["size"]))' <<<"$meta")"
+            test "$size" -gt 0 && test "$size" -le "${max_size[$member]}"
+            total=$((total + size))
+          done
+          test "$total" -le $((35*1024*1024))
+          for member in binding.json bars.json manifest.json; do gcloud storage cp --quiet "$source/$member" "$root/$member"; done
+          gcloud storage cp --quiet "$source/p1-complete.json" "$completion"
+          test "$(sha256sum "$root/manifest.json" | cut -d' ' -f1)" = "$P1_MANIFEST_SHA256"
+          COMPLETION="$completion" "$CASE_ROOT/uesp-env/bin/python" - "$root" "$P1_MANIFEST_SHA256" <<'PY'
+          import os, sys
+          from pathlib import Path
+          from us_equity_snapshot_pipelines.lifecycle.soxl_core_only_p1_publisher import verify_soxl_core_only_input_root, verify_soxl_core_only_p1_remote_completion
+          root = Path(sys.argv[1])
+          if verify_soxl_core_only_input_root(root) != sys.argv[2] or verify_soxl_core_only_p1_remote_completion(root, Path(os.environ["COMPLETION"])) != sys.argv[2]:
+              raise SystemExit("p1 root verification failed")
+          PY
+      - name: Run fixed SOXL RSI2 Codex codegen case
+        working-directory: bridge
+        run: |
+          set -euo pipefail
+          if ! "$CASE_ROOT/venv/bin/python" -m scripts.run_new_research \
+            --soxl-rsi2-codegen --p1-root "$CASE_ROOT/p1-root" \
+            --ues-repo-root "$GITHUB_WORKSPACE/ues-source" \
+            --run-root "$CASE_ROOT/run" --output "$CASE_ROOT/result.json"; then
+            printf '%s\n' '{"schema_version":"qsl.soxl-rsi2-codegen-run.v1","status":"failed","research_executed":"unknown","learning_only":true,"no_order":true,"promotion_eligible":false,"live_authority_granted":false}' > "$CASE_ROOT/result.json"
+            exit 1
+          fi
+      - name: Archive verified candidate source
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ -d "$CASE_ROOT/run/candidate" ] && [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("status"))' "$CASE_ROOT/result.json")" = "patch_validated" ]; then
+            tar -czf "$CASE_ROOT/candidate-source.tar.gz" -C "$CASE_ROOT/run" candidate
+          fi
+      - name: Upload codegen result and candidate source
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: soxl-rsi2-codegen-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.CASE_ROOT }}/result.json
+            ${{ env.CASE_ROOT }}/candidate-source.tar.gz
+          if-no-files-found: warn
+          retention-days: 35
+      - name: Remove codegen workspace
         if: always()
         run: rm -rf -- "$CASE_ROOT"
 

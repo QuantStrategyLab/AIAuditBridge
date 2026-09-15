@@ -25,15 +25,31 @@ class AiGatewayExecuteTelemetryTests(unittest.TestCase):
         self.assertIn("--sandbox", readonly_review_command)
         self.assertEqual(readonly_review_command[readonly_review_command.index("--sandbox") + 1], "read-only")
 
-    def test_codegen_service_route_is_separate_and_fail_closed(self) -> None:
+    def test_codex_command_tools_disabled_mode_blocks_shell_apps_mcp_and_web(self) -> None:
+        with patch("service.adapters.codex_adapter.shutil.which", return_value="/usr/bin/codex"):
+            command = _codex_command(Path("message.md"), shell_tool_enabled=False, tools_disabled=True)
+        for feature in ("shell_tool", "plugins", "apps"):
+            self.assertIn(["--disable", feature], [command[index : index + 2] for index in range(len(command) - 1)])
+        self.assertIn("--ignore-user-config", command)
+        self.assertIn("--ephemeral", command)
+        self.assertIn('web_search="disabled"', command)
+
+    def test_codegen_service_route_is_codex_only_and_tools_disabled(self) -> None:
         blocked = {
             "task": gateway.SOXL_RSI2_CODEGEN_TASK,
             "source_repository": gateway.SOXL_RSI2_CODEGEN_SOURCE_REPO,
             "allowed_providers": ["codex"], "provider": "codex", "mode": "review_only",
             "research_stage": "optimization", "sandbox": "read-only",
         }
-        with self.assertRaisesRegex(PermissionError, "integration is not implemented"):
-            gateway._validate_soxl_rsi2_codegen_payload(blocked)
+        gateway._validate_soxl_rsi2_codegen_payload(blocked)
+        self.assertEqual(blocked["model"], gateway.SOXL_RSI2_CODEGEN_MODEL)
+        self.assertEqual(blocked["reasoning_effort"], "medium")
+        for field, value in (("allowed_providers", ["cursor"]), ("mode", "review_and_fix"),
+                             ("research_stage", "drift_analysis"), ("sandbox", "workspace-write"),
+                             ("source_repository", "Other/repo")):
+            invalid = {**blocked, field: value}
+            with self.subTest(field=field), self.assertRaises(PermissionError):
+                gateway._validate_soxl_rsi2_codegen_payload(invalid)
 
     def test_diagnosis_ledger_exposes_only_bounded_success_summary(self):
         base = {"job_id": "a" * 32, "task": "operational_data_diagnosis",
@@ -227,12 +243,13 @@ class AiGatewayExecuteTelemetryTests(unittest.TestCase):
             gateway, "_classify_failure", return_value=""
         ), patch.object(gateway, "_write_job"), patch.object(gateway, "CodexAdapter") as adapter:
             adapter.return_value.execute.return_value = SimpleNamespace(success=True, output="review", error="")
-            for task, mode, expected in (
-                ("platform_bugfix", "review_only", False),
-                (" platform_bugfix ", " REVIEW_ONLY ", False),
-                ("platform_bugfix", "review_and_fix", True),
-                ("platform_bugfix", "review_and_fix", False),
-                ("execute", "review_only", True),
+            for task, mode, expected, expected_tools in (
+                ("platform_bugfix", "review_only", False, False),
+                (" platform_bugfix ", " REVIEW_ONLY ", False, False),
+                ("platform_bugfix", "review_and_fix", True, False),
+                ("platform_bugfix", "review_and_fix", False, False),
+                ("execute", "review_only", True, False),
+                (gateway.SOXL_RSI2_CODEGEN_TASK, "review_only", False, True),
             ):
                 with self.subTest(task=task, mode=mode), patch.object(
                     gateway,
@@ -243,7 +260,9 @@ class AiGatewayExecuteTelemetryTests(unittest.TestCase):
                     if task == "platform_bugfix" and mode == "review_and_fix" and not expected:
                         payload["manual_approval_id"] = "sg-history-482"
                     gateway._run_job("job-1", payload)
-                self.assertEqual(adapter.return_value.execute.call_args.kwargs["shell_tool_enabled"], expected)
+                kwargs = adapter.return_value.execute.call_args.kwargs
+                self.assertEqual(kwargs["shell_tool_enabled"], expected)
+                self.assertEqual(kwargs["tools_disabled"], expected_tools)
 
 
 if __name__ == "__main__":

@@ -58,6 +58,14 @@ python3 -m venv .venv-rsi2-research
 identity, and offline input paths. The command consumes those frozen inputs,
 uses the budgeted Codex-only research route, and persists the research output;
 it does not fetch market data, submit orders, or grant promotion authority.
+The explicit SOXL codegen route reaches the service-backed Codex entry only
+when no caller callback is supplied. The service pins Codex Luna with medium
+reasoning, read-only review mode, and no deployment or trading authority; its
+task-scoped subprocess uses a temporary working directory, ignores user
+configuration, and disables plugins, apps, shell, and web search while
+retaining the service's existing authentication owner. The two public source
+receipts remain fixed and bounded to 512 KiB (the official Direxion SOXL/SOXS
+fact sheet and the fixed AQR research page). Local tests do not call the model.
 The CLI parks when formal backtest evidence is absent. A trusted Python caller
 may provide UES `SoxlRsi2PromotionBinding`, promotion store, and shadow recorder
 keywords to the same entry; arbitrary JSON pass/fail fields are not accepted as
@@ -87,7 +95,13 @@ and research runners. Focused tests verify the generated Docker commands,
 candidate source loading, input/output mounts, and re-entry result reuse; Docker
 has not been run in this workspace, so real backtest/research completion is
 unverified. No result has been deployed or published, and this mode grants no
-authority.
+authority. Its fixed case wrapper accepts only the verified P1 root, the
+approved UES revision `86aa4e03c30eb2fb561748d6e9c22e68d3267cfa`, and a
+persistent run root; it materializes only the 2022-01-03 through 2025-01-01
+optimization window (753 sessions). The manual watcher dispatch exposes this
+case as `run_soxl_codegen`, mutually exclusive with the older controlled case,
+and runs it on `ubuntu-latest`; the artifact keeps the sanitized result and
+candidate source checkout for review without retaining the input root.
 
 The `strategy_optimization_watcher.yml` workflow keeps its scheduled learning
 job unchanged. A one-shot manual run is available only when dispatching with

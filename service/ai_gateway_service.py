@@ -126,6 +126,7 @@ PLATFORM_BUGFIX_SOURCE_REPO = "QuantStrategyLab/LongBridgePlatform"
 PLATFORM_BUGFIX_MODEL = "gpt-5.6-luna"
 SOXL_RSI2_CODEGEN_TASK = "soxl_rsi2_research_codegen"
 SOXL_RSI2_CODEGEN_SOURCE_REPO = "QuantStrategyLab/AIAuditBridge"
+SOXL_RSI2_CODEGEN_MODEL = "gpt-5.6-luna"
 ACTIVE_JOB_STATUSES = frozenset({"queued", "running"})
 REUSABLE_RESEARCH_JOB_STATUSES = frozenset({"queued", "running", "succeeded", "failed"})
 REQUEST_AUTHORITY_FIELDS = (
@@ -356,7 +357,27 @@ def _validate_soxl_rsi2_codegen_payload(payload: dict[str, Any]) -> None:
     """Keep research code generation on the isolated, read-only Codex route."""
     if str(payload.get("task") or "").strip() != SOXL_RSI2_CODEGEN_TASK:
         return
-    raise PermissionError("soxl_rsi2_research_codegen integration is not implemented")
+    if str(payload.get("source_repository") or "").strip() != SOXL_RSI2_CODEGEN_SOURCE_REPO:
+        raise PermissionError("soxl_rsi2_research_codegen source repository is restricted")
+    if payload.get("allowed_providers", ["codex"]) != ["codex"]:
+        raise PermissionError("soxl_rsi2_research_codegen permits only Codex")
+    if str(payload.get("provider") or "codex").strip().lower() not in {"", "codex"}:
+        raise PermissionError("soxl_rsi2_research_codegen permits only Codex")
+    if str(payload.get("mode") or "review_only").strip().lower() != "review_only":
+        raise PermissionError("soxl_rsi2_research_codegen is review_only")
+    if str(payload.get("research_stage") or "").strip() != "optimization":
+        raise PermissionError("soxl_rsi2_research_codegen requires optimization stage")
+    if str(payload.get("sandbox") or "").strip() != "read-only":
+        raise PermissionError("soxl_rsi2_research_codegen requires read-only sandbox")
+    requested_model = str(payload.get("model") or "").strip().lower()
+    if requested_model not in {"", "auto", SOXL_RSI2_CODEGEN_MODEL}:
+        raise PermissionError("soxl_rsi2_research_codegen requires the pinned Luna model")
+    requested_effort = str(payload.get("reasoning_effort") or "").strip().lower()
+    if requested_effort not in {"", "auto", "medium"}:
+        raise PermissionError("soxl_rsi2_research_codegen requires medium reasoning effort")
+    if payload.get("auto_merge") is True or payload.get("deploy") is True or payload.get("trade") is True:
+        raise PermissionError("soxl_rsi2_research_codegen has no deployment or trading authority")
+    payload.update(provider="codex", model=SOXL_RSI2_CODEGEN_MODEL, reasoning_effort="medium", complexity="medium")
 
 
 def _manual_approval_policy_matches(
@@ -1530,7 +1551,9 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
             execute_kwargs["shell_tool_enabled"] = not (
                 _platform_bugfix_readonly_mode(payload)
                 or _platform_bugfix_manual_mode(payload)
+                or str(payload.get("task") or "") == SOXL_RSI2_CODEGEN_TASK
             )
+            execute_kwargs["tools_disabled"] = str(payload.get("task") or "") == SOXL_RSI2_CODEGEN_TASK
         result = adapter.execute(**execute_kwargs)
         job = _read_job(job_id)
         if result.success:
@@ -2055,7 +2078,9 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             execute_kwargs["shell_tool_enabled"] = not (
                 _platform_bugfix_readonly_mode(payload)
                 or _platform_bugfix_manual_mode(payload)
+                or str(payload.get("task") or "") == SOXL_RSI2_CODEGEN_TASK
             )
+            execute_kwargs["tools_disabled"] = str(payload.get("task") or "") == SOXL_RSI2_CODEGEN_TASK
         result = adapter.execute(**execute_kwargs)
         get_health_monitor().record("/v1/ai/execute", time.time() - started, result.success, result.error if not result.success else "")
         if result.success:
