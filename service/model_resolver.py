@@ -233,11 +233,13 @@ __all__ = [
 _CODEX_RESEARCH_LEVELS = {"research_summary": 0, "drift_analysis": 1, "optimization": 2, "promotion_review": 3}
 _CODEX_RESEARCH_MODELS = ("gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-6-astra")
 _CODEX_RESEARCH_EFFORTS = ("low", "medium", "high", "xhigh")
+_SOXL_RSI2_CODEGEN_TASK = "soxl_rsi2_research_codegen"
 
 
 def resolve_codex_research_route(
     *, stage: str, account: dict | None, now: float,
     complexity: str = "low", requested_model: str = "", requested_effort: str = "",
+    task: str = "",
 ) -> dict:
     """Choose a supported Codex route, then admit it above the quota reserve.
 
@@ -250,15 +252,27 @@ def resolve_codex_research_route(
     result = {"action": "defer", "provider": "codex", "reason": "research_route_unavailable", "retry_at": None}
     if stage not in _CODEX_RESEARCH_LEVELS or complexity not in {"low", "medium", "high"}:
         return result
-    level = max(_CODEX_RESEARCH_LEVELS[stage], {"low": 0, "medium": 1, "high": 2}[complexity])
-    model = requested_model if requested_model not in {"", "auto"} else _CODEX_RESEARCH_MODELS[level]
-    effort = requested_effort if requested_effort not in {"", "auto"} else _CODEX_RESEARCH_EFFORTS[level]
+    soxl_codegen = (
+        str(task or "").strip() == _SOXL_RSI2_CODEGEN_TASK
+        and stage == "optimization"
+    )
+    level = 1 if soxl_codegen else max(_CODEX_RESEARCH_LEVELS[stage], {"low": 0, "medium": 1, "high": 2}[complexity])
+    if soxl_codegen and requested_model not in {"", "auto", "gpt-5.6-luna"}:
+        return {**result, "research_stage": stage, "reason": "soxl_codegen_route_invalid"}
+    if soxl_codegen and requested_effort not in {"", "auto", "medium"}:
+        return {**result, "research_stage": stage, "reason": "soxl_codegen_route_invalid"}
+    model = requested_model if requested_model not in {"", "auto"} else (
+        "gpt-5.6-luna" if soxl_codegen else _CODEX_RESEARCH_MODELS[level]
+    )
+    effort = requested_effort if requested_effort not in {"", "auto"} else (
+        "medium" if soxl_codegen else _CODEX_RESEARCH_EFFORTS[level]
+    )
     result.update(model=model, reasoning_effort=effort, research_stage=stage)
     model_levels = {**dict(zip(_CODEX_RESEARCH_MODELS, range(4))),
         "gpt-5.5": 2, "gpt-5.4-mini": 0, "gpt-5.3-codex-spark": 0}
     if model not in model_levels:
         return {**result, "reason": "codex_model_quota_mapping_unavailable"}
-    if model_levels[model] < level:
+    if model_levels[model] < level and not (soxl_codegen and model == "gpt-5.6-luna"):
         return {**result, "reason": "research_model_below_floor"}
     if effort not in _CODEX_RESEARCH_EFFORTS or _CODEX_RESEARCH_EFFORTS.index(effort) < level:
         return {**result, "reason": "research_effort_below_floor_or_unsupported"}

@@ -235,6 +235,30 @@ def test_fallback_only_after_eligible_pre_execution_codex_deferral():
         cursor.assert_not_called()
 
 
+def test_soxl_codegen_admission_allows_pinned_luna_but_defers_reserved_quota():
+    quota = Mock()
+    quota._codex_account_snapshot.return_value = {
+        'status': 'available', 'updated_at': 1000,
+        'rate_limits': {'primary': {'used_percent': 10, 'window_duration_mins': 10080, 'resets_at': 9000}},
+        'available_models': [{'model': 'gpt-5.6-luna', 'supported_reasoning_efforts': ['medium']}],
+    }
+    payload = {
+        'prompt': 'bounded codegen', 'task': gateway.SOXL_RSI2_CODEGEN_TASK,
+        'source_repository': gateway.SOXL_RSI2_CODEGEN_SOURCE_REPO,
+        'allowed_providers': ['codex'], 'mode': 'review_only',
+        'research_stage': 'optimization', 'sandbox': 'read-only',
+        'model': gateway.SOXL_RSI2_CODEGEN_MODEL, 'reasoning_effort': 'medium',
+    }
+    with patch.object(gateway.time, 'time', return_value=1000):
+        assert gateway._admit_codex_execute(quota, 'QuantStrategyLab/AIAuditBridge', payload) is None
+    assert payload['model'] == 'gpt-5.6-luna'
+    quota._codex_account_snapshot.return_value['rate_limits']['primary']['used_percent'] = 60
+    with patch.object(gateway.time, 'time', return_value=1000):
+        deferred = gateway._admit_codex_execute(quota, 'QuantStrategyLab/AIAuditBridge', dict(payload))
+    assert deferred['status'] == 'deferred'
+    assert deferred['error'] == 'codex_quota_reserved'
+
+
 def test_cursor_quota_is_counted_separately_and_cost_is_unknown():
     from service.quota import QuotaManager
     manager = QuotaManager()

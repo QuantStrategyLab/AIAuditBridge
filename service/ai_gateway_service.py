@@ -311,6 +311,7 @@ def _admit_codex_execute(quota: Any, repo: str, payload: dict[str, Any]) -> dict
             account=quota._codex_account_snapshot(require_models=True), now=time.time(), complexity=complexity,
             requested_model=str(payload.get("model") or "").strip(),
             requested_effort=str(payload.get("reasoning_effort") or "").strip(),
+            task=str(payload.get("task") or "").strip(),
         )
         if route["action"] != "run":
             if (providers == ["codex", "cursor"]

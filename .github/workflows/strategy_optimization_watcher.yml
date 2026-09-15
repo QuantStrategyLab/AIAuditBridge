@@ -1124,7 +1124,10 @@ jobs:
             --soxl-rsi2-codegen --p1-root "$CASE_ROOT/p1-root" \
             --ues-repo-root "$GITHUB_WORKSPACE/ues-source" \
             --run-root "$CASE_ROOT/run" --output "$CASE_ROOT/result.json"; then
-            printf '%s\n' '{"schema_version":"qsl.soxl-rsi2-codegen-run.v1","status":"failed","research_executed":"unknown","learning_only":true,"no_order":true,"promotion_eligible":false,"live_authority_granted":false}' > "$CASE_ROOT/result.json"
+            result_status="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("status"))' "$CASE_ROOT/result.json" 2>/dev/null || true)"
+            if [ "$result_status" != "failed" ]; then
+              printf '%s\n' '{"schema_version":"qsl.soxl-rsi2-codegen-run.v1","status":"failed","reason":"codegen_entry_failed","research_executed":"unknown","learning_only":true,"no_order":true,"promotion_eligible":false,"live_authority_granted":false}' > "$CASE_ROOT/result.json"
+            fi
             exit 1
           fi
       - name: Archive verified candidate source
