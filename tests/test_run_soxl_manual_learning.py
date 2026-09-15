@@ -268,13 +268,13 @@ def test_watcher_learning_rejects_unreadable_or_untrusted_comment_history(paths:
         assert "private failure" not in json.dumps(artifact)
 
 
-def test_comment_reader_slurps_and_flattens_every_page(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_comment_reader_parses_and_flattens_continuous_json_pages(monkeypatch: pytest.MonkeyPatch) -> None:
     pages = [[{"body": f"comment-{index}"} for index in range(100)], [{"body": "comment-100"}]]
     observed: list[list[str]] = []
 
     def run(argv: list[str], **_kwargs: object) -> SimpleNamespace:
         observed.append(argv)
-        return SimpleNamespace(returncode=0, stdout=json.dumps(pages), stderr="")
+        return SimpleNamespace(returncode=0, stdout="\n".join(json.dumps(page) for page in pages), stderr="")
 
     monkeypatch.setattr(subprocess, "run", run)
     comments = read_issue_comments(
@@ -282,7 +282,26 @@ def test_comment_reader_slurps_and_flattens_every_page(monkeypatch: pytest.Monke
         "https://github.com/QuantStrategyLab/UsEquitySnapshotPipelines/issues/123",
     )
     assert len(comments) == 101
-    assert "--paginate" in observed[0] and "--slurp" in observed[0]
+    assert "--paginate" in observed[0] and "--slurp" not in observed[0]
+
+
+@pytest.mark.parametrize("stdout", ["[]\n[]", "[]  []\n"])
+def test_comment_reader_accepts_empty_pages(monkeypatch: pytest.MonkeyPatch, stdout: str) -> None:
+    monkeypatch.setattr(subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=stdout, stderr=""))
+    assert read_issue_comments(
+        "QuantStrategyLab/UsEquitySnapshotPipelines",
+        "https://github.com/QuantStrategyLab/UsEquitySnapshotPipelines/issues/123",
+    ) == []
+
+
+@pytest.mark.parametrize("stdout", ["{\"body\": \"wrong\"}", "[] 1", "[{}] trailing"])
+def test_comment_reader_rejects_non_page_or_malformed_output(monkeypatch: pytest.MonkeyPatch, stdout: str) -> None:
+    monkeypatch.setattr(subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=stdout, stderr=""))
+    with pytest.raises(ManualLearningError, match="watcher_comments_unavailable"):
+        read_issue_comments(
+            "QuantStrategyLab/UsEquitySnapshotPipelines",
+            "https://github.com/QuantStrategyLab/UsEquitySnapshotPipelines/issues/123",
+        )
 
 
 def test_multiline_comment_uses_body_file_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
