@@ -46,6 +46,7 @@ def _codex_command(
     output_schema: Path | None = None,
     cwd: Path | None = None,
     images: list[Path] | None = None,
+    shell_tool_enabled: bool = True,
 ) -> list[str]:
     codex = shutil.which(os.environ.get("CODEX_AUDIT_SERVICE_CODEX_BIN", "codex"))
     if not codex:
@@ -60,6 +61,8 @@ def _codex_command(
         "--output-last-message",
         str(output_last_message),
     ]
+    if not shell_tool_enabled:
+        command.extend(["--disable", "shell_tool"])
     selected_model = model or os.environ.get("CODEX_AUDIT_SERVICE_MODEL", "").strip()
     if selected_model:
         command.extend(["--model", selected_model])
@@ -104,6 +107,7 @@ class CodexAdapter:
         output_schema: Path | None = None,
         cwd: Path | None = None,
         images: list[Path] | None = None,
+        shell_tool_enabled: bool = True,
     ) -> CodexResult:
         """Run ``codex exec`` synchronously and return the result.
 
@@ -132,6 +136,7 @@ class CodexAdapter:
                         output_schema=output_schema,
                         cwd=cwd,
                         images=images,
+                        shell_tool_enabled=shell_tool_enabled,
                     ),
                     input=prompt,
                     text=True,

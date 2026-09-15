@@ -682,6 +682,32 @@ def build_prompt(
 ) -> str:
     template_path = PROMPT_TEMPLATES[task]
     template = Template(template_path.read_text(encoding="utf-8"))
+    mode_instructions = ""
+    if task == "platform_bugfix":
+        if mode == "review_only":
+            mode_instructions = "\n".join(
+                [
+                    "## Review-only operating mode",
+                    "",
+                    "Analyze only the supplied issue, evidence, and bounded repository context snapshot.",
+                    "Do not edit files, propose or return a patch, return complete file contents, or emit a JSON changes object.",
+                    "Do not run or request local checkout commands, tests, or other commands; the service has no checkout access.",
+                    "Report concrete findings and recommended next steps. Never claim that tests, deployment, broker actions, or live recovery occurred; treat them as unverified unless the supplied evidence proves them.",
+                ]
+            )
+        elif mode == "review_and_fix":
+            mode_instructions = "\n".join(
+                [
+                    "## Review-and-fix operating mode",
+                    "",
+                    "Analyze the supplied issue, evidence, and bounded repository context snapshot, then return the requested patch.",
+                    "The patch contract permits complete file contents for exactly these two paths and no others: `application/rebalance_service.py` and `tests/test_rebalance_service.py`.",
+                    "Do not run or request local checkout commands or tests; the service has no checkout access and the bridge runs the pinned test after applying the patch.",
+                    "The bridge applies the returned files and runs the pinned bounded test in its offline sandbox. Do not claim that test, deployment, broker action, or live recovery succeeded unless the bridge result proves it.",
+                ]
+            )
+        else:
+            raise BridgeError(f"Unsupported mode for platform_bugfix prompt: {mode}")
     return template.safe_substitute(
         TASK=task,
         SOURCE_REPO=source_repo,
@@ -689,6 +715,7 @@ def build_prompt(
         ISSUE_URL=issue.get("html_url", ""),
         ISSUE_NUMBER=str(issue.get("number", "")),
         MODE=mode,
+        MODE_INSTRUCTIONS=mode_instructions,
         ISSUE_MARKDOWN_PATH=str(issue_path),
         CONTEXT_JSON_PATH=str(context_path),
     )

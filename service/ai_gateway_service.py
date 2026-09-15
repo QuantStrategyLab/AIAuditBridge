@@ -342,6 +342,13 @@ def _validate_platform_bugfix_payload(payload: dict[str, Any]) -> None:
     payload.update(provider="codex", model=PLATFORM_BUGFIX_MODEL, reasoning_effort="medium", complexity="medium")
 
 
+def _platform_bugfix_readonly_mode(payload: dict[str, Any]) -> bool:
+    return (
+        str(payload.get("task") or "").strip() == PLATFORM_BUGFIX_TASK
+        and str(payload.get("mode") or MODE_REVIEW_AND_FIX).strip().lower() == MODE_REVIEW_ONLY
+    )
+
+
 def _admit_cursor_execute(quota: Any, repo: str, payload: dict[str, Any]) -> dict[str, Any] | None:
     from service.cursor_account import cursor_research_route
     cursor_payload = dict(payload)
@@ -1297,13 +1304,16 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
         adapter = CursorAdapter() if payload.get("provider") == "cursor" else CodexAdapter()
         sandbox = _validate_sandbox(str(payload.get("sandbox") or ""))
         reasoning_effort = _resolve_codex_reasoning_effort(payload, str(payload.get("task") or TASK_EXECUTE))
-        result = adapter.execute(
-            prompt=str(payload["prompt"]),
-            sandbox=sandbox,
-            model=str(payload.get("model") or "").strip() or None,
-            reasoning_effort=reasoning_effort,
-            timeout=int(payload.get("timeout_seconds", 2700)),
-        )
+        execute_kwargs = {
+            "prompt": str(payload["prompt"]),
+            "sandbox": sandbox,
+            "model": str(payload.get("model") or "").strip() or None,
+            "reasoning_effort": reasoning_effort,
+            "timeout": int(payload.get("timeout_seconds", 2700)),
+        }
+        if payload.get("provider") != "cursor":
+            execute_kwargs["shell_tool_enabled"] = not _platform_bugfix_readonly_mode(payload)
+        result = adapter.execute(**execute_kwargs)
         job = _read_job(job_id)
         if result.success:
             job["status"] = "succeeded"
@@ -1749,13 +1759,16 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         adapter = CursorAdapter() if payload.get("provider") == "cursor" else CodexAdapter()
         sandbox = _validate_sandbox(str(payload.get("sandbox") or ""))
         reasoning_effort = _resolve_codex_reasoning_effort(payload, str(payload.get("task") or TASK_EXECUTE))
-        result = adapter.execute(
-            prompt=req.prompt,
-            sandbox=sandbox,
-            model=str(payload.get("model") or "") or None,
-            reasoning_effort=reasoning_effort,
-            timeout=req.timeout_seconds,
-        )
+        execute_kwargs = {
+            "prompt": req.prompt,
+            "sandbox": sandbox,
+            "model": str(payload.get("model") or "") or None,
+            "reasoning_effort": reasoning_effort,
+            "timeout": req.timeout_seconds,
+        }
+        if payload.get("provider") != "cursor":
+            execute_kwargs["shell_tool_enabled"] = not _platform_bugfix_readonly_mode(payload)
+        result = adapter.execute(**execute_kwargs)
         get_health_monitor().record("/v1/ai/execute", time.time() - started, result.success, result.error if not result.success else "")
         if result.success:
             _json_response(self, HTTPStatus.OK, {"status": "ok", "output": result.output,
