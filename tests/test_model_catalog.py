@@ -291,6 +291,13 @@ class CodexResearchRoutingTests(unittest.TestCase):
         from service.model_resolver import resolve_codex_research_route
         return resolve_codex_research_route(stage=stage, account=kwargs.pop("account", self.account()), now=1000, **kwargs)
 
+    def test_soxl_codegen_uses_pinned_luna_medium_without_lowering_other_floors(self):
+        result = self.route("optimization", task="soxl_rsi2_research_codegen", complexity="high")
+        self.assertEqual((result["action"], result["model"], result["reasoning_effort"]), ("run", "gpt-5.6-luna", "medium"))
+        self.assertEqual(self.route("optimization", complexity="high")["model"], "gpt-5.6-sol")
+        self.assertEqual(self.route("optimization", task="soxl_rsi2_research_codegen", requested_model="gpt-5.6-terra")["reason"], "soxl_codegen_route_invalid")
+        self.assertEqual(self.route("promotion_review", task="soxl_rsi2_research_codegen", requested_model="gpt-5.6-luna", requested_effort="medium")["reason"], "research_model_below_floor")
+
     def test_stage_selects_model_and_effort_without_api_catalog(self):
         for stage, model, effort in (
             ("research_summary", "gpt-5.6-luna", "low"),
