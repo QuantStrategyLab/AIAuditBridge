@@ -3,13 +3,28 @@ from __future__ import annotations
 import subprocess
 import unittest
 from types import SimpleNamespace
+from pathlib import Path
 from unittest.mock import patch
 
 import service.ai_gateway_service as gateway
+from service.adapters.codex_adapter import _codex_command
 from service.quota import QuotaManager
 
 
 class AiGatewayExecuteTelemetryTests(unittest.TestCase):
+    def test_codex_command_scopes_shell_tool_disable_to_explicit_request(self) -> None:
+        with patch("service.adapters.codex_adapter.shutil.which", return_value="/usr/bin/codex"):
+            default_command = _codex_command(Path("message.md"))
+            readonly_review_command = _codex_command(Path("message.md"), shell_tool_enabled=False)
+
+        self.assertIn("--sandbox", default_command)
+        self.assertEqual(default_command[default_command.index("--sandbox") + 1], "read-only")
+        self.assertNotIn("--disable", default_command)
+        disable_index = readonly_review_command.index("--disable")
+        self.assertEqual(readonly_review_command[disable_index : disable_index + 2], ["--disable", "shell_tool"])
+        self.assertIn("--sandbox", readonly_review_command)
+        self.assertEqual(readonly_review_command[readonly_review_command.index("--sandbox") + 1], "read-only")
+
     def test_diagnosis_ledger_exposes_only_bounded_success_summary(self):
         base = {"job_id": "a" * 32, "task": "operational_data_diagnosis",
                 "source_repository": "QuantStrategyLab/AIAuditBridge", "mode": "review_only",
@@ -194,6 +209,26 @@ class AiGatewayExecuteTelemetryTests(unittest.TestCase):
         self.assertEqual(execution_result["status"], "succeeded")
         self.assertEqual(execution_result["model"], "gpt-5.4-mini")
         self.assertEqual(call_domain, "cn_equity")
+
+    def test_run_job_disables_shell_tool_only_for_readonly_platform_bugfix(self) -> None:
+        with patch.object(gateway, "_record_job_automation_run"), patch.object(gateway, "_audit_log"), patch.object(
+            gateway, "get_health_monitor"
+        ), patch.object(gateway, "_record_platform_execution_telemetry"), patch.object(
+            gateway, "_classify_failure", return_value=""
+        ), patch.object(gateway, "_write_job"), patch.object(gateway, "CodexAdapter") as adapter:
+            adapter.return_value.execute.return_value = SimpleNamespace(success=True, output="review", error="")
+            for task, mode, expected in (
+                ("platform_bugfix", "review_only", False),
+                ("platform_bugfix", "review_and_fix", True),
+                ("execute", "review_only", True),
+            ):
+                with self.subTest(task=task, mode=mode), patch.object(
+                    gateway,
+                    "_read_job",
+                    return_value={"job_id": "job-1", "status": "queued", "task": task, "mode": mode},
+                ):
+                    gateway._run_job("job-1", {"prompt": "review", "task": task, "mode": mode})
+                self.assertEqual(adapter.return_value.execute.call_args.kwargs["shell_tool_enabled"], expected)
 
 
 if __name__ == "__main__":
