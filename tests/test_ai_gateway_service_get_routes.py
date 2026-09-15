@@ -5,6 +5,7 @@ import tempfile
 import threading
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import ThreadingHTTPServer
 from unittest.mock import patch
@@ -499,6 +500,85 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
                             f"{base_url}/v1/ai/automation/control?repo=QuantStrategyLab/OtherRepo",
                             timeout=5,
                         )
+                    self.assertEqual(ctx.exception.code, 401)
+                finally:
+                    server.shutdown()
+                    server.server_close()
+
+    def test_automation_control_manual_grant_allows_only_exact_cross_repository_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            approval = {
+                "approval_id": "sg-history-482",
+                "source_repository": "QuantStrategyLab/LongBridgePlatform",
+                "issue_number": 482,
+                "source_ref": "ai-history-sg-claim-dedup-20260915",
+                "source_sha": "26844fa9b909e98e867acf4c50120b90acc6c792",
+                "actor": "Pigbibi",
+                "workflow_repository": "QuantStrategyLab/AIAuditBridge",
+                "workflow_ref": "QuantStrategyLab/AIAuditBridge/.github/workflows/codex_audit.yml@refs/heads/main",
+                "workflow_sha": "9" * 40,
+                "expires_at": 4_000_000_000,
+            }
+            claims = {
+                "repository": approval["workflow_repository"],
+                "actor": approval["actor"],
+                "workflow_ref": approval["workflow_ref"],
+                "workflow_sha": approval["workflow_sha"],
+                "event_name": "workflow_dispatch",
+                "auth_method": "github_oidc",
+            }
+            query = urllib.parse.urlencode(
+                {
+                    "repo": approval["source_repository"],
+                    "task": "platform_bugfix",
+                    "mode": "review_and_fix",
+                    "issue_number": approval["issue_number"],
+                    "source_ref": approval["source_ref"],
+                    "source_sha": approval["source_sha"],
+                    "manual_approval_id": approval["approval_id"],
+                }
+            )
+            with patch.dict(os.environ, {"CODEX_AUDIT_SERVICE_JOB_DIR": tmp}, clear=False), patch(
+                "service.ai_gateway_service.authenticate", return_value=claims
+            ), patch("service.ai_gateway_service.load_execution_policy", return_value={"platform_bugfix_manual_approval": approval}), patch(
+                "service.ai_gateway_service._automation_control_snapshot",
+                return_value={"auto_fix_allowed": False, "auto_merge_allowed": False, "execution": {}},
+            ):
+                server = ThreadingHTTPServer(("127.0.0.1", 0), AiGatewayRequestHandler)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    base_url = f"http://127.0.0.1:{server.server_port}"
+                    with urllib.request.urlopen(f"{base_url}/v1/ai/automation/control?{query}", timeout=5) as response:
+                        self.assertEqual(response.status, 200)
+
+                    for change in ({"actor": "Other"}, {"workflow_sha": "8" * 40}):
+                        changed_claims = {**claims, **change}
+                        with patch("service.ai_gateway_service.authenticate", return_value=changed_claims):
+                            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                                urllib.request.urlopen(f"{base_url}/v1/ai/automation/control?{query}", timeout=5)
+                        self.assertEqual(ctx.exception.code, 401)
+
+                    with patch(
+                        "service.ai_gateway_service.authenticate",
+                        return_value={"repository": "dashboard", "actor": "dashboard", "auth_method": "static_token"},
+                    ):
+                        with self.assertRaises(urllib.error.HTTPError) as ctx:
+                            urllib.request.urlopen(f"{base_url}/v1/ai/automation/control?{query}", timeout=5)
+                    self.assertEqual(ctx.exception.code, 401)
+
+                    with patch(
+                        "service.ai_gateway_service.load_execution_policy",
+                        return_value={"platform_bugfix_manual_approval": {**approval, "expires_at": 1}},
+                    ), patch("service.ai_gateway_service.authenticate", return_value=claims):
+                        with self.assertRaises(urllib.error.HTTPError) as ctx:
+                            urllib.request.urlopen(f"{base_url}/v1/ai/automation/control?{query}", timeout=5)
+                    self.assertEqual(ctx.exception.code, 401)
+
+                    no_grant = urllib.parse.urlencode({"repo": approval["source_repository"], "mode": "review_and_fix"})
+                    with patch("service.ai_gateway_service.authenticate", return_value=claims):
+                        with self.assertRaises(urllib.error.HTTPError) as ctx:
+                            urllib.request.urlopen(f"{base_url}/v1/ai/automation/control?{no_grant}", timeout=5)
                     self.assertEqual(ctx.exception.code, 401)
                 finally:
                     server.shutdown()
