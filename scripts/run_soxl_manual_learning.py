@@ -334,18 +334,29 @@ def _issue_number(repository: str, issue_url: str) -> str:
 
 def read_issue_comments(repository: str, issue_url: str) -> list[dict[str, Any]]:
     completed = subprocess.run(
-        ["gh", "api", "--paginate", "--slurp", f"repos/{repository}/issues/{_issue_number(repository, issue_url)}/comments?per_page=100"],
+        ["gh", "api", "--paginate", f"repos/{repository}/issues/{_issue_number(repository, issue_url)}/comments?per_page=100"],
         capture_output=True, text=True, timeout=30, check=False,
     )
     if completed.returncode:
         raise ManualLearningError("watcher_comments_unavailable")
+    decoder = json.JSONDecoder()
+    pages: list[list[object]] = []
+    cursor = 0
     try:
-        value = json.loads(completed.stdout)
-    except json.JSONDecodeError as exc:
+        while cursor < len(completed.stdout):
+            while cursor < len(completed.stdout) and completed.stdout[cursor].isspace():
+                cursor += 1
+            if cursor == len(completed.stdout):
+                break
+            page, cursor = decoder.raw_decode(completed.stdout, cursor)
+            if not isinstance(page, list):
+                raise ValueError("comment page is not an array")
+            pages.append(page)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
         raise ManualLearningError("watcher_comments_unavailable") from exc
-    if not isinstance(value, list) or any(not isinstance(page, list) for page in value):
+    if not pages:
         raise ManualLearningError("watcher_comments_unavailable")
-    comments = [item for page in value for item in page]
+    comments = [item for page in pages for item in page]
     if any(not isinstance(item, dict) for item in comments):
         raise ManualLearningError("watcher_comments_unavailable")
     return comments
