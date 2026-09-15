@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import datetime as dt
+import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -55,6 +56,8 @@ TASK_DEFAULT_PROVIDERS = {
 PLATFORM_BUGFIX_ALLOWED_PATHS = frozenset(
     {"application/rebalance_service.py", "tests/test_rebalance_service.py"}
 )
+PLATFORM_BUGFIX_MAX_EDITS_PER_FILE = 20
+PLATFORM_BUGFIX_MAX_REPLACEMENT_BYTES = 128 * 1024
 API_PATCH_SYSTEM_PROMPT = (
     "You are AIAuditBridge's API fallback patch provider. "
     "Return exactly one JSON object that matches the service patch contract. "
@@ -702,7 +705,7 @@ def build_prompt(
                     "## Review-and-fix operating mode",
                     "",
                     "Analyze the supplied issue, evidence, and bounded repository context snapshot, then return the requested patch.",
-                    "The patch contract permits complete file contents for exactly these two paths and no others: `application/rebalance_service.py` and `tests/test_rebalance_service.py`.",
+                    "The patch contract permits targeted text replacements for exactly these two paths and no others: `application/rebalance_service.py` and `tests/test_rebalance_service.py`. Use the supplied per-file SHA256 and return unique, non-overlapping old/new edits against the original file text.",
                     "Do not run or request local checkout commands or tests; the service has no checkout access and the bridge runs the pinned test after applying the patch.",
                     "The bridge applies the returned files and runs the pinned bounded test in its offline sandbox. Do not claim that test, deployment, broker action, or live recovery succeeded unless the bridge result proves it.",
                 ]
@@ -851,8 +854,16 @@ def build_service_repository_context(
                 raise BridgeError(f"platform_bugfix required context file exceeds safe bounds: {rel}")
             omitted += 1
             continue
-        content = content_bytes.decode("utf-8", errors="replace").rstrip()
-        block = f'<context path="{rel}">\n{content}\n</context>\n\n'
+        if rel in PLATFORM_BUGFIX_ALLOWED_PATHS and task == "platform_bugfix":
+            try:
+                content = content_bytes.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise BridgeError(f"platform_bugfix required context is not valid UTF-8: {rel}") from exc
+            digest = hashlib.sha256(content_bytes).hexdigest()
+            block = f'sha256: {digest}\n<context path="{rel}">\n{content}\n</context>\n\n'
+        else:
+            content = content_bytes.decode("utf-8", errors="replace").rstrip()
+            block = f'<context path="{rel}">\n{content}\n</context>\n\n'
         block_bytes = len(block.encode("utf-8"))
         if total + block_bytes > max_bytes:
             if rel in required_paths:
@@ -868,7 +879,35 @@ def build_service_repository_context(
     return "\n".join(parts).rstrip() + "\n"
 
 
-def service_patch_contract_instructions() -> str:
+def service_patch_contract_instructions(task: str = DEFAULT_TASK) -> str:
+    if task == "platform_bugfix":
+        return "\n".join(
+            [
+                "## Service patch contract",
+                "",
+                "You are running behind AIAuditBridge's service backend. You cannot edit the checkout directly.",
+                "For review_and_fix mode, return exactly one JSON object and no surrounding prose:",
+                "",
+                "```json",
+                "{",
+                '  "final_message": "Markdown summary for the issue comment or PR body.",',
+                '  "changes": [',
+                '    {"path": "application/rebalance_service.py", "base_sha256": "<64 lowercase hex>", "edits": [{"old": "exact original text", "new": "replacement text"}]},',
+                '    {"path": "tests/test_rebalance_service.py", "base_sha256": "<64 lowercase hex>", "edits": [{"old": "exact original test text", "new": "replacement test text"}]}',
+                "  ]",
+                "}",
+                "```",
+                "",
+                "Rules:",
+                "- `changes` must contain exactly the two approved paths, once each: `application/rebalance_service.py` and `tests/test_rebalance_service.py`.",
+                "- Each `base_sha256` must match the supplied original raw UTF-8 file bytes.",
+                f"- Each file may contain at most {PLATFORM_BUGFIX_MAX_EDITS_PER_FILE} edits; total replacement UTF-8 output is limited to {PLATFORM_BUGFIX_MAX_REPLACEMENT_BYTES} bytes.",
+                "- Each `old` must be non-empty, occur exactly once in the original file text, and not overlap another edit. Do not return no-op edits or complete file contents.",
+                "- Do not include secrets, credentials, tokens, private keys, or .env files.",
+                "- Do not write under `.git/`.",
+                "- If no safe edit is needed, return an empty `changes` array and explain why in `final_message`.",
+            ]
+        )
     return "\n".join(
         [
             "## Service patch contract",
@@ -903,7 +942,7 @@ def build_service_prompt(repo_dir: Path, prompt: str, *, task: str, mode: str) -
         build_service_repository_context(repo_dir, task=task).rstrip(),
     ]
     if mode == "review_and_fix":
-        parts.extend(["", service_patch_contract_instructions()])
+        parts.extend(["", service_patch_contract_instructions(task)])
     return "\n".join(parts).rstrip() + "\n"
 
 
@@ -1186,7 +1225,18 @@ def extract_json_object(text: str) -> dict[str, Any]:
     return payload
 
 
-def parse_service_patch_response(text: str) -> tuple[str, list[dict[str, str]]]:
+def _strict_utf8_bytes(value: str, *, label: str) -> bytes:
+    try:
+        return value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise BridgeError(f"{label} must be valid UTF-8 without surrogate characters") from exc
+
+
+def parse_service_patch_response(
+    text: str,
+    *,
+    task: str = DEFAULT_TASK,
+) -> tuple[str, list[dict[str, Any]]]:
     payload = extract_json_object(text)
     final_message = payload.get("final_message", "")
     if final_message is None:
@@ -1196,17 +1246,52 @@ def parse_service_patch_response(text: str) -> tuple[str, list[dict[str, str]]]:
     changes_raw = payload.get("changes")
     if not isinstance(changes_raw, list):
         raise BridgeError("Service patch response `changes` must be a list")
-    changes: list[dict[str, str]] = []
+    changes: list[dict[str, Any]] = []
     for index, item in enumerate(changes_raw):
         if not isinstance(item, dict):
             raise BridgeError(f"Service patch response change #{index + 1} must be an object")
         path = item.get("path")
-        content = item.get("content")
         if not isinstance(path, str) or not path.strip():
             raise BridgeError(f"Service patch response change #{index + 1} has an invalid path")
-        if not isinstance(content, str):
-            raise BridgeError(f"Service patch response change #{index + 1} content must be a string")
-        changes.append({"path": path.strip(), "content": content})
+        normalized_path = path.strip()
+        if task == "platform_bugfix":
+            if "content" in item:
+                raise BridgeError("platform_bugfix requires targeted edits, not complete file contents")
+            base_sha256 = item.get("base_sha256")
+            edits = item.get("edits")
+            if not isinstance(base_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", base_sha256):
+                raise BridgeError(f"Service patch response change #{index + 1} has an invalid base_sha256")
+            if not isinstance(edits, list) or not edits:
+                raise BridgeError(f"Service patch response change #{index + 1} edits must be a non-empty list")
+            if len(edits) > PLATFORM_BUGFIX_MAX_EDITS_PER_FILE:
+                raise BridgeError(
+                    f"Service patch response change #{index + 1} exceeds the per-file edit limit"
+                )
+            normalized_edits: list[dict[str, str]] = []
+            replacement_bytes = 0
+            for edit_index, edit in enumerate(edits):
+                if not isinstance(edit, dict):
+                    raise BridgeError(f"Service patch response edit #{edit_index + 1} must be an object")
+                old = edit.get("old")
+                new = edit.get("new")
+                if not isinstance(old, str) or not old:
+                    raise BridgeError(f"Service patch response edit #{edit_index + 1} old must be non-empty")
+                if not isinstance(new, str):
+                    raise BridgeError(f"Service patch response edit #{edit_index + 1} new must be a string")
+                _strict_utf8_bytes(old, label="Service patch edit old")
+                new_bytes = _strict_utf8_bytes(new, label="Service patch edit new")
+                if old == new:
+                    raise BridgeError(f"Service patch response edit #{edit_index + 1} is a no-op")
+                replacement_bytes += len(new_bytes)
+                normalized_edits.append({"old": old, "new": new})
+            if replacement_bytes > PLATFORM_BUGFIX_MAX_REPLACEMENT_BYTES:
+                raise BridgeError("Service patch response exceeds the replacement output limit")
+            changes.append({"path": normalized_path, "base_sha256": base_sha256, "edits": normalized_edits})
+        else:
+            content = item.get("content")
+            if not isinstance(content, str):
+                raise BridgeError(f"Service patch response change #{index + 1} content must be a string")
+            changes.append({"path": normalized_path, "content": content})
     return final_message.strip(), changes
 
 
@@ -1221,13 +1306,61 @@ def validate_service_change_path(path: str) -> str:
     return posix_path.as_posix()
 
 
-def apply_service_changes(repo_dir: Path, changes: list[dict[str, str]], *, task: str) -> list[str]:
+def _platform_bugfix_replacement(
+    original_text: str,
+    edits: list[dict[str, Any]],
+    *,
+    path: str,
+) -> str:
+    if not edits or len(edits) > PLATFORM_BUGFIX_MAX_EDITS_PER_FILE:
+        raise BridgeError(f"platform_bugfix edit count is invalid for {path!r}")
+    locations: list[tuple[int, int, str]] = []
+    replacement_bytes = 0
+    for index, edit in enumerate(edits):
+        if not isinstance(edit, dict):
+            raise BridgeError(f"platform_bugfix edit #{index + 1} must be an object")
+        old = edit.get("old")
+        new = edit.get("new")
+        if not isinstance(old, str) or not old:
+            raise BridgeError(f"platform_bugfix edit #{index + 1} old must be non-empty")
+        if not isinstance(new, str):
+            raise BridgeError(f"platform_bugfix edit #{index + 1} new must be a string")
+        _strict_utf8_bytes(old, label=f"platform_bugfix edit old for {path}")
+        new_bytes = _strict_utf8_bytes(new, label=f"platform_bugfix edit new for {path}")
+        if old == new:
+            raise BridgeError(f"platform_bugfix edit #{index + 1} is a no-op")
+        replacement_bytes += len(new_bytes)
+        if replacement_bytes > PLATFORM_BUGFIX_MAX_REPLACEMENT_BYTES:
+            raise BridgeError("platform_bugfix replacement output exceeds 128 KiB")
+        first = original_text.find(old)
+        if first < 0 or original_text.find(old, first + 1) >= 0:
+            raise BridgeError(
+                f"platform_bugfix edit #{index + 1} old must occur exactly once in {path!r}"
+            )
+        locations.append((first, first + len(old), new))
+
+    ordered = sorted(locations)
+    for previous, current in zip(ordered, ordered[1:]):
+        if current[0] < previous[1]:
+            raise BridgeError(f"platform_bugfix edits overlap in {path!r}")
+    updated = original_text
+    for start, end, new in reversed(ordered):
+        updated = updated[:start] + new + updated[end:]
+    _strict_utf8_bytes(updated, label=f"platform_bugfix output for {path}")
+    if updated == original_text:
+        raise BridgeError(f"platform_bugfix output is unchanged for {path!r}")
+    return updated
+
+
+def apply_service_changes(repo_dir: Path, changes: list[dict[str, Any]], *, task: str) -> list[str]:
     max_changes = int_env("CODEX_AUDIT_SERVICE_MAX_CHANGES", DEFAULT_SERVICE_MAX_CHANGES)
     if len(changes) > max_changes:
         raise BridgeError(f"Service patch contains {len(changes)} changes; limit is {max_changes}")
 
     validated_paths = [validate_service_change_path(change["path"]) for change in changes]
     if task == "platform_bugfix":
+        if len(set(validated_paths)) != len(validated_paths):
+            raise BridgeError("platform_bugfix changes must not repeat a file")
         if (
             set(validated_paths) != PLATFORM_BUGFIX_ALLOWED_PATHS
             or len(validated_paths) != len(PLATFORM_BUGFIX_ALLOWED_PATHS)
@@ -1243,6 +1376,45 @@ def apply_service_changes(repo_dir: Path, changes: list[dict[str, str]], *, task
         raise BridgeError(f"Service patch includes blocked paths: {denied_list}")
 
     repo_root = repo_dir.resolve()
+    if task == "platform_bugfix":
+        prepared: list[tuple[Path, bytes]] = []
+        total_replacement_bytes = 0
+        for change, path in zip(changes, validated_paths, strict=True):
+            if "content" in change:
+                raise BridgeError("platform_bugfix requires targeted edits, not complete file contents")
+            base_sha256 = change.get("base_sha256")
+            edits = change.get("edits")
+            if not isinstance(base_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", base_sha256):
+                raise BridgeError(f"platform_bugfix has an invalid base_sha256 for {path!r}")
+            if not isinstance(edits, list):
+                raise BridgeError(f"platform_bugfix edits must be a list for {path!r}")
+            target = _service_change_target(repo_root, path)
+            if not target.exists() or not target.is_file():
+                raise BridgeError(f"platform_bugfix target file is missing: {path!r}")
+            original_bytes = target.read_bytes()
+            actual_sha256 = hashlib.sha256(original_bytes).hexdigest()
+            if actual_sha256 != base_sha256:
+                raise BridgeError(f"platform_bugfix base_sha256 mismatch for {path!r}")
+            try:
+                original_text = original_bytes.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise BridgeError(f"platform_bugfix target is not valid UTF-8: {path!r}") from exc
+            replacement = _platform_bugfix_replacement(original_text, edits, path=path)
+            replacement_bytes = _strict_utf8_bytes(replacement, label=f"platform_bugfix output for {path}")
+            total_replacement_bytes += sum(
+                len(_strict_utf8_bytes(str(edit.get("new")), label="platform_bugfix edit new"))
+                for edit in edits
+            )
+            if total_replacement_bytes > PLATFORM_BUGFIX_MAX_REPLACEMENT_BYTES:
+                raise BridgeError("platform_bugfix replacement output exceeds 128 KiB")
+            if replacement_bytes == original_bytes:
+                raise BridgeError(f"platform_bugfix output is unchanged for {path!r}")
+            prepared.append((target, replacement_bytes))
+        for target, replacement_bytes in prepared:
+            target.write_bytes(replacement_bytes)
+        run_bounded_platform_bugfix_tests(repo_dir)
+        return validated_paths
+
     # Preflight the entire patch before the first write, for every task.
     targets = [_service_change_target(repo_root, path) for path in validated_paths]
     for change, target in zip(changes, targets, strict=True):
@@ -1393,7 +1565,7 @@ def run_codex_service(
         )
         final_message = output
         if mode == "review_and_fix":
-            final_message, changes = parse_service_patch_response(output)
+            final_message, changes = parse_service_patch_response(output, task=task)
             apply_service_changes(repo_dir, changes, task=task)
         output_path = repo_dir / ".codex-audit" / "codex-final-message.md"
         output_path.write_text(final_message.rstrip() + "\n", encoding="utf-8")
@@ -1691,7 +1863,7 @@ def run_api_patch_provider(
             output = request_openai_completion(system=API_PATCH_SYSTEM_PROMPT, user=service_prompt)
         else:
             output = request_anthropic_completion(system=API_PATCH_SYSTEM_PROMPT, user=service_prompt)
-        final_message, changes = parse_service_patch_response(output)
+        final_message, changes = parse_service_patch_response(output, task=task)
         if changes:
             apply_service_changes(repo_dir, changes, task=task)
         output_path = repo_dir / ".codex-audit" / "api-patch-final-message.md"
