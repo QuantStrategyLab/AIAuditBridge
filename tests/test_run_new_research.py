@@ -385,6 +385,21 @@ def test_codegen_docker_integration_fixture(tmp_path, monkeypatch):
     assert first["research_result"]["live_authority_granted"] is False
     assert first["source_commit"] != approved_commit
     assert len(first["source_blobs"]) == 3
+    output_root = run_root / "codegen-research-output"
+    artifact = output_root / "soxl_rsi2_mean_reversion_v1.json"
+    readback = output_root / "soxl_rsi2_mean_reversion_v1.readback.json"
+    sidecar = output_root / "soxl_rsi2_mean_reversion_v1.sha256"
+    assert artifact.is_file()
+    assert readback.is_file()
+    assert sidecar.is_file()
+    persisted = json.loads(artifact.read_text(encoding="utf-8"))
+    persisted_readback = json.loads(readback.read_text(encoding="utf-8"))
+    assert isinstance(persisted, dict)
+    assert persisted_readback["source_commit"] == first["source_commit"]
+    assert persisted_readback["source_blobs"] == first["source_blobs"]
+    output_bytes = {
+        path.name: path.read_bytes() for path in (artifact, sidecar, readback)
+    }
     monkeypatch.setattr(module, "_run_codegen_candidate_tests", lambda *_args, **_kwargs: pytest.fail("re-entry must not start Docker tests"))
     monkeypatch.setattr(module, "_run_codegen_candidate_research", lambda *_args, **_kwargs: pytest.fail("re-entry must not start Docker research"))
     second = module.soxl_rsi2_codegen(
@@ -393,6 +408,7 @@ def test_codegen_docker_integration_fixture(tmp_path, monkeypatch):
         research_payload=payload, run_root=run_root,
     )
     assert second == first
+    assert {path.name: path.read_bytes() for path in (artifact, sidecar, readback)} == output_bytes
 
 
 def _payload(tmp_path):
