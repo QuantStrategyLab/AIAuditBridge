@@ -11,6 +11,8 @@ import hashlib
 import importlib
 import io
 import urllib.error
+import subprocess
+import sys
 
 import pytest
 
@@ -317,14 +319,20 @@ def test_actual_entrypoint_parks_declared_owner_ambiguity_before_runtime(issues,
 
 
 class Response:
-    def __init__(self, value):
+    def __init__(self, value, *, status=200, headers=None):
         self.body = json.dumps(value).encode()
+        self.status = status
+        self.code = status
+        self.reason = "OK" if status == 200 else "Not Found"
+        self.headers = headers or {"Content-Type": "application/json"}
     def __enter__(self):
         return self
     def __exit__(self, *_):
         return None
     def read(self):
         return self.body
+    def getheader(self, name, default=None):
+        return self.headers.get(name, default)
 
 
 def diagnosis_runtime():
@@ -669,6 +677,236 @@ def input_package(root, start, end):
     return {"path": str(root), "manifest_sha256": hashlib.sha256(encoded).hexdigest()}
 
 
+def _prepare_cn_reject_case(root):
+    importlib.import_module("cn_equity_strategies")
+    importlib.import_module("ai_gateway_client")
+    from datetime import date
+    binding, identity, _, _ = shadow_inputs.__wrapped__(root)
+    binding["forward_policy"]["observation_start_session"] = "2026-09-10"
+    calendar = write(Path(binding["calendar_path"]), ["2026-09-10", "2026-09-11"])
+    binding["calendar_sha256"] = hashlib.sha256(calendar.read_bytes()).hexdigest()
+    revision = "db8df9fca6665ec7c605bf04f12b74f5daa54491"
+    policy = dict(enabled=True, candidate_id=job.PROFILE, domain="cn_equity", code_revision=revision,
+        qpk_revision="5488048cc0fc8e818b8c4be7a9729f6f1b5fdfdd", sdk_revision="60bd64a2ae059a082614181eeb845b46df395523", shadow=binding, console={},
+        inputs={"development": input_package(root / "development", "2019-01-02", "2020-12-31"),
+                "validation": input_package(root / "validation", "2020-01-02", "2025-01-08")},
+        plan=dict(development_start="2020-01-02", development_end="2020-12-31", folds=[dict(
+            train_start=f"{year}-01-04", train_end=f"{year}-11-15", test_start=f"{year}-11-19", test_end=f"{year}-12-31")
+            for year in (2021, 2022, 2023)], locked_oos_start="2024-01-08", locked_oos_end="2025-01-08", purge_days=1, embargo_days=1),
+        execution_config={}, cost_model={"model_id": "cn_index_etf.next_open.v1", "commission_bps": 3., "slippage_bps": 5.})
+    drift_path = write(root / "drift.json", dict(strategy_profile=job.PROFILE, domain="cn_equity",
+        source_revision=revision, as_of="2026-09-09", drift_score=.8, status="critical"))
+    policy["drift"] = {"path": str(drift_path), "source_revision": revision}
+    runtime = job._load_runtime(policy)
+    args = dict(development_input=runtime.read_input(Path(policy["inputs"]["development"]["path"]), expected_manifest_sha256=policy["inputs"]["development"]["manifest_sha256"]),
+        validation_input=runtime.read_input(Path(policy["inputs"]["validation"]["path"]), expected_manifest_sha256=policy["inputs"]["validation"]["manifest_sha256"]),
+        trusted_input_roots={name: value["manifest_sha256"] for name, value in policy["inputs"].items()}, code_revision=revision,
+        development_start=date(2020, 1, 2), development_end=date(2020, 12, 31),
+        folds=tuple(runtime.fold(**{key: date.fromisoformat(value) for key, value in fold.items()}) for fold in policy["plan"]["folds"]),
+        locked_oos_start=date(2024, 1, 8), locked_oos_end=date(2025, 1, 8), purge_days=1, embargo_days=1)
+    policy["research_identity"] = runtime.cn.preflight_index_etf_research_job(**args)
+    route = dict(job_id="cross-process-reject", provider="codex", research_stage="optimization", model="gpt-5.6-sol", reasoning_effort="high")
+    replies = [Response({"value": "synthetic-oidc"}), Response({"codex_research_routing": "v1"}),
+        Response({**route, "status": "queued"}), Response({"value": "synthetic-oidc"}),
+        Response({**route, "status": "succeeded", "output": '{"optimization_needed":true,"recommended_method":"grid_search"}'})]
+    return policy, runtime, replies, revision
+
+
+def _run_cn_reject_process(root, phase):
+    import socket
+    from cn_equity_strategies.backtest import index_etf_research_job as cn_job
+    from unittest.mock import Mock
+    socket.socket.connect = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("network disabled"))
+    policy, runtime, replies, revision = _prepare_cn_reject_case(root)
+    with patch.dict(os.environ, ENV, clear=True), patch.object(job, "_now", return_value=NOW), \
+            patch.object(job, "STATE_ROOT", root / "state"), patch.object(job, "_read_policy", return_value=policy), \
+            patch.object(job, "_load_runtime", return_value=runtime), patch.object(job, "_protected_file", return_value=None), \
+            patch.object(job, "_console_bindings", return_value=(Mock(), Mock())), \
+            patch("quant_platform_kit.strategy_lifecycle.production_drift_health_probe.datetime", FixedClock), \
+            patch("quant_platform_kit.strategy_lifecycle.research_promotion_cycle.datetime", FixedClock), \
+            patch(runtime.client.__module__ + ".urllib.request.urlopen", side_effect=replies if phase == "first" else AssertionError("resume must not call network")) as http, \
+            patch.object(cn_job, "run_grid_search", wraps=cn_job.run_grid_search) as optimizer:
+        result = job.run_from_watcher(watcher(revision))
+    tickets = list((root / "state" / "research_promotion_tickets").glob("*.json"))
+    trials = list((root / "state" / "experiments").rglob("trials.json"))
+    payload = {"pid": os.getpid(), "phase": phase, "research_key": result.get("research_key"),
+        "resumed": result.get("resumed", False), "status": result.get("status"), "reason": result.get("reason"),
+        "http_count": http.call_count, "optimizer_calls": optimizer.call_count,
+        "ticket": str(tickets[0]) if tickets else None, "trial_count": len(trials),
+        "trial_bytes": trials[0].read_bytes().hex() if trials else None}
+    (root / f"result-{phase}.json").write_text(json.dumps(payload, sort_keys=True))
+
+
+def _run_cn_tail_process(root, phase, decision="reject"):
+    """Exercise the persisted shadow tail in separate interpreters."""
+    import socket
+    from datetime import date, datetime as RealDatetime
+    from urllib.parse import urlsplit
+    from cn_equity_strategies.backtest import index_etf_research_job as cn_job
+    socket.socket.connect = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("network disabled"))
+    policy, runtime, _, revision = _prepare_cn_reject_case(root)
+    token_path = root / "synthetic.token"
+    token_path.write_text("synthetic-console-token")
+    token_path.chmod(0o600)
+    policy["console"] = {"sync_url": "https://synthetic.invalid/sync", "pull_url": "https://synthetic.invalid/pull", "token_path": str(token_path)}
+    counts = {"http": 0, "oidc": 0, "health": 0, "diagnosis": 0, "summary": 0,
+              "optimizer_factories": 0, "optimizer_calls": 0, "gate_factories": 0,
+              "gate_calls": 0, "console_get": 0, "console_post": 0}
+    jobs = {}
+    def http(request, **_):
+        url = request if isinstance(request, str) else request.full_url
+        method = getattr(request, "method", "GET")
+        path = urlsplit(url).path
+        counts["http"] += 1
+        if path == "/oidc":
+            counts["oidc"] += 1
+            return Response({"value": "synthetic-oidc"}, headers={"Content-Type": "application/jwt"})
+        if path == "/healthz":
+            counts["health"] += 1
+            return Response({"codex_research_routing": "v1"})
+        if path == "/v1/ai/execute/jobs" and method == "POST":
+            payload = json.loads(request.data)
+            is_summary = "LOCAL_FACTS:" in str(payload.get("prompt") or "")
+            if is_summary:
+                counts["summary"] += 1
+                if phase != "resume":
+                    raise AssertionError("summary must run exactly once during resume")
+                job_id, output = "tail-summary", {"text": "候选与基线在既定窗口内可比较。"}
+            else:
+                counts["diagnosis"] += 1
+                if phase != "first":
+                    raise AssertionError("diagnosis must run exactly once during first")
+                job_id, output = "tail-diagnosis", {"optimization_needed": True, "recommended_method": "grid_search"}
+            route = {"job_id": job_id, "provider": "codex", "research_stage": "optimization",
+                     "model": "gpt-5.6-sol", "reasoning_effort": "high"}
+            jobs[job_id] = {**route, "status": "succeeded", "output": json.dumps(output, ensure_ascii=False),
+                            "policy_verdict": "advisory"}
+            return Response({**route, "status": "queued"})
+        if path.startswith("/v1/ai/execute/jobs/") and method == "GET":
+            return Response(jobs[path.rsplit("/", 1)[-1]])
+        if path == "/sync" and method == "POST":
+            counts["console_post"] += 1
+            (root / "remote-ticket.json").write_bytes(request.data)
+            return Response({"ok": True}, status=200, headers={"Content-Type": "application/json"})
+        if path == "/pull" and method == "GET":
+            counts["console_get"] += 1
+            remote = root / "remote-ticket.json"
+            if not remote.exists():
+                raise urllib.error.HTTPError(url, 404, "missing", {"Content-Type": "application/json"}, io.BytesIO(b"{}"))
+            return Response({"ok": True, "live_authority_granted": False,
+                             "ticket": json.loads(remote.read_text())}, status=200,
+                            headers={"Content-Type": "application/json"})
+        raise AssertionError(f"unexpected synthetic URL: {method} {url}")
+    observation_path = Path(policy["shadow"]["observation_path"])
+    if not (root / "full-observations.json").exists():
+        from quant_platform_kit.strategy_lifecycle.forward_observation import ForwardObservationPolicy
+        from quant_platform_kit.strategy_lifecycle.forward_observation_receipt import build_forward_observation_receipt
+        binding = policy["shadow"]
+        fp = ForwardObservationPolicy(**binding["forward_policy"])
+        deps = {"p1_manifest": "a" * 64, **binding["frozen_dependency_digests"]}
+        raw = json.loads(observation_path.read_text())
+        observations = []
+        previous = None
+        for index, day in enumerate(("2026-09-10", "2026-09-11"), 1):
+            receipt = build_forward_observation_receipt(policy=fp, observation_session=day,
+                observation_index=index, dependency_digests=deps, evidence_modes=["shadow_decision"], previous_receipt=previous)
+            leg = {key: {"synthetic": True, "value": 0} for key in ("signal", "hypothetical_order", "position", "cost", "return")}
+            observations.append({"forward_observation_receipt": receipt, "baseline_id": binding["baseline_id"],
+                "observed_at": day + "T16:00:00+08:00", "input_snapshot_sha256": "a" * 64,
+                "candidate": leg, "baseline": leg})
+            previous = receipt
+        raw.update({"source_revision": policy["code_revision"], "research_identity": policy["research_identity"],
+                    "current_params": {"a": 1}, "proposed_params": {"a": 2},
+                    "observations": observations})
+        observation_path.write_text(json.dumps(raw))
+        (root / "full-observations.json").write_text(json.dumps(raw))
+    full = json.loads((root / "full-observations.json").read_text())
+    if phase in {"first", "early"}:
+        value = dict(full)
+        value["observations"] = []
+        observation_path.write_text(json.dumps(value))
+    else:
+        observation_path.write_text(json.dumps(full))
+    class TailClock(RealDatetime):
+        @classmethod
+        def now(cls, tz=None):
+            value = {
+                "first": datetime(2026, 9, 9, 8, tzinfo=timezone.utc),
+                "early": datetime(2026, 9, 9, 8, 30, tzinfo=timezone.utc),
+                "resume": datetime(2026, 9, 12, 8, tzinfo=timezone.utc),
+                "decision": datetime(2026, 9, 12, 8, tzinfo=timezone.utc),
+                "terminal": datetime(2026, 9, 12, 8, tzinfo=timezone.utc),
+            }[phase]
+            return value.astimezone(tz) if tz else value.replace(tzinfo=None)
+    phase_now = TailClock.now(timezone.utc)
+    from quant_platform_kit.strategy_lifecycle.research_promotion_cycle import OptimizationProposal
+    from quant_platform_kit.strategy_lifecycle.contracts import BacktestResult
+    def metric(params, cagr, max_drawdown):
+        return BacktestResult(strategy_profile=job.PROFILE, domain="cn_equity", param_set_id="synthetic",
+            params=params, cagr=cagr, max_drawdown=max_drawdown, start_date=date(2020, 1, 2),
+            end_date=date(2020, 12, 31), source_revision=revision, cost_model="cn_index_etf.next_open.v1",
+            cost_inputs={"commission_bps": 3.0, "slippage_bps": 5.0})
+
+    def make_opt(*args, **kwargs):
+        counts["optimizer_factories"] += 1
+        def run(*run_args, **run_kwargs):
+            counts["optimizer_calls"] += 1
+            if phase != "first":
+                raise AssertionError("optimizer callback must not run on a resumed/terminal ticket")
+            return OptimizationProposal(strategy_profile=job.PROFILE, domain="cn_equity",
+                current_params={"a": 1}, current_metrics=metric({"a": 1}, .10, -.20),
+                proposed_params={"a": 2}, proposed_metrics=metric({"a": 2}, .11, -.19),
+                recommendation="research_candidate", improvement_score=1.0, confidence=1.0,
+                walk_forward_passed=True, optimization_method="synthetic_tail", search_iterations=1,
+                computed_at="2026-09-09T08:00:00+00:00")
+        return run
+    def make_gate(*args, **kwargs):
+        counts["gate_factories"] += 1
+        def gate(_proposal):
+            counts["gate_calls"] += 1
+            if phase != "first":
+                raise AssertionError("promotion gate callback must not run on a resumed/terminal ticket")
+            return {"status": "PASS", "orchestrator": "BacktestOrchestrator", "protocol": "purged_walk_forward.v1",
+                    "locked_independent_oos": {"locked": True, "independent": True, "reused_for_selection": False},
+                    "promotion_run": {"strategy_profile": job.PROFILE, "domain": "cn_equity", "folds":[
+                        {"train_start":"2021-01-04","train_end":"2021-11-15","test_start":"2021-11-19","test_end":"2021-12-31"},
+                        {"train_start":"2022-01-04","train_end":"2022-11-15","test_start":"2022-11-19","test_end":"2022-12-31"},
+                        {"train_start":"2023-01-04","train_end":"2023-11-15","test_start":"2023-11-19","test_end":"2023-12-31"}],
+                        "purge_days": 1, "embargo_days": 1, "locked_oos_start":"2024-01-08", "locked_oos_end":"2025-01-08"}}
+        return gate
+
+    if phase == "decision":
+        from quant_platform_kit.strategy_lifecycle.research_promotion_cycle import (
+            ResearchPromotionTicket, apply_human_promotion_decision,
+        )
+        ticket_path = next((root / "state" / "research_promotion_tickets").glob("*.json"))
+        local_before = ticket_path.read_bytes()
+        remote_path = root / "remote-ticket.json"
+        remote = ResearchPromotionTicket.from_dict(json.loads(remote_path.read_text()))
+        confirmation = ({"target_platform": "synthetic-platform", "execution_mode": "live",
+                         "risk_profile": "CAPITAL_PRESERVATION"} if decision == "accept" else None)
+        decided = apply_human_promotion_decision(remote, decision=decision, confirmation=confirmation,
+            paper_supported=False, decided_at="2026-09-12T09:00:00+00:00")
+        remote_path.write_text(json.dumps(decided.to_dict()))
+        assert ticket_path.read_bytes() == local_before
+        (root / f"tail-{phase}.json").write_text(json.dumps({"pid": os.getpid(), "phase": phase,
+            "decision": decision, "counts": counts, "remote_state": decided.state.value,
+            "live_authority_granted": decided.live_authority_granted}, sort_keys=True))
+        return
+
+    with patch.dict(os.environ, ENV, clear=True), patch.object(job, "_now", return_value=phase_now), \
+            patch.object(job, "STATE_ROOT", root / "state"), patch.object(job, "_read_policy", return_value=policy), \
+            patch.object(job, "_load_runtime", return_value=runtime), patch.object(job, "_protected_file", return_value=None), \
+            patch("quant_platform_kit.strategy_lifecycle.production_drift_health_probe.datetime", TailClock), \
+            patch("quant_platform_kit.strategy_lifecycle.research_promotion_cycle.datetime", TailClock), \
+            patch("urllib.request.urlopen", side_effect=http), \
+            patch.object(cn_job, "make_strict_index_etf_optimizer", side_effect=make_opt), \
+            patch.object(cn_job, "make_index_etf_promotion_gate", side_effect=make_gate):
+        result = job.run_from_watcher(watcher(revision))
+    (root / f"tail-{phase}.json").write_text(json.dumps({"pid": os.getpid(), "phase": phase,
+        "decision": decision, "counts": counts, **result}, default=str, sort_keys=True))
+
+
 @pytest.mark.parametrize(("expired_window", "defer_past_window"), [(False, False), (True, False), (False, True)])
 def test_installed_cn_reader_preflight_real_numeric_search_ticket_reuse_and_daily_cap(shadow_inputs, tmp_path, expired_window, defer_past_window):
     # No CN runner, preflight, input reader, optimizer or QPK stage is mocked.
@@ -775,6 +1013,62 @@ def test_installed_cn_reader_preflight_real_numeric_search_ticket_reuse_and_dail
     trials = list((tmp_path / "state" / "experiments").rglob("trials.json"))
     assert len(trials) == 1 and len(json.loads(trials[0].read_text())) == 13
     sync.assert_not_called()
+
+
+def test_real_cn_numeric_reject_reentry_uses_one_ticket_across_two_processes(tmp_path):
+    root = tmp_path / "cross-process-reject"
+    root.mkdir()
+    child = ("import runpy, sys; from pathlib import Path; "
+             f"ns=runpy.run_path({str(Path(__file__).resolve())!r}); "
+             "ns['_run_cn_reject_process'](Path(sys.argv[1]), sys.argv[2])")
+    first = subprocess.run([sys.executable, "-c", child, str(root), "first"], capture_output=True, text=True, timeout=240)
+    second = subprocess.run([sys.executable, "-c", child, str(root), "resume"], capture_output=True, text=True, timeout=240)
+    assert first.returncode == second.returncode == 0, first.stdout + first.stderr + second.stdout + second.stderr
+    first_result = json.loads((root / "result-first.json").read_text())
+    second_result = json.loads((root / "result-resume.json").read_text())
+    assert first_result["pid"] != second_result["pid"]
+    assert first_result["research_key"] == second_result["research_key"]
+    assert first_result["status"] == second_result["status"] == "parked"
+    assert first_result["resumed"] is False and second_result["resumed"] is True
+    assert first_result["http_count"] == 5 and second_result["http_count"] == 0
+    assert first_result["optimizer_calls"] == 1 and second_result["optimizer_calls"] == 0
+    assert first_result["trial_count"] == second_result["trial_count"] == 1
+    assert first_result["trial_bytes"] == second_result["trial_bytes"]
+
+
+@pytest.mark.parametrize("decision", ["accept", "reject"])
+def test_real_cn_shadow_tail_resumes_across_processes_and_reconciles_terminal_ticket(tmp_path, decision):
+    root = tmp_path / f"cross-process-tail-{decision}"
+    root.mkdir()
+    child = ("import runpy, sys; from pathlib import Path; "
+             f"ns=runpy.run_path({str(Path(__file__).resolve())!r}); "
+             "ns['_run_cn_tail_process'](Path(sys.argv[1]), sys.argv[2], sys.argv[3])")
+    for phase in ("first", "early", "resume", "decision", "terminal"):
+        completed = subprocess.run([sys.executable, "-c", child, str(root), phase, decision], capture_output=True, text=True, timeout=300)
+        assert completed.returncode == 0, completed.stdout + completed.stderr
+    first = json.loads((root / "tail-first.json").read_text())
+    early = json.loads((root / "tail-early.json").read_text())
+    resumed = json.loads((root / "tail-resume.json").read_text())
+    decided = json.loads((root / "tail-decision.json").read_text())
+    terminal = json.loads((root / "tail-terminal.json").read_text())
+    assert len({first["pid"], early["pid"], resumed["pid"], decided["pid"], terminal["pid"]}) == 5
+    assert first["reason"] == early["reason"] == "paired_shadow_observation_pending"
+    assert first["counts"]["diagnosis"] == first["counts"]["optimizer_calls"] == first["counts"]["gate_calls"] == 1
+    assert first["counts"]["summary"] == first["counts"]["console_post"] == first["counts"]["console_get"] == 0
+    assert early["counts"]["diagnosis"] == early["counts"]["optimizer_calls"] == early["counts"]["gate_calls"] == 0
+    assert early["counts"]["summary"] == early["counts"]["console_post"] == early["counts"]["console_get"] == 0
+    assert resumed["status"] == "awaiting_human" and resumed["reason"] == "promotion_cycle_completed"
+    assert resumed["console_synced"] is True
+    assert resumed["counts"]["diagnosis"] == resumed["counts"]["optimizer_calls"] == resumed["counts"]["gate_calls"] == 0
+    assert resumed["counts"]["summary"] == resumed["counts"]["console_post"] == 1
+    assert resumed["counts"]["console_get"] == 2
+    terminal_state = "human_accepted" if decision == "accept" else "human_rejected"
+    assert decided["remote_state"] == terminal_state and decided["live_authority_granted"] is False
+    assert terminal["status"] == terminal_state and terminal["reason"] == "saved_research_ticket_reused"
+    assert terminal["counts"]["diagnosis"] == terminal["counts"]["summary"] == 0
+    assert terminal["counts"]["optimizer_calls"] == terminal["counts"]["gate_calls"] == terminal["counts"]["console_post"] == 0
+    assert terminal["counts"]["console_get"] == 1
+    assert terminal["live_authority_granted"] is False
 
 
 @pytest.mark.parametrize("denied", [None, "repository", "workflow", "ref", "direct", "source", "cross_org", "static"])
