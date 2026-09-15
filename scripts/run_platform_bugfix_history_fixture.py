@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from scripts.run_monthly_codex_audit import BridgeError, apply_service_changes
+from scripts.run_monthly_codex_audit import BridgeError, PlatformBugfixFailure, apply_service_changes
 
 
 SOURCE_REPO = "https://github.com/QuantStrategyLab/LongBridgePlatform.git"
@@ -110,6 +110,9 @@ def main() -> int:
                 ],
                 task="platform_bugfix",
             )
+        except PlatformBugfixFailure as exc:
+            if (exc.phase, exc.category) != ("isolated_regression", "regression"):
+                raise RuntimeError(f"negative fixture failed at unexpected stage: {exc}") from exc
         except BridgeError as exc:
             if "bounded test failed" not in str(exc):
                 raise RuntimeError(f"negative fixture failed before bounded test: {exc}") from exc

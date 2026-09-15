@@ -195,6 +195,64 @@ class BridgeError(RuntimeError):
     pass
 
 
+PLATFORM_BUGFIX_FAILURE_MARKER = "platform_bugfix_failure"
+PLATFORM_BUGFIX_FAILURE_PHASES = frozenset(
+    {"service_request", "patch_validation", "dependency_build", "isolated_regression", "local_result"}
+)
+PLATFORM_BUGFIX_FAILURE_CATEGORIES = frozenset(
+    {"request", "invalid_response", "invalid_edit", "dependency", "regression", "timeout", "result"}
+)
+
+
+class PlatformBugfixFailure(BridgeError):
+    """Safe, typed failure marker for the platform_bugfix path only."""
+
+    def __init__(self, phase: str, category: str) -> None:
+        if phase not in PLATFORM_BUGFIX_FAILURE_PHASES or category not in PLATFORM_BUGFIX_FAILURE_CATEGORIES:
+            raise ValueError("invalid platform bugfix failure marker")
+        self.phase = phase
+        self.category = category
+        super().__init__(f"{PLATFORM_BUGFIX_FAILURE_MARKER}:{phase}:{category}")
+
+
+def platform_bugfix_failure_comment(message: str) -> str:
+    match = re.fullmatch(r"platform_bugfix_failure:([a-z_]+):([a-z_]+)", message.strip())
+    if match and match.group(1) in PLATFORM_BUGFIX_FAILURE_PHASES and match.group(2) in PLATFORM_BUGFIX_FAILURE_CATEGORIES:
+        phase, category = match.groups()
+    else:
+        phase, category = "unknown", "unknown"
+    phase_labels = {
+        "service_request": "服务请求",
+        "patch_validation": "补丁校验",
+        "dependency_build": "依赖构建",
+        "isolated_regression": "隔离回归",
+        "local_result": "本地结果处理",
+        "unknown": "未知阶段",
+    }
+    category_labels = {
+        "request": "请求失败",
+        "invalid_response": "响应格式无效",
+        "invalid_edit": "补丁内容无效",
+        "dependency": "依赖或环境失败",
+        "regression": "回归测试失败",
+        "timeout": "超时",
+        "result": "结果处理失败",
+        "unknown": "未知原因",
+    }
+    return "\n".join(
+        [
+            "## Codex Audit",
+            "",
+            "平台修复在发布前停止。",
+            "",
+            f"- 失败阶段：{phase_labels[phase]}（`{phase}`）",
+            f"- 失败原因：{category_labels[category]}（`{category}`）",
+            "",
+            "未推送文件，未执行 fallback 或部署。",
+        ]
+    )
+
+
 def _classify_codex_exec_failure(text: str) -> str:
     if any(word in text for word in ("quota", "rate limit", "too many active", "budget")):
         return "quota_or_capacity_failure"
@@ -1426,10 +1484,21 @@ def apply_service_changes(repo_dir: Path, changes: list[dict[str, Any]], *, task
 
 
 def run_bounded_platform_bugfix_tests(repo_dir: Path) -> None:
+    try:
+        _run_bounded_platform_bugfix_tests(repo_dir)
+    except PlatformBugfixFailure:
+        raise
+    except subprocess.TimeoutExpired as exc:
+        raise PlatformBugfixFailure("dependency_build", "timeout") from exc
+    except (subprocess.SubprocessError, OSError) as exc:
+        raise PlatformBugfixFailure("dependency_build", "dependency") from exc
+
+
+def _run_bounded_platform_bugfix_tests(repo_dir: Path) -> None:
     """Run the fixed LongBridge regression test in a locked-down Docker job."""
     docker = shutil.which("docker")
     if not docker:
-        raise BridgeError("platform_bugfix requires Docker for the bounded test")
+        raise PlatformBugfixFailure("dependency_build", "dependency")
 
     with tempfile.TemporaryDirectory(prefix="codex-platform-bugfix-test-") as tmp:
         tmp_root = Path(tmp)
@@ -1438,13 +1507,18 @@ def run_bounded_platform_bugfix_tests(repo_dir: Path) -> None:
         base.mkdir()
         for target in (base, sandbox):
             target.mkdir(exist_ok=True)
-            archive = subprocess.run(
-                ["git", "archive", "--format=tar", "HEAD"],
-                cwd=repo_dir,
-                capture_output=True,
-                check=True,
-                timeout=60,
-            )
+            try:
+                archive = subprocess.run(
+                    ["git", "archive", "--format=tar", "HEAD"],
+                    cwd=repo_dir,
+                    capture_output=True,
+                    check=True,
+                    timeout=60,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise PlatformBugfixFailure("dependency_build", "timeout") from exc
+            except subprocess.SubprocessError as exc:
+                raise PlatformBugfixFailure("dependency_build", "dependency") from exc
             subprocess.run(["tar", "-xf", "-", "-C", str(target)], input=archive.stdout, check=True)
         for relative in PLATFORM_BUGFIX_ALLOWED_PATHS:
             source = repo_dir / relative
@@ -1472,24 +1546,32 @@ def run_bounded_platform_bugfix_tests(repo_dir: Path) -> None:
             encoding="utf-8",
         )
         image = f"qsl-platform-bugfix-test:{os.getpid()}-{time.monotonic_ns()}"
-        context_host = subprocess.check_output(
-            [docker, "context", "inspect", "--format", "{{.Endpoints.docker.Host}}"],
-            text=True,
-            timeout=30,
-        ).strip()
+        try:
+            context_host = subprocess.check_output(
+                [docker, "context", "inspect", "--format", "{{.Endpoints.docker.Host}}"],
+                text=True,
+                timeout=30,
+            ).strip()
+        except subprocess.TimeoutExpired as exc:
+            raise PlatformBugfixFailure("dependency_build", "timeout") from exc
+        except subprocess.SubprocessError as exc:
+            raise PlatformBugfixFailure("dependency_build", "dependency") from exc
         docker_env = {"PATH": os.environ.get("PATH", ""), "DOCKER_HOST": context_host}
         container = f"qsl-platform-bugfix-test-{os.getpid()}-{time.monotonic_ns()}"
         try:
-            built = subprocess.run(
-                [docker, "build", "--network=default", "-f", str(dockerfile), "-t", image, str(base)],
-                env=docker_env,
-                capture_output=True,
-                text=True,
-                timeout=1800,
-                check=False,
-            )
+            try:
+                built = subprocess.run(
+                    [docker, "build", "--network=default", "-f", str(dockerfile), "-t", image, str(base)],
+                    env=docker_env,
+                    capture_output=True,
+                    text=True,
+                    timeout=1800,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise PlatformBugfixFailure("dependency_build", "timeout") from exc
             if built.returncode != 0:
-                raise BridgeError("platform_bugfix trusted dependency image build failed")
+                raise PlatformBugfixFailure("dependency_build", "dependency")
             command = [
                 docker,
                 "run",
@@ -1515,16 +1597,19 @@ def run_bounded_platform_bugfix_tests(repo_dir: Path) -> None:
                 "tests/test_rebalance_service.py",
                 "-q",
             ]
-            tested = subprocess.run(
-                command,
-                env=docker_env,
-                capture_output=True,
-                text=True,
-                timeout=600,
-                check=False,
-            )
+            try:
+                tested = subprocess.run(
+                    command,
+                    env=docker_env,
+                    capture_output=True,
+                    text=True,
+                    timeout=600,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise PlatformBugfixFailure("isolated_regression", "timeout") from exc
             if tested.returncode != 0:
-                raise BridgeError("platform_bugfix bounded test failed; no PR may be created")
+                raise PlatformBugfixFailure("isolated_regression", "regression")
         finally:
             subprocess.run([docker, "rm", "--force", container], env=docker_env, capture_output=True, check=False)
             subprocess.run([docker, "rmi", "--force", image], env=docker_env, capture_output=True, check=False)
@@ -1541,6 +1626,7 @@ def run_codex_service(
     mode: str,
     issue_number: int | None = None,
 ) -> tuple[int, str, str]:
+    stage = "service_request"
     try:
         source_sha = ""
         manual_approval_id = env_value("MANUAL_APPROVAL_ID")
@@ -1565,12 +1651,31 @@ def run_codex_service(
         )
         final_message = output
         if mode == "review_and_fix":
+            stage = "patch_validation"
             final_message, changes = parse_service_patch_response(output, task=task)
             apply_service_changes(repo_dir, changes, task=task)
+        stage = "local_result"
         output_path = repo_dir / ".codex-audit" / "codex-final-message.md"
         output_path.write_text(final_message.rstrip() + "\n", encoding="utf-8")
         return 0, output, final_message.strip()
+    except PlatformBugfixFailure as exc:
+        if task == "platform_bugfix":
+            print(f"{PLATFORM_BUGFIX_FAILURE_MARKER} phase={exc.phase} category={exc.category}", file=sys.stderr)
+            return 1, str(exc), ""
+        raise
+    except subprocess.TimeoutExpired as exc:
+        if task == "platform_bugfix":
+            phase = stage if stage in PLATFORM_BUGFIX_FAILURE_PHASES else "service_request"
+            failure = PlatformBugfixFailure(phase, "timeout")
+            print(f"{PLATFORM_BUGFIX_FAILURE_MARKER} phase={failure.phase} category={failure.category}", file=sys.stderr)
+            return 1, str(failure), ""
+        raise exc
     except (BridgeError, OSError, json.JSONDecodeError, urllib.error.URLError) as exc:
+        if task == "platform_bugfix":
+            category = "request" if stage == "service_request" else "invalid_edit" if stage == "patch_validation" else "result"
+            failure = PlatformBugfixFailure(stage, category)
+            print(f"{PLATFORM_BUGFIX_FAILURE_MARKER} phase={failure.phase} category={failure.category}", file=sys.stderr)
+            return 1, str(failure), ""
         message = str(exc)
         code = SERVICE_INFRA_FAILURE_EXIT_CODE if is_service_infrastructure_failure(message) else 1
         return code, message, ""
@@ -3315,6 +3420,14 @@ def main() -> int:
                 issue_number=issue_number,
             )
             if return_code != 0:
+                if task == "platform_bugfix":
+                    post_issue_comment(
+                        token,
+                        source_repo,
+                        issue_number,
+                        platform_bugfix_failure_comment(_codex_log),
+                    )
+                    return return_code
                 failure_category = service_failure_category(_codex_log)
                 failure_detail = str(_codex_log or "").strip()
                 # Quota/capacity is a recoverable service limit, so auto-provider runs
