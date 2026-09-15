@@ -116,6 +116,11 @@ DEFAULT_GUARDED_AUTO_MERGE_POLICY = {
 DEFAULT_SERVICE_AUDIENCE = "quant-codex-audit"
 DEFAULT_SERVICE_CONTEXT_MAX_BYTES = 700_000
 DEFAULT_SERVICE_CONTEXT_MAX_FILE_BYTES = 80_000
+PLATFORM_BUGFIX_REQUIRED_CONTEXT_PATHS = (
+    "application/rebalance_service.py",
+    "tests/test_rebalance_service.py",
+)
+PLATFORM_BUGFIX_REQUIRED_CONTEXT_MAX_FILE_BYTES = 256_000
 DEFAULT_SERVICE_MAX_CHANGES = 20
 SERVICE_INFRA_FAILURE_EXIT_CODE = 75
 # Recoverable quota/capacity failures are routed to API fallback instead of infra comments.
@@ -789,23 +794,41 @@ def build_service_repository_context(
     ]
     total = len("\n".join(parts).encode("utf-8"))
     omitted = 0
-    for rel in service_context_file_paths(repo_dir, task=task):
+    context_paths = service_context_file_paths(repo_dir, task=task)
+    required_paths = PLATFORM_BUGFIX_REQUIRED_CONTEXT_PATHS if task == "platform_bugfix" else ()
+    if required_paths:
+        for rel in required_paths:
+            if rel not in context_paths:
+                raise BridgeError(f"platform_bugfix required context file is unavailable: {rel}")
+        context_paths = list(required_paths) + [rel for rel in context_paths if rel not in required_paths]
+    for rel in context_paths:
         path = _service_context_file_path(repo_dir, repo_dir / rel, task=task)
         if path is None:
+            if rel in required_paths:
+                raise BridgeError(f"platform_bugfix required context file is unsafe: {rel}")
             omitted += 1
             continue
         try:
             content_bytes = path.read_bytes()
         except OSError:
+            if rel in required_paths:
+                raise BridgeError(f"platform_bugfix required context file cannot be read: {rel}")
             omitted += 1
             continue
-        if len(content_bytes) > max_file_bytes or b"\x00" in content_bytes:
+        file_limit = (
+            PLATFORM_BUGFIX_REQUIRED_CONTEXT_MAX_FILE_BYTES if rel in required_paths else max_file_bytes
+        )
+        if len(content_bytes) > file_limit or b"\x00" in content_bytes:
+            if rel in required_paths:
+                raise BridgeError(f"platform_bugfix required context file exceeds safe bounds: {rel}")
             omitted += 1
             continue
         content = content_bytes.decode("utf-8", errors="replace").rstrip()
         block = f'<context path="{rel}">\n{content}\n</context>\n\n'
         block_bytes = len(block.encode("utf-8"))
         if total + block_bytes > max_bytes:
+            if rel in required_paths:
+                raise BridgeError(f"platform_bugfix required context exceeds total bound: {rel}")
             omitted += 1
             continue
         parts.append(block)
@@ -2781,6 +2804,7 @@ def create_pull_request(
             "base": base_ref,
             "body": body,
             "maintainer_can_modify": True,
+            **({"draft": True} if task == "platform_bugfix" else {}),
         },
     )
 
