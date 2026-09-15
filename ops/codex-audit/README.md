@@ -37,3 +37,20 @@ bash ops/codex-audit/scripts/deploy_model_catalog_sync.sh deploy
 ```
 
 Timer schedule: monthly on the 1st at 06:00 UTC (`model-catalog-sync.timer`).
+
+## GitHub org-health token
+
+Org-health can read its short-lived GitHub App installation token from
+`/run/codex-org-health/installation-token.json`. The file is root-owned,
+group-readable by `ubuntu`, and includes an `expires_at` value; an expired,
+unsafe, or malformed file makes org-health unavailable before its cache is
+consulted. The legacy dedicated `CODEX_AUDIT_SERVICE_GITHUB_TOKEN` remains a
+fallback when no token-file path is configured. The generic `GITHUB_TOKEN` is
+never used for this scope.
+
+The protected `VPS Codex Service Ops` workflow has a manual
+`install-org-health-token` mode on `main`. It stops the audit service after
+checking `NoNewPrivileges`, installs the root-only issuer and systemd
+refresh timer, passes the App private key through stdin, and validates the
+first token without printing it. The job does not restart the audit service;
+the 40-minute timer refreshes the token thereafter.

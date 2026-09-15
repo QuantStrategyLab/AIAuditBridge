@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import math
 import os
+import stat
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
@@ -42,6 +45,8 @@ DEFAULT_RUN_LOOKBACK_PAGES = 3
 DEFAULT_WORKFLOW_LIMIT = 8
 DEFAULT_REFRESH_DEADLINE_SECONDS = 12.0
 DEFAULT_COLD_ASYNC_REPOSITORY_THRESHOLD = 4
+TOKEN_FILE_ENV = "CODEX_AUDIT_SERVICE_GITHUB_TOKEN_FILE"
+TOKEN_EXPIRY_SKEW_SECONDS = 60.0
 DEFAULT_WORKFLOW_ALLOWLIST = (
     "Auto Merge Dependabot PR",
     "Check",
@@ -81,11 +86,55 @@ def _repository_targets() -> list[str]:
     return targets
 
 
-def _github_token() -> tuple[str, str]:
+def _token_file_value(path: str) -> str:
+    try:
+        file_stat = os.lstat(path)
+    except OSError as exc:
+        raise ValueError("token_file_unavailable") from exc
+    if stat.S_ISLNK(file_stat.st_mode) or not stat.S_ISREG(file_stat.st_mode):
+        raise ValueError("token_file_unsafe")
+    if file_stat.st_uid != 0 or file_stat.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise ValueError("token_file_unsafe")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, ValueError) as exc:
+        raise ValueError("token_file_invalid") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("token_file_invalid")
+    token = payload.get("token")
+    expires_at = payload.get("expires_at")
+    if not isinstance(token, str) or not token.strip():
+        raise ValueError("token_file_invalid")
+    if isinstance(expires_at, bool):
+        raise ValueError("token_file_invalid")
+    if isinstance(expires_at, (int, float)):
+        expiry = float(expires_at)
+        if not math.isfinite(expiry):
+            raise ValueError("token_file_invalid")
+    elif isinstance(expires_at, str):
+        try:
+            expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00")).timestamp()
+        except ValueError as exc:
+            raise ValueError("token_file_invalid") from exc
+    else:
+        raise ValueError("token_file_invalid")
+    if expiry <= time.time() + TOKEN_EXPIRY_SKEW_SECONDS:
+        raise ValueError("token_file_expired")
+    return token.strip()
+
+
+def _github_token() -> tuple[str, str, str]:
+    token_file = os.environ.get(TOKEN_FILE_ENV, "").strip()
+    if token_file:
+        try:
+            return _token_file_value(token_file), TOKEN_FILE_ENV, ""
+        except ValueError as exc:
+            return "", TOKEN_FILE_ENV, str(exc)
     token = os.environ.get("CODEX_AUDIT_SERVICE_GITHUB_TOKEN", "").strip()
     if token:
-        return token, "CODEX_AUDIT_SERVICE_GITHUB_TOKEN"
-    return "", ""
+        return token, "CODEX_AUDIT_SERVICE_GITHUB_TOKEN", ""
+    return "", "", "needs_token"
 
 
 def _remaining_timeout(timeout_seconds: float, deadline: float | None) -> float:
@@ -425,6 +474,22 @@ def _refreshing_snapshot(repos: list[str], token_source: str) -> dict[str, Any]:
     }
 
 
+def _unavailable_snapshot(repos: list[str], reason: str) -> dict[str, Any]:
+    return {
+        "status": "unavailable",
+        "provider": {"status": "unavailable", "reason": reason, "source": "github_rest"},
+        "summary": {
+            "total_repositories": len(repos),
+            "unhealthy_repositories": 0,
+            "unknown_repositories": 0,
+            "degraded_repositories": 0,
+            "failed_workflow_runs": 0,
+            "in_progress_workflow_runs": 0,
+        },
+        "repositories": [],
+    }
+
+
 def _run_lookback_pages() -> int:
     raw = os.environ.get("CODEX_AUDIT_SERVICE_ORG_HEALTH_RUN_LOOKBACK_PAGES", str(DEFAULT_RUN_LOOKBACK_PAGES)).strip()
     try:
@@ -457,6 +522,7 @@ def _build_org_health_snapshot(
     repos: list[str],
     token: str,
     token_source: str,
+    token_reason: str,
     timeout_seconds: float,
 ) -> dict[str, Any]:
     summary = {
@@ -468,12 +534,7 @@ def _build_org_health_snapshot(
         "in_progress_workflow_runs": 0,
     }
     if not token:
-        return {
-            "status": "unavailable",
-            "provider": {"status": "unavailable", "reason": "needs_token", "source": "github_rest"},
-            "summary": summary,
-            "repositories": [],
-        }
+        return _unavailable_snapshot(repos, token_reason or "needs_token")
 
     deadline = time.monotonic() + _refresh_deadline_seconds()
 
@@ -557,12 +618,13 @@ def _start_background_refresh(
     repos: list[str],
     token: str,
     token_source: str,
+    token_reason: str,
     ttl_seconds: float,
     timeout_seconds: float,
 ) -> None:
     def refresh() -> None:
         try:
-            result = _build_org_health_snapshot(repos, token, token_source, timeout_seconds)
+            result = _build_org_health_snapshot(repos, token, token_source, token_reason, timeout_seconds)
             _store_cache(cache_key, result, ttl_seconds)
         except Exception:
             _discard_refresh(cache_key, ttl_seconds)
@@ -574,7 +636,11 @@ def _start_background_refresh(
 def read_org_health(timeout_seconds: float = 3.0) -> dict[str, Any]:
     """Return a GitHub Actions health snapshot for the configured repositories."""
     repos = _repository_targets()
-    token, token_source = _github_token()
+    token, token_source, token_reason = _github_token()
+    if token_reason and token_reason != "needs_token":
+        # A file-backed token is checked before consulting any cache.  An
+        # expired or unsafe file must not serve an older successful snapshot.
+        return _unavailable_snapshot(repos, token_reason)
     branch_cache_scope = os.environ.get("CODEX_AUDIT_SERVICE_ORG_HEALTH_BRANCH", "").strip() or "all"
     cache_key = (tuple(repos), token_source, "token" if token else "no-token", branch_cache_scope)
     ttl_seconds = _cache_ttl_seconds()
@@ -589,14 +655,14 @@ def read_org_health(timeout_seconds: float = 3.0) -> dict[str, Any]:
             if cached:
                 if not refresh_event:
                     _REFRESH_EVENTS[cache_key] = threading.Event()
-                    _start_background_refresh(cache_key, repos, token, token_source, ttl_seconds, timeout_seconds)
+                    _start_background_refresh(cache_key, repos, token, token_source, token_reason, ttl_seconds, timeout_seconds)
                 return cached[1]
             if refresh_event:
                 wait_for_refresh = refresh_event
             else:
                 _REFRESH_EVENTS[cache_key] = threading.Event()
                 if _should_return_cold_placeholder(repos, token, ttl_seconds):
-                    _start_background_refresh(cache_key, repos, token, token_source, ttl_seconds, timeout_seconds)
+                    _start_background_refresh(cache_key, repos, token, token_source, token_reason, ttl_seconds, timeout_seconds)
                     return _refreshing_snapshot(repos, token_source)
     if wait_for_refresh:
         if _should_return_cold_placeholder(repos, token, ttl_seconds):
@@ -607,7 +673,7 @@ def read_org_health(timeout_seconds: float = 3.0) -> dict[str, Any]:
             if cached:
                 return cached[1]
     try:
-        result = _build_org_health_snapshot(repos, token, token_source, timeout_seconds)
+        result = _build_org_health_snapshot(repos, token, token_source, token_reason, timeout_seconds)
     except Exception:
         _discard_refresh(cache_key, ttl_seconds)
         raise

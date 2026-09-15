@@ -12,6 +12,7 @@ on:
           - inspect
           - deploy
           - repair-ssh
+          - install-org-health-token
       ssh_unban_ip:
         description: "Optional IP to unban from sshd/fail2ban"
         required: false
@@ -26,6 +27,7 @@ concurrency:
 
 jobs:
   vps-codex-service-ops:
+    if: inputs.mode != 'install-org-health-token'
     # Bind to a protected environment when available so deploy/repair-ssh requires approval.
     environment: codex-vps-ops
     runs-on:
@@ -77,3 +79,121 @@ jobs:
           ANTHROPIC_ADMIN_KEY: ${{ secrets.ANTHROPIC_ADMIN_KEY }}
           CODEX_AUDIT_SERVICE_TOKEN: ${{ secrets.CODEX_AUDIT_SERVICE_TOKEN }}
         run: bash scripts/deploy_codex_audit_service.sh "${{ inputs.mode }}"
+
+  org-health-token:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.mode == 'install-org-health-token'
+    environment: codex-vps-ops
+    runs-on:
+      - self-hosted
+      - codex-vps
+    timeout-minutes: 15
+    steps:
+      - name: Verify idle host and stop Codex service
+        run: |
+          set -euo pipefail
+          service=codex-audit-service
+          nnp="$(systemctl show "$service" --property=NoNewPrivileges --value 2>/dev/null || true)"
+          case "$nnp" in
+            yes|true) ;;
+            *) echo "org-health token install requires NoNewPrivileges=yes" >&2; exit 1 ;;
+          esac
+          sudo -n python3 - <<'PY'
+          import json
+          from pathlib import Path
+          job_dir = Path("/var/lib/codex-audit-bridge/jobs")
+          active = 0
+          if job_dir.exists():
+              for path in job_dir.glob("*.json"):
+                  try:
+                      payload = json.loads(path.read_text(encoding="utf-8"))
+                  except Exception as exc:
+                      raise SystemExit("cannot verify active jobs") from exc
+                  if payload.get("status") in {"queued", "running"}:
+                      active += 1
+          if active:
+              raise SystemExit("active Codex jobs present; refusing service stop")
+          print("active_jobs=0")
+          PY
+          if systemctl is-active --quiet "$service"; then
+            sudo -n systemctl stop "$service"
+          fi
+          if systemctl is-active --quiet "$service"; then
+            echo "codex service did not stop; refusing secret installation" >&2
+            exit 1
+          fi
+          echo "codex_service_idle=1"
+
+      - name: Stage immutable payload from this commit
+        env:
+          GITHUB_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "immutable commit is required" >&2; exit 1; }
+          stage="/run/codex-org-health-provision/${GITHUB_RUN_ID}"
+          sudo -n install -d -o root -g root -m 0700 "$stage"
+          fetch() {
+            local source="$1" target="$2" mode="$3"
+            curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+              "https://raw.githubusercontent.com/QuantStrategyLab/AIAuditBridge/${GITHUB_SHA}/${source}" \
+              | sudo -n tee "$stage/$target" >/dev/null
+            sudo -n chown root:root "$stage/$target"
+            sudo -n chmod "$mode" "$stage/$target"
+          }
+          fetch scripts/provision_org_health_github_app.sh provision_org_health_github_app.sh 0755
+          fetch scripts/refresh_org_health_github_token.py refresh_org_health_github_token.py 0755
+          fetch service/org_health.py org_health.py 0644
+          fetch ops/codex-audit/systemd/codex-org-health-refresh.service.example codex-org-health-refresh.service 0644
+          fetch ops/codex-audit/systemd/codex-org-health-refresh.timer.example codex-org-health-refresh.timer 0644
+          sudo -n chmod 0755 "$stage"
+
+      - name: Install root-only issuer and token wiring
+        env:
+          APP_ID: ${{ vars.CROSS_REPO_GITHUB_APP_ID }}
+          INSTALLATION_ID: "120834787"
+          APP_PRIVATE_KEY: ${{ secrets.CROSS_REPO_GITHUB_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          stage="/run/codex-org-health-provision/${GITHUB_RUN_ID}"
+          [ -n "${APP_ID:-}" ] && [ -n "${APP_PRIVATE_KEY:-}" ] || { echo "GitHub App configuration is missing" >&2; exit 1; }
+          printf '%s' "$APP_PRIVATE_KEY" | sudo -n "$stage/provision_org_health_github_app.sh" \
+            --app-id "$APP_ID" \
+            --installation-id "$INSTALLATION_ID" \
+            --service-name codex-audit-service \
+            --deploy-dir /opt/codex-audit-bridge \
+            --payload-dir "$stage" \
+            --private-key-stdin
+          unset APP_PRIVATE_KEY
+
+      - name: Mint and validate first installation token
+        run: |
+          set -euo pipefail
+          sudo -n systemctl start codex-org-health-refresh.service
+          sudo -n python3 - <<'PY'
+          import json
+          import os
+          import stat
+          import time
+          from datetime import datetime
+          path = "/run/codex-org-health/installation-token.json"
+          info = os.stat(path)
+          if info.st_uid != 0 or info.st_mode & 0o022 or stat.S_ISLNK(info.st_mode):
+              raise SystemExit("token file ownership or mode is unsafe")
+          payload = json.load(open(path, encoding="utf-8"))
+          if not isinstance(payload.get("token"), str) or not payload["token"]:
+              raise SystemExit("token file is missing token")
+          expiry = datetime.fromisoformat(str(payload["expires_at"]).replace("Z", "+00:00")).timestamp()
+          if expiry <= time.time() + 60:
+              raise SystemExit("token file is already expired")
+          print("org_health_token=valid")
+          PY
+
+      - name: Enable token refresh timer after validation
+        run: |
+          set -euo pipefail
+          sudo -n systemctl enable codex-org-health-refresh.service >/dev/null
+          sudo -n systemctl enable codex-org-health-refresh.timer >/dev/null
+          sudo -n systemctl start codex-org-health-refresh.timer
+
+      - name: Remove root staging payload
+        if: always()
+        run: sudo -n rm -rf "/run/codex-org-health-provision/${GITHUB_RUN_ID}"
