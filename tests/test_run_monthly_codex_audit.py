@@ -27,6 +27,7 @@ from scripts.run_monthly_codex_audit import (
     apply_service_changes,
     blocked_paths,
     build_api_review_prompt,
+    build_prompt,
     build_service_repository_context,
     build_service_prompt,
     classify_service_failure,
@@ -647,6 +648,63 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertIn("Service patch contract", prompt)
         self.assertNotIn("api-token.md", prompt)
         self.assertNotIn("should not be included", prompt)
+
+    def test_platform_bugfix_prompt_review_only_is_readonly_and_uses_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            issue_path = Path(tmp) / "issue.md"
+            context_path = Path(tmp) / "context.json"
+            audit_dir = repo_dir / ".codex-audit"
+            audit_dir.mkdir()
+            (audit_dir / "issue.md").write_text("embedded issue evidence", encoding="utf-8")
+            base_prompt = build_prompt(
+                task="platform_bugfix",
+                source_repo="QuantStrategyLab/LongBridgePlatform",
+                source_ref="main",
+                issue={"number": 482, "html_url": "https://example.test/issue/482"},
+                issue_path=issue_path,
+                context_path=context_path,
+                mode="review_only",
+            )
+            for rel in ("application/rebalance_service.py", "tests/test_rebalance_service.py"):
+                path = repo_dir / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("# supplied context\n", encoding="utf-8")
+            prompt = build_service_prompt(repo_dir, base_prompt, task="platform_bugfix", mode="review_only")
+
+        self.assertIn("Review-only operating mode", prompt)
+        self.assertIn('context path="application/rebalance_service.py"', prompt)
+        self.assertIn('context path="tests/test_rebalance_service.py"', prompt)
+        self.assertIn("embedded issue evidence", prompt)
+        self.assertIn("Do not edit files", prompt)
+        self.assertIn("Do not run or request local checkout commands", prompt)
+        self.assertIn("Never claim that tests", prompt)
+        self.assertNotIn("complete file contents for exactly those two paths", prompt)
+
+    def test_platform_bugfix_prompt_review_and_fix_keeps_two_file_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_dir = Path(tmp)
+            base_prompt = build_prompt(
+                task="platform_bugfix",
+                source_repo="QuantStrategyLab/LongBridgePlatform",
+                source_ref="main",
+                issue={"number": 482, "html_url": "https://example.test/issue/482"},
+                issue_path=Path(tmp) / "issue.md",
+                context_path=Path(tmp) / "context.json",
+                mode="review_and_fix",
+            )
+            for rel in ("application/rebalance_service.py", "tests/test_rebalance_service.py"):
+                path = repo_dir / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("# supplied context\n", encoding="utf-8")
+            prompt = build_service_prompt(repo_dir, base_prompt, task="platform_bugfix", mode="review_and_fix")
+
+        self.assertIn("Review-and-fix operating mode", prompt)
+        self.assertIn("application/rebalance_service.py", prompt)
+        self.assertIn("tests/test_rebalance_service.py", prompt)
+        self.assertIn("Do not run or request local checkout commands or tests", prompt)
+        self.assertIn("bridge applies the returned files and runs the pinned bounded test", prompt)
+        self.assertIn("For review_and_fix mode, return exactly one JSON object", prompt)
 
     def test_platform_bugfix_prioritizes_complete_large_required_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
