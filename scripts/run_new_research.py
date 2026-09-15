@@ -1072,7 +1072,9 @@ def _run_codegen_candidate_research(
             docker, "run", "--rm", "--name", container, "--network=none", "--read-only",
             "--cap-drop=ALL", "--security-opt=no-new-privileges", "--pids-limit=256",
             "--memory=2g", "--cpus=2", "--tmpfs=/tmp:rw,noexec,nosuid,size=64m",
-            "-e", "PYTHONPATH=/workspace/src:/aab", "-v", f"{candidate_root}:/workspace:ro",
+            "-e", "PYTHONPATH=/workspace/src:/aab",
+            "-e", "GIT_CONFIG_COUNT=1", "-e", "GIT_CONFIG_KEY_0=safe.directory",
+            "-e", "GIT_CONFIG_VALUE_0=/workspace", "-v", f"{candidate_root}:/workspace:ro",
             "-v", f"{aab_mount}:/aab:ro", "-v", f"{script_file}:/request/run_research.py:ro",
             "-v", f"{request_file}:/request/research_payload.json:ro",
             "-v", f"{output_root}:/output:rw", "-v", f"{ticket_root}:/tickets:rw",
@@ -1104,6 +1106,13 @@ def _run_codegen_candidate_research(
                 fail("codegen_research_result_invalid")
             if not isinstance(result, dict):
                 fail("codegen_research_result_invalid")
+            required_artifacts = (
+                output_root / "soxl_rsi2_mean_reversion_v1.json",
+                output_root / "soxl_rsi2_mean_reversion_v1.sha256",
+                output_root / "soxl_rsi2_mean_reversion_v1.readback.json",
+            )
+            if not all(path.is_file() for path in required_artifacts):
+                fail("codegen_research_artifact_missing")
             result["execution_isolation"] = "docker"
             saved_result.write_text(json.dumps(result, ensure_ascii=False, sort_keys=True, allow_nan=False), encoding="utf-8")
             return result

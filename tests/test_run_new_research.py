@@ -277,8 +277,20 @@ def test_codegen_research_runner_is_docker_only_and_reentrant(tmp_path, monkeypa
         stdout = json.dumps({"status": "parked", "live_authority_granted": False})
         stderr = ""
     monkeypatch.setattr(module.shutil, "which", lambda name: "/usr/bin/docker")
-    monkeypatch.setattr(module.subprocess, "run", lambda command, **kwargs: (calls.append(command) or Completed()))
     run_root = tmp_path / "run"
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        if "run" in command:
+            output = run_root / "codegen-research-output"
+            output.mkdir(parents=True, exist_ok=True)
+            for name in (
+                "soxl_rsi2_mean_reversion_v1.json",
+                "soxl_rsi2_mean_reversion_v1.sha256",
+                "soxl_rsi2_mean_reversion_v1.readback.json",
+            ):
+                (output / name).write_text("{}", encoding="utf-8")
+        return Completed()
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
     result = module._run_codegen_candidate_research(
         candidate, payload=payload, run_root=run_root, source_commit="a" * 40,
     )
