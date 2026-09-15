@@ -305,11 +305,12 @@ def test_codegen_research_runner_is_docker_only_and_reentrant(tmp_path, monkeypa
         )
 
 
-def test_codegen_docker_integration_fixture(tmp_path):
+def test_codegen_docker_integration_fixture(tmp_path, monkeypatch):
     """Opt-in CI fixture: real Docker, UES optimizer and QPK cycle, no model/network."""
     if os.environ.get("AAB_RUN_DOCKER_INTEGRATION") != "1":
         pytest.skip("Docker integration is opt-in and runs only in the dedicated CI step")
     from scripts import run_new_research as module
+    monkeypatch.setattr(module, "fetch_soxl_rsi2_codegen_sources", lambda **_: [_receipt()])
     approved_root = Path(os.environ["AAB_SOXL_APPROVED_REPO"]).resolve()
     approved_commit = os.environ["AAB_SOXL_APPROVED_COMMIT"]
     assert subprocess.check_output(
@@ -372,6 +373,8 @@ def test_codegen_docker_integration_fixture(tmp_path):
     assert first["research_result"]["live_authority_granted"] is False
     assert first["source_commit"] != approved_commit
     assert len(first["source_blobs"]) == 3
+    monkeypatch.setattr(module, "_run_codegen_candidate_tests", lambda *_args, **_kwargs: pytest.fail("re-entry must not start Docker tests"))
+    monkeypatch.setattr(module, "_run_codegen_candidate_research", lambda *_args, **_kwargs: pytest.fail("re-entry must not start Docker research"))
     second = module.soxl_rsi2_codegen(
         ues_repo_root=approved_root, approved_commit=approved_commit,
         source_ref="e" * 40, execute=lambda _prompt: pytest.fail("re-entry must not call model"),
