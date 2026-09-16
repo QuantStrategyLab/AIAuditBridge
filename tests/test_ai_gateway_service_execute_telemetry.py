@@ -264,6 +264,51 @@ class AiGatewayExecuteTelemetryTests(unittest.TestCase):
                 self.assertEqual(kwargs["shell_tool_enabled"], expected)
                 self.assertEqual(kwargs["tools_disabled"], expected_tools)
 
+    def test_run_job_disables_all_codex_tools_for_readonly_drift_analysis(self) -> None:
+        with patch.object(gateway, "_record_job_automation_run"), patch.object(gateway, "_audit_log"), patch.object(
+            gateway, "get_health_monitor"
+        ), patch.object(gateway, "_record_platform_execution_telemetry"), patch.object(
+            gateway, "_classify_failure", return_value=""
+        ), patch.object(gateway, "_write_job"), patch.object(gateway, "CodexAdapter") as adapter:
+            adapter.return_value.execute.return_value = SimpleNamespace(success=True, output="review", error="")
+            cases = [
+                ({"task": "execute", "mode": "review_only", "research_stage": "drift_analysis", "sandbox": "read-only"}, True),
+                ({"mode": "review_only", "research_stage": "drift_analysis", "sandbox": "read-only"}, True),
+                ({"task": "execute", "mode": "review_and_fix", "research_stage": "drift_analysis", "sandbox": "read-only"}, False),
+                ({"task": "execute", "mode": "review_only", "research_stage": "optimization", "sandbox": "read-only"}, False),
+                ({"task": "execute", "mode": "review_only", "research_stage": "drift_analysis", "sandbox": "workspace-write"}, False),
+            ]
+            for payload, expected_disabled in cases:
+                with self.subTest(payload=payload), patch.object(
+                    gateway,
+                    "_read_job",
+                    return_value={"job_id": "job-1", "status": "queued", **payload},
+                ):
+                    gateway._run_job("job-1", {"prompt": "review", **payload})
+                kwargs = adapter.return_value.execute.call_args.kwargs
+                self.assertEqual(kwargs["shell_tool_enabled"], not expected_disabled)
+                self.assertEqual(kwargs["tools_disabled"], expected_disabled)
+
+    def test_sync_execute_disables_all_codex_tools_for_readonly_drift_analysis(self) -> None:
+        quota = QuotaManager()
+        account = {"status": "available", "rate_limits": {"primary": {"used_percent": 0}},
+                   "available_models": [{"model": "gpt-5.6-sol", "supported_reasoning_efforts": ["medium"]}]}
+        payload = {"prompt": "review", "mode": "review_only", "research_stage": "drift_analysis",
+                   "sandbox": "read-only", "model": "gpt-5.6-sol", "reasoning_effort": "medium"}
+        with (
+            patch.object(quota, "_codex_account_snapshot", return_value=account),
+            patch.object(gateway, "get_quota_manager", return_value=quota),
+            patch.object(gateway, "_admit_codex_execute", return_value=None),
+            patch.object(gateway, "get_health_monitor"),
+            patch.object(gateway, "_json_response"),
+            patch.object(gateway, "CodexAdapter") as adapter,
+        ):
+            adapter.return_value.execute.return_value = SimpleNamespace(success=True, output="review", error="")
+            gateway.AiGatewayRequestHandler._handle_execute_sync(object(), {"repository": "Synthetic/caller"}, payload)
+        kwargs = adapter.return_value.execute.call_args.kwargs
+        self.assertFalse(kwargs["shell_tool_enabled"])
+        self.assertTrue(kwargs["tools_disabled"])
+
 
 if __name__ == "__main__":
     unittest.main()
