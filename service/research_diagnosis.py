@@ -105,13 +105,26 @@ def build_research_diagnosis_prompt(request: Mapping[str, Any]) -> str:
     }:
         raise ResearchTaskError("research diagnosis authority is not bounded")
 
+    insufficient_evidence = trigger.get("kind") == "insufficient_evidence"
     signal_lines = [
         f"- {item.get('metric') or 'signal'}: {item.get('reason') or 'unspecified'}"
         for item in trigger.get("signals", [])
         if isinstance(item, Mapping)
     ]
     if not signal_lines:
-        signal_lines = ["- 没有额外的可公开信号；只能根据已验证的 P3 退化任务给出研究假设。"]
+        signal_lines = [
+            "- 没有额外的可公开信号；证据不足，无法提出因果假设；只列待补充的成本、基准、根因材料。"
+            if insufficient_evidence
+            else "- 没有额外的可公开信号；只能根据已验证的 P3 退化任务给出研究假设。"
+        ]
+    evidence_guidance = (
+        [
+            "对于 insufficient_evidence：在“可检验假设”中明确写“证据不足，无法提出因果假设”；"
+            "只列待补充的成本、基准、根因材料；不得补充条件性因果猜测或预测，不推断成本导致回撤。"
+        ]
+        if insufficient_evidence
+        else []
+    )
 
     return "\n".join(
         [
@@ -120,6 +133,7 @@ def build_research_diagnosis_prompt(request: Mapping[str, Any]) -> str:
             "你的任务仅是为一个已验证的 non-live P3 退化事件写出下一轮离线研究计划。",
             "禁止：修改代码或参数、执行命令、联网取数、读取凭证、创建 PR、发起 paper/shadow/live、访问券商、下单或讨论仓位大小。",
             "不得把历史指标解释为实盘表现或晋级资格。若证据不足，明确写“证据不足”，不要猜测。",
+            *evidence_guidance,
             "请使用简洁中文，严格输出以下四个标题：",
             "## 已验证事实",
             "## 可检验假设",
