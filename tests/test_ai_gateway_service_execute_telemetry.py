@@ -40,6 +40,7 @@ class AiGatewayExecuteTelemetryTests(unittest.TestCase):
             "source_repository": gateway.SOXL_RSI2_CODEGEN_SOURCE_REPO,
             "allowed_providers": ["codex"], "provider": "codex", "mode": "review_only",
             "research_stage": "optimization", "sandbox": "read-only",
+            "research_objective": "bounded RSI2 objective",
         }
         gateway._validate_soxl_rsi2_codegen_payload(blocked)
         self.assertEqual(blocked["model"], gateway.SOXL_RSI2_CODEGEN_MODEL)
@@ -50,6 +51,20 @@ class AiGatewayExecuteTelemetryTests(unittest.TestCase):
             invalid = {**blocked, field: value}
             with self.subTest(field=field), self.assertRaises(PermissionError):
                 gateway._validate_soxl_rsi2_codegen_payload(invalid)
+
+    def test_codegen_objective_is_required_and_bounded_before_quota_or_model(self) -> None:
+        base = {
+            "task": gateway.SOXL_RSI2_CODEGEN_TASK,
+            "source_repository": gateway.SOXL_RSI2_CODEGEN_SOURCE_REPO,
+            "allowed_providers": ["codex"], "provider": "codex", "mode": "review_only",
+            "research_stage": "optimization", "sandbox": "read-only",
+        }
+        for value in (None, "", "   ", 42, "x" * 1001, "bad\robjective"):
+            with self.subTest(value=repr(value)), self.assertRaises(PermissionError):
+                gateway._validate_soxl_rsi2_codegen_payload({**base, "research_objective": value})
+        valid = {**base, "research_objective": "  bounded\tobjective\nwith context  "}
+        gateway._validate_soxl_rsi2_codegen_payload(valid)
+        self.assertEqual(valid["research_objective"], "bounded\tobjective\nwith context")
 
     def test_diagnosis_ledger_exposes_only_bounded_success_summary(self):
         base = {"job_id": "a" * 32, "task": "operational_data_diagnosis",

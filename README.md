@@ -276,6 +276,16 @@ AIAuditBridge rejects absolute paths, `.git` paths, secret-like paths, and block
 - Research outputs may feed only a separately validated, inactive no-order candidate; P6 live use still requires an explicit owner decision.
 - Keep credentials, private data, and external service tokens out of Git and logs.
 
+### Research trigger matrix
+
+| Trigger | Scope | Boundary |
+| --- | --- | --- |
+| Scheduled watcher | Discovers an already verified event and records an Issue | The same event creates at most one Issue comment; unreadable Issue state writes nothing. A durable attempt parks AI; only a trusted pre-execution quota deferral with a future `retry_at` may unlock one claim at expiry, while unknown, timeout, or comment failures remain parked. |
+| SOXL RSI2 codegen | Requires an explicit, non-empty bounded research objective from a manual dispatch | The objective is validated before quota/model admission, authentication, P1 reads, materialization, or research-source reads. |
+| General new-strategy design | Not implemented by this watcher | Do not describe the generic design path as implemented or automatically triggered. |
+
+These paths remain research-only and do not grant deployment, trading, promotion, or live authority.
+
 ## Repository layout
 
 - `tests/`: unit, contract, and regression tests.

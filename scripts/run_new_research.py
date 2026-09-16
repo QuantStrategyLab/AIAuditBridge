@@ -654,6 +654,22 @@ def run_soxl_rsi2_codegen_case(
     ues_path = Path(ues_repo_root).resolve()
     persistent = Path(run_root).resolve()
     research_objective = _normalise_research_objective(research_objective)
+    if research_objective is None:
+        case_input = persistent / "codegen_case_input.json"
+        if case_input.is_file():
+            try:
+                saved_payload = json.loads(case_input.read_text(encoding="utf-8"))
+            except (OSError, ValueError, json.JSONDecodeError):
+                raise NewResearchInputError("codegen_case_input_invalid") from None
+            if not isinstance(saved_payload, Mapping):
+                raise NewResearchInputError("codegen_case_input_invalid")
+            saved_objective = _normalise_research_objective(saved_payload.get("research_objective"))
+            if saved_objective is not None:
+                raise NewResearchInputError("research_objective_mismatch")
+        return {
+            "status": "no_changes", "reason": "research_objective_missing", "changed_paths": [],
+            "research_executed": False, "research_only": True, "live_authority_granted": False,
+        }
     persistent.mkdir(parents=True, exist_ok=True)
     if not p1_path.is_dir() or not ues_path.is_dir():
         raise NewResearchInputError("codegen_case_root_invalid")
@@ -1462,7 +1478,9 @@ def soxl_rsi2_codegen(
         receipts = fetch_soxl_rsi2_codegen_sources(retrieved_at=retrieved_at)
         prompt = _codegen_prompt(files, receipts, research_objective)
         if execute is None:
-            execute = _codex_codegen_execute(source_ref=source_ref)
+            execute = _codex_codegen_execute(
+                source_ref=source_ref, research_objective=research_objective,
+            )
         response = execute(prompt)
         if persistent_root is not None:
             persistent_root.mkdir(parents=True, exist_ok=True)
@@ -1781,7 +1799,7 @@ def _digest_map(raw: Any) -> dict[str, str]:
     return dict(raw)
 
 
-def _codex_codegen_execute(*, source_ref: str):
+def _codex_codegen_execute(*, source_ref: str, research_objective: str):
     """Return the bounded Codex-only patch callback for the SOXL lane."""
     from ai_gateway_client import AiGatewayClient, GatewayConfig
 
@@ -1798,6 +1816,7 @@ def _codex_codegen_execute(*, source_ref: str):
             model="gpt-5.6-luna",
             complexity="medium",
             research_stage="optimization",
+            research_objective=research_objective,
             reasoning_effort="medium",
             sandbox="read-only",
             allowed_providers=["codex"],

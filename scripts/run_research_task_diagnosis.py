@@ -13,9 +13,14 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import math
+import os
+import re
 import subprocess
 import sys
+import time
 from collections.abc import Callable, Mapping
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +40,12 @@ from service.research_diagnosis import (  # noqa: E402
 
 MAX_AUTOMATIC_DIAGNOSES = 1
 _REPOSITORY = "QuantStrategyLab"
+_ATTEMPT_MARKER_PREFIX = "qsl-research-diagnosis-attempt:v1"
+_DEFERRED_MARKER_PREFIX = "qsl-research-diagnosis-deferred:v1"
+_DEFERRED_MARKER_RE = re.compile(
+    r"<!--\s*" + re.escape(_DEFERRED_MARKER_PREFIX)
+    + r":(?P<task_id>watcher-[0-9a-f]{12}):(?P<task_sha256>[0-9a-f]{64}):(?P<claim_comment_id>[1-9][0-9]*):(?P<retry_at>[0-9]+(?:\.[0-9]+)?)\s*-->"
+)
 
 
 def _clean_repo(value: object) -> str:
@@ -92,30 +103,211 @@ def diagnosis_candidates(result: Mapping[str, Any]) -> list[dict[str, Any]]:
     return sorted(candidates, key=lambda item: (str(item["repository"]), str(item["issue_url"])))
 
 
-def issue_is_open_and_undiagnosed(repository: str, issue_url: str, marker: str) -> bool:
-    """Return true only for a readable open Issue without this exact marker."""
+def issue_is_open_and_undiagnosed(repository: str, issue_url: str, marker: str, *, now: float | None = None) -> bool:
+    """Return true only for an open Issue with no terminal or parked state."""
+    app_id = os.environ.get("SOURCE_GITHUB_APP_ID", "").strip()
+    if not re.fullmatch(r"[1-9][0-9]*", app_id):
+        return False
     try:
-        completed = subprocess.run(
-            ["gh", "issue", "view", issue_url, "--repo", repository, "--json", "state,comments"],
+        match = re.fullmatch(
+            rf"https://github\.com/{re.escape(repository)}/issues/([1-9][0-9]*)", issue_url
+        )
+        if match is None:
+            return False
+        issue = subprocess.run(
+            ["gh", "api", f"repos/{repository}/issues/{match.group(1)}"],
             check=True,
             capture_output=True,
             text=True,
             timeout=30,
         )
-        payload = json.loads(completed.stdout)
-        if not isinstance(payload, Mapping):
+        issue_payload = json.loads(issue.stdout)
+        if not isinstance(issue_payload, Mapping) or issue_payload.get("state") != "open":
             return False
-        comments = payload.get("comments")
-        if payload.get("state") != "OPEN" or not isinstance(comments, list):
+        comments_result = subprocess.run(
+            ["gh", "api", "--paginate", f"repos/{repository}/issues/{match.group(1)}/comments?per_page=100"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        decoder = json.JSONDecoder()
+        comments: list[Any] = []
+        cursor = 0
+        while cursor < len(comments_result.stdout):
+            while cursor < len(comments_result.stdout) and comments_result.stdout[cursor].isspace():
+                cursor += 1
+            if cursor == len(comments_result.stdout):
+                break
+            page, cursor = decoder.raw_decode(comments_result.stdout, cursor)
+            if not isinstance(page, list):
+                return False
+            comments.extend(page)
+        if not comments_result.stdout.strip():
             return False
-        return not any(isinstance(item, Mapping) and marker in str(item.get("body") or "") for item in comments)
-    except (OSError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        state = _issue_comment_state(comments, marker, now=time.time() if now is None else now)
+        return state in {"none", "due"}
+    except (OSError, TypeError, ValueError, json.JSONDecodeError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return False
 
 
 def issue_has_diagnosis_marker(repository: str, issue_url: str, marker: str) -> bool:
     """Any closed Issue or retrieval error is treated as already handled."""
     return not issue_is_open_and_undiagnosed(repository, issue_url, marker)
+
+
+def attempt_marker_for_research_diagnosis(request: Mapping[str, Any]) -> str:
+    """Return the durable pre-AI claim marker for one verified task."""
+    return marker_for_research_diagnosis(request).replace(
+        "<!-- qsl-research-diagnosis:v1:",
+        f"<!-- {_ATTEMPT_MARKER_PREFIX}:",
+        1,
+    )
+
+
+def format_research_diagnosis_attempt_comment(request: Mapping[str, Any]) -> str:
+    """Build a visible durable claim without presenting it as diagnosis output."""
+    return (
+        f"{attempt_marker_for_research_diagnosis(request)}\n"
+        "本任务已开始自动诊断；若没有后续结果，保持暂停，避免重复执行。"
+    )
+
+
+def deferred_marker_for_research_diagnosis(request: Mapping[str, Any], retry_at: object, claim_comment_id: str) -> str:
+    """Return a retry marker bound to the same task as the durable claim."""
+    if not isinstance(retry_at, (int, float)) or isinstance(retry_at, bool) or not math.isfinite(retry_at) or retry_at <= 0:
+        raise ValueError("research diagnosis retry_at is invalid")
+    if not re.fullmatch(r"[1-9][0-9]*", claim_comment_id):
+        raise ValueError("research diagnosis claim comment ID is invalid")
+    return (
+        f"<!-- {_DEFERRED_MARKER_PREFIX}:{request['task_id']}:{request['task_sha256']}:{claim_comment_id}:{retry_at} -->"
+    )
+
+
+def format_research_diagnosis_deferred_comment(request: Mapping[str, Any], retry_at: object, claim_comment_id: str) -> str:
+    """Build a visible, non-diagnostic marker for a trusted future retry."""
+    return (
+        f"{deferred_marker_for_research_diagnosis(request, retry_at, claim_comment_id)}\n"
+        "网关明确额度暂缓；达到记录的恢复时间前保持暂停，之后仅重新领取一次。"
+    )
+
+
+def _comment_id_from_url(value: object) -> str | None:
+    match = re.search(r"(?:issuecomment-|/comments/)([1-9][0-9]*)", str(value or ""))
+    return match.group(1) if match else None
+
+
+def _recoverable_deferred_retry_at(ai_result: Any, config: GatewayConfig, *, now: float) -> float | None:
+    """Accept only the gateway's explicit pre-execution quota deferral."""
+    raw = getattr(ai_result, "raw", None)
+    if not (
+        getattr(ai_result, "success", True) is False
+        and getattr(ai_result, "provider", "") in config.research_providers
+        and isinstance(raw, Mapping)
+        and raw.get("status") == "deferred"
+        and raw.get("execution_started") is False
+        and raw.get("failure_category") == "quota_or_capacity_failure"
+    ):
+        return None
+    retry_at = raw.get("retry_at")
+    if not isinstance(retry_at, (int, float)) or isinstance(retry_at, bool) or not math.isfinite(retry_at):
+        return None
+    if retry_at <= now:
+        return None
+    return float(retry_at)
+
+
+def _comment_is_trusted_application(comment: Mapping[str, Any]) -> bool:
+    """Accept only bot/App-authored state comments from the Issue history."""
+    app = comment.get("performed_via_github_app")
+    expected_app = os.environ.get("SOURCE_GITHUB_APP_ID", "").strip()
+    return (
+        bool(re.fullmatch(r"[1-9][0-9]*", expected_app))
+        and isinstance(app, Mapping)
+        and str(app.get("id") or "") == expected_app
+    )
+
+
+def _comment_created_at(comment: Mapping[str, Any]) -> float | None:
+    value = comment.get("createdAt") or comment.get("created_at")
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.timestamp()
+
+
+def _issue_comment_state(comments: list[Any], marker: str, *, now: float) -> str:
+    """Resolve the latest trusted state; malformed state conservatively parks."""
+    last_id = 0
+    last_created_at: float | None = None
+    for item in comments:
+        if not isinstance(item, Mapping) or not isinstance(item.get("id"), int) or item["id"] <= last_id:
+            return "unknown"
+        created_at = _comment_created_at(item)
+        if created_at is None or created_at > now or (last_created_at is not None and created_at < last_created_at):
+            return "unknown"
+        last_id = item["id"]
+        last_created_at = created_at
+    deferred_match = re.search(
+        r"<!--\s*qsl-research-diagnosis:v1:watcher-(?P<event>[0-9a-f]{12}):(?P<sha>[0-9a-f]{64})\s*-->$",
+        marker,
+    )
+    if deferred_match is None:
+        return "unknown"
+    attempt_marker = (
+        f"<!-- {_ATTEMPT_MARKER_PREFIX}:watcher-{deferred_match.group('event')}:{deferred_match.group('sha')} -->"
+    )
+    attempt_seen = False
+    attempt_id: str | None = None
+    attempt_created_at: float | None = None
+    state = "none"
+    for item in comments:
+        if not isinstance(item, Mapping):
+            return "unknown"
+        body = item.get("body")
+        if not isinstance(body, str):
+            continue
+        deferred = _DEFERRED_MARKER_RE.search(body)
+        deferred_matches_task = bool(
+            deferred
+            and deferred.group("task_id") == f"watcher-{deferred_match.group('event')}"
+            and deferred.group("task_sha256") == deferred_match.group("sha")
+        )
+        has_marker = marker in body or attempt_marker in body or deferred_matches_task
+        if not has_marker:
+            continue
+        if not _comment_is_trusted_application(item):
+            return "unknown"
+        created_at = _comment_created_at(item)
+        if attempt_marker in body:
+            current_id = item.get("id")
+            if created_at is None or created_at > now or not isinstance(current_id, int) or current_id <= 0:
+                return "unknown"
+            attempt_seen = True
+            attempt_id = str(current_id)
+            attempt_created_at = created_at
+            state = "started"
+            continue
+        if marker in body:
+            return "success"
+        if deferred is None or not deferred_matches_task:
+            return "unknown"
+        if not attempt_seen or attempt_id is None or attempt_created_at is None or created_at is None or created_at < attempt_created_at or created_at > now:
+            return "unknown"
+        try:
+            deferred_id = str(deferred.group("claim_comment_id"))
+            retry_at = float(deferred.group("retry_at"))
+        except (TypeError, ValueError):
+            return "unknown"
+        if deferred_id != attempt_id or not math.isfinite(retry_at) or retry_at <= created_at:
+            continue
+        state = "deferred" if retry_at > now else "due"
+    return state
 
 
 def recover_pending_watcher_result(
@@ -204,7 +396,7 @@ def run_diagnosis(
     create_comment: Callable[[str, str, str], str] = comment_issue,
     client_factory: Callable[[GatewayConfig], AiGatewayClient] = AiGatewayClient,
 ) -> dict[str, Any]:
-    """Diagnose at most one not-yet-diagnosed issue; failures have no side effect."""
+    """Diagnose at most one issue after a durable claim; uncertain claims never call AI."""
     candidates = diagnosis_candidates(result)
     if max_per_run < 1:
         raise ValueError("max_per_run must be positive")
@@ -231,13 +423,8 @@ def run_diagnosis(
         summary["reason"] = "no_pending_verified_research_task"
         return summary
 
-    try:
-        config = GatewayConfig.from_env()
-    except ValueError:
-        summary["status"] = "not_configured"
-        summary["reason"] = "ai_gateway_not_configured"
-        return summary
-    client = client_factory(config)
+    config: GatewayConfig | None = None
+    client: AiGatewayClient | None = None
     for candidate in pending[:max_per_run]:
         task = candidate["task"]
         try:
@@ -255,6 +442,31 @@ def run_diagnosis(
                     "repository": candidate["repository"],
                     "issue_url": candidate["issue_url"],
                     "prompt": prompt,
+                }
+            )
+            continue
+        if client is None:
+            try:
+                config = GatewayConfig.from_env()
+            except ValueError:
+                summary["diagnoses"].append(
+                    {"status": "not_configured", "task_id": request["task_id"], "error": "ai_gateway_not_configured"}
+                )
+                continue
+            client = client_factory(config)
+        try:
+            claim_url = create_comment(
+                str(candidate["repository"]), str(candidate["issue_url"]),
+                format_research_diagnosis_attempt_comment(request),
+            )
+            if not isinstance(claim_url, str) or not claim_url.strip():
+                raise RuntimeError("claim_write_result_unknown")
+        except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            summary["diagnoses"].append(
+                {
+                    "status": "claim_failed",
+                    "task_id": request["task_id"],
+                    "error": _error_summary(exc),
                 }
             )
             continue
@@ -278,9 +490,33 @@ def run_diagnosis(
         # This lane has no analyze/review fallback, including quota failures.
         output = ai_result.output
         raw = getattr(ai_result, "raw", None)
-        if (ai_result.provider in config.research_providers or (not ai_result.provider and "cursor" in config.research_providers)) and ai_result.success is False and isinstance(raw, dict) and raw.get("status") == "deferred":
+        if isinstance(raw, dict) and raw.get("status") == "deferred":
+            retry_at = _recoverable_deferred_retry_at(ai_result, config, now=time.time())
+            if retry_at is None:
+                summary["diagnoses"].append({
+                    "status": "unavailable", "task_id": request["task_id"],
+                    "error": "deferred_result_unavailable",
+                })
+                continue
+            try:
+                claim_comment_id = _comment_id_from_url(claim_url)
+                if claim_comment_id is None:
+                    raise RuntimeError("claim_comment_identity_unknown")
+                deferred_url = create_comment(
+                    str(candidate["repository"]), str(candidate["issue_url"]),
+                    format_research_diagnosis_deferred_comment(request, retry_at, claim_comment_id),
+                )
+                if not isinstance(deferred_url, str) or not deferred_url.strip():
+                    raise RuntimeError("deferred_comment_result_unknown")
+            except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+                summary["diagnoses"].append({
+                    "status": "deferred_comment_failed", "task_id": request["task_id"],
+                    "error": _error_summary(exc),
+                })
+                continue
             summary["diagnoses"].append({
-                "status": "deferred", "task_id": request["task_id"], "retry_at": raw.get("retry_at"),
+                "status": "deferred", "task_id": request["task_id"], "retry_at": retry_at,
+                "comment_url": deferred_url,
             })
             continue
         content_available = (
@@ -324,7 +560,7 @@ def run_diagnosis(
                 "comment_url": comment_url,
             }
         )
-    if any(item.get("status") in {"unavailable", "comment_failed", "rejected"} for item in summary["diagnoses"]):
+    if any(item.get("status") in {"unavailable", "comment_failed", "deferred_comment_failed", "claim_failed", "not_configured", "rejected"} for item in summary["diagnoses"]):
         summary["status"] = "partial_error"
     return summary
 
@@ -382,9 +618,9 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"status": "error", "error": _error_summary(exc)}, sort_keys=True))
         return 2
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
-    # A missing service or failed text-only diagnosis must not turn into a
-    # strategy action or break the primary watcher.  Its durable issue remains
-    # the retry point for the next scheduled run.
+    # A missing service, failed diagnosis, or uncertain comment write must not
+    # turn into a strategy action or break the primary watcher.  A durable
+    # started marker parks the task until an explicit recovery decision.
     return 0
 
 

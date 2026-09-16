@@ -9,6 +9,9 @@ from unittest.mock import patch
 from scripts.run_research_task_diagnosis import (
     diagnosis_candidates,
     issue_is_open_and_undiagnosed,
+    attempt_marker_for_research_diagnosis,
+    format_research_diagnosis_attempt_comment,
+    format_research_diagnosis_deferred_comment,
     recover_pending_watcher_result,
     run_diagnosis,
 )
@@ -18,6 +21,7 @@ from service.research_diagnosis import (
     build_research_diagnosis_prompt,
     build_research_diagnosis_request,
     format_research_diagnosis_comment,
+    marker_for_research_diagnosis,
 )
 from service.research_task import ResearchTaskError, build_strategy_diagnosis_task
 
@@ -152,7 +156,7 @@ class ResearchDiagnosisTests(unittest.TestCase):
         client.execute.return_value = result
         with patch.dict(os.environ, {"CODEX_AUDIT_SERVICE_URL": "https://example.test"}, clear=True):
             summary = run_diagnosis(_result(), marker_present=lambda *_args: False,
-                    create_comment=lambda _repo, _url, body: comments.append(body) or "https://example.test/comment/1",
+                    create_comment=lambda _repo, _url, body: comments.append(body) or "https://github.com/QuantStrategyLab/UsEquitySnapshotPipelines/issues/1#issuecomment-101",
                     client_factory=lambda _config: client)
         client.execute.assert_called_once()
         client.analyze.assert_not_called()
@@ -181,7 +185,7 @@ class ResearchDiagnosisTests(unittest.TestCase):
                 create_comment=lambda _repo, _url, body: comments.append(body) or "comment-1",
                 client_factory=lambda _: client)
         self.assertEqual(summary["status"], "ok")
-        self.assertEqual(len(comments), 1)
+        self.assertEqual(len(comments), 2)
         requests = [call.args[0] for call in http.call_args_list]
         self.assertEqual([request.get_method() for request in requests], ["GET", "POST", "GET"])
         self.assertTrue(requests[0].full_url.endswith("/healthz"))
@@ -195,12 +199,15 @@ class ResearchDiagnosisTests(unittest.TestCase):
     def test_quota_deferral_keeps_issue_pending_without_comment_or_error(self):
         from client.gateway_client import AiResult
         result = AiResult(provider="codex", model="", success=False, note="deferred",
-            raw={"status": "deferred", "retry_at": 9000})
+            raw={"status": "deferred", "retry_at": 4102444800.123456, "execution_started": False,
+                 "failure_category": "quota_or_capacity_failure"})
         summary, comments = self._run_codex_result(result)
-        self.assertEqual(comments, [])
+        self.assertEqual(len(comments), 2)
+        self.assertIn("qsl-research-diagnosis-attempt:v1", comments[0])
+        self.assertIn("qsl-research-diagnosis-deferred:v1", comments[1])
         self.assertEqual(summary["status"], "ok")
         self.assertEqual(summary["diagnoses"][0]["status"], "deferred")
-        self.assertEqual(summary["diagnoses"][0]["retry_at"], 9000)
+        self.assertEqual(summary["diagnoses"][0]["retry_at"], 4102444800.123456)
 
     def test_codex_failure_or_other_provider_never_uses_api_fallback(self):
         from client.gateway_client import AiResult
@@ -212,7 +219,8 @@ class ResearchDiagnosisTests(unittest.TestCase):
         ):
             with self.subTest(result=result):
                 summary, comments = self._run_codex_result(result)
-                self.assertEqual(comments, [])
+                self.assertEqual(len(comments), 1)
+                self.assertIn("qsl-research-diagnosis-attempt:v1", comments[0])
                 self.assertEqual(summary["status"], "partial_error")
                 self.assertNotIn("sensitive", json.dumps(summary))
 
@@ -236,7 +244,8 @@ class ResearchDiagnosisTests(unittest.TestCase):
                 fields.update(case)
                 summary, comments = self._run_codex_result(AiResult(**fields))
                 self.assertNotEqual(summary["status"], "ok")
-                self.assertEqual(comments, [])
+                self.assertEqual(len(comments), 1)
+                self.assertIn("qsl-research-diagnosis-attempt:v1", comments[0])
 
     def test_valid_task_projects_to_read_only_prompt(self) -> None:
         request = build_research_diagnosis_request(_task(), trigger={"signals": [{"metric": "sharpe", "reason": "drop"}]})
@@ -363,26 +372,148 @@ class ResearchDiagnosisTests(unittest.TestCase):
         )
 
     def test_historical_issue_must_be_open_and_missing_exact_marker(self) -> None:
-        marker = "<!-- qsl-research-diagnosis:v1:watcher-a1b2c3d4e5f6:digest -->"
-        with patch(
+        marker = "<!-- qsl-research-diagnosis:v1:watcher-a1b2c3d4e5f6:" + "a" * 64 + " -->"
+        issue = SimpleNamespace(stdout=json.dumps({"state": "open"}))
+        with patch.dict(os.environ, {"SOURCE_GITHUB_APP_ID": "42"}, clear=False), patch(
             "scripts.run_research_task_diagnosis.subprocess.run",
-            return_value=SimpleNamespace(
-                stdout=json.dumps({"state": "OPEN", "comments": [{"body": "unrelated"}]})
+            side_effect=[issue, SimpleNamespace(stdout=json.dumps([]))],
+        ):
+            self.assertTrue(issue_is_open_and_undiagnosed("QuantStrategyLab/Test", "https://github.com/QuantStrategyLab/Test/issues/1", marker))
+        with patch.dict(os.environ, {"SOURCE_GITHUB_APP_ID": "42"}, clear=False), patch(
+            "scripts.run_research_task_diagnosis.subprocess.run",
+            side_effect=[issue, SimpleNamespace(stdout=json.dumps([{
+                "id": 7, "body": marker, "performed_via_github_app": {"id": 42},
+                "created_at": "2026-09-16T00:00:00Z",
+            }]))],
+        ):
+            self.assertFalse(issue_is_open_and_undiagnosed("QuantStrategyLab/Test", "https://github.com/QuantStrategyLab/Test/issues/1", marker))
+        with patch.dict(os.environ, {"SOURCE_GITHUB_APP_ID": "42"}, clear=False), patch(
+            "scripts.run_research_task_diagnosis.subprocess.run",
+            return_value=SimpleNamespace(stdout=json.dumps({"state": "closed"})),
+        ):
+            self.assertFalse(issue_is_open_and_undiagnosed("QuantStrategyLab/Test", "https://github.com/QuantStrategyLab/Test/issues/1", marker))
+
+    def test_deferred_marker_requires_current_claim_and_exact_due_time(self) -> None:
+        request = build_research_diagnosis_request(_task())
+        marker = marker_for_research_diagnosis(request)
+        attempt = {
+            "id": 7,
+            "body": format_research_diagnosis_attempt_comment(request),
+            "performed_via_github_app": {"id": 42},
+            "created_at": "1970-01-01T00:01:40Z",
+        }
+        deferred = {
+            "id": 8,
+            "body": format_research_diagnosis_deferred_comment(request, 200.123456, "7"),
+            "performed_via_github_app": {"id": 42},
+            "created_at": "1970-01-01T00:01:41Z",
+        }
+        with patch.dict(os.environ, {"SOURCE_GITHUB_APP_ID": "42"}, clear=False):
+            with patch(
+                "scripts.run_research_task_diagnosis.subprocess.run",
+                side_effect=[
+                    SimpleNamespace(stdout=json.dumps({"state": "open"})),
+                    SimpleNamespace(stdout=json.dumps([attempt, deferred])),
+                ],
+            ):
+                self.assertFalse(issue_is_open_and_undiagnosed(
+                    "QuantStrategyLab/Test", "https://github.com/QuantStrategyLab/Test/issues/1", marker, now=199.123456
+                ))
+            with patch(
+                "scripts.run_research_task_diagnosis.subprocess.run",
+                side_effect=[
+                    SimpleNamespace(stdout=json.dumps({"state": "open"})),
+                    SimpleNamespace(stdout=json.dumps([attempt, deferred])),
+                ],
+            ):
+                self.assertTrue(issue_is_open_and_undiagnosed(
+                    "QuantStrategyLab/Test", "https://github.com/QuantStrategyLab/Test/issues/1", marker, now=201.0
+                ))
+
+    def test_old_deferred_cannot_unlock_newer_unknown_attempt(self) -> None:
+        request = build_research_diagnosis_request(_task())
+        marker = marker_for_research_diagnosis(request)
+        comments = [
+            {"id": 7, "body": format_research_diagnosis_attempt_comment(request), "performed_via_github_app": {"id": 42}, "created_at": "1970-01-01T00:01:40Z"},
+            {"id": 8, "body": format_research_diagnosis_deferred_comment(request, 200.0, "7"), "performed_via_github_app": {"id": 42}, "created_at": "1970-01-01T00:01:41Z"},
+            {"id": 9, "body": format_research_diagnosis_attempt_comment(request), "performed_via_github_app": {"id": 42}, "created_at": "1970-01-01T00:02:30Z"},
+            {"id": 10, "body": format_research_diagnosis_deferred_comment(request, 150.0, "7"), "performed_via_github_app": {"id": 42}, "created_at": "1970-01-01T00:02:31Z"},
+        ]
+        with patch.dict(os.environ, {"SOURCE_GITHUB_APP_ID": "42"}, clear=False), patch(
+            "scripts.run_research_task_diagnosis.subprocess.run",
+            side_effect=[SimpleNamespace(stdout=json.dumps({"state": "open"})), SimpleNamespace(stdout=json.dumps(comments))],
+        ):
+            self.assertFalse(issue_is_open_and_undiagnosed(
+                "QuantStrategyLab/Test", "https://github.com/QuantStrategyLab/Test/issues/1", marker, now=300.0
+            ))
+
+    def test_success_marker_is_terminal_even_if_a_later_old_deferred_is_present(self) -> None:
+        request = build_research_diagnosis_request(_task())
+        marker = marker_for_research_diagnosis(request)
+        comments = [
+            {"id": 7, "body": format_research_diagnosis_attempt_comment(request), "performed_via_github_app": {"id": 42}, "created_at": "1970-01-01T00:01:40Z"},
+            {"id": 8, "body": marker + "\n## 已验证事实", "performed_via_github_app": {"id": 42}, "created_at": "1970-01-01T00:01:41Z"},
+            {"id": 9, "body": format_research_diagnosis_deferred_comment(request, 300.0, "7"), "performed_via_github_app": {"id": 42}, "created_at": "1970-01-01T00:01:42Z"},
+        ]
+        with patch.dict(os.environ, {"SOURCE_GITHUB_APP_ID": "42"}, clear=False), patch(
+            "scripts.run_research_task_diagnosis.subprocess.run",
+            side_effect=[SimpleNamespace(stdout=json.dumps({"state": "open"})), SimpleNamespace(stdout=json.dumps(comments))],
+        ):
+            self.assertFalse(issue_is_open_and_undiagnosed(
+                "QuantStrategyLab/Test", "https://github.com/QuantStrategyLab/Test/issues/1", marker, now=400.0
+            ))
+
+    def test_deferred_recovery_is_one_claim_after_due_then_unknown_parks(self) -> None:
+        from client.gateway_client import AiResult
+        from unittest.mock import Mock
+
+        reader_result = _result()
+        reader_result["issues"][0]["url"] = "https://github.com/QuantStrategyLab/UsEquitySnapshotPipelines/issues/1"  # type: ignore[index]
+        comments: list[dict[str, object]] = []
+        current_time = [100.0]
+        client = Mock()
+        client.execute.side_effect = [
+            AiResult(
+                provider="codex", model="", success=False, note="deferred",
+                raw={
+                    "status": "deferred", "retry_at": 200.5,
+                    "execution_started": False, "failure_category": "quota_or_capacity_failure",
+                },
             ),
-        ):
-            self.assertTrue(issue_is_open_and_undiagnosed("QuantStrategyLab/Test", "issue", marker))
-        with patch(
-            "scripts.run_research_task_diagnosis.subprocess.run",
-            return_value=SimpleNamespace(
-                stdout=json.dumps({"state": "OPEN", "comments": [{"body": marker}]})
-            ),
-        ):
-            self.assertFalse(issue_is_open_and_undiagnosed("QuantStrategyLab/Test", "issue", marker))
-        with patch(
-            "scripts.run_research_task_diagnosis.subprocess.run",
-            return_value=SimpleNamespace(stdout=json.dumps({"state": "CLOSED", "comments": []})),
-        ):
-            self.assertFalse(issue_is_open_and_undiagnosed("QuantStrategyLab/Test", "issue", marker))
+            AiResult(provider="codex", model="", success=False, error="unknown"),
+        ]
+
+        def read_issue(args: list[str], **_kwargs: object) -> SimpleNamespace:
+            if "/comments?" in args[-1]:
+                return SimpleNamespace(stdout=json.dumps(comments))
+            return SimpleNamespace(stdout=json.dumps({"state": "open"}))
+
+        def create_comment(_repo: str, _url: str, body: str) -> str:
+            comment_id = 100 + len(comments)
+            comments.append({
+                "id": comment_id, "body": body,
+                "performed_via_github_app": {"id": 42},
+                "created_at": f"1970-01-01T00:{int(current_time[0] // 60):02d}:{int(current_time[0] % 60):02d}Z",
+            })
+            return f"https://github.com/QuantStrategyLab/UsEquitySnapshotPipelines/issues/1#issuecomment-{comment_id}"
+
+        with patch.dict(os.environ, {"CODEX_AUDIT_SERVICE_URL": "https://example.test", "SOURCE_GITHUB_APP_ID": "42"}, clear=False), patch(
+            "scripts.run_research_task_diagnosis.subprocess.run", side_effect=read_issue,
+        ), patch("scripts.run_research_task_diagnosis.time.time", side_effect=lambda: current_time[0]):
+            first = run_diagnosis(reader_result, create_comment=create_comment, client_factory=lambda _config: client)
+            current_time[0] = 150.0
+            before_due = run_diagnosis(reader_result, create_comment=create_comment, client_factory=lambda _config: client)
+            current_time[0] = 201.0
+            after_due = run_diagnosis(reader_result, create_comment=create_comment, client_factory=lambda _config: client)
+            current_time[0] = 202.0
+            after_unknown = run_diagnosis(reader_result, create_comment=create_comment, client_factory=lambda _config: client)
+
+        self.assertEqual(first["diagnoses"][0]["status"], "deferred")
+        self.assertEqual(before_due["status"], "skipped")
+        self.assertEqual(after_due["diagnoses"][0]["status"], "unavailable")
+        self.assertEqual(after_unknown["status"], "skipped")
+        self.assertEqual(client.execute.call_count, 2)
+        self.assertEqual(len(comments), 3)
 
     def test_run_diagnosis_calls_ai_once_and_writes_marked_comment(self) -> None:
         fake = FakeClient()
@@ -399,9 +530,10 @@ class ResearchDiagnosisTests(unittest.TestCase):
         self.assertEqual(summary["diagnoses"][0]["status"], "diagnosed")
         self.assertEqual(len(fake.calls), 1)
         self.assertEqual(fake.calls[0]["source_repository"], "QuantStrategyLab/UsEquityStrategies")
-        self.assertEqual(len(comments), 1)
-        self.assertIn("qsl-research-diagnosis:v1", comments[0][2])
-        self.assertIn("没有代码、参数、数据、订单、P4/P5/P6", comments[0][2])
+        self.assertEqual(len(comments), 2)
+        self.assertIn("qsl-research-diagnosis-attempt:v1", comments[0][2])
+        self.assertIn("qsl-research-diagnosis:v1", comments[1][2])
+        self.assertIn("没有代码、参数、数据、订单、P4/P5/P6", comments[1][2])
 
     def test_new_verified_task_on_existing_issue_is_not_blocked_by_legacy_marker(self) -> None:
         fake = FakeClient()
@@ -422,9 +554,9 @@ class ResearchDiagnosisTests(unittest.TestCase):
         self.assertEqual(summary["status"], "ok")
         self.assertEqual(summary["diagnoses"][0]["status"], "diagnosed")
         self.assertEqual(len(fake.calls), 1)
-        self.assertEqual(len(comments), 1)
-        self.assertIn(str(next_task["task_id"]), comments[0][2])
-        self.assertIn(str(next_task["task_sha256"]), comments[0][2])
+        self.assertEqual(len(comments), 2)
+        self.assertIn(str(next_task["task_id"]), comments[1][2])
+        self.assertIn(str(next_task["task_sha256"]), comments[1][2])
 
     def test_existing_task_marker_skips_without_calling_ai(self) -> None:
         with patch.dict(os.environ, {"CODEX_AUDIT_SERVICE_URL": "https://example.test"}, clear=False):
@@ -436,6 +568,111 @@ class ResearchDiagnosisTests(unittest.TestCase):
 
         self.assertEqual(summary["status"], "skipped")
         self.assertEqual(summary["reason"], "no_pending_verified_research_task")
+
+    def test_started_attempt_claim_prevents_second_tick_after_comment_failure(self) -> None:
+        fake = FakeClient()
+        comments: list[str] = []
+        request = build_research_diagnosis_request(_task())
+        attempt_marker = attempt_marker_for_research_diagnosis(request)
+
+        def marker_present(_repo: str, _url: str, marker: str) -> bool:
+            return any(marker in body or attempt_marker in body for body in comments)
+
+        def create_comment(_repo: str, _url: str, body: str) -> str:
+            if attempt_marker in body:
+                comments.append(body)
+                return "claim-1"
+            raise RuntimeError("comment result unknown")
+
+        with patch.dict(os.environ, {"CODEX_AUDIT_SERVICE_URL": "https://example.test"}, clear=False):
+            first = run_diagnosis(
+                _result(), marker_present=marker_present, create_comment=create_comment,
+                client_factory=lambda _config: fake,
+            )
+            second = run_diagnosis(
+                _result(), marker_present=marker_present, create_comment=create_comment,
+                client_factory=lambda _config: fake,
+            )
+
+        self.assertEqual(first["diagnoses"][0]["status"], "comment_failed")
+        self.assertEqual(second["status"], "skipped")
+        self.assertEqual(len(fake.calls), 1)
+        self.assertEqual(sum(attempt_marker in body for body in comments), 1)
+
+    def test_default_issue_reader_parks_started_claim_across_ticks(self) -> None:
+        fake = FakeClient()
+        issue_comments: list[str] = []
+        request = build_research_diagnosis_request(_task())
+        attempt_marker = attempt_marker_for_research_diagnosis(request)
+
+        def read_issue(args: list[str], **_kwargs: object) -> SimpleNamespace:
+            if "/comments?" in args[-1]:
+                return SimpleNamespace(stdout=json.dumps([
+                    {
+                        "id": index + 1,
+                        "body": body,
+                        "performed_via_github_app": {"id": 42},
+                        "created_at": "2026-09-16T00:00:00Z",
+                    }
+                    for index, body in enumerate(issue_comments)
+                ]))
+            return SimpleNamespace(stdout=json.dumps({"state": "open"}))
+
+        def create_comment(_repo: str, _url: str, body: str) -> str:
+            issue_comments.append(body)
+            if attempt_marker in body:
+                return "claim-1"
+            raise RuntimeError("comment result unknown")
+
+        with patch.dict(os.environ, {"CODEX_AUDIT_SERVICE_URL": "https://example.test", "SOURCE_GITHUB_APP_ID": "42"}, clear=False), patch(
+            "scripts.run_research_task_diagnosis.subprocess.run", side_effect=read_issue,
+        ):
+            reader_result = _result()
+            reader_result["issues"][0]["url"] = "https://github.com/QuantStrategyLab/UsEquitySnapshotPipelines/issues/1"  # type: ignore[index]
+            first = run_diagnosis(reader_result, create_comment=create_comment, client_factory=lambda _config: fake)
+            second = run_diagnosis(reader_result, create_comment=create_comment, client_factory=lambda _config: fake)
+
+        self.assertEqual(first["diagnoses"][0]["status"], "comment_failed")
+        self.assertEqual(second["status"], "skipped")
+        self.assertEqual(len(fake.calls), 1)
+
+    def test_missing_gateway_configuration_does_not_write_claim(self) -> None:
+        fake = FakeClient()
+        with patch.dict(os.environ, {}, clear=True):
+            summary = run_diagnosis(
+                _result(), marker_present=lambda *_args: False,
+                create_comment=lambda *_args: (_ for _ in ()).throw(AssertionError("must not claim")),
+                client_factory=lambda _config: fake,
+            )
+        self.assertEqual(summary["diagnoses"][0]["status"], "not_configured")
+        self.assertEqual(fake.calls, [])
+
+    def test_claim_write_failure_never_calls_ai(self) -> None:
+        fake = FakeClient()
+
+        def fail_claim(_repo: str, _url: str, _body: str) -> str:
+            raise RuntimeError("claim result unknown")
+
+        with patch.dict(os.environ, {"CODEX_AUDIT_SERVICE_URL": "https://example.test"}, clear=False):
+            summary = run_diagnosis(
+                _result(), marker_present=lambda *_args: False, create_comment=fail_claim,
+                client_factory=lambda _config: fake,
+            )
+
+        self.assertEqual(summary["status"], "partial_error")
+        self.assertEqual(summary["diagnoses"][0]["status"], "claim_failed")
+        self.assertEqual(fake.calls, [])
+
+    def test_dry_run_does_not_create_claim_or_construct_client(self) -> None:
+        with patch.dict(os.environ, {"CODEX_AUDIT_SERVICE_URL": "https://example.test"}, clear=False):
+            summary = run_diagnosis(
+                _result(), dry_run=True, marker_present=lambda *_args: False,
+                create_comment=lambda *_args: (_ for _ in ()).throw(AssertionError("must not comment")),
+                client_factory=lambda _config: (_ for _ in ()).throw(AssertionError("must not construct client")),
+            )
+
+        self.assertEqual(summary["status"], "ok")
+        self.assertEqual(summary["diagnoses"][0]["status"], "dry_run")
 
     def test_comment_caps_output_and_keeps_marker(self) -> None:
         request = build_research_diagnosis_request(_task())

@@ -137,6 +137,16 @@ AIAuditBridge 会在本地写文件前拒绝绝对路径、`.git` 路径、疑�
 - 研究输出只能进入另行验证的、未激活且无订单的候选；P6 live 使用仍需要所有者明确决定。
 - 凭据、私人数据和外部服务 token 不能提交到 Git，也不能写入日志。
 
+### 研究触发矩阵
+
+| 触发 | 范围 | 边界 |
+| --- | --- | --- |
+| 定时 watcher | 只发现已验证事件并记录 Issue | 同一事件最多写一次 Issue 评论；Issue 状态读取失败时不写。持久 attempt marker 会停车；只有可信、明确未执行且带未来 `retry_at` 的额度 deferred 才能到期重新 claim 一次，unknown、超时或评论失败继续停车。 |
+| SOXL RSI2 codegen | 只接受手工 dispatch 提供的非空、有界研究目标 | 目标在 quota/model、认证、P1 读取、materialize 和研究来源读取前校验。 |
+| 通用新策略设计 | 本 watcher 尚未实现 | 不得把通用设计路径写成已实现或自动触发。 |
+
+以上路径均为 research-only，不授予部署、交易、晋级或 live 权限。
+
 ## 策略观察到研究任务索引
 
 `Strategy Optimization Watcher` 仍是观察器：两次可比较的 P3 脱敏观察出现退化后，它照常只创建或更新 source repository 的 Issue。它不会执行回测、调参、改代码、创建 PR、合并、部署、进入 paper/shadow/live 或触碰订单。
