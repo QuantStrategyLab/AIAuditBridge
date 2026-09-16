@@ -149,7 +149,7 @@ class GlobalResearchCodegenTests(TestCase):
 
         config = SimpleNamespace(service_url="https://audit.example")
         failures = (
-            (urllib.error.HTTPError("https://audit.example/v1/ai/health", 401, "canary", None, None), "service_http_401"),
+            (urllib.error.HTTPError("https://audit.example/v1/ai/health", 401, "canary", {}, io.BytesIO(b'{"error":"canary"}')), "service_http_401_unknown"),
             (urllib.error.HTTPError("https://oidc.example/token?canary", 403, "canary", None, None), "oidc_http_403"),
         )
         for failure, category in failures:
@@ -166,6 +166,27 @@ class GlobalResearchCodegenTests(TestCase):
                 self.assertEqual(status, 1)
                 self.assertEqual(output.getvalue().strip(), f"auth_preflight_{category}")
                 self.assertNotIn("canary", output.getvalue())
+
+    def test_auth_preflight_exactly_classifies_known_service_claim_error(self):
+        class FakeAuthenticationError(Exception):
+            pass
+
+        error = urllib.error.HTTPError(
+            "https://audit.example/v1/ai/health", 401, "canary", {},
+            io.BytesIO(b'{"error":"OIDC job workflow ref is not allowed","detail":"canary"}'),
+        )
+        client = SimpleNamespace(get_health=lambda: (_ for _ in ()).throw(error))
+        output = io.StringIO()
+        config = SimpleNamespace(service_url="https://audit.example")
+        with patch.dict(sys.modules, {"ai_gateway_client": SimpleNamespace(
+            AiGatewayClient=lambda _: client, AuthenticationError=FakeAuthenticationError,
+            GatewayConfig=SimpleNamespace(from_env=lambda: config),
+        )}), redirect_stdout(output):
+            status = codegen.main(["--auth-preflight"])
+
+        self.assertEqual(status, 1)
+        self.assertEqual(output.getvalue().strip(), "auth_preflight_service_http_401_job_workflow_ref_not_allowed")
+        self.assertNotIn("canary", output.getvalue())
 
     def test_auth_preflight_classifies_config_and_invalid_response(self):
         class FakeAuthenticationError(Exception):

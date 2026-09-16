@@ -384,6 +384,32 @@ def _auth_preflight_http_stage(url: object, service_url: object) -> str:
     return "unknown"
 
 
+_AUTH_PREFLIGHT_SERVICE_ERROR_MARKERS = {
+    "OIDC workflow_ref is not allowed": "workflow_ref_not_allowed",
+    "OIDC job workflow ref is not allowed": "job_workflow_ref_not_allowed",
+    "OIDC repository is not allowed": "repository_not_allowed",
+    "OIDC ref is not allowed": "ref_not_allowed",
+    "OIDC audience is not allowed": "audience_not_allowed",
+    "OIDC token is expired": "token_expired",
+    "OIDC signature length is invalid": "signature_invalid",
+    "OIDC signature padding is invalid": "signature_invalid",
+    "OIDC signature padding separator is missing": "signature_invalid",
+    "OIDC signature digest does not match": "signature_invalid",
+}
+
+
+def _auth_preflight_service_error_marker(exc: urllib.error.HTTPError) -> str:
+    """Map only exact service error values; never return the response content."""
+    try:
+        payload = json.loads(exc.read(4096).decode("utf-8"))
+    except (AttributeError, OSError, UnicodeError, json.JSONDecodeError):
+        return "unknown"
+    if not isinstance(payload, dict):
+        return "unknown"
+    error = payload.get("error")
+    return _AUTH_PREFLIGHT_SERVICE_ERROR_MARKERS.get(error, "unknown") if isinstance(error, str) else "unknown"
+
+
 def _auth_preflight() -> str:
     """Check the audit-service route without exposing credentials or response content."""
     try:
@@ -402,7 +428,10 @@ def _auth_preflight() -> str:
     except urllib.error.HTTPError as exc:
         try:
             stage = _auth_preflight_http_stage(exc.url, config.service_url)
-            return f"{stage}_http_{int(exc.code)}"
+            code = int(exc.code)
+            if stage == "service" and code in {401, 403}:
+                return f"{stage}_http_{code}_{_auth_preflight_service_error_marker(exc)}"
+            return f"{stage}_http_{code}"
         except (TypeError, ValueError):
             return "unknown"
     except (urllib.error.URLError, TimeoutError, OSError):
