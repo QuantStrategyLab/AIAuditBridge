@@ -35,18 +35,31 @@ AIAuditBridge is the QuantStrategyLab AI audit automation bridge. It runs Codex 
 
 It produces research, audit, or orchestration artifacts. It should not submit broker orders or mutate live allocations by itself.
 
-## Fixed Global ETF research codegen entry
+## Fixed Global ETF candidate review
 
 `scripts/run_global_etf_research_codegen.py` is plan-only by default. Its explicit
 execute path is limited to the manual `main` self-hosted workflow, the fixed
 `global_etf_research_codegen` task, and the pinned UsEquityStrategies commit.
-Docker must be available before any source or model call. The gateway is
-review-only, read-only, Codex/Luna/medium, and permits only the two fixed source
-paths; the validator accepts only function-leading docstrings or the local
-`frame` → `history_frame` and `subset` → `symbol_frame` renames in
-`_closes_for_symbol`. A claim without a terminal result is unknown and is never
-retried automatically. This lane does not grant deployment, trading, or research
-execution authority.
+The technical task key and script filename are retained, but this replaces the
+retired local-variable rename case. It reviews the fixed 126-day/15% research
+candidate at UES `ceb3e6eb33c7913bcc10bacd6a04fda8aeb1c7ff`. It reads the
+Volatility Managed Portfolios abstract from the author's public academic page,
+requiring the author, paper title, original PDF link, and unique section bounds.
+There is no fallback source, challenge bypass, parameter search, or model patch.
+
+Docker must be available before a source or model call. The committed candidate
+and its runner are tested in the existing restricted Docker helper before the
+Codex/Luna/medium review. The model receives the source hash, fixed code, and
+actual synthetic test status; its structured assessments remain advisory.
+`review_completed` proves a returned review and successful synthetic checks,
+not correct financial claims, profitability, or out-of-sample validation.
+
+The new fixed state directory is `~/.local/state/aiauditbridge/global-etf-review-20260917`;
+the old `global-etf-codegen-20260916` directory is not changed or replayed.
+A claim without a terminal result remains unknown and is never retried
+automatically. Only the advisory result is projected to a seven-day GitHub
+artifact; source body and raw response stay private on VPS. No deployment,
+trading, or financial promotion authority is granted.
 
 ## Bounded SOXL research entry
 

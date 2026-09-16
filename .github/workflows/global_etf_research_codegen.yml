@@ -1,10 +1,10 @@
-name: Global ETF Research Codegen
+name: Global ETF Candidate Review
 
 on:
   workflow_dispatch:
     inputs:
       execute:
-        description: Run the fixed review-only codegen case
+        description: Review the fixed volatility candidate; no edits
         required: true
         default: false
         type: boolean
@@ -41,7 +41,7 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           repository: QuantStrategyLab/UsEquityStrategies
-          ref: 5f11fcfe8c5473de20e1b590e9aa3e87665b6108
+          ref: ceb3e6eb33c7913bcc10bacd6a04fda8aeb1c7ff
           path: ues-source
           persist-credentials: false
 
@@ -83,14 +83,14 @@ jobs:
             python3 -m scripts.run_global_etf_research_codegen
           fi
 
-      - name: Project the bounded result and candidate for artifact review
+      - name: Project the bounded advisory result
         if: always() && inputs.execute == true
         run: |
           set -euo pipefail
           umask 077
           mkdir -p "$CASE_ROOT/artifact"
           chmod 700 "$CASE_ROOT/artifact"
-          python3 - "$HOME/.local/state/aiauditbridge/global-etf-codegen-20260916/result.json" "$CASE_ROOT/artifact/result.json" <<'PY'
+          python3 - "$HOME/.local/state/aiauditbridge/global-etf-review-20260917/result.json" "$CASE_ROOT/artifact/result.json" <<'PY'
           import json, sys
           from pathlib import Path
           source, target = map(Path, sys.argv[1:])
@@ -99,17 +99,13 @@ jobs:
               value.pop("source", None)
               target.write_text(json.dumps(value, ensure_ascii=False, sort_keys=True), encoding="utf-8")
           PY
-          if [ "$(python3 -c 'import json,sys; p=sys.argv[1]; print(json.load(open(p)).get("status", ""))' "$CASE_ROOT/artifact/result.json" 2>/dev/null || true)" = "patch_validated" ]; then
-            tar -czf "$CASE_ROOT/artifact/candidate-source.tar.gz" -C "$HOME/.local/state/aiauditbridge/global-etf-codegen-20260916" candidate
-          fi
 
-      - name: Upload only the bounded result and verified candidate
+      - name: Upload only the bounded advisory result
         if: always() && inputs.execute == true
         uses: actions/upload-artifact@v7
         with:
           name: global-etf-research-codegen-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ env.CASE_ROOT }}/artifact/result.json
-            ${{ env.CASE_ROOT }}/artifact/candidate-source.tar.gz
           if-no-files-found: warn
           retention-days: 7
