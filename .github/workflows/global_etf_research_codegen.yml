@@ -8,6 +8,11 @@ on:
         required: true
         default: false
         type: boolean
+      auth_only:
+        description: Check the audit-service authentication path only; no research work
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -37,7 +42,16 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Reject conflicting execution modes
+        run: |
+          set -euo pipefail
+          if [ "${{ inputs.execute }}" = "true" ] && [ "${{ inputs.auth_only }}" = "true" ]; then
+            echo "execute_and_auth_only_are_mutually_exclusive" >&2
+            exit 2
+          fi
+
       - name: Checkout frozen UsEquityStrategies base
+        if: inputs.execute == true || inputs.auth_only == true
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           repository: QuantStrategyLab/UsEquityStrategies
@@ -46,7 +60,7 @@ jobs:
           persist-credentials: false
 
       - name: Initialize the bounded execute workspace
-        if: inputs.execute == true
+        if: inputs.execute == true || inputs.auth_only == true
         run: |
           set -euo pipefail
           umask 077
@@ -57,7 +71,7 @@ jobs:
         run: docker info --format '{{.ServerVersion}}'
 
       - name: Install the bounded codegen runtime
-        if: inputs.execute == true
+        if: inputs.execute == true || inputs.auth_only == true
         run: |
           set -euo pipefail
           umask 077
@@ -75,11 +89,12 @@ jobs:
             ./ues-source ./
 
       - name: Verify audit-service authentication before research entry
-        if: inputs.execute == true
+        if: inputs.execute == true || inputs.auth_only == true
         run: |
           "$CASE_ROOT/venv/bin/python" -m scripts.run_global_etf_research_codegen --auth-preflight
 
       - name: Run the fixed plan or execute path
+        if: inputs.auth_only != true
         run: |
           set -euo pipefail
           if [ "${{ inputs.execute }}" = "true" ]; then

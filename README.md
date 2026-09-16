@@ -58,6 +58,9 @@ The old `global-etf-review-20260917` claim, result, and response are retained as
 authorization failure record; this explicitly authorized recovery uses
 `~/.local/state/aiauditbridge/global-etf-review-20260917-auth-recovery-35124525442`.
 The older `global-etf-codegen-20260916` directory is not changed or replayed.
+The manual workflow also has an `auth_only` path for its existing OIDC and
+audit-service health check. It cannot be combined with `execute`, and it does
+not read the research source, create a claim, or call a model.
 A claim without a terminal result remains unknown and is never retried
 automatically. Only the advisory result is projected to a seven-day GitHub
 artifact; source body and raw response stay private on VPS. No deployment,
