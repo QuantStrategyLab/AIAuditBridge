@@ -61,6 +61,11 @@ SOXL_RSI2_CODEGEN_ALLOWED_PATHS = frozenset({
     "src/us_equity_strategies/research/soxl_core_optimization.py",
     "tests/test_soxl_rsi2_mean_reversion.py",
 })
+GLOBAL_ETF_RESEARCH_CODEGEN_TASK = "global_etf_research_codegen"
+GLOBAL_ETF_RESEARCH_CODEGEN_ALLOWED_PATHS = frozenset({
+    "src/us_equity_strategies/strategies/global_etf_rotation.py",
+    "tests/test_global_etf_rotation.py",
+})
 PLATFORM_BUGFIX_MAX_EDITS_PER_FILE = 20
 PLATFORM_BUGFIX_MAX_REPLACEMENT_BYTES = 128 * 1024
 API_PATCH_SYSTEM_PROMPT = (
@@ -1317,7 +1322,7 @@ def parse_service_patch_response(
         if not isinstance(path, str) or not path.strip():
             raise BridgeError(f"Service patch response change #{index + 1} has an invalid path")
         normalized_path = path.strip()
-        if task in {"platform_bugfix", SOXL_RSI2_CODEGEN_TASK}:
+        if task in {"platform_bugfix", SOXL_RSI2_CODEGEN_TASK, GLOBAL_ETF_RESEARCH_CODEGEN_TASK}:
             if "content" in item:
                 raise BridgeError(f"{task} requires targeted edits, not complete file contents")
             base_sha256 = item.get("base_sha256")
@@ -1427,10 +1432,15 @@ def apply_service_changes(
         raise BridgeError(f"Service patch contains {len(changes)} changes; limit is {max_changes}")
 
     validated_paths = [validate_service_change_path(change["path"]) for change in changes]
-    if task in {"platform_bugfix", SOXL_RSI2_CODEGEN_TASK}:
+    if task in {"platform_bugfix", SOXL_RSI2_CODEGEN_TASK, GLOBAL_ETF_RESEARCH_CODEGEN_TASK}:
         if len(set(validated_paths)) != len(validated_paths):
             raise BridgeError(f"{task} changes must not repeat a file")
-        allowed_paths = PLATFORM_BUGFIX_ALLOWED_PATHS if task == "platform_bugfix" else SOXL_RSI2_CODEGEN_ALLOWED_PATHS
+        if task == "platform_bugfix":
+            allowed_paths = PLATFORM_BUGFIX_ALLOWED_PATHS
+        elif task == SOXL_RSI2_CODEGEN_TASK:
+            allowed_paths = SOXL_RSI2_CODEGEN_ALLOWED_PATHS
+        else:
+            allowed_paths = GLOBAL_ETF_RESEARCH_CODEGEN_ALLOWED_PATHS
         if not set(validated_paths) <= allowed_paths:
             raise BridgeError(f"{task} includes a path outside its exact allowlist")
         if task == "platform_bugfix" and set(validated_paths) != allowed_paths:
@@ -1445,7 +1455,7 @@ def apply_service_changes(
         raise BridgeError(f"Service patch includes blocked paths: {denied_list}")
 
     repo_root = repo_dir.resolve()
-    if task in {"platform_bugfix", SOXL_RSI2_CODEGEN_TASK}:
+    if task in {"platform_bugfix", SOXL_RSI2_CODEGEN_TASK, GLOBAL_ETF_RESEARCH_CODEGEN_TASK}:
         prepared: list[tuple[Path, bytes]] = []
         total_replacement_bytes = 0
         for change, path in zip(changes, validated_paths, strict=True):

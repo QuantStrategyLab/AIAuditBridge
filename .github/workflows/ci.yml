@@ -9,6 +9,40 @@ permissions:
   contents: read
 
 jobs:
+  global-etf-codegen-docker-fixture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          repository: QuantStrategyLab/UsEquityStrategies
+          ref: 5f11fcfe8c5473de20e1b590e9aa3e87665b6108
+          path: ues-global-approved
+          persist-credentials: false
+      - name: Install isolated Global codegen dependency set
+        run: |
+          set -euo pipefail
+          python3 -m venv "${RUNNER_TEMP}/aab-global-etf-research"
+          "${RUNNER_TEMP}/aab-global-etf-research/bin/python" -m pip install pytest \
+            "us-equity-strategies @ git+https://github.com/QuantStrategyLab/UsEquityStrategies.git@5f11fcfe8c5473de20e1b590e9aa3e87665b6108" \
+            "quant-platform-kit @ git+https://github.com/QuantStrategyLab/QuantPlatformKit.git@de13e486da1bdba60f425e576e944591fc97b809" \
+            .
+          "${RUNNER_TEMP}/aab-global-etf-research/bin/python" -m pip check
+      - name: Run the opt-in Global Docker synthetic fixture
+        env:
+          AAB_RUN_GLOBAL_ETF_DOCKER_INTEGRATION: "1"
+          AAB_GLOBAL_ETF_APPROVED_REPO: ${{ github.workspace }}/ues-global-approved
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          set -euo pipefail
+          "${RUNNER_TEMP}/aab-global-etf-research/bin/python" -m pytest -q tests/test_global_etf_research_codegen.py -k docker_integration_fixture
+
   platform-bugfix-history:
     runs-on: ubuntu-latest
     timeout-minutes: 15

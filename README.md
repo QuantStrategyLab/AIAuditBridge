@@ -35,6 +35,19 @@ AIAuditBridge is the QuantStrategyLab AI audit automation bridge. It runs Codex 
 
 It produces research, audit, or orchestration artifacts. It should not submit broker orders or mutate live allocations by itself.
 
+## Fixed Global ETF research codegen entry
+
+`scripts/run_global_etf_research_codegen.py` is plan-only by default. Its explicit
+execute path is limited to the manual `main` self-hosted workflow, the fixed
+`global_etf_research_codegen` task, and the pinned UsEquityStrategies commit.
+Docker must be available before any source or model call. The gateway is
+review-only, read-only, Codex/Luna/medium, and permits only the two fixed source
+paths; the validator accepts only function-leading docstrings or the local
+`frame` → `history_frame` and `subset` → `symbol_frame` renames in
+`_closes_for_symbol`. A claim without a terminal result is unknown and is never
+retried automatically. This lane does not grant deployment, trading, or research
+execution authority.
+
 ## Bounded SOXL research entry
 
 The source-bound new-research entry currently supports only the existing

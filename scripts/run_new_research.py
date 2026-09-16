@@ -1082,8 +1082,26 @@ def _report_opt_in_docker_output(label: str, completed: Any) -> None:
 
 def _run_codegen_candidate_tests(
     candidate_root: Path, *, baseline_root: Path, timeout: int = 300,
+    profile: str = "soxl_rsi2",
 ) -> dict[str, Any]:
     """Run baseline and candidate tests in separate locked-down Docker containers."""
+    profiles = {
+        "soxl_rsi2": (
+            "us_equity_strategies.research.soxl_core_optimization",
+            "test_soxl_rsi2_mean_reversion.py",
+            "tests/test_soxl_rsi2_mean_reversion.py",
+            "aab-soxl-rsi2",
+        ),
+        "global_etf": (
+            "us_equity_strategies.strategies.global_etf_rotation",
+            "test_global_etf_rotation.py",
+            "tests/test_global_etf_rotation.py",
+            "aab-global-etf",
+        ),
+    }
+    if profile not in profiles:
+        raise NewResearchInputError("codegen_test_profile_invalid")
+    module_import, trusted_test_filename, candidate_test_path, container_prefix = profiles[profile]
     docker = shutil.which("docker")
     if not docker:
         raise NewResearchInputError("codegen_docker_unavailable")
@@ -1108,7 +1126,7 @@ def _run_codegen_candidate_tests(
             "    && uv pip install --python /opt/ues/.venv/bin/python pytest\n",
             encoding="utf-8",
         )
-        image = f"aab-soxl-rsi2-test:{os.getpid()}-{time.monotonic_ns()}"
+        image = f"{container_prefix}-test:{os.getpid()}-{time.monotonic_ns()}"
         containers: list[str] = []
         try:
             try:
@@ -1127,11 +1145,11 @@ def _run_codegen_candidate_tests(
                 root: Path, label: str, *, test_path: str,
                 trusted_test: Path | None = None,
             ) -> None:
-                container = f"aab-soxl-rsi2-{label}-{os.getpid()}-{time.monotonic_ns()}"
+                container = f"{container_prefix}-{label}-{os.getpid()}-{time.monotonic_ns()}"
                 containers.append(container)
                 probe = (
                     "from pathlib import Path; import pytest; "
-                    "import us_equity_strategies.research.soxl_core_optimization as m; "
+                    f"import {module_import} as m; "
                     "p=Path(m.__file__).resolve(); root=Path('/workspace').resolve(); "
                     "assert root in p.parents and (root/'src') in p.parents, (str(p), str(root)); "
                     "raise SystemExit(pytest.main(['%s', '-q']))" % test_path
@@ -1144,7 +1162,7 @@ def _run_codegen_candidate_tests(
                     "-e", "PYTHONPATH=/workspace/src", "-v", f"{root}:/workspace:ro",
                 ]
                 if trusted_test is not None:
-                    command.extend(["-v", f"{trusted_test}:/trusted/test_soxl_rsi2_mean_reversion.py:ro"])
+                    command.extend(["-v", f"{trusted_test}:/trusted/{trusted_test_filename}:ro"])
                 command.extend([
                     "-w", "/workspace", image, "/opt/ues/.venv/bin/python", "-c", probe,
                 ])
@@ -1160,10 +1178,10 @@ def _run_codegen_candidate_tests(
                     raise NewResearchInputError(f"codegen_{label}_tests_failed")
 
             run_one(
-                candidate_root, "trusted", test_path="/trusted/test_soxl_rsi2_mean_reversion.py",
-                trusted_test=baseline_root / "tests/test_soxl_rsi2_mean_reversion.py",
+                candidate_root, "trusted", test_path=f"/trusted/{trusted_test_filename}",
+                trusted_test=baseline_root / "tests" / trusted_test_filename,
             )
-            run_one(candidate_root, "candidate", test_path="tests/test_soxl_rsi2_mean_reversion.py")
+            run_one(candidate_root, "candidate", test_path=candidate_test_path)
             return {"status": "passed", "baseline": "passed", "candidate": "passed", "execution_isolation": "docker"}
         finally:
             for container in containers:
