@@ -65,6 +65,40 @@ def test_global_codegen_docker_integration_fixture(tmp_path):
 
 
 class GlobalResearchCodegenTests(TestCase):
+    def test_auth_preflight_is_an_execute_only_gate_before_research_entry(self):
+        workflow = (Path(__file__).parents[1] / ".github/workflows/global_etf_research_codegen.yml").read_text()
+        preflight = "      - name: Verify audit-service authentication before research entry\n"
+        entry = "      - name: Run the fixed plan or execute path\n"
+
+        self.assertIn(preflight, workflow)
+        self.assertIn("        if: inputs.execute == true\n", workflow.split(preflight, 1)[1].split(entry, 1)[0])
+        self.assertLess(workflow.index(preflight), workflow.index(entry))
+
+    def test_auth_preflight_hides_exception_and_stops_before_research(self):
+        client = SimpleNamespace(get_health=lambda: (_ for _ in ()).throw(RuntimeError("sensitive detail")))
+        output = io.StringIO()
+        with patch.dict(sys.modules, {"ai_gateway_client": SimpleNamespace(
+            AiGatewayClient=lambda config: client, GatewayConfig=SimpleNamespace(from_env=lambda: object()),
+        )}), patch.object(codegen, "run_global_etf_research_codegen_case") as run_research, redirect_stdout(output):
+            status = codegen.main(["--auth-preflight"])
+
+        self.assertEqual(status, 1)
+        self.assertEqual(output.getvalue().strip(), "auth_preflight_failed")
+        run_research.assert_not_called()
+
+    def test_auth_preflight_only_reports_passed_after_health_check(self):
+        calls = []
+        client = SimpleNamespace(get_health=lambda: calls.append("health"))
+        output = io.StringIO()
+        with patch.dict(sys.modules, {"ai_gateway_client": SimpleNamespace(
+            AiGatewayClient=lambda config: client, GatewayConfig=SimpleNamespace(from_env=lambda: object()),
+        )}), redirect_stdout(output):
+            status = codegen.main(["--auth-preflight"])
+
+        self.assertEqual(status, 0)
+        self.assertEqual(calls, ["health"])
+        self.assertEqual(output.getvalue().strip(), "auth_preflight_passed")
+
     def test_workflow_plan_branch_runs_without_execute_venv(self):
         workflow = (Path(__file__).parents[1] / ".github/workflows/global_etf_research_codegen.yml").read_text()
         step = workflow.split("      - name: Run the fixed plan or execute path\n", 1)[1]

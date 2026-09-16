@@ -54,8 +54,10 @@ actual synthetic test status; its structured assessments remain advisory.
 `review_completed` proves a returned review and successful synthetic checks,
 not correct financial claims, profitability, or out-of-sample validation.
 
-The new fixed state directory is `~/.local/state/aiauditbridge/global-etf-review-20260917`;
-the old `global-etf-codegen-20260916` directory is not changed or replayed.
+The old `global-etf-review-20260917` claim, result, and response are retained as the
+authorization failure record; this explicitly authorized recovery uses
+`~/.local/state/aiauditbridge/global-etf-review-20260917-auth-recovery-35124525442`.
+The older `global-etf-codegen-20260916` directory is not changed or replayed.
 A claim without a terminal result remains unknown and is never retried
 automatically. Only the advisory result is projected to a seven-day GitHub
 artifact; source body and raw response stay private on VPS. No deployment,

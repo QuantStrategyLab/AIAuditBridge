@@ -43,7 +43,7 @@ GLOBAL_ETF_ALLOWED_PATHS = frozenset({
     "docs/research/global_etf_absolute_volatility.md",
 })
 GLOBAL_ETF_TARGET_PATH = "src/us_equity_strategies/research/global_etf_absolute_volatility.py"
-GLOBAL_ETF_STATE_ROOT = Path.home() / ".local/state/aiauditbridge/global-etf-review-20260917"
+GLOBAL_ETF_STATE_ROOT = Path.home() / ".local/state/aiauditbridge/global-etf-review-20260917-auth-recovery-35124525442"
 GLOBAL_ETF_WORKFLOW_NAME = "Global ETF Candidate Review"
 GLOBAL_ETF_SOURCE_REPOSITORY = "QuantStrategyLab/AIAuditBridge"
 _REVISION = re.compile(r"^[0-9a-f]{40}$")
@@ -365,6 +365,17 @@ def _codex_execute(*, source_ref: str):
     return execute
 
 
+def _auth_preflight() -> bool:
+    """Check the audit-service route before any bounded research work begins."""
+    try:
+        from ai_gateway_client import AiGatewayClient, GatewayConfig
+
+        AiGatewayClient(GatewayConfig.from_env()).get_health()
+    except Exception:
+        return False
+    return True
+
+
 def _run_global_candidate_tests(candidate_root: Path, *, baseline_root: Path) -> dict[str, str]:
     """Run the fixed Global profile through the shared Docker test helper."""
     try:
@@ -468,8 +479,13 @@ def plan() -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--execute", action="store_true", help="run only in the fixed main self-hosted workflow")
+    parser.add_argument("--auth-preflight", action="store_true", help="verify audit-service authentication only")
     parser.add_argument("--ues-repo-root", type=Path, default=Path("/opt/ues-source"))
     args = parser.parse_args(argv)
+    if args.auth_preflight:
+        passed = _auth_preflight()
+        print("auth_preflight_passed" if passed else "auth_preflight_failed")
+        return 0 if passed else 1
     if not args.execute:
         print(json.dumps(plan(), ensure_ascii=False, sort_keys=True, separators=(",", ":")))
         return 0
