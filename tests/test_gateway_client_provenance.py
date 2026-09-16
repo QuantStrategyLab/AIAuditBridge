@@ -143,6 +143,26 @@ class GatewayClientProvenanceTests(unittest.TestCase):
         self.assertEqual(payload["research_stage"], "optimization")
         self.assertEqual(payload["reasoning_effort"], "high")
 
+    def test_submission_429_without_explicit_not_started_marker_stays_unknown(self) -> None:
+        for execution_started in (None, True):
+            body = {"status": "deferred", "retry_at": 9000}
+            if execution_started is not None:
+                body["execution_started"] = execution_started
+            client = AiGatewayClient(GatewayConfig(service_url="https://gateway.invalid"))
+            error = urllib.error.HTTPError(
+                "https://gateway.invalid", 429, "deferred", {}, io.BytesIO(json.dumps(body).encode())
+            )
+            with self.subTest(execution_started=execution_started), patch(
+                "client.gateway_client._fetch_oidc_token", return_value="test-token"
+            ), patch("client.gateway_client.urllib.request.urlopen", side_effect=[
+                _FakeResponse({"codex_research_routing": "v1"}), error,
+            ]) as http:
+                result = client.execute("synthetic", research_stage="optimization")
+            self.assertFalse(result.success)
+            self.assertNotEqual((result.raw or {}).get("status"), "deferred")
+            self.assertEqual(result.error, "subscription_research_http_failure")
+            self.assertEqual(http.call_count, 2)
+
     def test_health_429_is_unknown_and_cannot_become_recoverable_deferred(self):
         client = AiGatewayClient(GatewayConfig(service_url="https://gateway.invalid"))
         error = urllib.error.HTTPError(

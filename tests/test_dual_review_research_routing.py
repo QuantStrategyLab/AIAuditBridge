@@ -218,7 +218,8 @@ def test_sdk_admission_or_execution_failure_has_no_paid_fallback(kind):
     else:
         replies += [Response({"codex_research_routing": "v1"})]
         if kind in {"quota", "http403"}:
-            body = {"status": "deferred", "retry_at": 9000, "error": "private-marker"}
+            body = {"status": "deferred", "retry_at": 9000, "execution_started": False,
+                    "error": "private-marker"}
             replies += [urllib.error.HTTPError("https://synthetic.invalid", 429 if kind == "quota" else 403,
                                                "private-marker", {}, io.BytesIO(json.dumps(body).encode()))]
         else:

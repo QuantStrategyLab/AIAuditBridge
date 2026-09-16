@@ -239,7 +239,8 @@ def test_real_sdk_unavailable_or_deferred_does_not_fallback_or_leak(report, kind
         replies += [Response({"subscription_research_routing": "v1"})]
         if kind == "quota":
             replies += [urllib.error.HTTPError("https://synthetic.invalid", 429, "private-marker", {},
-                io.BytesIO(json.dumps({"status": "deferred", "retry_at": 9000, "error": "private-marker"}).encode()))]
+                io.BytesIO(json.dumps({"status": "deferred", "retry_at": 9000,
+                                       "execution_started": False, "error": "private-marker"}).encode()))]
         else:
             terminal = {**route, "status": "succeeded", "output": "private-marker"}
             if kind == "failed":
