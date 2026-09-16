@@ -62,8 +62,15 @@ The manual workflow also has an `auth_only` path for its existing OIDC and
 audit-service health check. It cannot be combined with `execute`, and it does
 not read the research source, create a claim, or call a model.
 A claim without a terminal result remains unknown and is never retried
-automatically. Only the advisory result is projected to a seven-day GitHub
-artifact; source body and raw response stay private on VPS. No deployment,
+automatically. A Codex response is deferred only when its saved pre-execution
+quota record has the exact bounded shape; ordinary gateway failures remain
+failed. Default re-entry returns a saved deferred result without another call.
+The manual `resume_deferred` input is false by default and can make one due
+recovery attempt only after reusing the verified claim source and rerunning the
+fixed candidate tests. It keeps the original claim, result, and response,
+leaves a permanent same-root recovery lock, and blocks after an unknown outcome
+or another model call after a completed recovery. Only the advisory result is projected to a seven-day
+GitHub artifact; source body and raw response stay private on VPS. No deployment,
 trading, or financial promotion authority is granted.
 
 ## Bounded SOXL research entry

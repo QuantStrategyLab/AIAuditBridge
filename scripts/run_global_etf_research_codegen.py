@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from html.parser import HTMLParser
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import platform
@@ -49,7 +50,10 @@ GLOBAL_ETF_WORKFLOW_NAME = "Global ETF Candidate Review"
 GLOBAL_ETF_SOURCE_REPOSITORY = "QuantStrategyLab/AIAuditBridge"
 _REVISION = re.compile(r"^[0-9a-f]{40}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
-_TERMINAL_STATUSES = frozenset({"review_completed", "failed"})
+_TERMINAL_STATUSES = frozenset({"review_completed", "failed", "deferred"})
+_DEFERRED_RETRY_MAX_SECONDS = 7 * 24 * 60 * 60
+_DEFERRED_QUOTA_ERROR = "codex_quota_reserved"
+_DEFERRED_FAILURE_CATEGORY = "quota_or_capacity_failure"
 
 
 class GlobalResearchCodegenError(ValueError):
@@ -229,9 +233,87 @@ def _read_json(path: Path, reason: str) -> dict[str, Any]:
     return value
 
 
+def _trusted_deferred_retry_at(raw: Any, *, now: float | None = None) -> int | None:
+    """Return the bounded retry time for the one recognized pre-execution deferral."""
+    if not isinstance(raw, Mapping):
+        return None
+    retry_at = raw.get("retry_at")
+    if (
+        raw.get("status") != "deferred"
+        or raw.get("execution_started") is not False
+        or raw.get("error") != _DEFERRED_QUOTA_ERROR
+        or raw.get("failure_category") != _DEFERRED_FAILURE_CATEGORY
+        or isinstance(retry_at, bool)
+        or not isinstance(retry_at, (int, float))
+        or not math.isfinite(retry_at)
+        or retry_at != int(retry_at)
+    ):
+        return None
+    current = datetime.now(timezone.utc).timestamp() if now is None else now
+    retry = int(retry_at)
+    return retry if current < retry <= current + _DEFERRED_RETRY_MAX_SECONDS else None
+
+
+def _stored_deferred_timestamp(result: Mapping[str, Any], claim: Mapping[str, Any]) -> float | None:
+    value = result.get("deferred_at", claim.get("claimed_at"))
+    if not isinstance(value, str):
+        return None
+    try:
+        timestamp = datetime.fromisoformat(value).astimezone(timezone.utc).timestamp()
+    except ValueError:
+        return None
+    return timestamp if math.isfinite(timestamp) else None
+
+
+def _deferred_result_from_response(
+    result: Mapping[str, Any], response: Mapping[str, Any], *, claim: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Recognize only the saved, trusted Codex quota deferral without exposing raw data."""
+    if result.get("status") == "failed" and result.get("reason") != "global_codegen_gateway_failed":
+        return None
+    if result.get("status") not in {"failed", "deferred"}:
+        return None
+    if (
+        response.get("success") is not False
+        or response.get("provider") != "codex"
+        or response.get("output") != ""
+    ):
+        return None
+    saved_at = _stored_deferred_timestamp(result, claim)
+    retry_at = _trusted_deferred_retry_at(response.get("raw"), now=saved_at) if saved_at is not None else None
+    if retry_at is None:
+        return None
+    deferred = dict(result)
+    deferred.update(status="deferred", reason="global_codegen_quota_deferred", retry_at=retry_at)
+    return deferred
+
+
 def _recover_existing(root: Path) -> dict[str, Any] | None:
     result_path = root / "result.json"
     claim_path = root / "claim.json"
+    resume_result_path = root / "resume-result.json"
+    resume_lock_path = root / "resume.lock"
+    if resume_result_path.exists():
+        if not claim_path.exists():
+            raise GlobalResearchCodegenError("global_codegen_terminal_claim_missing")
+        resume_result = _read_json(resume_result_path, "global_codegen_terminal_invalid")
+        claim = _read_json(claim_path, "global_codegen_claim_invalid")
+        _validate_stored_identity(resume_result.get("identity"))
+        _validate_stored_identity(claim.get("identity"))
+        if claim.get("identity") != resume_result.get("identity"):
+            raise GlobalResearchCodegenError("global_codegen_terminal_identity_mismatch")
+        _validate_stored_source(claim.get("source"), resume_result["identity"])
+        if resume_result.get("status") not in _TERMINAL_STATUSES:
+            raise GlobalResearchCodegenError("global_codegen_terminal_invalid")
+        if resume_result.get("status") == "deferred":
+            response = _read_json(root / "resume-response.json", "global_codegen_response_unknown")
+            deferred = _deferred_result_from_response(resume_result, response, claim=claim)
+            if deferred is None:
+                raise GlobalResearchCodegenError("global_codegen_terminal_invalid")
+            return deferred
+        return resume_result
+    if resume_lock_path.exists():
+        raise GlobalResearchCodegenError("global_codegen_resume_blocked")
     if result_path.exists():
         if not claim_path.exists():
             raise GlobalResearchCodegenError("global_codegen_terminal_claim_missing")
@@ -245,6 +327,14 @@ def _recover_existing(root: Path) -> dict[str, Any] | None:
         if result.get("source") is not None:
             _validate_stored_source(result.get("source"), result["identity"])
         if result.get("status") not in _TERMINAL_STATUSES:
+            raise GlobalResearchCodegenError("global_codegen_terminal_invalid")
+        response_path = root / "response.json"
+        if response_path.exists():
+            response = _read_json(response_path, "global_codegen_response_unknown")
+            deferred = _deferred_result_from_response(result, response, claim=claim)
+            if deferred is not None:
+                return deferred
+        if result.get("status") == "deferred":
             raise GlobalResearchCodegenError("global_codegen_terminal_invalid")
         return result
     if claim_path.exists():
@@ -296,6 +386,65 @@ def _write_terminal(root: Path, result: dict[str, Any]) -> None:
         (root / "result.json").write_text(json.dumps(result, ensure_ascii=False, sort_keys=True, allow_nan=False), encoding="utf-8")
     except (OSError, TypeError, ValueError):
         raise GlobalResearchCodegenError("global_codegen_terminal_write_unknown") from None
+
+
+def _write_resume_terminal(root: Path, result: dict[str, Any]) -> None:
+    result.update(
+        no_order=True,
+        promotion_eligible=False,
+        research_only=True,
+        live_authority_granted=False,
+    )
+    try:
+        (root / "resume-result.json").write_text(
+            json.dumps(result, ensure_ascii=False, sort_keys=True, allow_nan=False), encoding="utf-8",
+        )
+    except (OSError, TypeError, ValueError):
+        raise GlobalResearchCodegenError("global_codegen_terminal_write_unknown") from None
+
+
+def _write_response(root: Path, response: Any, *, filename: str) -> dict[str, Any]:
+    saved = {
+        "success": getattr(response, "success", False), "provider": getattr(response, "provider", ""),
+        "model": getattr(response, "model", ""), "raw": getattr(response, "raw", {}),
+        "output": getattr(response, "output", ""),
+    }
+    try:
+        (root / filename).write_text(
+            json.dumps(saved, ensure_ascii=False, sort_keys=True, allow_nan=False), encoding="utf-8",
+        )
+    except (OSError, TypeError, ValueError):
+        raise GlobalResearchCodegenError("global_codegen_response_unknown") from None
+    return saved
+
+
+def _acquire_resume_lock(root: Path, identity: Mapping[str, Any]) -> None:
+    lock = {"status": "resume_started", "resumed_at": datetime.now(timezone.utc).isoformat(), "identity": dict(identity)}
+    try:
+        fd = os.open(root / "resume.lock", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(lock, handle, ensure_ascii=False, sort_keys=True, allow_nan=False)
+    except FileExistsError:
+        raise GlobalResearchCodegenError("global_codegen_resume_blocked") from None
+    except OSError:
+        raise GlobalResearchCodegenError("global_codegen_resume_lock_failed") from None
+
+
+def _load_resumable_deferred(root: Path, identity: Mapping[str, Any]) -> dict[str, Any]:
+    claim = _read_json(root / "claim.json", "global_codegen_claim_invalid")
+    result = _read_json(root / "result.json", "global_codegen_terminal_invalid")
+    response = _read_json(root / "response.json", "global_codegen_response_unknown")
+    _validate_stored_identity(claim.get("identity"))
+    _validate_stored_identity(result.get("identity"))
+    _validate_stored_source(claim.get("source"), claim["identity"])
+    if claim.get("identity") != result.get("identity") or claim.get("identity") != identity:
+        raise GlobalResearchCodegenError("global_codegen_resume_identity_mismatch")
+    deferred = _deferred_result_from_response(result, response, claim=claim)
+    if deferred is None:
+        raise GlobalResearchCodegenError("global_codegen_resume_unavailable")
+    if deferred["retry_at"] > datetime.now(timezone.utc).timestamp():
+        raise GlobalResearchCodegenError("global_codegen_resume_not_due")
+    return deferred
 
 
 def _prompt(files: Mapping[str, str], source: Mapping[str, Any], tests: Mapping[str, Any]) -> str:
@@ -464,23 +613,41 @@ def run_global_etf_research_codegen_case(
     source_ref: str, execute: Callable[[str], Any] | None = None,
     fetch_source: Callable[[], dict[str, Any]] | None = None,
     candidate_test_runner: Callable[..., Mapping[str, Any]] | None = None,
+    resume_deferred: bool = False,
 ) -> dict[str, Any]:
     """Run one fixed Global codegen attempt with exclusive persistent claim."""
     root = Path(run_root).resolve()
     recovered = _recover_existing(root)
-    if recovered is not None:
+    if recovered is not None and not (resume_deferred and recovered.get("status") == "deferred"):
         return recovered
+    if resume_deferred and recovered is None:
+        raise GlobalResearchCodegenError("global_codegen_resume_unavailable")
+    if resume_deferred and (root / "resume-result.json").exists():
+        raise GlobalResearchCodegenError("global_codegen_resume_used")
     _docker_preflight()
     source_commit, files = _read_global_base(Path(ues_repo_root))
-    source = (fetch_source or fetch_global_research_source)()
-    identity = _identity(source=source, source_commit=source_commit)
-    recovered = _claim_or_recover(root, identity, source)
-    if recovered is not None:
-        return recovered
+    resumed = recovered is not None
+    if resumed:
+        claim = _read_json(root / "claim.json", "global_codegen_claim_invalid")
+        _validate_stored_identity(claim.get("identity"))
+        _validate_stored_source(claim.get("source"), claim["identity"])
+        source = dict(claim["source"])
+        identity = dict(claim["identity"])
+        if identity.get("source_commit") != source_commit:
+            raise GlobalResearchCodegenError("global_codegen_resume_identity_mismatch")
+        _load_resumable_deferred(root, identity)
+        _acquire_resume_lock(root, identity)
+    else:
+        source = (fetch_source or fetch_global_research_source)()
+        identity = _identity(source=source, source_commit=source_commit)
+        recovered = _claim_or_recover(root, identity, source)
+        if recovered is not None:
+            return recovered
     from scripts.run_new_research import _archive_codegen_base
 
     # Validate the published source before spending a model call. No model patch
     # is applied, and neither the checkout nor the archived source is writable.
+    test_result: dict[str, Any] | None = None
     try:
         with tempfile.TemporaryDirectory(prefix="aab-global-review-") as tmp:
             baseline = Path(tmp) / "source"
@@ -490,26 +657,36 @@ def run_global_etf_research_codegen_case(
                 raise GlobalResearchCodegenError("global_codegen_candidate_tests_failed")
     except Exception:
         result = {"status": "failed", "reason": "global_review_tests_failed", "identity": identity}
-        _write_terminal(root, result)
+        if test_result is not None:
+            result["candidate_tests"] = test_result
+        (_write_resume_terminal if resumed else _write_terminal)(root, result)
         return result
     prompt = _prompt(files, source, test_result)
     try:
         response = (execute or _codex_execute(source_ref=source_ref))(prompt)
     except Exception:
         raise GlobalResearchCodegenError("global_codegen_response_unknown") from None
-    response_path = root / "response.json"
-    try:
-        response_path.write_text(json.dumps({
-            "success": getattr(response, "success", False), "provider": getattr(response, "provider", ""),
-            "model": getattr(response, "model", ""), "raw": getattr(response, "raw", {}),
-            "output": getattr(response, "output", ""),
-        }, ensure_ascii=False, sort_keys=True, allow_nan=False), encoding="utf-8")
-    except (OSError, TypeError, ValueError):
-        raise GlobalResearchCodegenError("global_codegen_response_unknown") from None
-    raw = getattr(response, "raw", {}) if isinstance(getattr(response, "raw", {}), Mapping) else {}
+    saved_response = _write_response(root, response, filename="resume-response.json" if resumed else "response.json")
+    raw = saved_response["raw"] if isinstance(saved_response["raw"], Mapping) else {}
     if getattr(response, "success", False) is not True:
-        result = {"status": "failed", "reason": "global_codegen_gateway_failed", "identity": identity}
-        _write_terminal(root, result)
+        retry_at = _trusted_deferred_retry_at(raw)
+        if (
+            retry_at is not None
+            and saved_response.get("success") is False
+            and saved_response.get("provider") == "codex"
+            and saved_response.get("output") == ""
+        ):
+            result = {
+                "status": "deferred", "reason": "global_codegen_quota_deferred", "retry_at": retry_at,
+                "deferred_at": datetime.now(timezone.utc).isoformat(), "candidate_tests": test_result,
+                "identity": identity,
+            }
+        else:
+            result = {
+                "status": "failed", "reason": "global_codegen_gateway_failed",
+                "candidate_tests": test_result, "identity": identity,
+            }
+        (_write_resume_terminal if resumed else _write_terminal)(root, result)
         return result
     if (
         getattr(response, "provider", "") != "codex"
@@ -519,17 +696,19 @@ def run_global_etf_research_codegen_case(
         or raw.get("research_stage") != "optimization"
     ):
         result = {"status": "failed", "reason": "global_codegen_result_invalid", "identity": identity}
-        _write_terminal(root, result)
+        result["candidate_tests"] = test_result
+        (_write_resume_terminal if resumed else _write_terminal)(root, result)
         return result
     try:
         review = _validate_review(getattr(response, "output", ""))
     except GlobalResearchCodegenError:
         result = {"status": "failed", "reason": "global_review_invalid", "identity": identity}
-        _write_terminal(root, result)
+        result["candidate_tests"] = test_result
+        (_write_resume_terminal if resumed else _write_terminal)(root, result)
         return result
     result = {"status": "review_completed", "review": review, "changed_paths": [],
               "candidate_tests": test_result, "identity": identity, "advisory_only": True}
-    _write_terminal(root, result)
+    (_write_resume_terminal if resumed else _write_terminal)(root, result)
     return result
 
 
@@ -543,16 +722,42 @@ def plan() -> dict[str, Any]:
     }
 
 
+def _public_result(result: Mapping[str, Any]) -> dict[str, Any]:
+    public = {key: value for key, value in result.items() if key not in {"identity", "source"}}
+    public.update(no_order=True, promotion_eligible=False, live_authority_granted=False)
+    return public
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--execute", action="store_true", help="run only in the fixed main self-hosted workflow")
     parser.add_argument("--auth-preflight", action="store_true", help="verify audit-service authentication only")
+    parser.add_argument("--resume-deferred", action="store_true", help="resume one due, trusted quota deferral")
+    parser.add_argument("--project-result", action="store_true", help="project the sanitized persisted advisory result")
     parser.add_argument("--ues-repo-root", type=Path, default=Path("/opt/ues-source"))
     args = parser.parse_args(argv)
+    if args.project_result:
+        if args.execute or args.auth_preflight or args.resume_deferred:
+            print("global_codegen_projection_unavailable")
+            return 2
+        try:
+            result = _recover_existing(GLOBAL_ETF_STATE_ROOT)
+        except GlobalResearchCodegenError:
+            result = {"status": "unknown"}
+        if result is None:
+            result = {"status": "unknown"}
+        print(json.dumps(_public_result(result), ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+        return 0
     if args.auth_preflight:
+        if args.resume_deferred:
+            print("global_codegen_resume_unavailable")
+            return 2
         outcome = _auth_preflight()
         print(f"auth_preflight_{outcome}")
         return 0 if outcome == "passed" else 1
+    if args.resume_deferred and not args.execute:
+        print("global_codegen_resume_unavailable")
+        return 2
     if not args.execute:
         print(json.dumps(plan(), ensure_ascii=False, sort_keys=True, separators=(",", ":")))
         return 0
@@ -568,13 +773,11 @@ def main(argv: list[str] | None = None) -> int:
         print("global_codegen_unavailable")
         return 2
     try:
-        result = run_global_etf_research_codegen_case(ues_repo_root=args.ues_repo_root, source_ref=environ.get("GITHUB_SHA", ""))
-        public = {
-            key: value for key, value in result.items()
-            if key not in {"identity", "source"}
-        }
-        public.update(no_order=True, promotion_eligible=False, live_authority_granted=False)
-        print(json.dumps(public, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+        result = run_global_etf_research_codegen_case(
+            ues_repo_root=args.ues_repo_root, source_ref=environ.get("GITHUB_SHA", ""),
+            resume_deferred=args.resume_deferred,
+        )
+        print(json.dumps(_public_result(result), ensure_ascii=False, sort_keys=True, separators=(",", ":")))
         return 1 if result.get("status") == "failed" else 0
     except GlobalResearchCodegenError as exc:
         print(str(exc))

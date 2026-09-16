@@ -4,10 +4,12 @@ import hashlib
 import io
 import json
 import os
+from datetime import timedelta
 from pathlib import Path
 import subprocess
 import sys
 import textwrap
+import threading
 import urllib.error
 from contextlib import redirect_stdout
 from tempfile import TemporaryDirectory
@@ -66,6 +68,24 @@ def test_global_codegen_docker_integration_fixture(tmp_path):
 
 
 class GlobalResearchCodegenTests(TestCase):
+    def _write_legacy_deferred(self, root: Path, *, retry_at: int) -> dict[str, object]:
+        source = _source()
+        identity = codegen._identity(source=source, source_commit=codegen.GLOBAL_ETF_RESEARCH_CODEGEN_UES_COMMIT)
+        codegen._claim_or_recover(root, identity, source)
+        claim = json.loads((root / "claim.json").read_text(encoding="utf-8"))
+        claim["claimed_at"] = (codegen.datetime.now(codegen.timezone.utc) - timedelta(seconds=120)).isoformat()
+        (root / "claim.json").write_text(json.dumps(claim), encoding="utf-8")
+        codegen._write_terminal(root, {
+            "status": "failed", "reason": "global_codegen_gateway_failed", "identity": identity,
+        })
+        (root / "response.json").write_text(json.dumps({
+            "success": False, "provider": "codex", "model": "", "output": "", "raw": {
+                "status": "deferred", "execution_started": False, "retry_at": retry_at,
+                "error": "codex_quota_reserved", "failure_category": "quota_or_capacity_failure",
+            },
+        }), encoding="utf-8")
+        return identity
+
     def test_auth_preflight_is_a_bounded_execute_or_auth_only_gate_before_research_entry(self):
         workflow = (Path(__file__).parents[1] / ".github/workflows/global_etf_research_codegen.yml").read_text()
         preflight = "      - name: Verify audit-service authentication before research entry\n"
@@ -87,6 +107,17 @@ class GlobalResearchCodegenTests(TestCase):
         result = subprocess.run(["bash", "-euo", "pipefail", "-c", script], capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("execute_and_auth_only_are_mutually_exclusive", result.stderr)
+
+    def test_workflow_exposes_explicit_resume_only_with_execute(self):
+        workflow = (Path(__file__).parents[1] / ".github/workflows/global_etf_research_codegen.yml").read_text()
+        inputs = workflow.split("    inputs:\n", 1)[1].split("\npermissions:", 1)[0]
+        self.assertIn("      resume_deferred:\n", inputs)
+        self.assertIn("        default: false\n", inputs.split("      resume_deferred:\n", 1)[1])
+        guard = workflow.split("      - name: Reject conflicting execution modes\n", 1)[1].split("\n      - name:", 1)[0]
+        self.assertIn("resume_deferred_requires_execute", guard)
+        self.assertIn("resume_deferred_and_auth_only_are_mutually_exclusive", guard)
+        execute = workflow.split("      - name: Run the fixed plan or execute path\n", 1)[1].split("\n      - name:", 1)[0]
+        self.assertIn("resume_arg+=(--resume-deferred)", execute)
 
     def test_auth_preflight_hides_exception_and_stops_before_research(self):
         class FakeAuthenticationError(Exception):
@@ -286,6 +317,239 @@ class GlobalResearchCodegenTests(TestCase):
                 replay = codegen.run_global_etf_research_codegen_case(ues_repo_root=tmp, run_root=tmp,
                     source_ref="a" * 40, fetch_source=lambda: self.fail("refetched"), execute=lambda _: self.fail("recalled"))
                 self.assertEqual(replay, result)
+
+    def test_trusted_quota_deferral_preserves_completed_test_summary_and_replays_without_model(self):
+        retry_at = int(codegen.datetime.now(codegen.timezone.utc).timestamp()) + 60
+        response = SimpleNamespace(
+            success=False, provider="codex", model="", output="",
+            raw={
+                "status": "deferred", "execution_started": False,
+                "retry_at": retry_at, "error": "codex_quota_reserved",
+                "failure_category": "quota_or_capacity_failure",
+            },
+        )
+        with TemporaryDirectory() as tmp, patch.object(codegen, "_docker_preflight"), patch.object(
+            codegen, "_read_global_base", return_value=(codegen.GLOBAL_ETF_RESEARCH_CODEGEN_UES_COMMIT, {})), patch.dict(
+                sys.modules, {"scripts.run_new_research": SimpleNamespace(_archive_codegen_base=lambda *a, **k: None)}):
+            calls = []
+            result = codegen.run_global_etf_research_codegen_case(
+                ues_repo_root=tmp, run_root=tmp, source_ref="a" * 40, fetch_source=_source,
+                candidate_test_runner=lambda *args, **kwargs: {"status": "passed", "profile": "fixed"},
+                execute=lambda prompt: calls.append(prompt) or response,
+            )
+            self.assertEqual(result["status"], "deferred")
+            self.assertEqual(result["reason"], "global_codegen_quota_deferred")
+            self.assertEqual(result["retry_at"], retry_at)
+            self.assertEqual(result["candidate_tests"], {"status": "passed", "profile": "fixed"})
+            self.assertEqual(len(calls), 1)
+            replay = codegen.run_global_etf_research_codegen_case(
+                ues_repo_root=tmp, run_root=tmp, source_ref="a" * 40,
+                fetch_source=lambda: self.fail("deferred source must not run"),
+                execute=lambda _: self.fail("deferred model must not run"),
+            )
+            self.assertEqual(replay, result)
+
+    def test_legacy_gateway_failure_is_deferred_only_for_the_exact_saved_quota_shape(self):
+        source = _source()
+        identity = codegen._identity(source=source, source_commit=codegen.GLOBAL_ETF_RESEARCH_CODEGEN_UES_COMMIT)
+        retry_at = int(codegen.datetime.now(codegen.timezone.utc).timestamp()) + 60
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            codegen._claim_or_recover(root, identity, source)
+            codegen._write_terminal(root, {
+                "status": "failed", "reason": "global_codegen_gateway_failed", "identity": identity,
+            })
+            (root / "response.json").write_text(json.dumps({"success": False, "provider": "codex", "output": "", "raw": {
+                "status": "deferred", "execution_started": False, "retry_at": retry_at,
+                "error": "codex_quota_reserved", "failure_category": "quota_or_capacity_failure",
+            }}), encoding="utf-8")
+            recovered = codegen._recover_existing(root)
+            self.assertEqual(recovered["status"], "deferred")
+            self.assertEqual(recovered["retry_at"], retry_at)
+            self.assertNotIn("candidate_tests", recovered)
+
+            (root / "response.json").write_text(json.dumps({"success": False, "provider": "codex", "output": "", "raw": {
+                "status": "deferred", "execution_started": None, "retry_at": retry_at,
+                "error": "codex_quota_reserved", "failure_category": "quota_or_capacity_failure",
+            }}), encoding="utf-8")
+            self.assertEqual(codegen._recover_existing(root)["status"], "failed")
+
+    def test_due_legacy_deferral_resumes_once_with_cached_source_and_preserves_old_evidence(self):
+        retry_at = int(codegen.datetime.now(codegen.timezone.utc).timestamp()) - 1
+        with TemporaryDirectory() as tmp, patch.object(codegen, "_docker_preflight"), patch.object(
+            codegen, "_read_global_base", return_value=(codegen.GLOBAL_ETF_RESEARCH_CODEGEN_UES_COMMIT, {})), patch.dict(
+                sys.modules, {"scripts.run_new_research": SimpleNamespace(_archive_codegen_base=lambda *a, **k: None)}):
+            root = Path(tmp)
+            self._write_legacy_deferred(root, retry_at=retry_at)
+            result = codegen.run_global_etf_research_codegen_case(
+                ues_repo_root=root, run_root=root, source_ref="a" * 40, resume_deferred=True,
+                fetch_source=lambda: self.fail("resume must use the verified claim source"),
+                candidate_test_runner=lambda *args, **kwargs: {"status": "passed", "profile": "fixed"},
+                execute=lambda _: _response(),
+            )
+            self.assertEqual(result["status"], "review_completed")
+            self.assertEqual(json.loads((root / "result.json").read_text())["status"], "failed")
+            self.assertTrue((root / "resume.lock").exists())
+            self.assertTrue((root / "resume-response.json").exists())
+            self.assertEqual(codegen._recover_existing(root), result)
+            self.assertEqual(codegen.run_global_etf_research_codegen_case(
+                ues_repo_root=root, run_root=root, source_ref="a" * 40, resume_deferred=True,
+                execute=lambda _: self.fail("a completed recovery must not run twice"),
+            ), result)
+
+    def test_resume_without_an_existing_deferred_record_stops_before_docker_or_model(self):
+        with TemporaryDirectory() as tmp, patch.object(codegen, "_docker_preflight") as docker:
+            with self.assertRaisesRegex(codegen.GlobalResearchCodegenError, "resume_unavailable"):
+                codegen.run_global_etf_research_codegen_case(
+                    ues_repo_root=tmp, run_root=tmp, source_ref="a" * 40, resume_deferred=True,
+                    fetch_source=lambda: self.fail("no source"), execute=lambda _: self.fail("no model"),
+                )
+            docker.assert_not_called()
+
+    def test_deferred_resume_rejects_not_due_or_locked_without_a_model_call(self):
+        now = int(codegen.datetime.now(codegen.timezone.utc).timestamp())
+        for state in ("not_due", "locked"):
+            with self.subTest(state=state), TemporaryDirectory() as tmp, patch.object(codegen, "_docker_preflight") as docker, patch.object(
+                codegen, "_read_global_base", return_value=(codegen.GLOBAL_ETF_RESEARCH_CODEGEN_UES_COMMIT, {})):
+                root = Path(tmp)
+                self._write_legacy_deferred(root, retry_at=now + 60)
+                if state == "locked":
+                    codegen._acquire_resume_lock(root, json.loads((root / "claim.json").read_text())["identity"])
+                with self.assertRaises(codegen.GlobalResearchCodegenError):
+                    codegen.run_global_etf_research_codegen_case(
+                        ues_repo_root=root, run_root=root, source_ref="a" * 40, resume_deferred=True,
+                        fetch_source=lambda: self.fail("no source"), execute=lambda _: self.fail("no model"),
+                    )
+                if state == "not_due":
+                    self.assertTrue(docker.called)
+                else:
+                    docker.assert_not_called()
+
+    def test_resume_unknown_response_leaves_permanent_lock_and_no_retry_result(self):
+        retry_at = int(codegen.datetime.now(codegen.timezone.utc).timestamp()) - 1
+        with TemporaryDirectory() as tmp, patch.object(codegen, "_docker_preflight"), patch.object(
+            codegen, "_read_global_base", return_value=(codegen.GLOBAL_ETF_RESEARCH_CODEGEN_UES_COMMIT, {})), patch.dict(
+                sys.modules, {"scripts.run_new_research": SimpleNamespace(_archive_codegen_base=lambda *a, **k: None)}):
+            root = Path(tmp)
+            self._write_legacy_deferred(root, retry_at=retry_at)
+            with self.assertRaisesRegex(codegen.GlobalResearchCodegenError, "response_unknown"):
+                codegen.run_global_etf_research_codegen_case(
+                    ues_repo_root=root, run_root=root, source_ref="a" * 40, resume_deferred=True,
+                    candidate_test_runner=lambda *args, **kwargs: {"status": "passed"},
+                    execute=lambda _: (_ for _ in ()).throw(RuntimeError("unknown")),
+                )
+            self.assertTrue((root / "resume.lock").exists())
+            self.assertFalse((root / "resume-result.json").exists())
+            with self.assertRaisesRegex(codegen.GlobalResearchCodegenError, "resume_blocked"):
+                codegen.run_global_etf_research_codegen_case(
+                    ues_repo_root=root, run_root=root, source_ref="a" * 40, resume_deferred=True,
+                    execute=lambda _: self.fail("must not retry"),
+                )
+
+    def test_concurrent_resumes_make_one_model_call_and_preserve_original_evidence(self):
+        retry_at = int(codegen.datetime.now(codegen.timezone.utc).timestamp()) - 1
+        with TemporaryDirectory() as tmp, patch.object(codegen, "_docker_preflight"), patch.object(
+            codegen, "_read_global_base", return_value=(codegen.GLOBAL_ETF_RESEARCH_CODEGEN_UES_COMMIT, {})), patch.dict(
+                sys.modules, {"scripts.run_new_research": SimpleNamespace(_archive_codegen_base=lambda *a, **k: None)}):
+            root = Path(tmp)
+            self._write_legacy_deferred(root, retry_at=retry_at)
+            original = {name: (root / name).read_bytes() for name in ("claim.json", "response.json", "result.json")}
+            barrier = threading.Barrier(2)
+            original_loader = codegen._load_resumable_deferred
+            calls, outcomes = [], []
+
+            def synchronized_loader(*args, **kwargs):
+                value = original_loader(*args, **kwargs)
+                barrier.wait(timeout=5)
+                return value
+
+            def resume():
+                try:
+                    outcomes.append(codegen.run_global_etf_research_codegen_case(
+                        ues_repo_root=root, run_root=root, source_ref="a" * 40, resume_deferred=True,
+                        candidate_test_runner=lambda *args, **kwargs: {"status": "passed"},
+                        execute=lambda _: calls.append("model") or _response(),
+                    ))
+                except codegen.GlobalResearchCodegenError as exc:
+                    outcomes.append(str(exc))
+
+            with patch.object(codegen, "_load_resumable_deferred", side_effect=synchronized_loader):
+                threads = [threading.Thread(target=resume), threading.Thread(target=resume)]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join(timeout=10)
+                    self.assertFalse(thread.is_alive())
+            self.assertEqual(calls, ["model"])
+            self.assertEqual(sum(isinstance(item, dict) for item in outcomes), 1)
+            self.assertIn("global_codegen_resume_blocked", outcomes)
+            self.assertEqual({name: (root / name).read_bytes() for name in original}, original)
+
+    def test_resume_quota_deferral_blocks_a_third_model_call(self):
+        retry_at = int(codegen.datetime.now(codegen.timezone.utc).timestamp()) - 1
+        response = SimpleNamespace(
+            success=False, provider="codex", model="", output="",
+            raw={
+                "status": "deferred", "execution_started": False,
+                "retry_at": retry_at + 120, "error": "codex_quota_reserved",
+                "failure_category": "quota_or_capacity_failure",
+            },
+        )
+        with TemporaryDirectory() as tmp, patch.object(codegen, "_docker_preflight"), patch.object(
+            codegen, "_read_global_base", return_value=(codegen.GLOBAL_ETF_RESEARCH_CODEGEN_UES_COMMIT, {})), patch.dict(
+                sys.modules, {"scripts.run_new_research": SimpleNamespace(_archive_codegen_base=lambda *a, **k: None)}):
+            root = Path(tmp)
+            self._write_legacy_deferred(root, retry_at=retry_at)
+            calls = []
+            resumed = codegen.run_global_etf_research_codegen_case(
+                ues_repo_root=root, run_root=root, source_ref="a" * 40, resume_deferred=True,
+                candidate_test_runner=lambda *args, **kwargs: {"status": "passed"},
+                execute=lambda _: calls.append("model") or response,
+            )
+            self.assertEqual(resumed["status"], "deferred")
+            self.assertEqual(codegen.run_global_etf_research_codegen_case(
+                ues_repo_root=root, run_root=root, source_ref="a" * 40,
+                execute=lambda _: self.fail("default must not call"),
+            )["status"], "deferred")
+            with self.assertRaisesRegex(codegen.GlobalResearchCodegenError, "resume_used"):
+                codegen.run_global_etf_research_codegen_case(
+                    ues_repo_root=root, run_root=root, source_ref="a" * 40, resume_deferred=True,
+                    execute=lambda _: self.fail("third model call"),
+                )
+            self.assertEqual(calls, ["model"])
+
+    def test_project_result_projects_deferred_resume_and_unknown_without_private_fields(self):
+        now = int(codegen.datetime.now(codegen.timezone.utc).timestamp())
+        with TemporaryDirectory() as tmp, patch.object(codegen, "GLOBAL_ETF_STATE_ROOT", Path(tmp)):
+            root = Path(tmp)
+            self._write_legacy_deferred(root, retry_at=now + 60)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(codegen.main(["--project-result"]), 0)
+            deferred = json.loads(output.getvalue())
+            self.assertEqual(deferred["status"], "deferred")
+            self.assertNotIn("source", deferred)
+            self.assertNotIn("raw", deferred)
+
+            identity = json.loads((root / "claim.json").read_text())["identity"]
+            codegen._write_resume_terminal(root, {"status": "review_completed", "identity": identity})
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(codegen.main(["--project-result"]), 0)
+            completed = json.loads(output.getvalue())
+            self.assertEqual(completed["status"], "review_completed")
+            self.assertNotIn("source", completed)
+            self.assertNotIn("raw", completed)
+
+        with TemporaryDirectory() as tmp, patch.object(codegen, "GLOBAL_ETF_STATE_ROOT", Path(tmp)):
+            (Path(tmp) / "resume.lock").write_text("{}", encoding="utf-8")
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(codegen.main(["--project-result"]), 0)
+            self.assertEqual(json.loads(output.getvalue()), {
+                "live_authority_granted": False, "no_order": True,
+                "promotion_eligible": False, "status": "unknown",
+            })
 
     def test_global_gateway_payload_is_fixed_and_tools_are_disabled(self):
         payload = {
