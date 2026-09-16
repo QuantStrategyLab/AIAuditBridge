@@ -13,6 +13,11 @@ on:
         required: true
         default: false
         type: boolean
+      resume_deferred:
+        description: Resume one due, pre-execution Codex quota deferral
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -47,6 +52,14 @@ jobs:
           set -euo pipefail
           if [ "${{ inputs.execute }}" = "true" ] && [ "${{ inputs.auth_only }}" = "true" ]; then
             echo "execute_and_auth_only_are_mutually_exclusive" >&2
+            exit 2
+          fi
+          if [ "${{ inputs.resume_deferred }}" = "true" ] && [ "${{ inputs.execute }}" != "true" ]; then
+            echo "resume_deferred_requires_execute" >&2
+            exit 2
+          fi
+          if [ "${{ inputs.resume_deferred }}" = "true" ] && [ "${{ inputs.auth_only }}" = "true" ]; then
+            echo "resume_deferred_and_auth_only_are_mutually_exclusive" >&2
             exit 2
           fi
 
@@ -98,7 +111,11 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${{ inputs.execute }}" = "true" ]; then
-            "$CASE_ROOT/venv/bin/python" -m scripts.run_global_etf_research_codegen --execute --ues-repo-root "$GITHUB_WORKSPACE/ues-source"
+            resume_arg=()
+            if [ "${{ inputs.resume_deferred }}" = "true" ]; then
+              resume_arg+=(--resume-deferred)
+            fi
+            "$CASE_ROOT/venv/bin/python" -m scripts.run_global_etf_research_codegen --execute --ues-repo-root "$GITHUB_WORKSPACE/ues-source" "${resume_arg[@]}"
           else
             python3 -m scripts.run_global_etf_research_codegen
           fi
@@ -110,15 +127,7 @@ jobs:
           umask 077
           mkdir -p "$CASE_ROOT/artifact"
           chmod 700 "$CASE_ROOT/artifact"
-          python3 - "$HOME/.local/state/aiauditbridge/global-etf-review-20260917-auth-recovery-35124525442/result.json" "$CASE_ROOT/artifact/result.json" <<'PY'
-          import json, sys
-          from pathlib import Path
-          source, target = map(Path, sys.argv[1:])
-          if source.is_file():
-              value = json.loads(source.read_text(encoding="utf-8"))
-              value.pop("source", None)
-              target.write_text(json.dumps(value, ensure_ascii=False, sort_keys=True), encoding="utf-8")
-          PY
+          python3 -m scripts.run_global_etf_research_codegen --project-result > "$CASE_ROOT/artifact/result.json"
 
       - name: Upload only the bounded advisory result
         if: always() && inputs.execute == true
