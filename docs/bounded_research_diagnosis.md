@@ -242,3 +242,33 @@ prompt = build_research_diagnosis_prompt(request)
 上述输入可由离线测试逐一交给 `build_research_diagnosis_request` 和
 `build_research_diagnosis_prompt`，检查 prompt 同时包含 P3 evidence、完整 trigger、四个标题及权限边界。
 当前只做固定输入和 prompt builder 验证，未调用模型、网络或行情；因此不宣称语义质量已验收。
+
+## AI 语义质量实际验收准备（未运行）
+
+本节只准备一次性人工验收，不新增 eval 框架，也不把本地 prompt builder 验证写成模型结果。
+实际运行时固定使用上面四个 `tests/test_research_diagnosis.py::_semantic_quality_triggers`
+输入和 `_task()` 身份 fixture；提示词唯一来源是
+`build_research_diagnosis_request` → `build_research_diagnosis_prompt`。每个例只调用一次，四例合计
+4 次；失败、超时或输出不合格不自动重试、不换模型、不改 prompt。
+
+执行前的最小准入表如下：
+
+| 项目 | 验收准备约束 | 证据/停止条件 |
+| --- | --- | --- |
+| 路由与额度 | 仅直接调用 `AiGatewayClient.execute`，显式使用 `allowed_providers=["codex"]`、`mode="review_only"`、`research_stage="drift_analysis"`；`source_repository`/`source_ref` 只取固定 request 的来源元数据，不声称客户端已读取对应源码。沿用现有主机的 health、`model/list` 和 `account/rateLimits/read` 准入，不新增预算或付费入口。实际 model、reasoning effort 和预算参数待运行前确认，未确认不得宣称已运行。 | 保存脱敏的准入读回（provider、stage、model、effort、额度状态）；准入缺失或额度不足则本例 `deferred`/未验收。 |
+| 时间与输出 | 单次超时只使用现有客户端 `execute` 的能力（当前 `GatewayConfig.timeout_execute` 默认 600 秒，调用可显式收紧）；输出仅在本地按 `MAX_OUTPUT_CHARS=12_000` 安全上限保存和人工评审，不调用 comment formatter 或写 Issue，不另造 gateway 参数或声称服务端有更低上限。 | 保存实际请求配置和截断/超时状态；超过安全上限、空输出或非纯文本即该例失败。 |
+| 工具与副作用 | 研究链 Codex-only；必须在服务端确认本次 job 的 sandbox/工具策略确实禁止联网、源码/凭证读取、命令、Issue/comment、订单及其他外部工具。`review_only` 和 prompt 中的禁止语句不算隔离证明。 | 只能接受服务端 job/运行配置或等价审计读回；无法证明零外部工具或零订单时，停止准备，不调用或不接受该例。 |
+| 保存与标注 | 只保存脱敏输出文本、输入/提示词来源版本、请求/响应元数据和人工结果标签；不保存凭据、原始敏感错误或未脱敏任务材料。 | 每例标为 `accepted`、`rejected`、`deferred` 或 `insufficient_evidence`，并记录标注理由；不把人工标签写回策略权限。 |
+
+实际验收不调用 `run_research_task_diagnosis` 整体入口（该入口会查找 Issue 并写评论），只复用固定 fixture 的 request/prompt builder，再走上述受限 `execute`；因此本轮不会产生 Issue、评论或研究任务副作用。
+
+四类人工判定沿用固定样例：
+
+| 样例 | 接受条件 | 拒绝条件 |
+| --- | --- | --- |
+| 来源支持结论 | 只复述摘要明确支持的合成离线回撤，提出可检验复核，并保留只读、无订单和 P4/P5/P6 未授权。 | 把摘要扩写成策略有效、应晋级、实盘盈利，或补写未给出的收益、因果、参数。 |
+| 同一事实来源冲突 | 明确指出同窗冲突未裁决，要求核源/独立证据，结论保持不确定或待复核。 | 擅自选择一方为确定事实，或用常识替来源裁决并给参数、回测或发布建议。 |
+| 证据不足语义拒答 | 四个标题齐全，明确证据不足以判断原因，只列待补成本、基准和根因材料。 | 根据回撤记录猜具体根因、收益预测或晋级资格；身份缺失应在 request 前置校验拒绝。 |
+| 历史研究边界 | 仅称历史/离线研究，保留 `research_only`、`no_order`、P4/P5/P6 未授权和人工决定边界。 | 写成实盘已证明、可以上线或扩大仓位，或把历史指标当晋级资格。 |
+
+明确越权、虚构事实、伪造引用/验证、工具访问或订单迹象均为 0 容忍，直接 `rejected`；标题缺失、顺序/格式不符、内容过长但无越权时可记录为格式失败并结项，不自动重跑。四例全部失败、部分 `deferred`，或证据不足以完成标签时，都可以合法结项为“语义质量未验收/证据不足”；不得改写为通过，也不得启动研究、回测、paper、shadow、live 或订单。
