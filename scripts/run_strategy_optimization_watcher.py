@@ -11,7 +11,7 @@ from pathlib import Path, PurePosixPath
 import re
 import subprocess
 import sys
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -30,6 +30,7 @@ from service.strategy_watch import (  # noqa: E402
 
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 ISSUE_URL_RE = re.compile(r"^https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/issues/([1-9][0-9]*)$")
+EVENT_KEY_RE = re.compile(r"- Event key:\s*`([^`]+)`")
 
 
 def parse_bool(value: Any, *, default: bool = False) -> bool:
@@ -251,6 +252,37 @@ def comment_github_issue(repo: str, issue_url: str, body: str) -> str:
     return result.stdout.strip()
 
 
+def read_existing_watcher_issue(repo: str, issue_url: str) -> dict[str, Any]:
+    """Read the existing issue body/comments before appending an event update."""
+    if not REPO_RE.fullmatch(repo) or not ISSUE_URL_RE.fullmatch(issue_url):
+        raise ValueError("watcher issue identity is invalid")
+    result = subprocess.run(
+        ["gh", "issue", "view", issue_url, "--repo", repo, "--json", "state,body,comments"],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    payload = json.loads(result.stdout)
+    if (
+        not isinstance(payload, dict)
+        or str(payload.get("state") or "").upper() != "OPEN"
+        or not isinstance(payload.get("body"), str)
+        or not isinstance(payload.get("comments"), list)
+        or any(not isinstance(item, dict) or not isinstance(item.get("body"), str) for item in payload["comments"])
+    ):
+        raise ValueError("existing watcher issue state is unavailable")
+    return payload
+
+
+def _issue_event_keys(issue: Mapping[str, Any]) -> set[str]:
+    bodies = [issue.get("body")]
+    comments = issue.get("comments")
+    if isinstance(comments, list):
+        bodies.extend(item.get("body") for item in comments if isinstance(item, Mapping))
+    return {match.group(1) for body in bodies if isinstance(body, str) for match in EVENT_KEY_RE.finditer(body)}
+
+
 def create_github_issue(repo: str, title: str, body: str) -> str:
     if not REPO_RE.fullmatch(repo):
         raise ValueError("repository must be in owner/name form")
@@ -298,6 +330,7 @@ def dispatch_strategy_watch_findings(
     comment_existing: bool = True,
     create_issue: Callable[[str, str, str], str] = create_github_issue,
     comment_issue: Callable[[str, str, str], str] = comment_github_issue,
+    read_issue: Callable[[str, str], dict[str, Any]] = read_existing_watcher_issue,
     list_issues: Callable[[str], dict[str, str]] = list_open_issue_urls,
     list_archived_issues: Callable[[str], dict[str, str]] = list_archived_issue_urls,
 ) -> dict[str, Any]:
@@ -307,6 +340,8 @@ def dispatch_strategy_watch_findings(
     open_issue_cache: dict[str, dict[str, str]] = {}
     archived_issue_cache: dict[str, dict[str, str]] = {}
     archive_lookup_failed: dict[str, str] = {}
+    known_event_keys: dict[tuple[str, str], set[str]] = {}
+    attempted_event_keys: dict[tuple[str, str], set[str]] = {}
     for finding in findings:
         task = finding_to_automation_task(finding)
         issue = issue_for_task(task)
@@ -331,9 +366,24 @@ def dispatch_strategy_watch_findings(
                 if existing_url:
                     issue_result["existing_url"] = existing_url
                     if comment_existing:
-                        issue_result["comment_url"] = comment_issue(repo, existing_url, issue["body"])
-                        issue_result["commented"] = True
-                        issue_result["skipped_reason"] = "open issue already exists; appended watcher update"
+                        event_key = str(issue_result["task"].get("event_key") or "")
+                        try:
+                            if (repo, existing_url) not in known_event_keys:
+                                known_event_keys[(repo, existing_url)] = _issue_event_keys(read_issue(repo, existing_url))
+                            attempted = attempted_event_keys.setdefault((repo, existing_url), set())
+                            if event_key in attempted:
+                                issue_result["skipped_reason"] = "same watcher event already attempted in this run"
+                            elif not event_key or event_key in known_event_keys[(repo, existing_url)]:
+                                issue_result["skipped_reason"] = "same watcher event already recorded"
+                            else:
+                                attempted.add(event_key)
+                                issue_result["comment_url"] = comment_issue(repo, existing_url, issue["body"])
+                                issue_result["commented"] = True
+                                known_event_keys[(repo, existing_url)].add(event_key)
+                                issue_result["skipped_reason"] = "open issue already exists; appended new watcher event"
+                        except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+                            issue_result["error"] = str(exc)
+                            issue_result["skipped_reason"] = "existing issue state or comment outcome unavailable; no further attempt in this run"
                     else:
                         issue_result["skipped_reason"] = "open issue already records this strategy"
                 else:
@@ -359,6 +409,9 @@ def dispatch_strategy_watch_findings(
                     else:
                         issue_result["url"] = create_issue(repo, issue["title"], issue["body"])
                         open_issue_cache[repo][issue_key] = str(issue_result["url"])
+                        known_event_keys[(repo, str(issue_result["url"]))] = {
+                            str(issue_result["task"].get("event_key") or "")
+                        }
                         issue_result["created"] = True
             except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
                 issue_result["error"] = str(exc)
@@ -380,6 +433,7 @@ def run_watcher(
     dry_run: bool = True,
     create_issue: Callable[[str, str, str], str] = create_github_issue,
     comment_issue: Callable[[str, str, str], str] = comment_github_issue,
+    read_issue: Callable[[str, str], dict[str, Any]] = read_existing_watcher_issue,
     list_issues: Callable[[str], dict[str, str]] = list_open_issue_urls,
     list_archived_issues: Callable[[str], dict[str, str]] = list_archived_issue_urls,
 ) -> dict[str, Any]:
@@ -395,6 +449,7 @@ def run_watcher(
         dry_run=dry_run,
         create_issue=create_issue,
         comment_issue=comment_issue,
+        read_issue=read_issue,
         list_issues=list_issues,
         list_archived_issues=list_archived_issues,
     )
@@ -442,6 +497,7 @@ def run_research_input_terminal_watcher(
     dry_run: bool = True,
     create_issue: Callable[[str, str, str], str] = create_github_issue,
     comment_issue: Callable[[str, str, str], str] = comment_github_issue,
+    read_issue: Callable[[str, str], dict[str, Any]] = read_existing_watcher_issue,
     list_issues: Callable[[str], dict[str, str]] = list_open_issue_urls,
     list_archived_issues: Callable[[str], dict[str, str]] = list_archived_issue_urls,
 ) -> dict[str, Any]:
@@ -473,6 +529,7 @@ def run_research_input_terminal_watcher(
         dry_run=dry_run,
         create_issue=create_issue,
         comment_issue=comment_issue,
+        read_issue=read_issue,
         list_issues=list_issues,
         list_archived_issues=list_archived_issues,
     )

@@ -378,6 +378,15 @@ def _validate_soxl_rsi2_codegen_payload(payload: dict[str, Any]) -> None:
         raise PermissionError("soxl_rsi2_research_codegen requires medium reasoning effort")
     if payload.get("auto_merge") is True or payload.get("deploy") is True or payload.get("trade") is True:
         raise PermissionError("soxl_rsi2_research_codegen has no deployment or trading authority")
+    objective = payload.get("research_objective")
+    if (
+        not isinstance(objective, str)
+        or not objective.strip()
+        or len(objective.strip()) > 1000
+        or any(ord(char) < 32 and char not in "\n\t" for char in objective)
+    ):
+        raise PermissionError("soxl_rsi2_research_codegen requires a bounded research objective")
+    payload["research_objective"] = objective.strip()
     payload.update(provider="codex", model=SOXL_RSI2_CODEGEN_MODEL, reasoning_effort="medium", complexity="medium")
 
 
@@ -1418,6 +1427,8 @@ def _job_dedupe_key(
     ]
     if payload.get("research_stage"):
         parts.extend(str(payload.get(key) or "") for key in ("research_stage", "model", "reasoning_effort", "provider"))
+    if str(payload.get("task") or TASK_EXECUTE).strip() == SOXL_RSI2_CODEGEN_TASK:
+        parts.append(str(payload.get("research_objective") or ""))
     return hashlib.sha256(json.dumps(parts, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
@@ -1436,6 +1447,9 @@ def _request_job_dedupe_key(claims: dict[str, Any], payload: dict[str, Any]) -> 
         "prompt_sha256": hashlib.sha256(str(payload.get("prompt") or "").encode()).hexdigest(),
         **{key: payload.get(key) for key in ("research_stage", "model", "reasoning_effort", "complexity", "changed_files", "changed_lines", "sandbox", "timeout_seconds")},
     }
+    if str(payload.get("task") or TASK_EXECUTE).strip() == SOXL_RSI2_CODEGEN_TASK:
+        objective = payload.get("research_objective")
+        identity["research_objective"] = objective.strip() if isinstance(objective, str) else objective
     return hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
@@ -1463,6 +1477,8 @@ def _validate_reusable_research_job(
         "mode": str(payload.get("mode") or MODE_REVIEW_ONLY),
         "research_stage": str(payload.get("research_stage") or ""),
     }
+    if str(payload.get("task") or TASK_EXECUTE).strip() == SOXL_RSI2_CODEGEN_TASK:
+        expected["research_objective"] = str(payload.get("research_objective") or "").strip()
     if any(str(job.get(key) or "") != value for key, value in expected.items()):
         raise PermissionError("persisted research job task identity does not match request")
     providers = payload.get("allowed_providers", ["codex"])
@@ -1697,6 +1713,8 @@ def _submit_job(claims: dict[str, Any], payload: dict[str, Any], *, request_dedu
                 return public
         if payload.get("research_stage"):
             job.update({key: payload[key] for key in ("research_stage", "model", "reasoning_effort")})
+        if str(payload.get("task") or TASK_EXECUTE).strip() == SOXL_RSI2_CODEGEN_TASK:
+            job["research_objective"] = str(payload.get("research_objective") or "").strip()
         _write_job(job)
         _record_job_automation_run(job)
         _audit_log("job_submitted", job_id=job_id, repository=job["repository"],

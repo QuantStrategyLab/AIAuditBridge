@@ -248,6 +248,7 @@ def test_soxl_codegen_admission_allows_pinned_luna_but_defers_reserved_quota():
         'allowed_providers': ['codex'], 'mode': 'review_only',
         'research_stage': 'optimization', 'sandbox': 'read-only',
         'model': gateway.SOXL_RSI2_CODEGEN_MODEL, 'reasoning_effort': 'medium',
+        'research_objective': 'bounded RSI2 objective',
     }
     with patch.object(gateway.time, 'time', return_value=1000):
         assert gateway._admit_codex_execute(quota, 'QuantStrategyLab/AIAuditBridge', payload) is None
@@ -634,6 +635,18 @@ def test_original_request_identity_binds_route_inputs_and_ignores_claimed_provid
                    {'allowed_providers': ['cursor']}, {'complexity': 'high'}):
         assert gateway._request_job_dedupe_key(claims, {**payload, **change}) != key
     assert gateway._request_job_dedupe_key(claims, {**payload, 'provider': 'cursor'}) == key
+
+
+def test_codegen_request_identity_binds_research_objective():
+    claims = {'repository': 'Synthetic/caller', 'run_id': '1'}
+    payload = {
+        'task': gateway.SOXL_RSI2_CODEGEN_TASK,
+        'source_repository': gateway.SOXL_RSI2_CODEGEN_SOURCE_REPO,
+        'prompt': 'synthetic', 'research_stage': 'optimization',
+        'research_objective': 'objective A',
+    }
+    key = gateway._request_job_dedupe_key(claims, payload)
+    assert gateway._request_job_dedupe_key(claims, {**payload, 'research_objective': 'objective B'}) != key
 
 
 def test_active_cap_rejects_new_request_before_quota_reservation(tmp_path):

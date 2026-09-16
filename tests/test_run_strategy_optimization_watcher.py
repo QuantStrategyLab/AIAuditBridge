@@ -266,15 +266,72 @@ class RunStrategyOptimizationWatcherTest(unittest.TestCase):
             dry_run=False,
             create_issue=lambda repo, title, body: calls.append((repo, title, body)) or "https://example.test/new",
             comment_issue=lambda repo, url, body: "https://example.test/comment",
+            read_issue=lambda _repo, _url: {
+                "state": "OPEN",
+                "body": f"- Event key: `{dry_result['issues'][0]['task']['event_key']}`",
+                "comments": [],
+            },
             list_issues=lambda repo: {issue_key: "https://example.test/existing"},
             list_archived_issues=lambda _repo: {},
         )
 
         self.assertFalse(result["issues"][0]["created"])
         self.assertEqual(result["issues"][0]["existing_url"], "https://example.test/existing")
-        self.assertEqual(result["issues"][0]["comment_url"], "https://example.test/comment")
-        self.assertTrue(result["issues"][0]["commented"])
+        self.assertNotIn("comment_url", result["issues"][0])
+        self.assertNotIn("commented", result["issues"][0])
+        self.assertEqual(result["issues"][0]["skipped_reason"], "same watcher event already recorded")
         self.assertEqual(calls, [])
+
+    def test_new_event_comments_existing_issue_once_and_reuses_url(self) -> None:
+        payload = _performance_payload() | {"generated_at": "2026-08-21T00:00:00Z"}
+        original = run_watcher(_performance_payload(), dry_run=True)
+        issue_key = original["issues"][0]["watcher_issue_key"]
+        old_event = original["issues"][0]["task"]["event_key"]
+        comments: list[str] = []
+        result = run_watcher(
+            payload,
+            source_repo="QuantStrategyLab/TestStrategies",
+            dry_run=False,
+            comment_issue=lambda _repo, _url, body: comments.append(body) or "https://example.test/comment",
+            read_issue=lambda _repo, _url: {
+                "state": "OPEN", "body": f"- Event key: `{old_event}`", "comments": [],
+            },
+            list_issues=lambda _repo: {issue_key: "https://example.test/existing"},
+            list_archived_issues=lambda _repo: {},
+        )
+        self.assertEqual(result["issues"][0]["existing_url"], "https://example.test/existing")
+        self.assertEqual(result["issues"][0]["comment_url"], "https://example.test/comment")
+        self.assertEqual(len(comments), 1)
+
+    def test_uncertain_comment_write_is_not_retried_for_duplicate_event_in_same_run(self) -> None:
+        payload = {
+            "repo": "QuantStrategyLab/TestStrategies",
+            "snapshots": [_performance_payload(), _performance_payload()],
+        }
+        dry = run_watcher(payload, dry_run=True)
+        issue_key = dry["issues"][0]["watcher_issue_key"]
+        calls: list[str] = []
+
+        def fail_comment(_repo: str, _url: str, _body: str) -> str:
+            calls.append("attempt")
+            raise RuntimeError("comment result unknown")
+
+        result = run_watcher(
+            payload,
+            source_repo="QuantStrategyLab/TestStrategies",
+            dry_run=False,
+            comment_issue=fail_comment,
+            read_issue=lambda _repo, _url: {"state": "OPEN", "body": "- Event key: `old-event`", "comments": []},
+            list_issues=lambda _repo: {issue_key: "https://example.test/existing"},
+            list_archived_issues=lambda _repo: {},
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertIn("error", result["issues"][0])
+        self.assertEqual(
+            result["issues"][0]["skipped_reason"],
+            "existing issue state or comment outcome unavailable; no further attempt in this run",
+        )
+        self.assertEqual(result["issues"][1]["skipped_reason"], "same watcher event already attempted in this run")
 
     def test_resolve_input_path_rejects_metrics_path_traversal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

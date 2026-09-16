@@ -99,6 +99,29 @@ def test_codegen_missing_objective_never_fetches_or_executes(tmp_path, monkeypat
     assert result["reason"] == "research_objective_missing"
 
 
+def test_codegen_case_missing_objective_returns_before_materialize_or_source_read(tmp_path, monkeypatch):
+    monkeypatch.setattr("scripts.run_new_research.read_soxl_ues_provenance", lambda *_args, **_kwargs: pytest.fail("must not read source"))
+    result = run_soxl_rsi2_codegen_case(
+        p1_root=tmp_path / "missing-p1", ues_repo_root=tmp_path / "missing-ues",
+        run_root=tmp_path / "run", source_ref="a" * 40, research_objective="  ",
+    )
+    assert result["reason"] == "research_objective_missing"
+    assert not (tmp_path / "run").exists()
+
+
+def test_codegen_case_missing_objective_preserves_existing_run_identity(tmp_path):
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    (run_root / "codegen_case_input.json").write_text(
+        json.dumps({"research_objective": "objective A"}), encoding="utf-8",
+    )
+    with pytest.raises(NewResearchInputError, match="research_objective_mismatch"):
+        run_soxl_rsi2_codegen_case(
+            p1_root=tmp_path / "missing-p1", ues_repo_root=tmp_path / "missing-ues",
+            run_root=run_root, source_ref="a" * 40,
+        )
+
+
 def test_codegen_objective_resume_and_saved_input_binding(tmp_path, monkeypatch):
     root = tmp_path / "ues"
     (root / "src/us_equity_strategies/research").mkdir(parents=True)
@@ -232,7 +255,7 @@ def test_default_codegen_callback_uses_codex_medium_research_contract(monkeypatc
     fake_module.GatewayConfig = types.SimpleNamespace(from_env=lambda: config)
     fake_module.AiGatewayClient = FakeClient
     monkeypatch.setitem(sys.modules, "ai_gateway_client", fake_module)
-    callback = _codex_codegen_execute(source_ref="a" * 40)
+    callback = _codex_codegen_execute(source_ref="a" * 40, research_objective="bounded objective")
     assert callback("bounded prompt") == "response"
     prompt, kwargs = calls[0]
     assert prompt == "bounded prompt"
@@ -242,7 +265,7 @@ def test_default_codegen_callback_uses_codex_medium_research_contract(monkeypatc
         "research_stage": "optimization", "reasoning_effort": "medium",
         "sandbox": "read-only", "allowed_providers": ["codex"],
         "source_repository": "QuantStrategyLab/AIAuditBridge",
-        "source_ref": "a" * 40, "timeout": 1800,
+        "source_ref": "a" * 40, "research_objective": "bounded objective", "timeout": 1800,
     }
 
 
@@ -273,6 +296,7 @@ def test_fixed_codegen_case_builds_optimization_only_payload_and_reuses_run_root
     )
     result = run_soxl_rsi2_codegen_case(
         p1_root=p1_root, ues_repo_root=ues_root, run_root=tmp_path / "run", source_ref="a" * 40,
+        research_objective="bounded RSI2 objective",
     )
     assert result == {"status": "parked"}
     payload = captured[0]["research_payload"]
@@ -282,6 +306,7 @@ def test_fixed_codegen_case_builds_optimization_only_payload_and_reuses_run_root
     assert captured[0]["run_root"] == tmp_path / "run"
     run_soxl_rsi2_codegen_case(
         p1_root=p1_root, ues_repo_root=ues_root, run_root=tmp_path / "run", source_ref="a" * 40,
+        research_objective="bounded RSI2 objective",
     )
     assert captured[1]["research_payload"]["request"] == payload["request"]
     assert captured[1]["research_payload"]["source_receipts"] == payload["source_receipts"]

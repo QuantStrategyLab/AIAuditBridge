@@ -308,7 +308,8 @@ class PortfolioCodexOnlyTests(unittest.TestCase):
         import io
         import urllib.error
         deferred = urllib.error.HTTPError("https://gateway.invalid", 429, "deferred", {},
-            io.BytesIO(json.dumps({"status": "deferred", "retry_at": 9000}).encode()))
+            io.BytesIO(json.dumps({"status": "deferred", "retry_at": 9000,
+                                   "execution_started": False}).encode()))
         summary, comment, http, client = self._dispatch_real_sdk([
             {"codex_research_routing": "v1"}, deferred,
         ])

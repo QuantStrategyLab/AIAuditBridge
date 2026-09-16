@@ -165,6 +165,7 @@ class AiGatewayClient:
         model: str | None = None,
         complexity: str = "",
         research_stage: str = "",
+        research_objective: str | None = None,
         reasoning_effort: str = "",
         sandbox: str | None = None,
         allowed_providers: list[str] | None = None,
@@ -182,6 +183,7 @@ class AiGatewayClient:
             return AiResult.unavailable("", "invalid_execution_providers", failure_category="auth_or_config_failure")
         subscription_route = "cursor" in providers
         selected_provider = providers[0] if len(providers) == 1 else ""
+        request_phase = "health"
 
         try:
             self._breaker.before_call()
@@ -201,6 +203,7 @@ class AiGatewayClient:
                 "complexity": complexity,
                 **({"allowed_providers": providers} if allowed_providers is not None else {}),
                 **({"research_stage": research_stage} if research_stage else {}),
+                **({"research_objective": research_objective} if research_objective is not None else {}),
                 **({"reasoning_effort": reasoning_effort} if reasoning_effort else {}),
                 **({"sandbox": sandbox} if sandbox is not None else {}),
                 "source_repository": source_repository or self.config.source_repository,
@@ -215,6 +218,7 @@ class AiGatewayClient:
                 method="POST",
                 headers=_headers(submit_token),
             )
+            request_phase = "submit"
             with urllib.request.urlopen(req, timeout=30) as resp:
                 job = json.loads(resp.read().decode("utf-8"))
 
@@ -240,6 +244,7 @@ class AiGatewayClient:
                 selected_provider = admitted_route["provider"]
 
             # Poll until completion; a submitted job is never retried on another provider.
+            request_phase = "poll"
             deadline = time.time() + timeout + 60
             while time.time() < deadline:
                 time.sleep(poll_interval)
@@ -253,6 +258,8 @@ class AiGatewayClient:
                     with urllib.request.urlopen(req2, timeout=30) as resp2:
                         status_data = json.loads(resp2.read().decode("utf-8"))
                 except urllib.error.HTTPError:
+                    # Keep the existing poll tolerance, but never route this
+                    # phase through the admission-deferred response below.
                     continue
 
                 if (research_stage or subscription_route) and (status_data.get("job_id") != job_id or any(status_data.get(key) != value for key, value in admitted_route.items())):
@@ -312,7 +319,7 @@ class AiGatewayClient:
                     data = json.loads(body)
                 except ValueError:
                     data = None
-                if research_stage and isinstance(data, dict) and data.get("status") == "deferred":
+                if request_phase == "submit" and research_stage and isinstance(data, dict) and data.get("status") == "deferred" and data.get("execution_started") is False:
                     retry = data.get("retry_at")
                     if type(retry) not in (int, float) or not math.isfinite(retry) or retry <= 0:
                         retry = None
@@ -320,7 +327,8 @@ class AiGatewayClient:
                     # provider failures. Do not poll, retry or open the breaker.
                     return AiResult(provider=selected_provider, model="", success=False,
                         error="subscription_research_deferred" if subscription_route else "codex_research_deferred", note="deferred",
-                        raw={"status": "deferred", "retry_at": retry, "failure_category": "quota_or_capacity_failure"})
+                        raw={"status": "deferred", "error": data.get("error"), "retry_at": retry,
+                             "execution_started": False, "failure_category": "quota_or_capacity_failure"})
                 category = "quota_or_capacity_failure"
             elif exc.code >= 500:
                 category = "transient_service_failure"

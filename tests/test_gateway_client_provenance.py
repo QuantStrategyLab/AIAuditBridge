@@ -95,6 +95,23 @@ class GatewayClientProvenanceTests(unittest.TestCase):
         submitted = json.loads(http.call_args_list[1].args[0].data)
         self.assertEqual(submitted["sandbox"], "read-only")
 
+    def test_execute_sends_structured_research_objective_when_provided(self):
+        route = {"job_id": "submitted-job", "provider": "codex", "research_stage": "optimization",
+                 "model": "gpt-5.6-luna", "reasoning_effort": "medium"}
+        replies = [_FakeResponse({"codex_research_routing": "v1"}), _FakeResponse(route),
+                   _FakeResponse({**route, "status": "succeeded", "output": "synthetic"})]
+        client = AiGatewayClient(GatewayConfig(service_url="https://synthetic.invalid"))
+        with patch("client.gateway_client._fetch_oidc_token", return_value="synthetic"), patch(
+            "client.gateway_client.time.sleep",
+        ), patch("client.gateway_client.urllib.request.urlopen", side_effect=replies) as http:
+            result = client.execute(
+                "synthetic", task="soxl_rsi2_research_codegen", research_stage="optimization",
+                research_objective="bounded objective",
+            )
+        self.assertTrue(result.success)
+        submitted = json.loads(http.call_args_list[1].args[0].data)
+        self.assertEqual(submitted["research_objective"], "bounded objective")
+
     def test_nonresearch_execute_keeps_legacy_receipt_compatibility(self):
         replies = [_FakeResponse({"job_id": "legacy-job"}), _FakeResponse({"status": "succeeded", "output": "legacy"})]
         client = AiGatewayClient(GatewayConfig(service_url="https://synthetic.invalid"))
@@ -109,6 +126,7 @@ class GatewayClientProvenanceTests(unittest.TestCase):
         client = AiGatewayClient(GatewayConfig(service_url="https://gateway.invalid"))
         error = urllib.error.HTTPError("https://gateway.invalid", 429, "deferred", {}, io.BytesIO(json.dumps({
             "status": "deferred", "error": "codex_quota_reserved", "retry_at": 9000,
+            "execution_started": False,
             "private": "must-not-propagate",
         }).encode()))
         with patch("client.gateway_client._fetch_oidc_token", return_value="test-token"), patch(
@@ -124,6 +142,65 @@ class GatewayClientProvenanceTests(unittest.TestCase):
         payload = json.loads(http.call_args.args[0].data)
         self.assertEqual(payload["research_stage"], "optimization")
         self.assertEqual(payload["reasoning_effort"], "high")
+
+    def test_submission_429_without_explicit_not_started_marker_stays_unknown(self) -> None:
+        for execution_started in (None, True):
+            body = {"status": "deferred", "retry_at": 9000}
+            if execution_started is not None:
+                body["execution_started"] = execution_started
+            client = AiGatewayClient(GatewayConfig(service_url="https://gateway.invalid"))
+            error = urllib.error.HTTPError(
+                "https://gateway.invalid", 429, "deferred", {}, io.BytesIO(json.dumps(body).encode())
+            )
+            with self.subTest(execution_started=execution_started), patch(
+                "client.gateway_client._fetch_oidc_token", return_value="test-token"
+            ), patch("client.gateway_client.urllib.request.urlopen", side_effect=[
+                _FakeResponse({"codex_research_routing": "v1"}), error,
+            ]) as http:
+                result = client.execute("synthetic", research_stage="optimization")
+            self.assertFalse(result.success)
+            self.assertNotEqual((result.raw or {}).get("status"), "deferred")
+            self.assertEqual(result.error, "subscription_research_http_failure")
+            self.assertEqual(http.call_count, 2)
+
+    def test_health_429_is_unknown_and_cannot_become_recoverable_deferred(self):
+        client = AiGatewayClient(GatewayConfig(service_url="https://gateway.invalid"))
+        error = urllib.error.HTTPError(
+            "https://gateway.invalid/healthz", 429, "busy", {}, io.BytesIO(
+                json.dumps({"status": "deferred", "retry_at": 9000, "execution_started": False}).encode()
+            )
+        )
+        with patch("client.gateway_client._fetch_oidc_token", return_value="test-token"), patch(
+            "client.gateway_client.urllib.request.urlopen", side_effect=error
+        ):
+            result = client.execute("synthetic", research_stage="optimization", timeout=-59)
+        self.assertFalse(result.success)
+        self.assertNotEqual((result.raw or {}).get("status"), "deferred")
+        self.assertEqual(result.error, "subscription_research_http_failure")
+
+    def test_poll_429_is_unknown_and_cannot_become_recoverable_deferred(self):
+        client = AiGatewayClient(GatewayConfig(service_url="https://gateway.invalid"))
+        route = {"job_id": "submitted-job", "provider": "codex", "research_stage": "optimization",
+                 "model": "gpt-5.6-luna", "reasoning_effort": "medium"}
+        error = urllib.error.HTTPError(
+            "https://gateway.invalid/jobs/submitted-job", 429, "busy", {}, io.BytesIO(
+                json.dumps({"status": "deferred", "retry_at": 9000, "execution_started": False}).encode()
+            )
+        )
+        clock = [0]
+        def now():
+            clock[0] += 1
+            return 100 if clock[0] <= 3 else 200
+        with patch("client.gateway_client._fetch_oidc_token", return_value="test-token"), patch(
+            "client.gateway_client.time.sleep"), patch(
+            "client.gateway_client.time.time", side_effect=now), patch(
+            "client.gateway_client.urllib.request.urlopen",
+            side_effect=[_FakeResponse({"codex_research_routing": "v1"}), _FakeResponse(route), error],
+        ):
+            result = client.execute("synthetic", research_stage="optimization", timeout=-59)
+        self.assertFalse(result.success)
+        self.assertNotEqual((result.raw or {}).get("status"), "deferred")
+        self.assertEqual(result.error, "Job polling timed out")
 
     def test_research_refuses_old_service_before_submitting_and_checks_completion_route(self):
         route = {"job_id": "synthetic", "provider": "codex", "research_stage": "optimization",
