@@ -133,6 +133,28 @@ class StrategyOptimizationWatcherWorkflowTest(unittest.TestCase):
         self.assertIn("candidate-source.tar.gz", text)
         self.assertIn("-C \"$CASE_ROOT/run\" candidate", text)
 
+    def test_financial_explanation_lane_is_manual_only_isolated_and_summary_only(self) -> None:
+        text = WORKFLOW_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("run_soxl_financial_explanation:", text)
+        self.assertIn("inputs.run_soxl_financial_explanation == true", text)
+        self.assertIn("soxl-financial-explanation:", text)
+        self.assertIn("inputs.run_soxl_rsi2 != true && inputs.run_soxl_codegen != true", text)
+        self.assertIn("inputs.dry_run == true", text)
+        self.assertIn("runs-on: ubuntu-latest", text)
+        self.assertIn("contents: read\n      actions: read\n      id-token: write", text)
+        self.assertIn("UES_COMMIT: 86aa4e03c30eb2fb561748d6e9c22e68d3267cfa", text)
+        self.assertIn("QPK_COMMIT: de13e486da1bdba60f425e576e944591fc97b809", text)
+        self.assertIn("UESP_COMMIT: ddce45441ef3a1306db30f502b3773a4eb81f4f8", text)
+        self.assertIn('mktemp -d /dev/shm/aab-soxl-financial-explanation.', text)
+        self.assertIn("--run-root \"$CASE_ROOT/run-root\"", text)
+        self.assertIn("path: ${{ env.CASE_ROOT }}/result.json", text)
+        self.assertIn("raw P1", Path(__file__).resolve().parents[1].joinpath("README.md").read_text(encoding="utf-8"))
+        lane = text.split("  soxl-financial-explanation:", 1)[1].split("  soxl-validation-quality:", 1)[0]
+        self.assertNotIn("permission-issues: write", lane)
+        self.assertNotIn("issues: write", lane)
+        self.assertNotIn("run_soxl_codegen", lane.split("Run bounded SOXL financial explanation", 1)[1])
+
 
 if __name__ == "__main__":
     unittest.main()

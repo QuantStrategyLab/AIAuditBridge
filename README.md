@@ -109,6 +109,14 @@ job unchanged. A one-shot manual run is available only when dispatching with
 only the sanitized result, and cleans its temporary workspace. It does not
 accept candidate, date, root, or permission values from workflow inputs.
 
+For the bounded financial explanation lane, dispatch the same workflow with
+`run_soxl_financial_explanation=true` and leave `run_soxl_rsi2` and
+`run_soxl_codegen` false and `dry_run=true`. The lane is manual-only, uses the fixed UES/QPK
+revisions and P1 manifest, makes no model call, and uploads only the aggregate
+`result.json`; raw P1 and materialized files are removed from its `/dev/shm`
+workspace. This is a research-only explanation and does not authorize a new
+candidate, promotion, or trading action.
+
 Health terms are intentionally split into online service health, organization workflow health, background job health, and artifact/content health. See [`docs/health_taxonomy.md`](docs/health_taxonomy.md) before wiring new dashboard panels or automation gates.
 The service also exposes a structured automation triage endpoint for failure diagnosis and release-readiness guidance. It remains advisory and does not bypass merge or deploy controls.
 
