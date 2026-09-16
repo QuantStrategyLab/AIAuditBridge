@@ -204,6 +204,8 @@ def test_workflow_keeps_readback_default_and_bounds_manual_learning() -> None:
     assert "github.ref == 'refs/heads/main'" in text
     assert "inputs.operation == 'readback' || github.run_attempt == 1" in text
     assert "default: readback" in text
+    assert "- semantic_quality" in text
+    assert "inputs.operation != 'semantic_quality'" in text
     assert "- soxl_learning" in text
     assert "repository: QuantStrategyLab/UsEquitySnapshotPipelines" in text
     assert "ref: ca61b82c2a508a1cc81fb5831294ba9835ac41c2" in text
@@ -222,6 +224,19 @@ def test_workflow_keeps_readback_default_and_bounds_manual_learning() -> None:
         'UV_PROJECT_ENVIRONMENT="$UES_ENV_ROOT" python3 -m scripts.run_soxl_manual_learning'
     )
     assert "run_soxl_core_only_p3_evidence" not in text
+
+
+def test_semantic_quality_uses_one_bounded_codex_only_job() -> None:
+    text = workflow_text()
+
+    assert "name: Run fixed semantic quality acceptance" in text
+    assert "inputs.operation == 'semantic_quality'" in text
+    assert "runs-on: ubuntu-latest" in text
+    assert "timeout-minutes: 45" in text
+    assert "contents: read" in text
+    assert "id-token: write" in text
+    assert "python3 -m scripts.run_semantic_quality_acceptance" in text
+    assert "CODEX_AUDIT_SERVICE_URL: ${{ secrets.CODEX_AUDIT_SERVICE_URL }}" in text
 
 
 def test_selected_validation_uses_original_evidence_and_an_isolated_strict_gate():
