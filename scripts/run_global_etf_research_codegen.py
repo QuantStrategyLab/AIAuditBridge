@@ -124,8 +124,12 @@ def _source_fields(body: bytes) -> tuple[str, str]:
         raise GlobalResearchCodegenError("global_source_parse_failed") from None
     title = " ".join(parser.meta.get("citation_title", "").split()) or " ".join("".join(parser.title_parts).split())
     abstract = " ".join("".join(parser.intro_parts).split())
-    if not title or not abstract:
+    if not title and not abstract:
         raise GlobalResearchCodegenError("global_source_metadata_missing")
+    if not title:
+        raise GlobalResearchCodegenError("global_source_title_missing")
+    if not abstract:
+        raise GlobalResearchCodegenError("global_source_abstract_missing")
     return title, abstract
 
 

@@ -5,8 +5,11 @@ import io
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
+import textwrap
 from contextlib import redirect_stdout
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import patch
@@ -80,9 +83,68 @@ def test_global_codegen_docker_integration_fixture(tmp_path):
 
 
 class GlobalResearchCodegenTests(TestCase):
+    def test_workflow_plan_branch_runs_without_execute_venv(self):
+        workflow = (Path(__file__).parents[1] / ".github/workflows/global_etf_research_codegen.yml").read_text()
+        step = workflow.split("      - name: Run the fixed plan or execute path\n", 1)[1]
+        run_block = step.split("        run: |\n", 1)[1].split("\n      - name:", 1)[0]
+        script = textwrap.dedent(run_block).replace("${{ inputs.execute }}", "false")
+        with TemporaryDirectory() as tmp:
+            case_root = Path(tmp) / "case-root-must-not-be-needed"
+            env = {**os.environ, "CASE_ROOT": str(case_root)}
+            result = subprocess.run(
+                ["bash", "-euo", "pipefail", "-c", script],
+                cwd=Path(__file__).parents[1], env=env, capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('"status":"PLAN_ONLY"', result.stdout)
+            self.assertFalse(case_root.exists())
+
+    def test_http_200_without_paper_abstract_is_classified_and_stops_before_claim_or_model(self):
+        body = (
+            b"<html><meta name='citation_title' content='Volatility Managed Portfolios'>"
+            b"<body>site shell only</body></html>"
+        )
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def geturl(self):
+                return codegen.GLOBAL_ETF_RESEARCH_SOURCE_URL
+
+            def read(self, _limit):
+                return body
+
+        class Opener:
+            def open(self, _request, timeout):
+                self.timeout = timeout
+                return Response()
+
+        opener = Opener()
+        with TemporaryDirectory() as tmp, patch.object(codegen, "_docker_preflight"), patch.object(
+            codegen, "_read_global_base", return_value=(codegen.GLOBAL_ETF_RESEARCH_CODEGEN_UES_COMMIT, {})
+        ), patch.object(codegen, "_claim_or_recover", side_effect=AssertionError("claim must not be written")):
+            model_calls = []
+            with self.assertRaisesRegex(codegen.GlobalResearchCodegenError, "global_source_abstract_missing"):
+                codegen.run_global_etf_research_codegen_case(
+                    ues_repo_root=Path(tmp) / "ues", run_root=Path(tmp) / "run", source_ref="a" * 40,
+                    execute=lambda prompt: model_calls.append(prompt),
+                    fetch_source=lambda: codegen.fetch_global_research_source(opener=opener),
+                )
+        self.assertEqual(model_calls, [])
+
     def test_source_parser_uses_nber_intro_not_meta_description(self):
         title, abstract = codegen._source_fields(_source()["body"].encode())
         self.assertEqual((title, abstract), ("Citation title", "Actual abstract."))
+
+    def test_source_parser_classifies_missing_title_and_both_metadata(self):
+        with self.assertRaisesRegex(codegen.GlobalResearchCodegenError, "global_source_title_missing"):
+            codegen._source_fields(b"<div class='page-header__intro-inner'><p>Abstract.</p></div>")
+        with self.assertRaisesRegex(codegen.GlobalResearchCodegenError, "global_source_metadata_missing"):
+            codegen._source_fields(b"<html><body>unstable shell</body></html>")
 
     def test_prompt_contains_fixed_file_material_and_patch_contract(self):
         files = {
