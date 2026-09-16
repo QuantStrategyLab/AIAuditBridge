@@ -496,7 +496,6 @@ def test_codegen_research_runner_is_docker_only_and_reentrant(tmp_path, monkeypa
 
 def test_codegen_docker_integration_fixture(tmp_path, monkeypatch):
     """Opt-in CI fixture: real Docker, UES optimizer and QPK cycle, no model/network."""
-    _freeze_qpk_clock(monkeypatch)
     if os.environ.get("AAB_RUN_DOCKER_INTEGRATION") != "1":
         pytest.skip("Docker integration is opt-in and runs only in the dedicated CI step")
     from scripts import run_new_research as module
@@ -554,7 +553,11 @@ def test_codegen_docker_integration_fixture(tmp_path, monkeypatch):
     payload = _payload(tmp_path)
     payload.update({
         "source_commit": approved_commit, "source_blobs": blobs,
-        "request": {**payload["request"], "source_revision": source.source_revision},
+        "request": {
+            **payload["request"],
+            "as_of": datetime.now(timezone.utc).date().isoformat(),
+            "source_revision": source.source_revision,
+        },
         "research_identity": {
             "code_revision": approved_commit, "input_revision": source.input_digest,
             "param_space_revision": _PARAM_SPACE_REVISION,
