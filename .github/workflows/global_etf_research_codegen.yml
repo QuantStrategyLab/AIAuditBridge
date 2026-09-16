@@ -78,9 +78,9 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${{ inputs.execute }}" = "true" ]; then
-            "$CASE_ROOT/venv/bin/python" scripts/run_global_etf_research_codegen.py --execute --ues-repo-root "$GITHUB_WORKSPACE/ues-source"
+            "$CASE_ROOT/venv/bin/python" -m scripts.run_global_etf_research_codegen --execute --ues-repo-root "$GITHUB_WORKSPACE/ues-source"
           else
-            python3 scripts/run_global_etf_research_codegen.py
+            "$CASE_ROOT/venv/bin/python" -m scripts.run_global_etf_research_codegen
           fi
 
       - name: Project the bounded result and candidate for artifact review
