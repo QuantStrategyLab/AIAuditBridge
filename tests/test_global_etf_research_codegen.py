@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import sys
 import textwrap
+import urllib.error
 from contextlib import redirect_stdout
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -65,39 +66,124 @@ def test_global_codegen_docker_integration_fixture(tmp_path):
 
 
 class GlobalResearchCodegenTests(TestCase):
-    def test_auth_preflight_is_an_execute_only_gate_before_research_entry(self):
+    def test_auth_preflight_is_a_bounded_execute_or_auth_only_gate_before_research_entry(self):
         workflow = (Path(__file__).parents[1] / ".github/workflows/global_etf_research_codegen.yml").read_text()
         preflight = "      - name: Verify audit-service authentication before research entry\n"
         entry = "      - name: Run the fixed plan or execute path\n"
 
         self.assertIn(preflight, workflow)
-        self.assertIn("        if: inputs.execute == true\n", workflow.split(preflight, 1)[1].split(entry, 1)[0])
+        self.assertIn("      auth_only:\n", workflow)
+        self.assertIn("        default: false\n", workflow.split("      auth_only:\n", 1)[1].split("\n\npermissions:", 1)[0])
+        self.assertIn("        if: inputs.execute == true || inputs.auth_only == true\n", workflow.split(preflight, 1)[1].split(entry, 1)[0])
+        self.assertIn("        if: inputs.auth_only != true\n", workflow.split(entry, 1)[1].split("\n      - name:", 1)[0])
         self.assertLess(workflow.index(preflight), workflow.index(entry))
 
+    def test_workflow_rejects_execute_and_auth_only_together(self):
+        workflow = (Path(__file__).parents[1] / ".github/workflows/global_etf_research_codegen.yml").read_text()
+        step = workflow.split("      - name: Reject conflicting execution modes\n", 1)[1]
+        run_block = step.split("        run: |\n", 1)[1].split("\n      - name:", 1)[0]
+        script = textwrap.dedent(run_block).replace("${{ inputs.execute }}", "true").replace(
+            "${{ inputs.auth_only }}", "true")
+        result = subprocess.run(["bash", "-euo", "pipefail", "-c", script], capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("execute_and_auth_only_are_mutually_exclusive", result.stderr)
+
     def test_auth_preflight_hides_exception_and_stops_before_research(self):
+        class FakeAuthenticationError(Exception):
+            pass
+
         client = SimpleNamespace(get_health=lambda: (_ for _ in ()).throw(RuntimeError("sensitive detail")))
         output = io.StringIO()
         with patch.dict(sys.modules, {"ai_gateway_client": SimpleNamespace(
-            AiGatewayClient=lambda config: client, GatewayConfig=SimpleNamespace(from_env=lambda: object()),
+            AiGatewayClient=lambda config: client, AuthenticationError=FakeAuthenticationError,
+            GatewayConfig=SimpleNamespace(from_env=lambda: object()),
         )}), patch.object(codegen, "run_global_etf_research_codegen_case") as run_research, redirect_stdout(output):
             status = codegen.main(["--auth-preflight"])
 
         self.assertEqual(status, 1)
-        self.assertEqual(output.getvalue().strip(), "auth_preflight_failed")
+        self.assertEqual(output.getvalue().strip(), "auth_preflight_unknown")
+        self.assertNotIn("sensitive detail", output.getvalue())
         run_research.assert_not_called()
 
     def test_auth_preflight_only_reports_passed_after_health_check(self):
+        class FakeAuthenticationError(Exception):
+            pass
+
         calls = []
-        client = SimpleNamespace(get_health=lambda: calls.append("health"))
+        client = SimpleNamespace(get_health=lambda: calls.append("health") or {})
         output = io.StringIO()
         with patch.dict(sys.modules, {"ai_gateway_client": SimpleNamespace(
-            AiGatewayClient=lambda config: client, GatewayConfig=SimpleNamespace(from_env=lambda: object()),
+            AiGatewayClient=lambda config: client, AuthenticationError=FakeAuthenticationError,
+            GatewayConfig=SimpleNamespace(from_env=lambda: object()),
         )}), redirect_stdout(output):
             status = codegen.main(["--auth-preflight"])
 
         self.assertEqual(status, 0)
         self.assertEqual(calls, ["health"])
         self.assertEqual(output.getvalue().strip(), "auth_preflight_passed")
+
+    def test_auth_preflight_classifies_failures_without_leaking_exception_content(self):
+        class FakeAuthenticationError(Exception):
+            pass
+
+        failures = (
+            (FakeAuthenticationError("canary"), "oidc"),
+            (urllib.error.URLError("canary"), "transport"),
+        )
+        for failure, category in failures:
+            with self.subTest(category=category):
+                client = SimpleNamespace(get_health=lambda failure=failure: (_ for _ in ()).throw(failure))
+                output = io.StringIO()
+                with patch.dict(sys.modules, {"ai_gateway_client": SimpleNamespace(
+                    AiGatewayClient=lambda config: client, AuthenticationError=FakeAuthenticationError,
+                    GatewayConfig=SimpleNamespace(from_env=lambda: object()),
+                )}), redirect_stdout(output):
+                    status = codegen.main(["--auth-preflight"])
+                self.assertEqual(status, 1)
+                self.assertEqual(output.getvalue().strip(), f"auth_preflight_{category}")
+                self.assertNotIn("canary", output.getvalue())
+
+    def test_auth_preflight_classifies_http_service_and_oidc_stages_without_urls(self):
+        class FakeAuthenticationError(Exception):
+            pass
+
+        config = SimpleNamespace(service_url="https://audit.example")
+        failures = (
+            (urllib.error.HTTPError("https://audit.example/v1/ai/health", 401, "canary", None, None), "service_http_401"),
+            (urllib.error.HTTPError("https://oidc.example/token?canary", 403, "canary", None, None), "oidc_http_403"),
+        )
+        for failure, category in failures:
+            with self.subTest(category=category):
+                client = SimpleNamespace(get_health=lambda failure=failure: (_ for _ in ()).throw(failure))
+                output = io.StringIO()
+                with patch.dict(os.environ, {"ACTIONS_ID_TOKEN_REQUEST_URL": "https://oidc.example/token?secret=canary"}), patch.dict(
+                    sys.modules, {"ai_gateway_client": SimpleNamespace(
+                        AiGatewayClient=lambda _: client, AuthenticationError=FakeAuthenticationError,
+                        GatewayConfig=SimpleNamespace(from_env=lambda: config),
+                    )}
+                ), redirect_stdout(output):
+                    status = codegen.main(["--auth-preflight"])
+                self.assertEqual(status, 1)
+                self.assertEqual(output.getvalue().strip(), f"auth_preflight_{category}")
+                self.assertNotIn("canary", output.getvalue())
+
+    def test_auth_preflight_classifies_config_and_invalid_response(self):
+        class FakeAuthenticationError(Exception):
+            pass
+
+        cases = (
+            (SimpleNamespace(from_env=lambda: (_ for _ in ()).throw(ValueError("canary"))), None, "config"),
+            (SimpleNamespace(from_env=lambda: object()), SimpleNamespace(get_health=lambda: []), "invalid_response"),
+        )
+        for config, client, category in cases:
+            with self.subTest(category=category):
+                output = io.StringIO()
+                with patch.dict(sys.modules, {"ai_gateway_client": SimpleNamespace(
+                    AiGatewayClient=lambda _: client, AuthenticationError=FakeAuthenticationError, GatewayConfig=config,
+                )}), redirect_stdout(output):
+                    status = codegen.main(["--auth-preflight"])
+                self.assertEqual(status, 1)
+                self.assertEqual(output.getvalue().strip(), f"auth_preflight_{category}")
 
     def test_workflow_plan_branch_runs_without_execute_venv(self):
         workflow = (Path(__file__).parents[1] / ".github/workflows/global_etf_research_codegen.yml").read_text()

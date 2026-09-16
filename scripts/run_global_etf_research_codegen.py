@@ -22,6 +22,7 @@ import shutil
 import subprocess
 import tempfile
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping
 from typing import Any
@@ -365,15 +366,52 @@ def _codex_execute(*, source_ref: str):
     return execute
 
 
-def _auth_preflight() -> bool:
-    """Check the audit-service route before any bounded research work begins."""
-    try:
-        from ai_gateway_client import AiGatewayClient, GatewayConfig
+def _auth_preflight_http_stage(url: object, service_url: object) -> str:
+    """Return a fixed stage label without retaining an error URL or query."""
+    if isinstance(url, str) and isinstance(service_url, str):
+        if url == f"{service_url}/v1/ai/health":
+            return "service"
+        oidc_url = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL", "")
+        try:
+            actual = urllib.parse.urlsplit(url)
+            oidc = urllib.parse.urlsplit(oidc_url)
+        except ValueError:
+            return "unknown"
+        if oidc.scheme and oidc.netloc and oidc.path and (
+            actual.scheme, actual.netloc, actual.path
+        ) == (oidc.scheme, oidc.netloc, oidc.path):
+            return "oidc"
+    return "unknown"
 
-        AiGatewayClient(GatewayConfig.from_env()).get_health()
+
+def _auth_preflight() -> str:
+    """Check the audit-service route without exposing credentials or response content."""
+    try:
+        from ai_gateway_client import AiGatewayClient, AuthenticationError, GatewayConfig
+    except ImportError:
+        return "import"
+
+    try:
+        config = GatewayConfig.from_env()
+    except ValueError:
+        return "config"
+    try:
+        health = AiGatewayClient(config).get_health()
+    except AuthenticationError:
+        return "oidc"
+    except urllib.error.HTTPError as exc:
+        try:
+            stage = _auth_preflight_http_stage(exc.url, config.service_url)
+            return f"{stage}_http_{int(exc.code)}"
+        except (TypeError, ValueError):
+            return "unknown"
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return "transport"
+    except (json.JSONDecodeError, UnicodeError, AttributeError, TypeError):
+        return "invalid_response"
     except Exception:
-        return False
-    return True
+        return "unknown"
+    return "passed" if isinstance(health, Mapping) else "invalid_response"
 
 
 def _run_global_candidate_tests(candidate_root: Path, *, baseline_root: Path) -> dict[str, str]:
@@ -483,9 +521,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ues-repo-root", type=Path, default=Path("/opt/ues-source"))
     args = parser.parse_args(argv)
     if args.auth_preflight:
-        passed = _auth_preflight()
-        print("auth_preflight_passed" if passed else "auth_preflight_failed")
-        return 0 if passed else 1
+        outcome = _auth_preflight()
+        print(f"auth_preflight_{outcome}")
+        return 0 if outcome == "passed" else 1
     if not args.execute:
         print(json.dumps(plan(), ensure_ascii=False, sort_keys=True, separators=(",", ":")))
         return 0
