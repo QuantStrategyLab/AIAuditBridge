@@ -40,6 +40,42 @@ def _task(*, event_key: str = "a1b2c3d4e5f6") -> dict[str, object]:
     )
 
 
+def _semantic_quality_triggers() -> tuple[dict[str, object], ...]:
+    return (
+        {
+            "kind": "strategy_metric_degradation",
+            "severity": "high",
+            "subject": "QuantStrategyLab/UsEquityStrategies:tqqq_core_only_p2_v5",
+            "reason": "source summary reports a negative drawdown in the synthetic offline window",
+            "signals": [{"metric": "drawdown", "reason": "source summary reports -12%"}],
+        },
+        {
+            "kind": "source_conflict",
+            "severity": "high",
+            "subject": "QuantStrategyLab/UsEquityStrategies:tqqq_core_only_p2_v5",
+            "reason": "source A reports positive return while source B reports negative return for the same window",
+            "signals": [
+                {"metric": "source_a_return", "reason": "same window return is +8%"},
+                {"metric": "source_b_return", "reason": "same window return is -8%"},
+            ],
+        },
+        {
+            "kind": "insufficient_evidence",
+            "severity": "medium",
+            "subject": "QuantStrategyLab/UsEquityStrategies:tqqq_core_only_p2_v5",
+            "reason": "the synthetic evidence records a drawdown but has no cost, benchmark, or cause data",
+            "signals": [{"metric": "evidence_gap", "reason": "drawdown is recorded; cause is absent"}],
+        },
+        {
+            "kind": "historical_boundary",
+            "severity": "high",
+            "subject": "QuantStrategyLab/UsEquityStrategies:tqqq_core_only_p2_v5",
+            "reason": "a positive historical return has no paper, shadow, live, or human acceptance evidence",
+            "signals": [{"metric": "historical_return", "reason": "offline window return is positive"}],
+        },
+    )
+
+
 def _result(task: dict[str, object] | None = None) -> dict[str, object]:
     active_task = task or _task()
     event_key = str(active_task["task_id"]).removeprefix("watcher-")
@@ -211,6 +247,26 @@ class ResearchDiagnosisTests(unittest.TestCase):
         self.assertIn("不得把历史指标解释为实盘表现", prompt)
         self.assertIn("P6 必须由所有者明确决定", prompt)
         self.assertNotIn("raw bars", request["evidence"])
+
+    def test_fixed_semantic_quality_inputs_reach_the_real_prompt_builder(self) -> None:
+        titles = (
+            "## 已验证事实",
+            "## 可检验假设",
+            "## 下一轮离线研究",
+            "## 边界与升级条件",
+        )
+        for trigger in _semantic_quality_triggers():
+            with self.subTest(kind=trigger["kind"]):
+                request = build_research_diagnosis_request(_task(), trigger=trigger)
+                prompt = build_research_diagnosis_prompt(request)
+                self.assertIn("P3 evidence: " + "c" * 64, prompt)
+                self.assertIn(str(trigger["reason"]), prompt)
+                for signal in trigger["signals"]:  # type: ignore[union-attr]
+                    self.assertIn(f"- {signal['metric']}: {signal['reason']}", prompt)  # type: ignore[index]
+                title_positions = [prompt.index(title) for title in titles]
+                self.assertEqual(title_positions, sorted(title_positions))
+                self.assertIn("P4/P5 不被授权", prompt)
+                self.assertIn("P6 必须由所有者明确决定", prompt)
 
     def test_tampered_task_cannot_build_diagnosis_request(self) -> None:
         task = _task()

@@ -553,7 +553,11 @@ def test_codegen_docker_integration_fixture(tmp_path, monkeypatch):
     payload = _payload(tmp_path)
     payload.update({
         "source_commit": approved_commit, "source_blobs": blobs,
-        "request": {**payload["request"], "source_revision": source.source_revision},
+        "request": {
+            **payload["request"],
+            "as_of": datetime.now(timezone.utc).date().isoformat(),
+            "source_revision": source.source_revision,
+        },
         "research_identity": {
             "code_revision": approved_commit, "input_revision": source.input_digest,
             "param_space_revision": _PARAM_SPACE_REVISION,
@@ -653,8 +657,18 @@ def _install_adapter(monkeypatch, *, prepare=None):
     monkeypatch.setitem(sys.modules, adapter.__name__, adapter)
 
 
+def _freeze_qpk_clock(monkeypatch):
+    import quant_platform_kit.strategy_lifecycle.research_promotion_cycle as qpk_cycle
+
+    monkeypatch.setattr(
+        qpk_cycle, "_clock_now",
+        lambda: datetime(2026, 9, 9, tzinfo=timezone.utc),
+    )
+
+
 def test_new_request_runs_existing_qpk_cycle_and_parks_without_promotion(tmp_path, monkeypatch):
     _install_adapter(monkeypatch)
+    _freeze_qpk_clock(monkeypatch)
     result = run_request(_payload(tmp_path), diagnose=lambda _context, _budget: {
         "optimization_needed": True, "design": "固定模板研究设计"
     })
@@ -686,6 +700,7 @@ def test_default_entry_requires_verified_adapter_facts_and_caller_ref(tmp_path, 
 
 def test_formal_binding_is_passed_to_ues_prepare_and_identity_is_used(tmp_path, monkeypatch):
     calls = []
+    _freeze_qpk_clock(monkeypatch)
 
     def prepare(**kwargs):
         calls.append(kwargs)
@@ -806,7 +821,8 @@ def _ues_provenance_repo(tmp_path: Path) -> tuple[Path, str, dict[str, str]]:
     return repo, commit, {path: git("rev-parse", f"HEAD:{path}") for path in required}
 
 
-def test_installed_ues_alpaca_path_runs_aab_request(tmp_path):
+def test_installed_ues_alpaca_path_runs_aab_request(tmp_path, monkeypatch):
+    _freeze_qpk_clock(monkeypatch)
     from us_equity_strategies.research.soxl_alpaca_input_adapter import (
         load_soxl_alpaca_input, materialize_soxl_alpaca_input,
     )
