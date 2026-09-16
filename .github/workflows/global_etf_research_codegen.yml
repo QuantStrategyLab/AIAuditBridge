@@ -80,7 +80,7 @@ jobs:
           if [ "${{ inputs.execute }}" = "true" ]; then
             "$CASE_ROOT/venv/bin/python" -m scripts.run_global_etf_research_codegen --execute --ues-repo-root "$GITHUB_WORKSPACE/ues-source"
           else
-            "$CASE_ROOT/venv/bin/python" -m scripts.run_global_etf_research_codegen
+            python3 -m scripts.run_global_etf_research_codegen
           fi
 
       - name: Project the bounded result and candidate for artifact review
