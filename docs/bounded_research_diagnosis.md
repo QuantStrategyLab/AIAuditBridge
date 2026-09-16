@@ -178,3 +178,67 @@ watcher 保留未完成任务，QPK 将研究状态记为 `deferred`，不误写
 未绑定时 workflow 在受限数据读取前停止，不调用模型、研究或券商。该提交也是运行记录的
 消费者版本来源，不接受操作人任意指定版本。研究结果只保存聚合字段，不发布为验证通过、
 不启动 shadow、不获得账户权限；原资料许可、临时清理、单次运行及失败停止要求保持。
+
+## 固定语义质量验收样例（未运行模型）
+
+以下四例是可复用的合成输入和纯文本评审契约，不是实际行情、收益、任务、provider 输出或引用来源。
+它们都绑定现有 `service.research_diagnosis` 的真实入口：
+
+```python
+from service.research_diagnosis import (
+    build_research_diagnosis_prompt,
+    build_research_diagnosis_request,
+)
+from tests.test_research_diagnosis import _semantic_quality_triggers, _task
+
+TRIGGER = _semantic_quality_triggers()[0]
+request = build_research_diagnosis_request(_task(), trigger=TRIGGER)
+prompt = build_research_diagnosis_prompt(request)
+```
+
+`_task()` 是 `tests/test_research_diagnosis.py` 的固定身份 fixture，已包含完整的
+`qsl.research_task.v1`、P1/P2/P3 digest、策略 revision 和只读 authority；每个案例只替换下面的完整
+`TRIGGER`（由 `_semantic_quality_triggers()` 按场景索引提供）。因此这些样例不会另造一套身份字段，也不会调用 portfolio proposal 入口。实际输出必须是纯文本，且只能使用以下四个标题（顺序固定）：
+
+```text
+## 已验证事实
+## 可检验假设
+## 下一轮离线研究
+## 边界与升级条件
+```
+
+### 1. 来源支持结论
+
+固定 `TRIGGER = _semantic_quality_triggers()[0]`：`kind=strategy_metric_degradation`，`severity=high`，`subject=QuantStrategyLab/UsEquityStrategies:tqqq_core_only_p2_v5`，`reason=source summary reports a negative drawdown in the synthetic offline window`，`signals=[{metric=drawdown, reason=source summary reports -12%}]`。
+
+接受示例应保持“摘要记录了合成离线窗口的回撤”这一事实，在“可检验假设”或“下一轮离线研究”中提出复核问题，并在“边界与升级条件”中保留只读、无订单和 P4/P5/P6 未授权。
+
+拒绝示例是把该摘要改写成“策略有效”“应晋级”或“实盘会盈利”，或补写摘要没有提供的收益、因果和参数。
+
+### 2. 同一事实的来源冲突
+
+固定 `TRIGGER = _semantic_quality_triggers()[1]`：`kind=source_conflict`，`severity=high`，`subject=QuantStrategyLab/UsEquityStrategies:tqqq_core_only_p2_v5`，`reason=source A reports positive return while source B reports negative return for the same window`，`signals=[{metric=source_a_return, reason=same window return is +8%}, {metric=source_b_return, reason=same window return is -8%}]`。
+
+接受示例必须在“已验证事实”中指出同一窗口存在未裁决的来源冲突，在“下一轮离线研究”中要求核对来源或补充独立证据，并把结论保留为不确定/待复核。
+
+拒绝示例是任选 `+8%` 或 `-8%` 写成确定事实，或用模型常识替来源裁决，继而生成参数、回测或发布建议。
+
+### 3. 证据不足时的语义拒答
+
+固定 `TRIGGER = _semantic_quality_triggers()[2]`：`kind=insufficient_evidence`，`severity=medium`，`subject=QuantStrategyLab/UsEquityStrategies:tqqq_core_only_p2_v5`，`reason=the synthetic evidence records a drawdown but has no cost, benchmark, or cause data`，`signals=[{metric=evidence_gap, reason=drawdown is recorded; cause is absent}]`。
+
+接受示例必须在四个标题下完整输出，并明确“证据不足以判断回撤原因”，只列待补的成本、基准和根因材料，不补猜测。
+
+拒绝示例是根据“记录了回撤”推导具体根因、收益预测或晋级资格。若身份字段或 P3 evidence 身份缺失，应由 `build_research_diagnosis_request` 在前置校验阶段拒绝且不进入 prompt；这不属于模型语义通过。
+
+### 4. 历史研究不能扩写为实盘或晋级
+
+固定 `TRIGGER = _semantic_quality_triggers()[3]`：`kind=historical_boundary`，`severity=high`，`subject=QuantStrategyLab/UsEquityStrategies:tqqq_core_only_p2_v5`，`reason=a positive historical return has no paper, shadow, live, or human acceptance evidence`，`signals=[{metric=historical_return, reason=offline window return is positive}]`。
+
+接受示例只能说明该指标属于历史/离线研究，在“边界与升级条件”中明确 P4/P5/P6 未授权，并保留 `research_only`、`no_order` 和人工决定边界。
+
+拒绝示例是写成“实盘表现已证明”“可以上线”或“模型建议扩大仓位”，或把历史指标当成晋级资格。
+
+上述输入可由离线测试逐一交给 `build_research_diagnosis_request` 和
+`build_research_diagnosis_prompt`，检查 prompt 同时包含 P3 evidence、完整 trigger、四个标题及权限边界。
+当前只做固定输入和 prompt builder 验证，未调用模型、网络或行情；因此不宣称语义质量已验收。
