@@ -494,6 +494,55 @@ def test_codegen_research_runner_is_docker_only_and_reentrant(tmp_path, monkeypa
         )
 
 
+def test_codegen_research_failed_cache_rethrows_without_retry(tmp_path, monkeypatch):
+    from scripts import run_new_research as module
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    (candidate / "pyproject.toml").write_text("[project]\nname='fixture'\nversion='0'\n", encoding="utf-8")
+    (candidate / "uv.lock").write_text("version = 1\n", encoding="utf-8")
+    inputs = {}
+    for key in ("manifest", "artifact", "readback"):
+        path = tmp_path / f"{key}.json"
+        path.write_text("{}", encoding="utf-8")
+        inputs[key] = str(path)
+    payload = {
+        "source_commit": "a" * 40,
+        "source_blobs": {"core": "b" * 40, "input": "c" * 40, "baseline": "d" * 40},
+        "input_paths": inputs,
+    }
+    run_root = tmp_path / "run"
+    monkeypatch.setattr(module.shutil, "which", lambda _name: None)
+    calls = []
+    monkeypatch.setattr(module.subprocess, "run", lambda *args, **kwargs: calls.append((args, kwargs)))
+
+    with pytest.raises(NewResearchInputError, match="codegen_docker_unavailable"):
+        module._run_codegen_candidate_research(
+            candidate, payload=payload, run_root=run_root, source_commit="a" * 40,
+        )
+    saved = json.loads((run_root / "codegen_research_result.json").read_text(encoding="utf-8"))
+    assert saved == {
+        "status": "failed", "reason": "codegen_docker_unavailable",
+        "source_commit": "a" * 40, "execution_isolation": "docker",
+    }
+    assert not (run_root / "codegen_result.json").exists()
+
+    with pytest.raises(NewResearchInputError, match="codegen_docker_unavailable"):
+        module._run_codegen_candidate_research(
+            candidate, payload=payload, run_root=run_root, source_commit="a" * 40,
+        )
+    assert calls == []
+
+    saved["reason"] = []
+    (run_root / "codegen_research_result.json").write_text(
+        json.dumps(saved, ensure_ascii=False, sort_keys=True), encoding="utf-8",
+    )
+    with pytest.raises(NewResearchInputError, match="codegen_research_saved_result_invalid"):
+        module._run_codegen_candidate_research(
+            candidate, payload=payload, run_root=run_root, source_commit="a" * 40,
+        )
+    assert calls == []
+
+
 def test_codegen_docker_integration_fixture(tmp_path, monkeypatch):
     """Opt-in CI fixture: real Docker, UES optimizer and QPK cycle, no model/network."""
     if os.environ.get("AAB_RUN_DOCKER_INTEGRATION") != "1":

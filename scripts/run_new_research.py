@@ -81,6 +81,11 @@ SOXL_RSI2_CODEGEN_SUMMARIES = {
     SOXL_RSI2_CODEGEN_SOURCE_URLS[0]: "公开产品说明书描述该 ETF 系列的每日杠杆敞口；不证明任何收益或策略有效性。",
     SOXL_RSI2_CODEGEN_SOURCE_URLS[1]: "公开研究页讨论交易成本；不提供本候选的盈利、晋级或实盘依据。",
 }
+_CODEGEN_RESEARCH_FAILURE_REASONS = frozenset({
+    "codegen_dependency_build_failed", "codegen_docker_unavailable",
+    "codegen_research_failed", "codegen_research_result_invalid",
+    "codegen_research_artifact_missing",
+})
 
 
 class NewResearchInputError(ValueError):
@@ -1245,6 +1250,11 @@ def _run_codegen_candidate_research(
                 raise NewResearchInputError("codegen_research_saved_result_invalid") from None
             if not isinstance(result, dict):
                 raise NewResearchInputError("codegen_research_saved_result_invalid")
+            if result.get("status") == "failed":
+                reason = result.get("reason")
+                if not isinstance(reason, str) or reason not in _CODEGEN_RESEARCH_FAILURE_REASONS:
+                    raise NewResearchInputError("codegen_research_saved_result_invalid")
+                raise NewResearchInputError(reason)
             return result
         container_payload["input_paths"] = container_paths
         saved_input.write_text(json.dumps({"fingerprint": fingerprint, "payload": container_payload}, ensure_ascii=False, sort_keys=True, allow_nan=False), encoding="utf-8")
