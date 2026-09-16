@@ -268,6 +268,26 @@ class ResearchDiagnosisTests(unittest.TestCase):
                 self.assertIn("P4/P5 不被授权", prompt)
                 self.assertIn("P6 必须由所有者明确决定", prompt)
 
+    def test_insufficient_evidence_prompt_does_not_invent_causal_hypotheses(self) -> None:
+        trigger = next(item for item in _semantic_quality_triggers() if item["kind"] == "insufficient_evidence")
+        request = build_research_diagnosis_request(_task(), trigger={**trigger, "signals": []})
+        prompt = build_research_diagnosis_prompt(request)
+
+        self.assertIn("证据不足，无法提出因果假设", prompt)
+        self.assertIn("成本、基准、根因材料", prompt)
+        self.assertIn("不得补充条件性因果猜测或预测", prompt)
+        self.assertNotIn("只能根据已验证的 P3 退化任务给出研究假设", prompt)
+
+    def test_other_semantic_quality_prompts_keep_their_existing_guidance(self) -> None:
+        special_instruction = "证据不足，无法提出因果假设"
+        for trigger in _semantic_quality_triggers():
+            request = build_research_diagnosis_request(_task(), trigger=trigger)
+            prompt = build_research_diagnosis_prompt(request)
+            if trigger["kind"] == "insufficient_evidence":
+                self.assertIn(special_instruction, prompt)
+            else:
+                self.assertNotIn(special_instruction, prompt)
+
     def test_tampered_task_cannot_build_diagnosis_request(self) -> None:
         task = _task()
         task["authority"] = {"research_only": True}
