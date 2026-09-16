@@ -127,6 +127,12 @@ PLATFORM_BUGFIX_MODEL = "gpt-5.6-luna"
 SOXL_RSI2_CODEGEN_TASK = "soxl_rsi2_research_codegen"
 SOXL_RSI2_CODEGEN_SOURCE_REPO = "QuantStrategyLab/AIAuditBridge"
 SOXL_RSI2_CODEGEN_MODEL = "gpt-5.6-luna"
+GLOBAL_ETF_RESEARCH_CODEGEN_TASK = "global_etf_research_codegen"
+GLOBAL_ETF_RESEARCH_CODEGEN_SOURCE_REPO = "QuantStrategyLab/AIAuditBridge"
+GLOBAL_ETF_RESEARCH_CODEGEN_MODEL = "gpt-5.6-luna"
+GLOBAL_ETF_RESEARCH_CODEGEN_OBJECTIVE = (
+    "Rename only the local variables frame and subset for readability without changing behavior."
+)
 ACTIVE_JOB_STATUSES = frozenset({"queued", "running"})
 REUSABLE_RESEARCH_JOB_STATUSES = frozenset({"queued", "running", "succeeded", "failed"})
 REQUEST_AUTHORITY_FIELDS = (
@@ -296,6 +302,7 @@ def _admit_codex_execute(quota: Any, repo: str, payload: dict[str, Any]) -> dict
     providers = payload.get("allowed_providers", ["codex"])
     _validate_platform_bugfix_payload(payload)
     _validate_soxl_rsi2_codegen_payload(payload)
+    _validate_global_etf_research_codegen_payload(payload)
     payload["provider"] = "codex"
     if "cursor" in providers and not payload.get("research_stage"):
         return {"status": "deferred", "error": "cursor_research_stage_required", "retry_at": None, "execution_started": False}
@@ -390,9 +397,36 @@ def _validate_soxl_rsi2_codegen_payload(payload: dict[str, Any]) -> None:
     payload.update(provider="codex", model=SOXL_RSI2_CODEGEN_MODEL, reasoning_effort="medium", complexity="medium")
 
 
+def _validate_global_etf_research_codegen_payload(payload: dict[str, Any]) -> None:
+    """Keep the Global ETF research case on its fixed review-only route."""
+    if str(payload.get("task") or "").strip() != GLOBAL_ETF_RESEARCH_CODEGEN_TASK:
+        return
+    if str(payload.get("source_repository") or "").strip() != GLOBAL_ETF_RESEARCH_CODEGEN_SOURCE_REPO:
+        raise PermissionError("global_etf_research_codegen source repository is restricted")
+    if payload.get("allowed_providers", ["codex"]) != ["codex"]:
+        raise PermissionError("global_etf_research_codegen permits only Codex")
+    if str(payload.get("provider") or "codex").strip().lower() not in {"", "codex"}:
+        raise PermissionError("global_etf_research_codegen permits only Codex")
+    if str(payload.get("mode") or "review_only").strip().lower() != "review_only":
+        raise PermissionError("global_etf_research_codegen is review_only")
+    if str(payload.get("research_stage") or "").strip() != "optimization":
+        raise PermissionError("global_etf_research_codegen requires optimization stage")
+    if str(payload.get("sandbox") or "").strip() != "read-only":
+        raise PermissionError("global_etf_research_codegen requires read-only sandbox")
+    if str(payload.get("model") or "").strip().lower() not in {"", "auto", GLOBAL_ETF_RESEARCH_CODEGEN_MODEL}:
+        raise PermissionError("global_etf_research_codegen requires the pinned Luna model")
+    if str(payload.get("reasoning_effort") or "").strip().lower() not in {"", "auto", "medium"}:
+        raise PermissionError("global_etf_research_codegen requires medium reasoning effort")
+    if payload.get("auto_merge") is True or payload.get("deploy") is True or payload.get("trade") is True:
+        raise PermissionError("global_etf_research_codegen has no deployment or trading authority")
+    if payload.get("research_objective") != GLOBAL_ETF_RESEARCH_CODEGEN_OBJECTIVE:
+        raise PermissionError("global_etf_research_codegen requires its fixed research objective")
+    payload.update(provider="codex", model=GLOBAL_ETF_RESEARCH_CODEGEN_MODEL, reasoning_effort="medium", complexity="medium")
+
+
 def _codex_tools_disabled(payload: dict[str, Any]) -> bool:
     """Disable external Codex tools for bounded codegen and drift analysis."""
-    if str(payload.get("task") or "").strip() == SOXL_RSI2_CODEGEN_TASK:
+    if str(payload.get("task") or "").strip() in {SOXL_RSI2_CODEGEN_TASK, GLOBAL_ETF_RESEARCH_CODEGEN_TASK}:
         return True
     return (
         str(payload.get("task") or TASK_EXECUTE).strip() == TASK_EXECUTE
@@ -1427,7 +1461,7 @@ def _job_dedupe_key(
     ]
     if payload.get("research_stage"):
         parts.extend(str(payload.get(key) or "") for key in ("research_stage", "model", "reasoning_effort", "provider"))
-    if str(payload.get("task") or TASK_EXECUTE).strip() == SOXL_RSI2_CODEGEN_TASK:
+    if str(payload.get("task") or TASK_EXECUTE).strip() in {SOXL_RSI2_CODEGEN_TASK, GLOBAL_ETF_RESEARCH_CODEGEN_TASK}:
         parts.append(str(payload.get("research_objective") or ""))
     return hashlib.sha256(json.dumps(parts, separators=(",", ":")).encode("utf-8")).hexdigest()
 
@@ -1447,7 +1481,7 @@ def _request_job_dedupe_key(claims: dict[str, Any], payload: dict[str, Any]) -> 
         "prompt_sha256": hashlib.sha256(str(payload.get("prompt") or "").encode()).hexdigest(),
         **{key: payload.get(key) for key in ("research_stage", "model", "reasoning_effort", "complexity", "changed_files", "changed_lines", "sandbox", "timeout_seconds")},
     }
-    if str(payload.get("task") or TASK_EXECUTE).strip() == SOXL_RSI2_CODEGEN_TASK:
+    if str(payload.get("task") or TASK_EXECUTE).strip() in {SOXL_RSI2_CODEGEN_TASK, GLOBAL_ETF_RESEARCH_CODEGEN_TASK}:
         objective = payload.get("research_objective")
         identity["research_objective"] = objective.strip() if isinstance(objective, str) else objective
     return hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
@@ -1477,7 +1511,7 @@ def _validate_reusable_research_job(
         "mode": str(payload.get("mode") or MODE_REVIEW_ONLY),
         "research_stage": str(payload.get("research_stage") or ""),
     }
-    if str(payload.get("task") or TASK_EXECUTE).strip() == SOXL_RSI2_CODEGEN_TASK:
+    if str(payload.get("task") or TASK_EXECUTE).strip() in {SOXL_RSI2_CODEGEN_TASK, GLOBAL_ETF_RESEARCH_CODEGEN_TASK}:
         expected["research_objective"] = str(payload.get("research_objective") or "").strip()
     if any(str(job.get(key) or "") != value for key, value in expected.items()):
         raise PermissionError("persisted research job task identity does not match request")
@@ -1713,7 +1747,7 @@ def _submit_job(claims: dict[str, Any], payload: dict[str, Any], *, request_dedu
                 return public
         if payload.get("research_stage"):
             job.update({key: payload[key] for key in ("research_stage", "model", "reasoning_effort")})
-        if str(payload.get("task") or TASK_EXECUTE).strip() == SOXL_RSI2_CODEGEN_TASK:
+        if str(payload.get("task") or TASK_EXECUTE).strip() in {SOXL_RSI2_CODEGEN_TASK, GLOBAL_ETF_RESEARCH_CODEGEN_TASK}:
             job["research_objective"] = str(payload.get("research_objective") or "").strip()
         _write_job(job)
         _record_job_automation_run(job)
