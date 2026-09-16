@@ -374,7 +374,8 @@ def test_real_sdk_binds_optimization_job_and_route_without_paid_fallback(mismatc
 def test_real_sdk_quota_defers_and_sanitizes_without_polling():
     runtime, drift = diagnosis_runtime()
     error = urllib.error.HTTPError("https://synthetic.invalid", 429, "private-error", {},
-        io.BytesIO(json.dumps({"status": "deferred", "retry_at": NOW.timestamp() + 3600, "stderr": "private-error"}).encode()))
+        io.BytesIO(json.dumps({"status": "deferred", "retry_at": NOW.timestamp() + 3600,
+                               "execution_started": False, "stderr": "private-error"}).encode()))
     with patch("client.gateway_client.urllib.request.urlopen", side_effect=[
         Response({"value": "synthetic-oidc"}), Response({"codex_research_routing": "v1"}), error,
     ]) as http:
@@ -949,7 +950,8 @@ def test_installed_cn_reader_preflight_real_numeric_search_ticket_reuse_and_dail
     initial_replies = replies
     if defer_past_window:
         quota_error = urllib.error.HTTPError("https://synthetic.invalid", 429, "synthetic quota", {},
-            io.BytesIO(json.dumps({"status": "deferred", "retry_at": NOW.timestamp()+3600}).encode()))
+            io.BytesIO(json.dumps({"status": "deferred", "retry_at": NOW.timestamp()+3600,
+                                   "execution_started": False}).encode()))
         initial_replies = replies[:2] + [quota_error]
     sync, pull = Mock(), Mock()
     with patch.object(job, "_read_policy", return_value=policy), patch.object(job, "_load_runtime", return_value=runtime), \
