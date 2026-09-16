@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 import unittest
 from pathlib import Path
+import re
 from unittest.mock import patch
 
 from service import auth
@@ -158,6 +159,54 @@ class ReusableWorkflowOidcAuthTests(unittest.TestCase):
 
         self.assertIn(workflow_ref, deploy_script)
         self.assertIn(workflow_ref, ops_workflow)
+
+    def test_global_etf_codegen_job_workflow_ref_is_exactly_allowlisted(self) -> None:
+        workflow_ref = (
+            "QuantStrategyLab/AIAuditBridge/.github/workflows/"
+            "global_etf_research_codegen.yml@refs/heads/main"
+        )
+        payload: dict[str, object] = {
+            "aud": "quant-codex-audit",
+            "iss": auth.GITHUB_OIDC_ISSUER,
+            "exp": int(time.time()) + 300,
+            "repository": "QuantStrategyLab/AIAuditBridge",
+            "workflow_ref": workflow_ref,
+            "job_workflow_ref": workflow_ref,
+            "ref": "refs/heads/main",
+        }
+        env = {
+            "CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES": "QuantStrategyLab/AIAuditBridge",
+            "CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS": workflow_ref,
+            "CODEX_AUDIT_SERVICE_ALLOWED_REFS": "refs/heads/main",
+            "CODEX_AUDIT_SERVICE_ALLOWED_DIRECT_REPOSITORIES": "QuantStrategyLab/AIAuditBridge",
+            "CODEX_AUDIT_SERVICE_ALLOWED_JOB_WORKFLOW_REFS": workflow_ref,
+        }
+
+        self.assertEqual(self._verify(payload, env)["job_workflow_ref"], workflow_ref)
+        for rejected_job_workflow_ref in (
+            workflow_ref.replace("refs/heads/main", "refs/heads/feature"),
+            workflow_ref.replace("global_etf_research_codegen.yml", "other.yml"),
+        ):
+            with self.subTest(job_workflow_ref=rejected_job_workflow_ref):
+                payload["job_workflow_ref"] = rejected_job_workflow_ref
+                with self.assertRaisesRegex(PermissionError, "job workflow ref is not allowed"):
+                    self._verify(payload, env)
+
+    def test_global_etf_codegen_job_workflow_ref_is_in_both_deployment_job_allowlists(self) -> None:
+        workflow_ref = (
+            "QuantStrategyLab/AIAuditBridge/.github/workflows/"
+            "global_etf_research_codegen.yml@refs/heads/main"
+        )
+        root = Path(__file__).parents[1]
+        deploy_script = (root / "scripts/deploy_codex_audit_service.sh").read_text()
+        ops_workflow = (root / ".github/workflows/vps_codex_service_ops.yml").read_text()
+        deploy_job_refs = re.search(r'^ALLOWED_JOB_WORKFLOW_REFS="\$\{[^:]+:-([^}]*)\}"$', deploy_script, re.MULTILINE)
+        ops_job_refs = re.search(r'^\s+CODEX_AUDIT_SERVICE_ALLOWED_JOB_WORKFLOW_REFS: (.+)$', ops_workflow, re.MULTILINE)
+
+        self.assertIsNotNone(deploy_job_refs)
+        self.assertIsNotNone(ops_job_refs)
+        self.assertIn(workflow_ref, deploy_job_refs.group(1))
+        self.assertIn(workflow_ref, ops_job_refs.group(1))
 
     def test_strategy_drift_requires_trusted_qpk_reusable_workflow(self) -> None:
         qpk_job_ref = (
