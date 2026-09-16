@@ -128,8 +128,8 @@ class GlobalResearchCodegenTests(TestCase):
     def test_tests_precede_model_and_terminal_replays(self):
         for passing in (False, True):
             with self.subTest(passing=passing), TemporaryDirectory() as tmp, patch.object(codegen, "_docker_preflight"), patch.object(
-                codegen, "_read_global_base", return_value=(codegen.GLOBAL_ETF_RESEARCH_CODEGEN_UES_COMMIT, {})), patch(
-                "scripts.run_new_research._archive_codegen_base"):
+                codegen, "_read_global_base", return_value=(codegen.GLOBAL_ETF_RESEARCH_CODEGEN_UES_COMMIT, {})), patch.dict(
+                sys.modules, {"scripts.run_new_research": SimpleNamespace(_archive_codegen_base=lambda *a, **k: None)}):
                 calls = []
                 def tests(*args, **kwargs):
                     calls.append("tests")
