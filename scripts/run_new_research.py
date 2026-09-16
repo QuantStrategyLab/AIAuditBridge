@@ -1092,6 +1092,12 @@ def _run_codegen_candidate_tests(
             "tests/test_soxl_rsi2_mean_reversion.py",
             "aab-soxl-rsi2",
         ),
+        "global_etf_review": (
+            "us_equity_strategies.research.global_etf_absolute_volatility",
+            "test_global_etf_absolute_volatility.py",
+            "tests/test_orchestrator_runner.py",
+            "aab-global-review",
+        ),
         "global_etf": (
             "us_equity_strategies.strategies.global_etf_rotation",
             "test_global_etf_rotation.py",

@@ -131,7 +131,7 @@ GLOBAL_ETF_RESEARCH_CODEGEN_TASK = "global_etf_research_codegen"
 GLOBAL_ETF_RESEARCH_CODEGEN_SOURCE_REPO = "QuantStrategyLab/AIAuditBridge"
 GLOBAL_ETF_RESEARCH_CODEGEN_MODEL = "gpt-5.6-luna"
 GLOBAL_ETF_RESEARCH_CODEGEN_OBJECTIVE = (
-    "Rename only the local variables frame and subset for readability without changing behavior."
+    "Review the fixed Global ETF volatility research candidate against the author abstract; no code or parameter changes."
 )
 ACTIVE_JOB_STATUSES = frozenset({"queued", "running"})
 REUSABLE_RESEARCH_JOB_STATUSES = frozenset({"queued", "running", "succeeded", "failed"})
