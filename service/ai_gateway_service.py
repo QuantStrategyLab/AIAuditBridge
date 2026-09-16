@@ -381,6 +381,18 @@ def _validate_soxl_rsi2_codegen_payload(payload: dict[str, Any]) -> None:
     payload.update(provider="codex", model=SOXL_RSI2_CODEGEN_MODEL, reasoning_effort="medium", complexity="medium")
 
 
+def _codex_tools_disabled(payload: dict[str, Any]) -> bool:
+    """Disable external Codex tools for bounded codegen and drift analysis."""
+    if str(payload.get("task") or "").strip() == SOXL_RSI2_CODEGEN_TASK:
+        return True
+    return (
+        str(payload.get("task") or TASK_EXECUTE).strip() == TASK_EXECUTE
+        and str(payload.get("mode") or MODE_REVIEW_ONLY).strip().lower() == MODE_REVIEW_ONLY
+        and str(payload.get("research_stage") or "").strip() == "drift_analysis"
+        and str(payload.get("sandbox") or DEFAULT_SANDBOX).strip() == "read-only"
+    )
+
+
 def _manual_approval_policy_matches(
     *,
     policy: dict[str, Any],
@@ -1552,9 +1564,9 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
             execute_kwargs["shell_tool_enabled"] = not (
                 _platform_bugfix_readonly_mode(payload)
                 or _platform_bugfix_manual_mode(payload)
-                or str(payload.get("task") or "") == SOXL_RSI2_CODEGEN_TASK
+                or _codex_tools_disabled(payload)
             )
-            execute_kwargs["tools_disabled"] = str(payload.get("task") or "") == SOXL_RSI2_CODEGEN_TASK
+            execute_kwargs["tools_disabled"] = _codex_tools_disabled(payload)
         result = adapter.execute(**execute_kwargs)
         job = _read_job(job_id)
         if result.success:
@@ -2079,9 +2091,9 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             execute_kwargs["shell_tool_enabled"] = not (
                 _platform_bugfix_readonly_mode(payload)
                 or _platform_bugfix_manual_mode(payload)
-                or str(payload.get("task") or "") == SOXL_RSI2_CODEGEN_TASK
+                or _codex_tools_disabled(payload)
             )
-            execute_kwargs["tools_disabled"] = str(payload.get("task") or "") == SOXL_RSI2_CODEGEN_TASK
+            execute_kwargs["tools_disabled"] = _codex_tools_disabled(payload)
         result = adapter.execute(**execute_kwargs)
         get_health_monitor().record("/v1/ai/execute", time.time() - started, result.success, result.error if not result.success else "")
         if result.success:
