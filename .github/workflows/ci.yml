@@ -175,3 +175,29 @@ jobs:
           git -C "${approved_repo}" checkout --detach "${AAB_SOXL_APPROVED_COMMIT}"
           export AAB_SOXL_APPROVED_REPO="${approved_repo}"
           "${RUNNER_TEMP}/aab-soxl-research/bin/python" -m pytest -q tests/test_run_new_research.py -k test_codegen_docker_integration_fixture
+
+      - name: Run opt-in SOXL financial explanation integration
+        env:
+          SOXL_RUN_INTEGRATION: "1"
+          SOXL_UES_REPO_ROOT: ${{ runner.temp }}/ues-soxl-financial-explanation
+          SOXL_QPK_REPO_ROOT: ${{ runner.temp }}/qpk-soxl-financial-explanation
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          set -euo pipefail
+          ues_root="${RUNNER_TEMP}/ues-soxl-financial-explanation"
+          qpk_root="${RUNNER_TEMP}/qpk-soxl-financial-explanation"
+          git clone --no-tags --filter=blob:none https://github.com/QuantStrategyLab/UsEquityStrategies.git "$ues_root"
+          git -C "$ues_root" fetch --no-tags --depth=1 origin 86aa4e03c30eb2fb561748d6e9c22e68d3267cfa
+          git -C "$ues_root" checkout --detach 86aa4e03c30eb2fb561748d6e9c22e68d3267cfa
+          git clone --no-tags --filter=blob:none https://github.com/QuantStrategyLab/QuantPlatformKit.git "$qpk_root"
+          git -C "$qpk_root" fetch --no-tags --depth=1 origin de13e486da1bdba60f425e576e944591fc97b809
+          git -C "$qpk_root" checkout --detach de13e486da1bdba60f425e576e944591fc97b809
+          SOXL_UES_REPO_ROOT="$ues_root" SOXL_QPK_REPO_ROOT="$qpk_root" \
+            "${RUNNER_TEMP}/aab-soxl-research/bin/python" - <<'PY' > /dev/null
+          import os
+          from pathlib import Path
+          from scripts.run_soxl_financial_explanation import _load_pinned_api
+          _load_pinned_api(Path(os.environ["SOXL_UES_REPO_ROOT"]), Path(os.environ["SOXL_QPK_REPO_ROOT"]))
+          PY
+          "${RUNNER_TEMP}/aab-soxl-research/bin/python" -m pytest -q tests/test_run_soxl_financial_explanation.py -k synthetic_p1
