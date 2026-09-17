@@ -80,7 +80,6 @@ class CursorPolicyTrustTests(unittest.TestCase):
                 os.environ,
                 {
                     **self._owner_env(),
-                    "AI_GATEWAY_CURSOR_ENABLED": "true",
                     "AI_GATEWAY_CURSOR_POLICY_PATH": str(link),
                 },
                 clear=False,
@@ -93,10 +92,15 @@ class CursorPolicyTrustTests(unittest.TestCase):
             self.assertEqual(route["action"], "defer")
             self.assertEqual(route["reason"], "cursor_policy_untrusted")
 
-    def test_readiness_reports_disabled_without_enabling_cursor(self) -> None:
-        with patch.dict(os.environ, {"AI_GATEWAY_CURSOR_ENABLED": "false"}, clear=False):
+    def test_readiness_reports_not_ready_when_policy_path_missing(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"AI_GATEWAY_CURSOR_POLICY_PATH": "/tmp/missing-cursor-policy.json"},
+            clear=False,
+        ):
             readiness = cursor_account.subscription_research_readiness(now=time.time())
-        self.assertEqual(readiness, {"status": "disabled", "reason": "cursor_disabled"})
+        self.assertEqual(readiness["status"], "not_ready")
+        self.assertIn(readiness["reason"], {"cursor_spend_policy_unavailable", "cursor_policy_untrusted"})
 
     def test_group_writable_policy_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as raw_dir:
@@ -107,7 +111,6 @@ class CursorPolicyTrustTests(unittest.TestCase):
                 os.environ,
                 {
                     **self._owner_env(),
-                    "AI_GATEWAY_CURSOR_ENABLED": "true",
                     "AI_GATEWAY_CURSOR_POLICY_PATH": str(policy_path),
                 },
                 clear=False,
@@ -142,7 +145,7 @@ class CursorPolicyTrustTests(unittest.TestCase):
         catalog = type("Catalog", (), {"subscription_rosters": {"cursor": roster}})()
         with patch.dict(
             os.environ,
-            {**self._owner_env(), "AI_GATEWAY_CURSOR_ENABLED": "true", "AI_GATEWAY_CURSOR_POLICY_PATH": "/tmp/unused"},
+            {**self._owner_env(), "AI_GATEWAY_CURSOR_POLICY_PATH": "/tmp/unused"},
             clear=False,
         ), patch(
             "service.automation_decision._read_trusted_policy_file",

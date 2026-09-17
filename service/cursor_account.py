@@ -29,8 +29,6 @@ def _finite(value: Any) -> bool:
 
 def cursor_research_route(payload: dict[str, Any], usage: dict[str, Any], *, now: float) -> dict[str, Any]:
     deferred = {'action': 'defer', 'provider': 'cursor', 'reason': 'cursor_research_unavailable'}
-    if os.environ.get('AI_GATEWAY_CURSOR_ENABLED', '').lower() != 'true':
-        return {**deferred, 'reason': 'cursor_disabled'}
     try:
         from service.automation_decision import _read_trusted_policy_file
 
@@ -49,11 +47,10 @@ def subscription_research_readiness(*, now: float | None = None) -> dict[str, st
     """Desensitized Cursor research lane readiness for health surfaces.
 
     Keeps the protocol capability field stable; readiness is a separate status.
-    Never enables Cursor or proves remaining quota.
+    Never proves remaining quota. Admission follows request selection plus
+    trusted spend policy and roster freshness—same shape as Codex gates.
     """
     clock = time.time() if now is None else now
-    if os.environ.get('AI_GATEWAY_CURSOR_ENABLED', '').lower() != 'true':
-        return {'status': 'disabled', 'reason': 'cursor_disabled'}
     try:
         from service.automation_decision import _read_trusted_policy_file
 

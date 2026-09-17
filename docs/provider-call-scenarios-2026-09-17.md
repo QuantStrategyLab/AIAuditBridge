@@ -1,6 +1,6 @@
 # Provider 调用场景与模式（2026-09-17）
 
-本设计授权范围：命名调用场景、默认 provider/mode/stage、Cursor canary 阶梯与停止条件。不启用 `AI_GATEWAY_CURSOR_ENABLED`，不部署，不跑真实模型，不 resume deferred claim。
+命名调用场景、默认 provider/mode/stage、Cursor canary 阶梯与停止条件。不自动部署、不跑真实模型、不 resume deferred claim。
 
 实现入口：`service/provider_scenarios.py`。消费者用 `resolve_execute_kwargs(scenario_id, research_providers=...)` 取 execute 参数；未知场景 fail-closed。
 
@@ -21,18 +21,18 @@
 
 规则：
 
-1. 默认研究链仍是 Codex。`AI_GATEWAY_RESEARCH_PROVIDERS` 只影响 `cursor_eligible` 场景。
-2. Cursor 仅 `review_only` + 有效 `research_stage`；服务侧仍要 `AI_GATEWAY_CURSOR_ENABLED`、可信 policy、费用确认。
+1. 默认研究链仍是 Codex。`AI_GATEWAY_RESEARCH_PROVIDERS` 只影响 `cursor_eligible` 场景——与选 Codex/API 一样靠请求选型，没有单独的 `*_ENABLED` 总开关。
+2. Cursor 仅 `review_only` + 有效 `research_stage`；服务侧靠可信 spend policy、roster 新鲜度与日调用上限准入（对标 Codex 账户/额度门）。
 3. Codex→Cursor fallback 仅当请求显式 `["codex","cursor"]` 且服务 `AI_GATEWAY_CURSOR_FALLBACK_ENABLED=true`；启动后失败不换后端；无 API fallback。
 4. 晋级主审、codegen、platform_bugfix、语义验收探针即使 env 写 cursor 也强制 Codex。
 5. analyze/review API 不替代 Cursor/Codex 订阅执行，也不承接 Cursor 额度失败。
 
 ## 启用阶梯（须逐步授权）
 
-1. **契约已合入**：provider 常量、`resolve_execution_adapter`、可信 policy、health/limiter；`AI_GATEWAY_CURSOR_ENABLED=false`。
+1. **契约已合入**：provider 常量、`resolve_execution_adapter`、可信 policy、health/limiter。
 2. **本矩阵落地**：场景代码 + 诊断/briefing 接线；默认仍 Codex。
-3. **VPS 休眠安装**（另授权）：policy/env、目录只读刷新；不登录、不跑模型、不重启即启用。
-4. **费用确认**：`on_demand_disabled_verified=true`、未过期 `valid_until`、`max_daily_calls`；未确认不 canary。
+3. **VPS 安装**（另授权）：policy/env、目录只读刷新；示例 policy 费用未确认时仍不能执行。
+4. **费用确认**：`on_demand_disabled_verified=true`、未过期 `valid_until`、`max_daily_calls`。
 5. **单次 canary**：仅 `research_task_diagnosis`，`AI_GATEWAY_RESEARCH_PROVIDERS=cursor`，1 次合成 advisory；验证零工具、trust 工作区、结果身份字段。
 6. **扩展**：仅 portfolio diagnosis → daily_briefing；每次单独授权与停止条件。
 7. **永不自动进入**：promotion_primary_review、任一 codegen、platform_bugfix、交易/风控路径。
@@ -46,4 +46,4 @@
 - 启动后超时/失败试图换后端或落到 API
 - canary 输出被当成晋级、下单或解除风控依据
 
-恢复须新的明确授权；本设计本身不构成启用授权。
+恢复须新的明确授权。

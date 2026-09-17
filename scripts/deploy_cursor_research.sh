@@ -31,7 +31,6 @@ if ! sudo test -e "$CURSOR_POLICY_ROOT/cursor_research.json"; then
 fi
 if ! sudo test -e "$CURSOR_CONFIG_ROOT/cursor.env"; then
   sudo tee "$CURSOR_CONFIG_ROOT/cursor.env" >/dev/null <<EOF
-AI_GATEWAY_CURSOR_ENABLED=false
 AI_GATEWAY_CURSOR_FALLBACK_ENABLED=false
 AI_GATEWAY_CURSOR_BIN=$CURSOR_EXECUTABLE
 AI_GATEWAY_CURSOR_POLICY_PATH=$CURSOR_POLICY_ROOT/cursor_research.json
