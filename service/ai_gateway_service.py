@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """AiGateway — unified HTTP service for QuantStrategyLab AI calls.
 
-Three endpoints, two adapters, one service.
+Endpoints with API + CLI execution adapters (Codex / dormant Cursor lane).
 Hardened with rate limiting, input validation, audit logging, and sandbox controls.
 
 Endpoints:
     POST /v1/ai/analyze          sync  — LlmAdapter (Claude/GPT API)
-    POST /v1/ai/execute/jobs     async — CodexAdapter (codex exec), poll via GET
+    POST /v1/ai/execute/jobs     async — CodexAdapter or CursorAdapter (CLI), poll via GET
     POST /v1/ai/review           sync  — LlmAdapter × N + optional CodexAdapter
 
 Backward-compatible aliases:
@@ -47,8 +47,8 @@ from service.contracts import (
     parse_review_request,
 )
 from service.adapters.llm_adapter import DEFAULT_MAX_TOKENS, LlmAdapter, resolve_model
-from service.adapters.cursor_adapter import CursorAdapter
 from service.adapters.codex_adapter import CodexAdapter
+from service.adapters.execution import resolve_execution_adapter
 from service.model_resolver import resolve_codex_research_route
 from service.ai_provenance import (
     build_provenance_receipt,
@@ -167,6 +167,7 @@ TASK_COMPLEXITY_LEVELS = (TASK_COMPLEXITY_LOW, TASK_COMPLEXITY_MEDIUM, TASK_COMP
 _RATE_LIMIT_WINDOW_SECONDS = 60
 _RATE_LIMIT_MAX_REQUESTS = 30
 _analyze_timestamps: list[float] = []
+_RATE_LIMIT_LOCK = threading.Lock()
 
 SERVICE_FAILURE_CATEGORY_PATTERN = re.compile(r"\[([a-z_]+_failure)\]")
 
@@ -299,13 +300,19 @@ def _resolve_codex_reasoning_effort(payload: dict[str, Any], task: str) -> str:
 
 def _admit_codex_execute(quota: Any, repo: str, payload: dict[str, Any]) -> dict[str, Any] | None:
     """Choose a Codex research route before consuming quota or starting a job."""
+    from service.provider_scenarios import cursor_canary_research_stages
+
     providers = payload.get("allowed_providers", ["codex"])
     _validate_platform_bugfix_payload(payload)
     _validate_soxl_rsi2_codegen_payload(payload)
     _validate_global_etf_research_codegen_payload(payload)
     payload["provider"] = "codex"
-    if "cursor" in providers and not payload.get("research_stage"):
-        return {"status": "deferred", "error": "cursor_research_stage_required", "retry_at": None, "execution_started": False}
+    stage = str(payload.get("research_stage") or "").strip()
+    if "cursor" in providers:
+        if not stage:
+            return {"status": "deferred", "error": "cursor_research_stage_required", "retry_at": None, "execution_started": False}
+        if stage not in cursor_canary_research_stages():
+            return {"status": "deferred", "error": "cursor_stage_not_canary", "retry_at": None, "execution_started": False}
     if providers == ["cursor"]:
         return _admit_cursor_execute(quota, repo, payload)
     if "research_stage" in payload:
@@ -323,6 +330,7 @@ def _admit_codex_execute(quota: Any, repo: str, payload: dict[str, Any]) -> dict
         if route["action"] != "run":
             if (providers == ["codex", "cursor"]
                 and os.environ.get("AI_GATEWAY_CURSOR_FALLBACK_ENABLED", "").lower() == "true"
+                and stage in cursor_canary_research_stages()
                 and route["reason"] in {"codex_quota_reserved", "codex_account_unavailable", "codex_account_stale"}
                 and str(payload.get("model") or "") in {"", "auto"}):
                 return _admit_cursor_execute(quota, repo, payload)
@@ -500,6 +508,11 @@ def _platform_bugfix_manual_mode(payload: dict[str, Any]) -> bool:
 
 def _admit_cursor_execute(quota: Any, repo: str, payload: dict[str, Any]) -> dict[str, Any] | None:
     from service.cursor_account import cursor_research_route
+    from service.provider_scenarios import cursor_canary_research_stages
+
+    stage = str(payload.get("research_stage") or "").strip()
+    if stage not in cursor_canary_research_stages():
+        return {"status": "deferred", "error": "cursor_stage_not_canary", "retry_at": None, "execution_started": False}
     cursor_payload = dict(payload)
     levels = ["low", "medium", "high"]
     cursor_payload["complexity"] = max((_normalize_complexity(str(payload.get("complexity") or "")) or "low", _estimate_codex_complexity(payload)), key=levels.index)
@@ -519,13 +532,42 @@ def _admit_cursor_execute(quota: Any, repo: str, payload: dict[str, Any]) -> dic
 def _check_rate_limit(max_per_window: int = _RATE_LIMIT_MAX_REQUESTS, window: float = _RATE_LIMIT_WINDOW_SECONDS) -> None:
     """Sliding-window rate limiter for sync endpoints (analyze, review)."""
     global _analyze_timestamps
-    now = time.time()
-    _analyze_timestamps = [t for t in _analyze_timestamps if now - t < window]
-    if len(_analyze_timestamps) >= max_per_window:
-        raise PermissionError(
-            f"rate limit exceeded: {max_per_window} requests per {window:.0f}s"
+    with _RATE_LIMIT_LOCK:
+        now = time.time()
+        _analyze_timestamps = [t for t in _analyze_timestamps if now - t < window]
+        if len(_analyze_timestamps) >= max_per_window:
+            raise PermissionError(
+                f"rate limit exceeded: {max_per_window} requests per {window:.0f}s"
+            )
+        _analyze_timestamps.append(now)
+
+
+def _http_status_for_permission_error(exc: BaseException) -> HTTPStatus:
+    """Map PermissionError to auth (401), authorization (403), or capacity (429)."""
+    text = str(exc).lower().strip()
+    if any(
+        signal in text
+        for signal in (
+            "rate limit",
+            "too many active jobs",
+            "quota exceeded",
+            "quota unavailable",
+            "budget",
         )
-    _analyze_timestamps.append(now)
+    ):
+        return HTTPStatus.TOO_MANY_REQUESTS
+    if (
+        text.startswith("oidc ")
+        or text.startswith("missing bearer")
+        or text.startswith("bearer token")
+        or text.startswith("service bearer")
+        or text.startswith("unsupported codex_audit_service_auth")
+        or "signature verification" in text
+        or "jwt segments" in text
+        or "signing key" in text
+    ):
+        return HTTPStatus.UNAUTHORIZED
+    return HTTPStatus.FORBIDDEN
 
 
 def _classify_service_failure(message: str) -> str:
@@ -1600,7 +1642,7 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
         job["updated_at"] = _now()
         _write_job(job)
         _record_job_automation_run(job)
-        adapter = CursorAdapter() if payload.get("provider") == "cursor" else CodexAdapter()
+        adapter = resolve_execution_adapter(str(payload.get("provider") or "codex"))
         sandbox = _validate_sandbox(str(payload.get("sandbox") or ""))
         reasoning_effort = _resolve_codex_reasoning_effort(payload, str(payload.get("task") or TASK_EXECUTE))
         execute_kwargs = {
@@ -1646,7 +1688,10 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
                 "provider": str(payload.get("provider") or "codex"),
                 "model": str(payload.get("model") or ""),
                 "reasoning_effort": str(reasoning_effort or ""),
-                "output": str(job.get("output") or ""),
+                "output_length": len(str(job.get("output") or "")),
+                "output_sha256": hashlib.sha256(str(job.get("output") or "").encode("utf-8")).hexdigest()
+                if job.get("output")
+                else "",
                 "error": str(job.get("error") or ""),
             },
             domain=str(job.get("domain") or ""),
@@ -1778,19 +1823,24 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         request_path = urlparse(self.path).path
 
         if request_path == "/healthz":
+            from service.cursor_account import subscription_research_readiness
+
             health = get_health_monitor()
+            readiness = subscription_research_readiness()
             _json_response(self, HTTPStatus.OK, {
                 "status": health.status,
                 "uptime_seconds": health.uptime_seconds,
                 "codex_research_routing": "v1",
                 "subscription_research_routing": "v1",
+                "subscription_research_status": readiness.get("status"),
+                "subscription_research_reason": readiness.get("reason"),
             })
             return
         if request_path == "/v1/ai/health":
             try:
                 claims = authenticate(self.headers, audience=DEFAULT_AUDIENCE)
             except PermissionError as exc:
-                _json_response(self, HTTPStatus.UNAUTHORIZED, {"status": "error", "error": str(exc)})
+                _json_response(self, _http_status_for_permission_error(exc), {"status": "error", "error": str(exc)})
                 return
             health = get_health_monitor()
             _json_response(self, HTTPStatus.OK, {"status": "ok", **health.snapshot()})
@@ -1799,7 +1849,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             try:
                 authenticate(self.headers, audience=DEFAULT_AUDIENCE)
             except PermissionError as exc:
-                _json_response(self, HTTPStatus.UNAUTHORIZED, {"status": "error", "error": str(exc)})
+                _json_response(self, _http_status_for_permission_error(exc), {"status": "error", "error": str(exc)})
                 return
             org_health = read_org_health()
             _json_response(self, HTTPStatus.OK, org_health)
@@ -1848,7 +1898,11 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 except FileNotFoundError:
                     _json_response(self, HTTPStatus.NOT_FOUND, {"status": "error", "error": "job not found"})
                 except PermissionError as exc:
-                    _json_response(self, HTTPStatus.UNAUTHORIZED, {"status": "error", "error": str(exc)})
+                    _json_response(
+                        self,
+                        _http_status_for_permission_error(exc),
+                        {"status": "error", "error": str(exc)},
+                    )
                 except ValueError as exc:
                     _json_response(self, HTTPStatus.BAD_REQUEST, {"status": "error", "error": str(exc)})
                 except Exception as exc:
@@ -1909,7 +1963,11 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
 
         except PermissionError as exc:
             _audit_log("auth_error", path=self.path, error=str(exc)[:200])
-            _json_response(self, HTTPStatus.UNAUTHORIZED, {"status": "error", "error": str(exc)})
+            _json_response(
+                self,
+                _http_status_for_permission_error(exc),
+                {"status": "error", "error": str(exc)},
+            )
         except ValueError as exc:
             _json_response(self, HTTPStatus.BAD_REQUEST, {"status": "error", "error": str(exc)})
         except Exception as exc:
@@ -2129,7 +2187,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 _json_response(self, HTTPStatus.TOO_MANY_REQUESTS, denial)
                 return
             quota.record_execute(quota_repo, provider=str(payload.get("provider") or "codex"))
-        adapter = CursorAdapter() if payload.get("provider") == "cursor" else CodexAdapter()
+        adapter = resolve_execution_adapter(str(payload.get("provider") or "codex"))
         sandbox = _validate_sandbox(str(payload.get("sandbox") or ""))
         reasoning_effort = _resolve_codex_reasoning_effort(payload, str(payload.get("task") or TASK_EXECUTE))
         execute_kwargs = {
@@ -2257,6 +2315,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 user=req.prompt,
                 output=r.output,
             ).to_dict()
+            confidence = _extract_confidence_from_output(r.output) if r.success else None
             entry: dict[str, Any] = {
                 "reviewer": r.provider,
                 "model": r.model,
@@ -2265,7 +2324,8 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 "error": r.error if not r.success else "",
                 "latency_seconds": r.latency_seconds,
                 "usage": {"tokens_input": r.tokens_input, "tokens_output": r.tokens_output, "complete": r.usage_complete},
-                "confidence": _extract_confidence_from_output(r.output) if r.success else 0.0,
+                "confidence": confidence if confidence is not None else 0.0,
+                "parse_ok": confidence is not None,
                 "provenance_receipt": receipt,
             }
             results.append(entry)
@@ -2280,19 +2340,24 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 user=req.prompt,
                 output=codex_result.output,
             ).to_dict()
+            codex_confidence = (
+                _extract_confidence_from_output(codex_result.output) if codex_result.success else None
+            )
             results.append({
                 "reviewer": "codex",
                 "model": "codex-cli",
                 "success": codex_result.success,
                 "output": codex_result.output if codex_result.success else "",
                 "error": codex_result.error if not codex_result.success else "",
-                "confidence": _extract_confidence_from_output(codex_result.output) if codex_result.success else 0.0,
+                "confidence": codex_confidence if codex_confidence is not None else 0.0,
+                "parse_ok": codex_confidence is not None,
                 "provenance_receipt": receipt,
             })
 
         # Step 4: compute consensus + recommended action
         consensus = _compute_consensus(results)
         all_ok = all(r["success"] for r in results)
+        parse_ok = all((not r["success"]) or bool(r.get("parse_ok")) for r in results)
 
         # Autonomy decision: confidence + file risk → recommended action
         repo = str(payload.get("source_repository") or "")
@@ -2318,6 +2383,9 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
             result["provenance_receipt"]["policy_verdict"] == "eligible"
             for result in results
         )
+        if not parse_ok:
+            consensus = "escalate"
+            policy_eligible = False
         if not policy_eligible:
             action = fail_closed_review_action(action)
         _audit_log("review_completed", consensus=consensus, all_success=all_ok,
@@ -2341,7 +2409,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         try:
             claims = authenticate(self.headers, audience=DEFAULT_AUDIENCE)
         except PermissionError as exc:
-            _json_response(self, HTTPStatus.UNAUTHORIZED, {"status": "error", "error": str(exc)})
+            _json_response(self, _http_status_for_permission_error(exc), {"status": "error", "error": str(exc)})
             return
         parsed = urlparse(self.path)
         params = parse_qs(parsed.query, keep_blank_values=True)
@@ -2371,19 +2439,19 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                     manual_approval_id=manual_approval_id,
                 )
             except PermissionError as exc:
-                _json_response(self, HTTPStatus.UNAUTHORIZED, {"status": "error", "error": str(exc)})
+                _json_response(self, _http_status_for_permission_error(exc), {"status": "error", "error": str(exc)})
                 return
         if not _automation_operator_claims(claims):
             claims_repo = str(claims.get("repository") or "")
             if str(claims.get("auth_method") or "") == "static_token":
                 if not _dashboard_repository_allowed(claims, repo):
-                    _json_response(self, HTTPStatus.UNAUTHORIZED, {"status": "error", "error": "repo is not allowed"})
+                    _json_response(self, HTTPStatus.FORBIDDEN, {"status": "error", "error": "repo is not allowed"})
                     return
             elif repo and _dashboard_repository_allowed(claims, repo):
                 pass
             elif repo and repo != claims_repo:
                 if not manual_approval_valid:
-                    _json_response(self, HTTPStatus.UNAUTHORIZED, {"status": "error", "error": "repo is not allowed"})
+                    _json_response(self, HTTPStatus.FORBIDDEN, {"status": "error", "error": "repo is not allowed"})
                     return
             else:
                 repo = claims_repo
@@ -2442,7 +2510,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         try:
             claims = authenticate(self.headers, audience=DEFAULT_AUDIENCE)
         except PermissionError as exc:
-            _json_response(self, HTTPStatus.UNAUTHORIZED, {"status": "error", "error": str(exc)})
+            _json_response(self, _http_status_for_permission_error(exc), {"status": "error", "error": str(exc)})
             return
         parsed = urlparse(self.path)
         params = parse_qs(parsed.query)
@@ -2464,7 +2532,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         try:
             claims = authenticate(self.headers, audience=DEFAULT_AUDIENCE)
         except PermissionError as exc:
-            _json_response(self, HTTPStatus.UNAUTHORIZED, {"status": "error", "error": str(exc)})
+            _json_response(self, _http_status_for_permission_error(exc), {"status": "error", "error": str(exc)})
             return
         record = get_automation_run_ledger().get(run_id)
         if record is None:
@@ -2473,7 +2541,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         try:
             _assert_automation_run_access(record, claims)
         except PermissionError as exc:
-            _json_response(self, HTTPStatus.UNAUTHORIZED, {"status": "error", "error": str(exc)})
+            _json_response(self, _http_status_for_permission_error(exc), {"status": "error", "error": str(exc)})
             return
         _json_response(self, HTTPStatus.OK, {"status": "ok", "run": record})
 
@@ -2690,14 +2758,14 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         except FileNotFoundError:
             _json_response(self, HTTPStatus.NOT_FOUND, {"status": "error", "error": "change not found"})
         except PermissionError as exc:
-            _json_response(self, HTTPStatus.UNAUTHORIZED, {"status": "error", "error": str(exc)})
+            _json_response(self, _http_status_for_permission_error(exc), {"status": "error", "error": str(exc)})
 
     def _handle_list_changes(self) -> None:
         from urllib.parse import urlparse, parse_qs
         try:
             authenticate(self.headers, audience=DEFAULT_AUDIENCE)
         except PermissionError as exc:
-            _json_response(self, HTTPStatus.UNAUTHORIZED, {"status": "error", "error": str(exc)})
+            _json_response(self, _http_status_for_permission_error(exc), {"status": "error", "error": str(exc)})
             return
         parsed = urlparse(self.path)
         params = parse_qs(parsed.query)
@@ -2714,7 +2782,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         try:
             authenticate(self.headers, audience=DEFAULT_AUDIENCE)
         except PermissionError as exc:
-            _json_response(self, HTTPStatus.UNAUTHORIZED, {"status": "error", "error": str(exc)})
+            _json_response(self, _http_status_for_permission_error(exc), {"status": "error", "error": str(exc)})
             return
         parsed = urlparse(self.path)
         params = parse_qs(parsed.query)
@@ -2731,14 +2799,14 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 "disagreements": get_shadow_disagreements(),
             })
         except PermissionError as exc:
-            _json_response(self, HTTPStatus.UNAUTHORIZED, {"status": "error", "error": str(exc)})
+            _json_response(self, _http_status_for_permission_error(exc), {"status": "error", "error": str(exc)})
 
     def _handle_quota_status(self) -> None:
         from urllib.parse import urlparse, parse_qs
         try:
             authenticate(self.headers, audience=DEFAULT_AUDIENCE)
         except PermissionError as exc:
-            _json_response(self, HTTPStatus.UNAUTHORIZED, {"status": "error", "error": str(exc)})
+            _json_response(self, _http_status_for_permission_error(exc), {"status": "error", "error": str(exc)})
             return
         parsed = urlparse(self.path)
         params = parse_qs(parsed.query)
@@ -2763,44 +2831,83 @@ def _record_platform_execution_telemetry(
         logging.getLogger(__name__).warning("platform execution telemetry failed: %s", exc)
 
 
-def _extract_confidence_from_output(output: str) -> float:
+def _parse_review_json_object(output: str) -> dict[str, Any] | None:
+    """Parse exactly one JSON object from review output; reject multi-object/junk."""
+    text = str(output or "").strip()
+    if not text:
+        return None
+    decoder = json.JSONDecoder()
+    try:
+        obj = json.loads(text)
+        if isinstance(obj, dict):
+            return obj
+        return None
+    except json.JSONDecodeError:
+        pass
+    start = text.find("{")
+    if start < 0:
+        return None
+    try:
+        obj, end = decoder.raw_decode(text, start)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(obj, dict):
+        return None
+    rest = text[end:].strip()
+    if "{" in rest:
+        return None
+    return obj
+
+
+def _extract_confidence_from_output(output: str) -> float | None:
     """Extract confidence score from a reviewer's JSON output.
 
-    Looks for a ``confidence`` field (0.0–1.0) in the first JSON block found.
-    Returns 0.5 (neutral) if no confidence data is found.
+    Returns a finite float in [0.0, 1.0], or None when the payload is missing/invalid
+    so callers can fail closed instead of inventing a neutral 0.5.
     """
-    if not output:
-        return 0.0
+    obj = _parse_review_json_object(output)
+    if obj is None or "confidence" not in obj:
+        return None
     try:
-        match = re.search(r"\{[\s\S]*\}", output)
-        if match:
-            obj = json.loads(match.group(0))
-            c = float(obj.get("confidence", 0.5))
-            return max(0.0, min(1.0, c))
-    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
-        pass
-    return 0.5
+        raw = obj["confidence"]
+        if isinstance(raw, bool):
+            return None
+        confidence = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
+        return None
+    return confidence
 
 
 def _compute_consensus(results: list[dict[str, Any]]) -> str:
     """Simple consensus from review results — extracts approve/reject/escalate from JSON outputs."""
     verdicts: list[str] = []
+    parse_failures = 0
     for r in results:
         if not r.get("success") or not r.get("output"):
             continue
-        try:
-            text = r["output"]
-            match = re.search(r"\{[\s\S]*\}", text)
-            if match:
-                obj = json.loads(match.group(0))
-                verdict = str(obj.get("verdict", "")).lower()
-                if verdict in {"approve", "reject", "escalate", "verified", "mismatch", "agree", "review", "data_insufficient"}:
-                    verdicts.append(verdict)
-        except (json.JSONDecodeError, KeyError):
+        obj = _parse_review_json_object(str(r["output"]))
+        if obj is None:
+            parse_failures += 1
             continue
+        verdict = str(obj.get("verdict", "")).lower()
+        if verdict in {
+            "approve",
+            "reject",
+            "escalate",
+            "verified",
+            "mismatch",
+            "agree",
+            "review",
+            "data_insufficient",
+        }:
+            verdicts.append(verdict)
+        else:
+            parse_failures += 1
 
-    if not verdicts:
-        return "unknown"
+    if parse_failures or not verdicts:
+        return "escalate"
     if all(v == verdicts[0] for v in verdicts):
         return verdicts[0]
     if any(v in {"reject", "mismatch"} for v in verdicts):

@@ -417,9 +417,20 @@ def summarize_briefing(result: BriefingConsumptionResult, *, dry_run: bool = Fal
     if not source_repository:
         return unavailable("source_repository_required")
     try:
+        from service.provider_scenarios import (
+            SCENARIO_DAILY_BRIEFING,
+            resolve_execute_kwargs,
+        )
+
         response = AiGatewayClient(config).execute(
-            prompt, task="daily_briefing", mode="review_only", research_stage="research_summary",
-            allowed_providers=list(config.research_providers), timeout=300, source_repository=source_repository,
+            prompt,
+            task="daily_briefing",
+            **resolve_execute_kwargs(
+                SCENARIO_DAILY_BRIEFING,
+                research_providers=config.research_providers,
+            ),
+            timeout=300,
+            source_repository=source_repository,
         )
     except Exception:
         return unavailable("summary_execution_unavailable")

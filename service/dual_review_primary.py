@@ -12,6 +12,7 @@ from client.config import GatewayConfig
 from client.gateway_client import AiGatewayClient
 from service.dual_review import VERDICT_FAIL, VERDICT_INVALID, VERDICT_PASS, VERDICT_UNAVAILABLE, extract_verdict
 from service.dual_review_secondary import parse_llm_review_output
+from service.provider_scenarios import SCENARIO_PROMOTION_PRIMARY_REVIEW, resolve_execute_kwargs
 
 _PRIMARY_SYSTEM = (
     "You are the primary Codex reviewer for quantitative strategy promotion, risk, and recovery decisions. "
@@ -164,9 +165,11 @@ def _run_codex_research_primary_review(
         if not 1 <= timeout <= 60:
             return unavailable("research_primary_invalid_timeout")
         result = AiGatewayClient(config).execute(
-            f"{_PRIMARY_SYSTEM}\n\n{prompt}", task="dual_review", mode="review_only",
-            research_stage="promotion_review", reasoning_effort="xhigh", allowed_providers=["codex"],
-            source_repository=source_repository, timeout=timeout * 60,
+            f"{_PRIMARY_SYSTEM}\n\n{prompt}",
+            task="dual_review",
+            **resolve_execute_kwargs(SCENARIO_PROMOTION_PRIMARY_REVIEW),
+            source_repository=source_repository,
+            timeout=timeout * 60,
         )
     except Exception:
         return unavailable("research_primary_unavailable")

@@ -489,6 +489,7 @@ def _validate_review(output: str) -> dict[str, str]:
 
 def _codex_execute(*, source_ref: str):
     from ai_gateway_client import AiGatewayClient, GatewayConfig
+    from service.provider_scenarios import SCENARIO_GLOBAL_ETF_CODEGEN, resolve_execute_kwargs
 
     config = GatewayConfig.from_env()
     if config.research_providers != ("codex",):
@@ -499,14 +500,14 @@ def _codex_execute(*, source_ref: str):
         return client.execute(
             prompt,
             task=GLOBAL_ETF_RESEARCH_CODEGEN_TASK,
-            mode="review_only",
-            model=GLOBAL_ETF_RESEARCH_CODEGEN_MODEL,
-            complexity="medium",
-            research_stage="optimization",
+            **resolve_execute_kwargs(
+                SCENARIO_GLOBAL_ETF_CODEGEN,
+                model=GLOBAL_ETF_RESEARCH_CODEGEN_MODEL,
+                reasoning_effort="medium",
+                complexity="medium",
+            ),
             research_objective=GLOBAL_ETF_RESEARCH_OBJECTIVE,
-            reasoning_effort="medium",
             sandbox="read-only",
-            allowed_providers=["codex"],
             source_repository=GLOBAL_ETF_SOURCE_REPOSITORY,
             source_ref=source_ref,
             timeout=1800,

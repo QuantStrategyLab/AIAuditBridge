@@ -301,16 +301,18 @@ def run_diagnosis(
 
             client_factory = AiGatewayClient
         client = client_factory(config_loader())
+        from service.provider_scenarios import (
+            SCENARIO_ACCOUNT_OPERATIONAL_DIAGNOSIS,
+            resolve_execute_kwargs,
+        )
+
         result = client.execute(
             build_prompt(observation),
             task="account_operational_diagnosis",
-            mode="review_only",
+            **resolve_execute_kwargs(SCENARIO_ACCOUNT_OPERATIONAL_DIAGNOSIS),
             sandbox="read-only",
-            allowed_providers=["codex"],
             source_repository=SOURCE_REPOSITORY,
             source_ref=SOURCE_REF,
-            research_stage="drift_analysis",
-            complexity="high",
             timeout=600,
         )
     except Exception:

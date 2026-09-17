@@ -1,6 +1,9 @@
-"""Cursor account roster and operator-reviewed subscription research admission.
+"""Cursor subscription research admission (same economic class as Codex).
 
-CLI discovery proves model availability, never remaining quota or paid usage.
+Cursor CLI execution is subscription capacity, not OpenAI/Anthropic API billing.
+Admission uses a trusted operator policy (models, daily call cap, on-demand off)
+plus a fresh CLI roster. API analyze/review budgets must not gate or charge
+these calls; Cursor dollar cost remains unknown and must not be reported as 0.
 """
 from __future__ import annotations
 
@@ -29,17 +32,56 @@ def _finite(value: Any) -> bool:
 
 def cursor_research_route(payload: dict[str, Any], usage: dict[str, Any], *, now: float) -> dict[str, Any]:
     deferred = {'action': 'defer', 'provider': 'cursor', 'reason': 'cursor_research_unavailable'}
-    if os.environ.get('AI_GATEWAY_CURSOR_ENABLED', '').lower() != 'true':
-        return {**deferred, 'reason': 'cursor_disabled'}
     try:
+        from service.automation_decision import _read_trusted_policy_file
+
         policy_path = Path(os.environ['AI_GATEWAY_CURSOR_POLICY_PATH'])
-        if policy_path.is_symlink():
-            return deferred
-        policy = json.loads(policy_path.read_text())
+        raw, read_error = _read_trusted_policy_file(policy_path)
+        if read_error:
+            return {**deferred, 'reason': 'cursor_policy_untrusted'}
+        policy = json.loads(raw)
         roster = load_catalog(catalog_path()).subscription_rosters.get('cursor', {})
     except (OSError, KeyError, TypeError, ValueError):
         return deferred
     return resolve_cursor_route(payload, usage, policy=policy, roster=roster, now=now)
+
+
+def subscription_research_readiness(*, now: float | None = None) -> dict[str, str]:
+    """Desensitized Cursor subscription-lane readiness for health surfaces.
+
+    Keeps the protocol capability field stable; readiness is a separate status.
+    Never proves remaining quota dollars. Admission follows request selection
+    plus trusted subscription policy and roster freshness—same shape as Codex.
+    """
+    clock = time.time() if now is None else now
+    try:
+        from service.automation_decision import _read_trusted_policy_file
+
+        policy_path = Path(os.environ['AI_GATEWAY_CURSOR_POLICY_PATH'])
+        raw, read_error = _read_trusted_policy_file(policy_path)
+        if read_error:
+            return {'status': 'not_ready', 'reason': 'cursor_policy_untrusted'}
+        policy = json.loads(raw)
+        roster = load_catalog(catalog_path()).subscription_rosters.get('cursor', {})
+    except (OSError, KeyError, TypeError, ValueError):
+        return {'status': 'not_ready', 'reason': 'cursor_subscription_policy_unavailable'}
+    probe = resolve_cursor_route(
+        {
+            'research_stage': 'research_summary',
+            'complexity': 'low',
+            'mode': 'review_only',
+            'model': '',
+            'reasoning_effort': 'auto',
+        },
+        {'cursor_calls': 0},
+        policy=policy,
+        roster=roster,
+        now=clock,
+    )
+    if probe.get('action') == 'run':
+        return {'status': 'ready', 'reason': 'cursor_route_ready'}
+    return {'status': 'not_ready', 'reason': str(probe.get('reason') or 'cursor_research_unavailable')}
+
 
 
 def resolve_cursor_route(payload, usage, *, policy, roster, now):
@@ -47,8 +89,10 @@ def resolve_cursor_route(payload, usage, *, policy, roster, now):
     if not isinstance(policy, dict) or not isinstance(roster, dict) or not _finite(now):
         return deferred
     until = policy.get('valid_until')
+    # on_demand_disabled_verified: operator confirmed subscription will not
+    # overflow into Cursor paid on-demand. This is not an API-key budget gate.
     if (policy.get('on_demand_disabled_verified') is not True or not _finite(until) or until <= now):
-        return {**deferred, 'reason': 'cursor_spend_policy_unavailable'}
+        return {**deferred, 'reason': 'cursor_subscription_policy_unavailable'}
     updated = roster.get('updated_at')
     if (roster.get('status') != 'available' or roster.get('source') != 'cursor_cli_account'
         or not _finite(updated) or not 0 <= now - updated <= 86400):
@@ -59,6 +103,9 @@ def resolve_cursor_route(payload, usage, *, policy, roster, now):
         return {**deferred, 'reason': 'cursor_capacity_unavailable'}
     stage = payload.get('research_stage')
     complexity = payload.get('complexity') or 'low'
+    # Cursor is subscription canary only for advisory stages; never promotion/codegen.
+    if stage not in {'research_summary', 'drift_analysis'}:
+        return {**deferred, 'reason': 'cursor_stage_not_canary'}
     if stage not in _STAGE_LEVELS or complexity not in ('low', 'medium', 'high') or payload.get('mode', 'review_only') != 'review_only':
         return deferred
     # Same deterministic stage/complexity floors as Codex, without assuming

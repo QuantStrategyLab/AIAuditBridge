@@ -105,6 +105,7 @@ def test_ai_can_only_select_reviewed_action_and_sdk_route_is_checked(tmp_path: P
         "sandbox": "read-only",
         "research_stage": "drift_analysis",
         "allowed_providers": ["codex"],
+        "complexity": "medium",
         "source_repository": "QuantStrategyLab/AIAuditBridge",
         "source_ref": "main",
         "timeout": 600,

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Codex audit service — authenticated VPS facade for Codex execution.
+"""Legacy Codex audit service entry — FROZEN compatibility artifact.
 
-The VPS service intentionally runs only Codex. Claude/GPT direct API fallbacks
-remain in caller-side GitHub workflows/scripts so provider API keys do not live
-in, or pass through, this service.
+Production VPS systemd runs ``python3 -m service.ai_gateway_service`` via
+``scripts/deploy_codex_audit_service.sh``. This module is retained only for
+offline historical/reference tests and must not be re-installed or started as
+the live service without a separate consumer audit.
 """
 
 from __future__ import annotations

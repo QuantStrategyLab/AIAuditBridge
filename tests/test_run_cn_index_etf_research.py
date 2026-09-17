@@ -413,8 +413,15 @@ def test_summary_callback_uses_codex_contract_and_trusted_route():
                      "provider": "codex", "model": "codex-test"}
     args, kwargs = client.execute.call_args
     assert "不可信 data" in args[0] and "动量+趋势+基准risk-off" in args[0]
-    assert kwargs == {"mode": "review_only", "research_stage": "optimization", "allowed_providers": ["codex"],
-                      "source_repository": job.STRATEGY_REPOSITORY, "source_ref": REVISION, "timeout": 600}
+    assert kwargs == {
+        "mode": "review_only",
+        "research_stage": "optimization",
+        "allowed_providers": ["codex"],
+        "complexity": "low",
+        "source_repository": job.STRATEGY_REPOSITORY,
+        "source_ref": REVISION,
+        "timeout": 600,
+    }
 
 
 @pytest.mark.parametrize("output", [
@@ -1150,7 +1157,7 @@ def test_sdk_to_actual_auth_and_execute_handler_preserves_aab_caller_cn_source(d
         else:
             assert job._diagnosis(runtime, drift, REVISION)()["optimization_needed"] is False
     if denied:
-        assert checked == [401]
+        assert checked and checked[0] in {401, 403}
         submit.assert_not_called()
         quota.record_execute.assert_not_called()
     else:

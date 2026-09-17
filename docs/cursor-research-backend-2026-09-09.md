@@ -10,7 +10,7 @@
 
 Codex→Cursor 仅在请求显式允许、服务 `AI_GATEWAY_CURSOR_FALLBACK_ENABLED=true`、Codex 准入确认未开始且额度预留/账户能力不可用时选择。显式型号不跨后端换型。启动后超时、失败、结果缺失、通信不明不会触发另一后端；没有 API fallback。已有 `analyze/review` API consumer 保留原用途与预算保护。
 
-AAB 两个实际调用者 `run_research_task_diagnosis.py` 与 `run_portfolio_research_proposal_diagnosis.py` 通过 `AI_GATEWAY_RESEARCH_PROVIDERS=cursor` 或 `codex,cursor` 显式采用；默认 `codex`。其权限、去重、输出验收与 advisory 定位保持。SDK 安装和 QPK consumer 的采用必须单独验证，源代码可用不等于已安装。
+AAB 两个实际调用者 `run_research_task_diagnosis.py` 与 `run_portfolio_research_proposal_diagnosis.py` 通过 `AI_GATEWAY_RESEARCH_PROVIDERS=cursor` 或 `codex,cursor` 显式采用；默认 `codex`。其权限、去重、输出验收与 advisory 定位保持。场景命名与 canary 阶梯见 [provider-call-scenarios-2026-09-17.md](provider-call-scenarios-2026-09-17.md)。SDK 安装和 QPK consumer 的采用必须单独验证，源代码可用不等于已安装。
 
 ## 模型与费用
 
@@ -20,7 +20,7 @@ AAB 两个实际调用者 `run_research_task_diagnosis.py` 与 `run_portfolio_re
 
 Cursor 官方区分 Cursor Models 和 Other Models 两个消费池；第三方模型从 Other Models 按对应模型 API 单价消耗额度，超额可另外付费。型号可见不证明余额，也不证明免费。见 [Cursor 模型与价格](https://cursor.com/docs/models-and-pricing)。
 
-启用还要求 policy 的 `on_demand_disabled_verified=true`、未过期 `valid_until` 和全账户 `max_daily_calls`。默认示例未确认费用、已过期，不能执行。额度计数复用持久存储，跨 HTTP 请求串行准入与预留；计数区分 Cursor/Codex，Cursor 实际费用和余额保留未知，不能报为 0。损坏/缺配置的额度存储拒绝 Cursor；这些门不授予交易或候选晋级权限。
+启用还要求 policy 的 `on_demand_disabled_verified=true`（确认订阅不会溢出成付费 on-demand，不是 API 计费开关）、未过期 `valid_until` 和全账户 `max_daily_calls`。默认示例未确认、已过期，不能执行。额度计数复用持久存储，跨 HTTP 请求串行准入与预留；计数区分 Cursor/Codex，Cursor 实际费用和余额保留未知，不能报为 0，也不计入 API 美元预算。损坏/缺配置的额度存储拒绝 Cursor；这些门不授予交易或候选晋级权限。
 
 ## 目录刷新
 
@@ -32,7 +32,7 @@ Cursor 官方区分 Cursor Models 和 Other Models 两个消费池；第三方�
 
 执行器每次新建临时任务工作区，复制服务拥有的 AGENTS 和研究真实性、故障验收两个 skill；这些文本与任务输入一起通过 stdin 提交。source_repository/source_ref 仅为来源元数据，不声称已 checkout 或读取对应代码。只接受 CLI 成功终态 `type=result/subtype=success/is_error=false` 的非空 result；失败固定脱敏。参见 [CLI 参数](https://cursor.com/docs/cli/reference/parameters)、[输出协议](https://cursor.com/docs/cli/reference/output-format)、[权限配置](https://cursor.com/docs/cli/reference/permissions)。
 
-当前固定 ask、sandbox enabled、禁自动更新；项目权限拒绝 Read/Shell/Write/MCP/WebFetch。额外传 `--allowed-tools "" --exclude-workspace-context`，并将规则与证据直接放入 stdin。AGENTS 和 skill 是任务指导；allowed-tools 是经 CLI 发送的服务端 no-tools 限制，不声称完整本地 OS 隔离。独立材料审查指出标准 Grep/Ls 不都消费 Read deny，原生 sandbox 默认 system read 不能描述成 workspace-only。根任务决定此最小首期可先部署 `AI_GATEWAY_CURSOR_ENABLED=false`，先验收无模型服务及目录刷新；自动启用仍须费用确认和实际 canary 的零工具调用验证。不通过不启用，不因沙箱失败改为 disabled。
+当前固定 ask、sandbox enabled、禁自动更新；项目权限拒绝 Read/Shell/Write/MCP/WebFetch。额外传 `--allowed-tools ""`（不传 `--exclude-workspace-context`：当前订阅/型号会 `invalid_argument`），并将规则与证据直接放入 stdin。服务若以 root 运行，用 `AI_GATEWAY_CURSOR_HOME` 指向已 `agent login` 的订阅 home。AGENTS 和 skill 是任务指导；allowed-tools 是经 CLI 发送的服务端 no-tools 限制，不声称完整本地 OS 隔离。独立材料审查指出标准 Grep/Ls 不都消费 Read deny，原生 sandbox 默认 system read 不能描述成 workspace-only。根任务决定此最小首期可先部署未确认费用的示例 policy 与目录刷新，不跑模型；真正执行仍须费用确认和实际 canary 的零工具调用验证。没有单独的 `AI_GATEWAY_CURSOR_ENABLED` 总开关——选型靠请求/`AI_GATEWAY_RESEARCH_PROVIDERS`，准入靠 policy 与 roster。不通过不启用，不因沙箱失败放宽门。
 
 ### 临时工作区的 headless 信任确认（2026-09-09）
 

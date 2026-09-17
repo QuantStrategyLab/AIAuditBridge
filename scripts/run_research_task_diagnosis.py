@@ -30,6 +30,10 @@ if str(ROOT) not in sys.path:
 
 from client.config import GatewayConfig  # noqa: E402
 from client.gateway_client import AiGatewayClient  # noqa: E402
+from service.provider_scenarios import (  # noqa: E402
+    SCENARIO_RESEARCH_TASK_DIAGNOSIS,
+    resolve_execute_kwargs,
+)
 from service.research_diagnosis import (  # noqa: E402
     build_research_diagnosis_prompt,
     build_research_diagnosis_request,
@@ -473,9 +477,10 @@ def run_diagnosis(
         try:
             ai_result = client.execute(
                 prompt,
-                mode="review_only",
-                research_stage="drift_analysis",
-                **({"allowed_providers": list(config.research_providers)} if config.research_providers != ("codex",) else {}),
+                **resolve_execute_kwargs(
+                    SCENARIO_RESEARCH_TASK_DIAGNOSIS,
+                    research_providers=config.research_providers,
+                ),
                 timeout=600,
                 source_repository=str(request["target"]["repository"]),
                 source_ref=str(request["target"]["strategy_revision"]),

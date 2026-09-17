@@ -31,6 +31,12 @@ class CursorAdapter:
                     'allow': [], 'deny': _DENY,
                 }}))
                 env = {k: v for k, v in _codex_env().items() if not k.startswith(('AI_GATEWAY_', 'CURSOR_'))}
+                # Service may run as root; Cursor CLI auth lives under the
+                # subscription login home. Isolation stays disposable workspace
+                # + deny-all tools + sandbox enabled (not OS-user separation).
+                cursor_home = os.environ.get('AI_GATEWAY_CURSOR_HOME', '').strip()
+                if cursor_home:
+                    env['HOME'] = cursor_home
                 instructions = '\n\n'.join(path.read_text() for path in (
                     workspace / 'AGENTS.md',
                     workspace / '.agents/skills/research-evidence/SKILL.md',
@@ -38,9 +44,11 @@ class CursorAdapter:
                 ))
                 # Trust only this service-created disposable directory, never
                 # a caller checkout; tool permissions and sandbox stay separate.
+                # Do not pass --exclude-workspace-context: current Cursor
+                # subscription/models reject it (invalid_argument).
                 completed = subprocess.run([
                     executable, '--disable-auto-update', '--print', '--output-format', 'json', '--mode', 'ask',
-                    '--allowed-tools', '', '--exclude-workspace-context',
+                    '--allowed-tools', '',
                     '--sandbox', 'enabled', '--workspace', directory, '--trust',
                     '--model', model,
                 ], input=instructions + '\n\nTask and supplied evidence:\n' + prompt, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
