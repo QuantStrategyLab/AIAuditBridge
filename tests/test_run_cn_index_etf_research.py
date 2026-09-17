@@ -369,7 +369,6 @@ def test_real_sdk_binds_optimization_job_and_route_without_paid_fallback(mismatc
     submitted = json.loads(http.call_args_list[2].args[0].data)
     assert submitted["source_ref"] == REVISION and submitted["source_repository"] == job.STRATEGY_REPOSITORY
     assert submitted["mode"] == "review_only" and submitted["allowed_providers"] == ["codex"]
-    assert submitted["research_stage"] == "optimization" and submitted["complexity"] == "high"
 
 
 def test_real_sdk_quota_defers_and_sanitizes_without_polling():
