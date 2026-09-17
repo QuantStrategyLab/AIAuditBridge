@@ -45,6 +45,8 @@ def test_actual_pipeline_routes_research_primary_and_keeps_actual_codex_model(tr
         result = run_pipeline(trigger=trigger, strategy_profile="synthetic", context={})
     assert execute.call_args.kwargs.get("research_stage") == "promotion_review"
     assert execute.call_args.kwargs["allowed_providers"] == ["codex"]
+    assert execute.call_args.kwargs["reasoning_effort"] == "xhigh"
+    assert execute.call_args.kwargs["complexity"] == "high"
     primary = result["primary_review"]
     assert primary["provider"] == "codex" and primary["model"] == "gpt-6-astra"
     assert primary["reasoning_effort"] == "xhigh"

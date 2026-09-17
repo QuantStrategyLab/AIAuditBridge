@@ -100,7 +100,7 @@ class CursorPolicyTrustTests(unittest.TestCase):
         ):
             readiness = cursor_account.subscription_research_readiness(now=time.time())
         self.assertEqual(readiness["status"], "not_ready")
-        self.assertIn(readiness["reason"], {"cursor_spend_policy_unavailable", "cursor_policy_untrusted"})
+        self.assertIn(readiness["reason"], {"cursor_subscription_policy_unavailable", "cursor_policy_untrusted"})
 
     def test_group_writable_policy_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as raw_dir:

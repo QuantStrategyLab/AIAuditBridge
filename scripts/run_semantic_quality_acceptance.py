@@ -10,6 +10,10 @@ from typing import Any, Callable
 
 from client.config import GatewayConfig
 from client.gateway_client import AiGatewayClient
+from service.provider_scenarios import (
+    SCENARIO_SEMANTIC_QUALITY_ACCEPTANCE,
+    resolve_execute_kwargs,
+)
 from service.research_diagnosis import build_research_diagnosis_prompt, build_research_diagnosis_request
 from tests.test_research_diagnosis import _semantic_quality_triggers, _task
 
@@ -69,12 +73,12 @@ def run_acceptance(
             result = client.execute(
                 build_research_diagnosis_prompt(request),
                 task="execute",
-                mode="review_only",
-                model=MODEL,
-                research_stage="drift_analysis",
-                reasoning_effort=REASONING_EFFORT,
+                **resolve_execute_kwargs(
+                    SCENARIO_SEMANTIC_QUALITY_ACCEPTANCE,
+                    model=MODEL,
+                    reasoning_effort=REASONING_EFFORT,
+                ),
                 sandbox="read-only",
-                allowed_providers=["codex"],
                 source_repository=str(request["target"]["repository"]),
                 source_ref=str(request["target"]["strategy_revision"]),
                 timeout=600,

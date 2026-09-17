@@ -23,6 +23,7 @@ from types import SimpleNamespace
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from service.provider_scenarios import SCENARIO_CN_INDEX_ETF_RESEARCH, resolve_execute_kwargs
 from service.research_task import validate_strategy_diagnosis_task
 
 PROFILE = "cn_index_etf_tactical_rotation"
@@ -444,8 +445,13 @@ def _diagnosis(runtime, drift, revision):
                               current_params=runtime.cn.BASELINE_PARAMS)
 
     def diagnose(*_):
-        result = client.execute(runtime.prompt(context), mode="review_only", research_stage="optimization",
-            allowed_providers=["codex"], source_repository=STRATEGY_REPOSITORY, source_ref=revision, timeout=600)
+        result = client.execute(
+            runtime.prompt(context),
+            **resolve_execute_kwargs(SCENARIO_CN_INDEX_ETF_RESEARCH),
+            source_repository=STRATEGY_REPOSITORY,
+            source_ref=revision,
+            timeout=600,
+        )
         raw = result.raw
         if not result.success and isinstance(raw, dict) and raw.get("status") == "deferred":
             return {"optimization_needed": False, "reason": "codex_research_deferred", "retry_at": raw.get("retry_at")}

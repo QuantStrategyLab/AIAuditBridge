@@ -553,7 +553,11 @@ class QuotaManager:
             )}
 
     def record_execute(self, repo: str, *, provider: str = "codex") -> None:
-        """Record subscription calls separately; Cursor cost is unavailable."""
+        """Record subscription CLI calls; never charge OpenAI/Anthropic API budget.
+
+        Codex keeps a nominal accounting estimate. Cursor increments call count
+        only—subscription dollars are unknown and must stay cost_incomplete.
+        """
         if provider not in {"codex", "cursor"}:
             raise ValueError("unsupported execution provider")
         cost = DEFAULT_MODEL_COSTS.get("codex-cli", {}).get("flat", 0.05)

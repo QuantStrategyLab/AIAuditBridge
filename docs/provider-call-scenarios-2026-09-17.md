@@ -1,49 +1,48 @@
 # Provider 调用场景与模式（2026-09-17）
 
-命名调用场景、默认 provider/mode/stage、Cursor canary 阶梯与停止条件。不自动部署、不跑真实模型、不 resume deferred claim。
+实现入口：`service/provider_scenarios.py`。消费者用 `resolve_execute_kwargs(...)` 取 execute 参数。
 
-实现入口：`service/provider_scenarios.py`。消费者用 `resolve_execute_kwargs(scenario_id, research_providers=...)` 取 execute 参数；未知场景 fail-closed。
+## 三池经济模型
+
+| 池 | 载体 | 计费 | 准入 |
+|---|---|---|---|
+| Codex 订阅 | CLI execute | 订阅容量（非 API USD） | 账户 rate limits / 研究路由 |
+| Cursor 订阅 | CLI execute | 订阅容量；on-demand 须已确认关闭 | 可信 policy + roster + 日调用上限 |
+| OpenAI/Anthropic API | analyze / review | API 美元预算 | `api_budget_admission` |
+
+Cursor 与 Codex 同类；API 失败/预算耗尽不得顶替任一订阅执行。Cursor 美元成本未知，记 `cost_incomplete`，不得报 0。
+
+## 智能适配 vs 强制指定
+
+**智能适配（默认）**：场景填入 `mode` / `research_stage` / `allowed_providers` / `complexity`；可 pin `reasoning_effort`（如晋级主审 `xhigh`）。`model`/未 pin 的 effort 省略，由网关订阅准入选择。`AI_GATEWAY_RESEARCH_PROVIDERS` 仅软影响 `cursor_eligible` 场景；固定 Codex 场景忽略该 env。
+
+**强制指定**：调用方可传 `allowed_providers` / `model` / `reasoning_effort` / `complexity`。与场景冲突则 `ValueError`，禁止静默改写到其他 provider 或 effort。例：晋级场景强制 `cursor` → 失败；语义验收强制 `gpt-5.6-terra` + `medium` → 透传。
 
 ## 场景矩阵
 
-| 场景 | 端点 | 默认 providers | mode | research_stage | Cursor canary |
-|---|---|---|---|---|---|
-| `research_task_diagnosis` | execute | codex；可经 env | review_only | drift_analysis | 是（首个 canary） |
-| `portfolio_proposal_diagnosis` | execute | 同上 | review_only | drift_analysis | 是（诊断通过后） |
-| `daily_briefing` | execute | 同上 | review_only | research_summary | 是（诊断通过后） |
-| `research_summary` | execute | 固定 codex | review_only | research_summary | 否 |
-| `promotion_primary_review` | execute | **固定 codex** | review_only | promotion_review | **永不** |
-| `platform_bugfix` | execute | 固定 codex | review_only / review_and_fix | — | 否 |
-| `soxl_rsi2_codegen` / `global_etf_codegen` / `cn_index_etf_research` | execute | 固定 codex | review_only | optimization | 否 |
-| `semantic_quality_acceptance` | execute | 固定 codex | review_only | drift_analysis | 否（验收探针） |
-| `api_analyze` | analyze | OpenAI/Anthropic | — | — | 否；独立 API 预算 |
-| `api_dual_review` | review | claude+gpt（+可选 Codex verifier） | review_only | — | 否 |
+| 场景 | 默认 providers | mode | stage | 复杂度 | pin | Cursor |
+|---|---|---|---|---|---|---|
+| `research_task_diagnosis` | env 软选 | review_only | drift_analysis | medium | — | canary |
+| `portfolio_proposal_diagnosis` | env 软选 | review_only | drift_analysis | medium | — | canary |
+| `daily_briefing` | env 软选 | review_only | research_summary | low | — | canary |
+| `research_summary` | 固定 codex | review_only | research_summary | low | — | 否 |
+| `promotion_primary_review` | 固定 codex | review_only | promotion_review | high | effort=xhigh | **永不** |
+| `platform_bugfix` | 固定 codex | review_only/fix | — | medium | — | 否 |
+| codegen / cn_index | 固定 codex | review_only | optimization | high* | — | 否 |
+| `semantic_quality_acceptance` | 固定 codex | review_only | drift_analysis | medium | 调用方强制型号 | 否 |
+| `account_operational_diagnosis` | 固定 codex | review_only | drift_analysis | high | — | 否 |
+| `api_analyze` / `api_dual_review` | API | — | — | — | — | 否 |
 
-规则：
+\* Global ETF codegen 调用方强制 `complexity=medium`、固定 Luna 型号。
 
-1. 默认研究链仍是 Codex。`AI_GATEWAY_RESEARCH_PROVIDERS` 只影响 `cursor_eligible` 场景——与选 Codex/API 一样靠请求选型，没有单独的 `*_ENABLED` 总开关。
-2. Cursor 仅 `review_only` + 有效 `research_stage`；服务侧靠可信 spend policy、roster 新鲜度与日调用上限准入（对标 Codex 账户/额度门）。
-3. Codex→Cursor fallback 仅当请求显式 `["codex","cursor"]` 且服务 `AI_GATEWAY_CURSOR_FALLBACK_ENABLED=true`；启动后失败不换后端；无 API fallback。
-4. 晋级主审、codegen、platform_bugfix、语义验收探针即使 env 写 cursor 也强制 Codex。
-5. analyze/review API 不替代 Cursor/Codex 订阅执行，也不承接 Cursor 额度失败。
+## 启用阶梯
 
-## 启用阶梯（须逐步授权）
-
-1. **契约已合入**：provider 常量、`resolve_execution_adapter`、可信 policy、health/limiter。
-2. **本矩阵落地**：场景代码 + 诊断/briefing 接线；默认仍 Codex。
-3. **VPS 安装**（另授权）：policy/env、目录只读刷新；示例 policy 费用未确认时仍不能执行。
-4. **费用确认**：`on_demand_disabled_verified=true`、未过期 `valid_until`、`max_daily_calls`。
-5. **单次 canary**：仅 `research_task_diagnosis`，`AI_GATEWAY_RESEARCH_PROVIDERS=cursor`，1 次合成 advisory；验证零工具、trust 工作区、结果身份字段。
-6. **扩展**：仅 portfolio diagnosis → daily_briefing；每次单独授权与停止条件。
-7. **永不自动进入**：promotion_primary_review、任一 codegen、platform_bugfix、交易/风控路径。
+1. 契约 + 场景矩阵已合入；默认仍 Codex。
+2. VPS：policy/CLI/目录刷新；示例 policy 未确认 on-demand 关闭前不能跑。
+3. 确认 `on_demand_disabled_verified` + `valid_until` + `max_daily_calls`。
+4. 单次 canary：`AI_GATEWAY_RESEARCH_PROVIDERS=cursor` + `research_task_diagnosis`。
+5. 再扩 portfolio → briefing；晋级/codegen/platform_bugfix 永不自动进 Cursor。
 
 ## 停止条件
 
-任一出现即停车该 Cursor 路径，保持 Codex 默认：
-
-- CLI 非成功终态、trust/sandbox/工具逃逸迹象、结果缺 provider/stage/model/effort
-- policy 不可信、费用未确认、日调用触顶、目录 stale
-- 启动后超时/失败试图换后端或落到 API
-- canary 输出被当成晋级、下单或解除风控依据
-
-恢复须新的明确授权。
+CLI 非成功、trust/工具逃逸、身份字段缺失、policy/roster/日调用失败、试图跨后端或落到 API、把 advisory 当晋级/下单依据 → 停车 Cursor 路径，保持 Codex。

@@ -1,6 +1,9 @@
-"""Cursor account roster and operator-reviewed subscription research admission.
+"""Cursor subscription research admission (same economic class as Codex).
 
-CLI discovery proves model availability, never remaining quota or paid usage.
+Cursor CLI execution is subscription capacity, not OpenAI/Anthropic API billing.
+Admission uses a trusted operator policy (models, daily call cap, on-demand off)
+plus a fresh CLI roster. API analyze/review budgets must not gate or charge
+these calls; Cursor dollar cost remains unknown and must not be reported as 0.
 """
 from __future__ import annotations
 
@@ -44,11 +47,11 @@ def cursor_research_route(payload: dict[str, Any], usage: dict[str, Any], *, now
 
 
 def subscription_research_readiness(*, now: float | None = None) -> dict[str, str]:
-    """Desensitized Cursor research lane readiness for health surfaces.
+    """Desensitized Cursor subscription-lane readiness for health surfaces.
 
     Keeps the protocol capability field stable; readiness is a separate status.
-    Never proves remaining quota. Admission follows request selection plus
-    trusted spend policy and roster freshness—same shape as Codex gates.
+    Never proves remaining quota dollars. Admission follows request selection
+    plus trusted subscription policy and roster freshness—same shape as Codex.
     """
     clock = time.time() if now is None else now
     try:
@@ -61,7 +64,7 @@ def subscription_research_readiness(*, now: float | None = None) -> dict[str, st
         policy = json.loads(raw)
         roster = load_catalog(catalog_path()).subscription_rosters.get('cursor', {})
     except (OSError, KeyError, TypeError, ValueError):
-        return {'status': 'not_ready', 'reason': 'cursor_spend_policy_unavailable'}
+        return {'status': 'not_ready', 'reason': 'cursor_subscription_policy_unavailable'}
     probe = resolve_cursor_route(
         {
             'research_stage': 'research_summary',
@@ -86,8 +89,10 @@ def resolve_cursor_route(payload, usage, *, policy, roster, now):
     if not isinstance(policy, dict) or not isinstance(roster, dict) or not _finite(now):
         return deferred
     until = policy.get('valid_until')
+    # on_demand_disabled_verified: operator confirmed subscription will not
+    # overflow into Cursor paid on-demand. This is not an API-key budget gate.
     if (policy.get('on_demand_disabled_verified') is not True or not _finite(until) or until <= now):
-        return {**deferred, 'reason': 'cursor_spend_policy_unavailable'}
+        return {**deferred, 'reason': 'cursor_subscription_policy_unavailable'}
     updated = roster.get('updated_at')
     if (roster.get('status') != 'available' or roster.get('source') != 'cursor_cli_account'
         or not _finite(updated) or not 0 <= now - updated <= 86400):

@@ -20,7 +20,7 @@ AAB 两个实际调用者 `run_research_task_diagnosis.py` 与 `run_portfolio_re
 
 Cursor 官方区分 Cursor Models 和 Other Models 两个消费池；第三方模型从 Other Models 按对应模型 API 单价消耗额度，超额可另外付费。型号可见不证明余额，也不证明免费。见 [Cursor 模型与价格](https://cursor.com/docs/models-and-pricing)。
 
-启用还要求 policy 的 `on_demand_disabled_verified=true`、未过期 `valid_until` 和全账户 `max_daily_calls`。默认示例未确认费用、已过期，不能执行。额度计数复用持久存储，跨 HTTP 请求串行准入与预留；计数区分 Cursor/Codex，Cursor 实际费用和余额保留未知，不能报为 0。损坏/缺配置的额度存储拒绝 Cursor；这些门不授予交易或候选晋级权限。
+启用还要求 policy 的 `on_demand_disabled_verified=true`（确认订阅不会溢出成付费 on-demand，不是 API 计费开关）、未过期 `valid_until` 和全账户 `max_daily_calls`。默认示例未确认、已过期，不能执行。额度计数复用持久存储，跨 HTTP 请求串行准入与预留；计数区分 Cursor/Codex，Cursor 实际费用和余额保留未知，不能报为 0，也不计入 API 美元预算。损坏/缺配置的额度存储拒绝 Cursor；这些门不授予交易或候选晋级权限。
 
 ## 目录刷新
 

@@ -196,6 +196,15 @@ class TestQuotaManager(unittest.TestCase):
         remaining = self.manager.remaining_daily("test/repo")
         self.assertEqual(remaining, DEFAULT_DAILY_BUDGET_USD)
 
+    def test_cursor_execute_does_not_consume_api_budget(self) -> None:
+        before = self.manager.remaining_daily("test/repo")
+        self.manager.record_execute("test/repo", provider="cursor")
+        self.assertEqual(self.manager.remaining_daily("test/repo"), before)
+        status = self.manager.status("test/repo")
+        self.assertEqual(status["cursor_calls"], 1)
+        self.assertEqual(status["api_key_cost_usd"], 0.0)
+        self.assertTrue(status["cost_incomplete"])
+
     def test_codex_account_requires_available_unexhausted_percentages(self) -> None:
         def snapshot(primary, secondary=None):
             return {"status": "available", "rate_limits": {"primary": primary, "secondary": secondary}}

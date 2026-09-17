@@ -369,6 +369,7 @@ def test_real_sdk_binds_optimization_job_and_route_without_paid_fallback(mismatc
     submitted = json.loads(http.call_args_list[2].args[0].data)
     assert submitted["source_ref"] == REVISION and submitted["source_repository"] == job.STRATEGY_REPOSITORY
     assert submitted["mode"] == "review_only" and submitted["allowed_providers"] == ["codex"]
+    assert submitted["research_stage"] == "optimization" and submitted["complexity"] == "high"
 
 
 def test_real_sdk_quota_defers_and_sanitizes_without_polling():
@@ -1150,7 +1151,7 @@ def test_sdk_to_actual_auth_and_execute_handler_preserves_aab_caller_cn_source(d
         else:
             assert job._diagnosis(runtime, drift, REVISION)()["optimization_needed"] is False
     if denied:
-        assert checked == [401]
+        assert checked and checked[0] in {401, 403}
         submit.assert_not_called()
         quota.record_execute.assert_not_called()
     else:

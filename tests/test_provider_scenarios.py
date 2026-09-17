@@ -1,4 +1,4 @@
-"""Tests for named provider call scenarios and routing defaults."""
+"""Tests for named provider call scenarios: adaptive defaults and forced pins."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from service import provider_scenarios as scenarios
 
 
 class ProviderScenarioTests(unittest.TestCase):
-    def test_default_research_diagnosis_stays_codex(self) -> None:
+    def test_adaptive_research_diagnosis_defaults(self) -> None:
         kwargs = scenarios.resolve_execute_kwargs(scenarios.SCENARIO_RESEARCH_TASK_DIAGNOSIS)
         self.assertEqual(
             kwargs,
@@ -17,8 +17,11 @@ class ProviderScenarioTests(unittest.TestCase):
                 "mode": MODE_REVIEW_ONLY,
                 "research_stage": "drift_analysis",
                 "allowed_providers": [PROVIDER_CODEX],
+                "complexity": "medium",
             },
         )
+        self.assertNotIn("model", kwargs)
+        self.assertNotIn("reasoning_effort", kwargs)
 
     def test_cursor_env_only_applies_to_canary_eligible_scenarios(self) -> None:
         providers = (PROVIDER_CURSOR,)
@@ -39,13 +42,39 @@ class ProviderScenarioTests(unittest.TestCase):
                 [PROVIDER_CODEX],
             )
 
-    def test_promotion_review_ignores_cursor_env(self) -> None:
+    def test_forced_cursor_on_fixed_scenario_fails_closed(self) -> None:
+        with self.assertRaisesRegex(ValueError, "does not allow Cursor"):
+            scenarios.resolve_execute_kwargs(
+                scenarios.SCENARIO_PROMOTION_PRIMARY_REVIEW,
+                allowed_providers=[PROVIDER_CURSOR],
+            )
+
+    def test_forced_model_and_effort_pass_through(self) -> None:
+        kwargs = scenarios.resolve_execute_kwargs(
+            scenarios.SCENARIO_SEMANTIC_QUALITY_ACCEPTANCE,
+            model="gpt-5.6-terra",
+            reasoning_effort="medium",
+        )
+        self.assertEqual(kwargs["model"], "gpt-5.6-terra")
+        self.assertEqual(kwargs["reasoning_effort"], "medium")
+        self.assertEqual(kwargs["allowed_providers"], [PROVIDER_CODEX])
+
+    def test_promotion_pins_xhigh_and_ignores_cursor_env(self) -> None:
         kwargs = scenarios.resolve_execute_kwargs(
             scenarios.SCENARIO_PROMOTION_PRIMARY_REVIEW,
             research_providers=(PROVIDER_CODEX, PROVIDER_CURSOR),
         )
         self.assertEqual(kwargs["allowed_providers"], [PROVIDER_CODEX])
         self.assertEqual(kwargs["research_stage"], "promotion_review")
+        self.assertEqual(kwargs["reasoning_effort"], "xhigh")
+        self.assertEqual(kwargs["complexity"], "high")
+
+    def test_forced_effort_conflict_with_pin_fails(self) -> None:
+        with self.assertRaisesRegex(ValueError, "requires reasoning_effort=xhigh"):
+            scenarios.resolve_execute_kwargs(
+                scenarios.SCENARIO_PROMOTION_PRIMARY_REVIEW,
+                reasoning_effort="medium",
+            )
 
     def test_platform_bugfix_allows_review_and_fix_but_not_cursor(self) -> None:
         kwargs = scenarios.resolve_execute_kwargs(
