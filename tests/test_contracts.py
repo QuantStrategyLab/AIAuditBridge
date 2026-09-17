@@ -34,6 +34,17 @@ class TestConstants(unittest.TestCase):
         self.assertEqual(MODE_REVIEW_ONLY, "review_only")
         self.assertEqual(MODE_REVIEW_AND_FIX, "review_and_fix")
 
+    def test_provider_constants_include_cursor(self) -> None:
+        from service.contracts import (
+            ALLOWED_EXECUTION_PROVIDER_CHAINS,
+            EXECUTION_PROVIDERS,
+            PROVIDER_CODEX,
+            PROVIDER_CURSOR,
+        )
+
+        self.assertEqual(EXECUTION_PROVIDERS, frozenset({PROVIDER_CODEX, PROVIDER_CURSOR}))
+        self.assertIn([PROVIDER_CODEX, PROVIDER_CURSOR], ALLOWED_EXECUTION_PROVIDER_CHAINS)
+
 
 class TestAnalyzeRequest(unittest.TestCase):
     """AnalyzeRequest schema validation."""

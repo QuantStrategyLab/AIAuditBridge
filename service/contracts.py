@@ -26,6 +26,15 @@ SUPPORTED_MODES = frozenset({MODE_REVIEW_ONLY, MODE_REVIEW_AND_FIX})
 PROVIDER_OPENAI = "openai"
 PROVIDER_ANTHROPIC = "anthropic"
 PROVIDER_CODEX = "codex"
+PROVIDER_CURSOR = "cursor"
+
+# CLI execution providers admitted by ExecuteRequest.allowed_providers.
+EXECUTION_PROVIDERS = frozenset({PROVIDER_CODEX, PROVIDER_CURSOR})
+ALLOWED_EXECUTION_PROVIDER_CHAINS = (
+    [PROVIDER_CODEX],
+    [PROVIDER_CURSOR],
+    [PROVIDER_CODEX, PROVIDER_CURSOR],
+)
 
 
 @dataclass(frozen=True)
@@ -62,9 +71,9 @@ class ExecuteRequest:
     def validate(self) -> None:
         if not self.prompt.strip():
             raise ValueError("prompt must be a non-empty string")
-        if self.allowed_providers not in (["codex"], ["cursor"], ["codex", "cursor"]):
+        if self.allowed_providers not in ALLOWED_EXECUTION_PROVIDER_CHAINS:
             raise ValueError("allowed_providers must be [codex], [cursor], or [codex, cursor]")
-        if "cursor" in self.allowed_providers and self.mode != MODE_REVIEW_ONLY:
+        if PROVIDER_CURSOR in self.allowed_providers and self.mode != MODE_REVIEW_ONLY:
             raise ValueError("Cursor only supports review_only")
         if self.mode not in SUPPORTED_MODES:
             raise ValueError(f"mode must be one of {sorted(SUPPORTED_MODES)}")

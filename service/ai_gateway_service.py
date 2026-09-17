@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """AiGateway — unified HTTP service for QuantStrategyLab AI calls.
 
-Three endpoints, two adapters, one service.
+Endpoints with API + CLI execution adapters (Codex / dormant Cursor lane).
 Hardened with rate limiting, input validation, audit logging, and sandbox controls.
 
 Endpoints:
     POST /v1/ai/analyze          sync  — LlmAdapter (Claude/GPT API)
-    POST /v1/ai/execute/jobs     async — CodexAdapter (codex exec), poll via GET
+    POST /v1/ai/execute/jobs     async — CodexAdapter or CursorAdapter (CLI), poll via GET
     POST /v1/ai/review           sync  — LlmAdapter × N + optional CodexAdapter
 
 Backward-compatible aliases:
@@ -47,8 +47,8 @@ from service.contracts import (
     parse_review_request,
 )
 from service.adapters.llm_adapter import DEFAULT_MAX_TOKENS, LlmAdapter, resolve_model
-from service.adapters.cursor_adapter import CursorAdapter
 from service.adapters.codex_adapter import CodexAdapter
+from service.adapters.execution import resolve_execution_adapter
 from service.model_resolver import resolve_codex_research_route
 from service.ai_provenance import (
     build_provenance_receipt,
@@ -167,6 +167,7 @@ TASK_COMPLEXITY_LEVELS = (TASK_COMPLEXITY_LOW, TASK_COMPLEXITY_MEDIUM, TASK_COMP
 _RATE_LIMIT_WINDOW_SECONDS = 60
 _RATE_LIMIT_MAX_REQUESTS = 30
 _analyze_timestamps: list[float] = []
+_RATE_LIMIT_LOCK = threading.Lock()
 
 SERVICE_FAILURE_CATEGORY_PATTERN = re.compile(r"\[([a-z_]+_failure)\]")
 
@@ -519,13 +520,14 @@ def _admit_cursor_execute(quota: Any, repo: str, payload: dict[str, Any]) -> dic
 def _check_rate_limit(max_per_window: int = _RATE_LIMIT_MAX_REQUESTS, window: float = _RATE_LIMIT_WINDOW_SECONDS) -> None:
     """Sliding-window rate limiter for sync endpoints (analyze, review)."""
     global _analyze_timestamps
-    now = time.time()
-    _analyze_timestamps = [t for t in _analyze_timestamps if now - t < window]
-    if len(_analyze_timestamps) >= max_per_window:
-        raise PermissionError(
-            f"rate limit exceeded: {max_per_window} requests per {window:.0f}s"
-        )
-    _analyze_timestamps.append(now)
+    with _RATE_LIMIT_LOCK:
+        now = time.time()
+        _analyze_timestamps = [t for t in _analyze_timestamps if now - t < window]
+        if len(_analyze_timestamps) >= max_per_window:
+            raise PermissionError(
+                f"rate limit exceeded: {max_per_window} requests per {window:.0f}s"
+            )
+        _analyze_timestamps.append(now)
 
 
 def _classify_service_failure(message: str) -> str:
@@ -1600,7 +1602,7 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
         job["updated_at"] = _now()
         _write_job(job)
         _record_job_automation_run(job)
-        adapter = CursorAdapter() if payload.get("provider") == "cursor" else CodexAdapter()
+        adapter = resolve_execution_adapter(str(payload.get("provider") or "codex"))
         sandbox = _validate_sandbox(str(payload.get("sandbox") or ""))
         reasoning_effort = _resolve_codex_reasoning_effort(payload, str(payload.get("task") or TASK_EXECUTE))
         execute_kwargs = {
@@ -1778,12 +1780,17 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
         request_path = urlparse(self.path).path
 
         if request_path == "/healthz":
+            from service.cursor_account import subscription_research_readiness
+
             health = get_health_monitor()
+            readiness = subscription_research_readiness()
             _json_response(self, HTTPStatus.OK, {
                 "status": health.status,
                 "uptime_seconds": health.uptime_seconds,
                 "codex_research_routing": "v1",
                 "subscription_research_routing": "v1",
+                "subscription_research_status": readiness.get("status"),
+                "subscription_research_reason": readiness.get("reason"),
             })
             return
         if request_path == "/v1/ai/health":
@@ -2129,7 +2136,7 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 _json_response(self, HTTPStatus.TOO_MANY_REQUESTS, denial)
                 return
             quota.record_execute(quota_repo, provider=str(payload.get("provider") or "codex"))
-        adapter = CursorAdapter() if payload.get("provider") == "cursor" else CodexAdapter()
+        adapter = resolve_execution_adapter(str(payload.get("provider") or "codex"))
         sandbox = _validate_sandbox(str(payload.get("sandbox") or ""))
         reasoning_effort = _resolve_codex_reasoning_effort(payload, str(payload.get("task") or TASK_EXECUTE))
         execute_kwargs = {

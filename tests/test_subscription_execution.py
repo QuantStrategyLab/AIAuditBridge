@@ -332,16 +332,24 @@ def test_started_codex_failure_never_starts_cursor():
     from types import SimpleNamespace
     job = {'job_id': 'synthetic', 'status': 'queued', 'task': 'execute', 'provider': 'codex',
            'model': 'synthetic-model', 'research_stage': 'drift_analysis', 'reasoning_effort': 'medium'}
+    codex = SimpleNamespace(execute=Mock(return_value=SimpleNamespace(success=False, error='codex exec timed out', output='')))
+    cursor = SimpleNamespace(execute=Mock())
+    selected = []
+
+    def resolve(provider):
+        selected.append(provider)
+        return cursor if provider == 'cursor' else codex
+
     with patch.object(gateway, '_read_job', return_value=job), patch.object(gateway, '_write_job'), patch.object(
         gateway, '_record_job_automation_run'
     ), patch.object(gateway, '_audit_log'), patch.object(gateway, 'get_health_monitor'), patch.object(
         gateway, '_record_platform_execution_telemetry'
-    ), patch.object(gateway, 'CodexAdapter') as codex, patch.object(gateway, 'CursorAdapter') as cursor:
-        codex.return_value.execute.return_value = SimpleNamespace(success=False, error='codex exec timed out', output='')
+    ), patch.object(gateway, 'resolve_execution_adapter', side_effect=resolve):
         gateway._run_job('synthetic', {'prompt': 'synthetic', 'allowed_providers': ['codex', 'cursor'], **job})
     assert job['status'] == 'failed'
-    codex.return_value.execute.assert_called_once()
-    cursor.assert_not_called()
+    assert selected == ['codex']
+    codex.execute.assert_called_once()
+    cursor.execute.assert_not_called()
 
 
 def test_cursor_usage_is_global_and_corrupt_store_cannot_reset_allowance(tmp_path):

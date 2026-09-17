@@ -32,14 +32,56 @@ def cursor_research_route(payload: dict[str, Any], usage: dict[str, Any], *, now
     if os.environ.get('AI_GATEWAY_CURSOR_ENABLED', '').lower() != 'true':
         return {**deferred, 'reason': 'cursor_disabled'}
     try:
+        from service.automation_decision import _read_trusted_policy_file
+
         policy_path = Path(os.environ['AI_GATEWAY_CURSOR_POLICY_PATH'])
-        if policy_path.is_symlink():
-            return deferred
-        policy = json.loads(policy_path.read_text())
+        raw, read_error = _read_trusted_policy_file(policy_path)
+        if read_error:
+            return {**deferred, 'reason': 'cursor_policy_untrusted'}
+        policy = json.loads(raw)
         roster = load_catalog(catalog_path()).subscription_rosters.get('cursor', {})
     except (OSError, KeyError, TypeError, ValueError):
         return deferred
     return resolve_cursor_route(payload, usage, policy=policy, roster=roster, now=now)
+
+
+def subscription_research_readiness(*, now: float | None = None) -> dict[str, str]:
+    """Desensitized Cursor research lane readiness for health surfaces.
+
+    Keeps the protocol capability field stable; readiness is a separate status.
+    Never enables Cursor or proves remaining quota.
+    """
+    clock = time.time() if now is None else now
+    if os.environ.get('AI_GATEWAY_CURSOR_ENABLED', '').lower() != 'true':
+        return {'status': 'disabled', 'reason': 'cursor_disabled'}
+    try:
+        from service.automation_decision import _read_trusted_policy_file
+
+        policy_path = Path(os.environ['AI_GATEWAY_CURSOR_POLICY_PATH'])
+        raw, read_error = _read_trusted_policy_file(policy_path)
+        if read_error:
+            return {'status': 'not_ready', 'reason': 'cursor_policy_untrusted'}
+        policy = json.loads(raw)
+        roster = load_catalog(catalog_path()).subscription_rosters.get('cursor', {})
+    except (OSError, KeyError, TypeError, ValueError):
+        return {'status': 'not_ready', 'reason': 'cursor_spend_policy_unavailable'}
+    probe = resolve_cursor_route(
+        {
+            'research_stage': 'research_summary',
+            'complexity': 'low',
+            'mode': 'review_only',
+            'model': '',
+            'reasoning_effort': 'auto',
+        },
+        {'cursor_calls': 0},
+        policy=policy,
+        roster=roster,
+        now=clock,
+    )
+    if probe.get('action') == 'run':
+        return {'status': 'ready', 'reason': 'cursor_route_ready'}
+    return {'status': 'not_ready', 'reason': str(probe.get('reason') or 'cursor_research_unavailable')}
+
 
 
 def resolve_cursor_route(payload, usage, *, policy, roster, now):

@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 class ProviderConfig:
     """Per-provider model configuration."""
 
-    label: str  # "claude" | "gpt" | "codex"
+    label: str  # "claude" | "gpt" | "codex" | "cursor"
     model: str
     can_execute_code: bool = False
     can_analyze: bool = True
@@ -34,6 +34,10 @@ class ProviderConfig:
     @classmethod
     def codex(cls, model: str = "") -> "ProviderConfig":
         return cls(label="codex", model=model or "codex-cli", can_execute_code=True, can_analyze=True)
+
+    @classmethod
+    def cursor(cls, model: str = "") -> "ProviderConfig":
+        return cls(label="cursor", model=model or "cursor-agent", can_execute_code=True, can_analyze=True)
 
 
 @dataclass(frozen=True)

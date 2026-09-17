@@ -25,7 +25,7 @@ from .errors import AuthenticationError, CircuitBreaker, CircuitBreakerOpenError
 class AiResult:
     """Result from a single AI call."""
 
-    provider: str  # "claude" | "gpt" | "codex"
+    provider: str  # "claude" | "gpt" | "codex" | "cursor"
     model: str
     success: bool
     output: str = ""
