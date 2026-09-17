@@ -334,7 +334,13 @@ def _admit_codex_execute(quota: Any, repo: str, payload: dict[str, Any]) -> dict
                 and route["reason"] in {"codex_quota_reserved", "codex_account_unavailable", "codex_account_stale"}
                 and str(payload.get("model") or "") in {"", "auto"}):
                 return _admit_cursor_execute(quota, repo, payload)
-            return {"status": "deferred", "error": route["reason"], "retry_at": route["retry_at"], "execution_started": False}
+            return {
+                "status": "deferred",
+                "error": route["reason"],
+                "retry_at": route["retry_at"],
+                "execution_started": False,
+                "failure_category": "quota_or_capacity_failure",
+            }
         payload.update(model=route["model"], reasoning_effort=route["reasoning_effort"])
         return None
     result = quota.check(repo, "codex-cli", str(payload.get("prompt") or ""), codex_account=True)

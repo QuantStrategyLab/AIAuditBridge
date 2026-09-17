@@ -234,15 +234,25 @@ def _read_json(path: Path, reason: str) -> dict[str, Any]:
 
 
 def _trusted_deferred_retry_at(raw: Any, *, now: float | None = None) -> int | None:
-    """Return the bounded retry time for the one recognized pre-execution deferral."""
+    """Return the bounded retry time for the one recognized pre-execution deferral.
+
+    Service-side 429 defer bodies may omit ``failure_category``; the gateway
+    client injects ``quota_or_capacity_failure`` when present. Accept either
+    the exact category or a missing/empty category when the other quota fields
+    already match, so deferred is not mis-labeled ``global_codegen_gateway_failed``.
+    """
     if not isinstance(raw, Mapping):
         return None
     retry_at = raw.get("retry_at")
+    failure_category = raw.get("failure_category")
     if (
         raw.get("status") != "deferred"
         or raw.get("execution_started") is not False
         or raw.get("error") != _DEFERRED_QUOTA_ERROR
-        or raw.get("failure_category") != _DEFERRED_FAILURE_CATEGORY
+        or (
+            failure_category not in (None, "")
+            and failure_category != _DEFERRED_FAILURE_CATEGORY
+        )
         or isinstance(retry_at, bool)
         or not isinstance(retry_at, (int, float))
         or not math.isfinite(retry_at)

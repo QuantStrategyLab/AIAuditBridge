@@ -349,6 +349,27 @@ class GlobalResearchCodegenTests(TestCase):
             )
             self.assertEqual(replay, result)
 
+    def test_service_shape_quota_deferral_without_failure_category_is_deferred(self):
+        retry_at = int(codegen.datetime.now(codegen.timezone.utc).timestamp()) + 60
+        response = SimpleNamespace(
+            success=False, provider="codex", model="", output="",
+            raw={
+                "status": "deferred", "execution_started": False,
+                "retry_at": retry_at, "error": "codex_quota_reserved",
+            },
+        )
+        with TemporaryDirectory() as tmp, patch.object(codegen, "_docker_preflight"), patch.object(
+            codegen, "_read_global_base", return_value=(codegen.GLOBAL_ETF_RESEARCH_CODEGEN_UES_COMMIT, {})), patch.dict(
+                sys.modules, {"scripts.run_new_research": SimpleNamespace(_archive_codegen_base=lambda *a, **k: None)}):
+            result = codegen.run_global_etf_research_codegen_case(
+                ues_repo_root=tmp, run_root=tmp, source_ref="a" * 40, fetch_source=_source,
+                candidate_test_runner=lambda *args, **kwargs: {"status": "passed"},
+                execute=lambda prompt: response,
+            )
+            self.assertEqual(result["status"], "deferred")
+            self.assertEqual(result["reason"], "global_codegen_quota_deferred")
+            self.assertEqual(result["retry_at"], retry_at)
+
     def test_legacy_gateway_failure_is_deferred_only_for_the_exact_saved_quota_shape(self):
         source = _source()
         identity = codegen._identity(source=source, source_commit=codegen.GLOBAL_ETF_RESEARCH_CODEGEN_UES_COMMIT)
