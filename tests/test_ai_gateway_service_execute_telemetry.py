@@ -135,20 +135,21 @@ class AiGatewayExecuteTelemetryTests(unittest.TestCase):
                     patch.object(gateway, "get_health_monitor"),
                     patch.object(gateway, "_json_response") as response,
                     patch.object(gateway, "_submit_job", return_value={"job_id": "synthetic"}) as submit,
-                    patch.object(gateway, "CodexAdapter") as adapter,
+                    patch.object(gateway, "resolve_execution_adapter") as resolve,
                 ):
-                    adapter.return_value.execute.return_value = SimpleNamespace(success=True, output="synthetic", error="")
+                    adapter = resolve.return_value
+                    adapter.execute.return_value = SimpleNamespace(success=True, output="synthetic", error="")
                     getattr(gateway.AiGatewayRequestHandler, method)(object(), {"repository": "Synthetic/caller"}, payload)
                     if used == 65:
                         self.assertEqual(response.call_args.args[1], 429)
                         self.assertEqual(response.call_args.args[2]["status"], "deferred")
                         self.assertEqual(response.call_args.args[2]["retry_at"], 9000)
                         submit.assert_not_called()
-                        adapter.assert_not_called()
+                        resolve.assert_not_called()
                         record.assert_not_called()
                     else:
                         self.assertIn(response.call_args.args[1], (200, 202))
-                        selected = submit.call_args.args[1] if method.endswith("async") else adapter.return_value.execute.call_args.kwargs
+                        selected = submit.call_args.args[1] if method.endswith("async") else adapter.execute.call_args.kwargs
                         self.assertEqual(selected["model"], "gpt-5.6-sol")
                         self.assertEqual(selected["reasoning_effort"], "high")
                         record.assert_called_once()
@@ -163,14 +164,14 @@ class AiGatewayExecuteTelemetryTests(unittest.TestCase):
                 patch.object(gateway, "get_quota_manager", return_value=quota),
                 patch.object(gateway, "_json_response") as response,
                 patch.object(gateway, "_submit_job") as submit,
-                patch.object(gateway, "CodexAdapter") as adapter,
+                patch.object(gateway, "resolve_execution_adapter") as resolve,
             ):
                 getattr(gateway.AiGatewayRequestHandler, method)(
                     object(), {"repository": "Synthetic/caller"}, {"prompt": "synthetic", "mode": "review_only"},
                 )
                 self.assertEqual(response.call_args.args[1], 429)
                 submit.assert_not_called()
-                adapter.assert_not_called()
+                resolve.assert_not_called()
                 self.assertNotIn("Synthetic/caller", quota._records)
 
     def test_failed_codex_diagnostics_never_reach_job_or_telemetry(self) -> None:
@@ -205,10 +206,10 @@ class AiGatewayExecuteTelemetryTests(unittest.TestCase):
     @patch("service.ai_gateway_service.get_health_monitor")
     @patch("service.ai_gateway_service._record_job_automation_run")
     @patch("service.ai_gateway_service._audit_log")
-    @patch("service.ai_gateway_service.CodexAdapter.execute")
+    @patch("service.ai_gateway_service.resolve_execution_adapter")
     def test_run_job_records_execution_telemetry(
         self,
-        mock_execute,
+        mock_resolve,
         _mock_audit_log,
         _mock_record_job_automation_run,
         mock_health_monitor,
@@ -230,7 +231,7 @@ class AiGatewayExecuteTelemetryTests(unittest.TestCase):
         def _write_job(payload: dict[str, object]) -> None:
             writes.append(dict(payload))
 
-        mock_execute.return_value = SimpleNamespace(success=True, output="done", error="")
+        mock_resolve.return_value.execute.return_value = SimpleNamespace(success=True, output="done", error="")
         health = mock_health_monitor.return_value
         health.record.return_value = None
 
@@ -256,8 +257,9 @@ class AiGatewayExecuteTelemetryTests(unittest.TestCase):
             gateway, "get_health_monitor"
         ), patch.object(gateway, "_record_platform_execution_telemetry"), patch.object(
             gateway, "_classify_failure", return_value=""
-        ), patch.object(gateway, "_write_job"), patch.object(gateway, "CodexAdapter") as adapter:
-            adapter.return_value.execute.return_value = SimpleNamespace(success=True, output="review", error="")
+        ), patch.object(gateway, "_write_job"), patch.object(gateway, "resolve_execution_adapter") as resolve:
+            adapter = resolve.return_value
+            adapter.execute.return_value = SimpleNamespace(success=True, output="review", error="")
             for task, mode, expected, expected_tools in (
                 ("platform_bugfix", "review_only", False, False),
                 (" platform_bugfix ", " REVIEW_ONLY ", False, False),
@@ -275,7 +277,7 @@ class AiGatewayExecuteTelemetryTests(unittest.TestCase):
                     if task == "platform_bugfix" and mode == "review_and_fix" and not expected:
                         payload["manual_approval_id"] = "sg-history-482"
                     gateway._run_job("job-1", payload)
-                kwargs = adapter.return_value.execute.call_args.kwargs
+                kwargs = adapter.execute.call_args.kwargs
                 self.assertEqual(kwargs["shell_tool_enabled"], expected)
                 self.assertEqual(kwargs["tools_disabled"], expected_tools)
 
@@ -284,8 +286,9 @@ class AiGatewayExecuteTelemetryTests(unittest.TestCase):
             gateway, "get_health_monitor"
         ), patch.object(gateway, "_record_platform_execution_telemetry"), patch.object(
             gateway, "_classify_failure", return_value=""
-        ), patch.object(gateway, "_write_job"), patch.object(gateway, "CodexAdapter") as adapter:
-            adapter.return_value.execute.return_value = SimpleNamespace(success=True, output="review", error="")
+        ), patch.object(gateway, "_write_job"), patch.object(gateway, "resolve_execution_adapter") as resolve:
+            adapter = resolve.return_value
+            adapter.execute.return_value = SimpleNamespace(success=True, output="review", error="")
             cases = [
                 ({"task": "execute", "mode": "review_only", "research_stage": "drift_analysis", "sandbox": "read-only"}, True),
                 ({"mode": "review_only", "research_stage": "drift_analysis", "sandbox": "read-only"}, True),
@@ -300,7 +303,7 @@ class AiGatewayExecuteTelemetryTests(unittest.TestCase):
                     return_value={"job_id": "job-1", "status": "queued", **payload},
                 ):
                     gateway._run_job("job-1", {"prompt": "review", **payload})
-                kwargs = adapter.return_value.execute.call_args.kwargs
+                kwargs = adapter.execute.call_args.kwargs
                 self.assertEqual(kwargs["shell_tool_enabled"], not expected_disabled)
                 self.assertEqual(kwargs["tools_disabled"], expected_disabled)
 
@@ -316,11 +319,12 @@ class AiGatewayExecuteTelemetryTests(unittest.TestCase):
             patch.object(gateway, "_admit_codex_execute", return_value=None),
             patch.object(gateway, "get_health_monitor"),
             patch.object(gateway, "_json_response"),
-            patch.object(gateway, "CodexAdapter") as adapter,
+            patch.object(gateway, "resolve_execution_adapter") as resolve,
         ):
-            adapter.return_value.execute.return_value = SimpleNamespace(success=True, output="review", error="")
+            adapter = resolve.return_value
+            adapter.execute.return_value = SimpleNamespace(success=True, output="review", error="")
             gateway.AiGatewayRequestHandler._handle_execute_sync(object(), {"repository": "Synthetic/caller"}, payload)
-        kwargs = adapter.return_value.execute.call_args.kwargs
+        kwargs = adapter.execute.call_args.kwargs
         self.assertFalse(kwargs["shell_tool_enabled"])
         self.assertTrue(kwargs["tools_disabled"])
 
