@@ -264,6 +264,20 @@ def test_real_sdk_unavailable_or_deferred_does_not_fallback_or_leak(report, kind
         assert result["retry_at"] == 9000
 
 
+def test_summary_only_deferred_exits_zero_for_oidc_actions(report, capsys):
+    path, _ = report
+    with patch(
+        "scripts.consume_daily_briefing.summarize_briefing",
+        return_value={"status": "deferred", "advisory_only": True, "retry_at": 9000},
+    ), patch(
+        "scripts.consume_daily_briefing.consume_briefing_dir",
+        return_value=object(),
+    ):
+        assert main(["--report-dir", str(path), "--day", "2026-09-09", "--summary-only"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ai_summary"]["status"] == "deferred"
+
+
 @pytest.mark.parametrize("field,value", [
     ("as_of", None), ("as_of", "invalid"), ("as_of", "2026-09-09T22:00:00"),
     ("as_of", "9999-12-31T23:59:59+00:00"), ("as_of", "2026-09-08T00:00:00+00:00"),

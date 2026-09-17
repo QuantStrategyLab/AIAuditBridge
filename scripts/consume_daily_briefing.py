@@ -67,7 +67,9 @@ def main(argv: list[str] | None = None) -> int:
         except (OSError, ValueError, TypeError, KeyError, OverflowError):
             summary = {"status": "unavailable", "reason": "briefing_input_unavailable", "advisory_only": True}
         print(json.dumps({"day": args.day, "ai_summary": summary}, ensure_ascii=False, indent=2))
-        return 0 if summary["status"] in {"available", "dry_run"} else 3
+        # deferred = trusted capacity/scheduling decision with artifact; do not
+        # fail the OIDC Actions job (red CI) the way unavailable/input errors do.
+        return 0 if summary["status"] in {"available", "dry_run", "deferred"} else 3
     result = consume_briefing_dir(report_dir, day=args.day)
     payload: dict = result.to_dict()
     if args.dispatch:
