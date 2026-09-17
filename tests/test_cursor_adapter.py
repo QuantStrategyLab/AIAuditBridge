@@ -28,19 +28,24 @@ def test_runner_uses_readonly_workspace_no_privileged_flags_or_secret_env():
         assert command[command.index('--sandbox') + 1] == 'enabled'
         assert command[command.index('--model') + 1] == 'synthetic-model'
         assert command[command.index('--allowed-tools') + 1] == ''
-        assert '--exclude-workspace-context' in command
+        assert '--exclude-workspace-context' not in command
         assert '--disable-auto-update' in command
         assert not {'--force', '--yolo', '--approve-mcps', '--api-key'} & set(command)
         assert kwargs['input'].endswith('Task and supplied evidence:\nsynthetic prompt')
         assert 'OPENAI_API_KEY' not in kwargs['env']
         assert 'CURSOR_API_KEY' not in kwargs['env']
+        assert kwargs['env'].get('HOME') == '/synthetic/cursor-home'
         workspace = Path(kwargs['cwd'])
         assert workspace.joinpath('AGENTS.md').is_file()
         assert workspace.joinpath('.agents/skills/research-evidence/SKILL.md').is_file()
         assert 'Shell(*)' in json.loads(workspace.joinpath('.cursor/cli.json').read_text())['permissions']['deny']
         return SimpleNamespace(returncode=0, stdout=json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': 'advisory'}), stderr='')
     with patch('service.adapters.cursor_adapter.shutil.which', return_value='/synthetic/agent'), patch.dict(
-        'os.environ', {'OPENAI_API_KEY': 'synthetic-private', 'CURSOR_API_KEY': 'synthetic-private'}
+        'os.environ', {
+            'OPENAI_API_KEY': 'synthetic-private',
+            'CURSOR_API_KEY': 'synthetic-private',
+            'AI_GATEWAY_CURSOR_HOME': '/synthetic/cursor-home',
+        }
     ), patch('service.adapters.cursor_adapter.subprocess.run', side_effect=run) as runner:
         result = CursorAdapter().execute(prompt='synthetic prompt', model='synthetic-model', reasoning_effort='high')
     assert result.success and result.output == 'advisory'

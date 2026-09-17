@@ -32,7 +32,7 @@ Cursor 官方区分 Cursor Models 和 Other Models 两个消费池；第三方�
 
 执行器每次新建临时任务工作区，复制服务拥有的 AGENTS 和研究真实性、故障验收两个 skill；这些文本与任务输入一起通过 stdin 提交。source_repository/source_ref 仅为来源元数据，不声称已 checkout 或读取对应代码。只接受 CLI 成功终态 `type=result/subtype=success/is_error=false` 的非空 result；失败固定脱敏。参见 [CLI 参数](https://cursor.com/docs/cli/reference/parameters)、[输出协议](https://cursor.com/docs/cli/reference/output-format)、[权限配置](https://cursor.com/docs/cli/reference/permissions)。
 
-当前固定 ask、sandbox enabled、禁自动更新；项目权限拒绝 Read/Shell/Write/MCP/WebFetch。额外传 `--allowed-tools "" --exclude-workspace-context`，并将规则与证据直接放入 stdin。AGENTS 和 skill 是任务指导；allowed-tools 是经 CLI 发送的服务端 no-tools 限制，不声称完整本地 OS 隔离。独立材料审查指出标准 Grep/Ls 不都消费 Read deny，原生 sandbox 默认 system read 不能描述成 workspace-only。根任务决定此最小首期可先部署未确认费用的示例 policy 与目录刷新，不跑模型；真正执行仍须费用确认和实际 canary 的零工具调用验证。没有单独的 `AI_GATEWAY_CURSOR_ENABLED` 总开关——选型靠请求/`AI_GATEWAY_RESEARCH_PROVIDERS`，准入靠 policy 与 roster。不通过不启用，不因沙箱失败放宽门。
+当前固定 ask、sandbox enabled、禁自动更新；项目权限拒绝 Read/Shell/Write/MCP/WebFetch。额外传 `--allowed-tools ""`（不传 `--exclude-workspace-context`：当前订阅/型号会 `invalid_argument`），并将规则与证据直接放入 stdin。服务若以 root 运行，用 `AI_GATEWAY_CURSOR_HOME` 指向已 `agent login` 的订阅 home。AGENTS 和 skill 是任务指导；allowed-tools 是经 CLI 发送的服务端 no-tools 限制，不声称完整本地 OS 隔离。独立材料审查指出标准 Grep/Ls 不都消费 Read deny，原生 sandbox 默认 system read 不能描述成 workspace-only。根任务决定此最小首期可先部署未确认费用的示例 policy 与目录刷新，不跑模型；真正执行仍须费用确认和实际 canary 的零工具调用验证。没有单独的 `AI_GATEWAY_CURSOR_ENABLED` 总开关——选型靠请求/`AI_GATEWAY_RESEARCH_PROVIDERS`，准入靠 policy 与 roster。不通过不启用，不因沙箱失败放宽门。
 
 ### 临时工作区的 headless 信任确认（2026-09-09）
 
