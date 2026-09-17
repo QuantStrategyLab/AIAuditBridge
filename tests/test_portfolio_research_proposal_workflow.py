@@ -18,6 +18,7 @@ class PortfolioResearchProposalWorkflowTest(unittest.TestCase):
         self.assertIn("portfolio-candidate-readiness.yml", text)
         self.assertIn("portfolio-candidate-readiness-*", text)
         self.assertIn("run_portfolio_research_proposal_diagnosis.py", text)
+        self.assertIn("AI_GATEWAY_RESEARCH_PROVIDERS: cursor", text)
         self.assertIn("actions/create-github-app-token", text)
         self.assertIn("permission-actions: read", text)
         self.assertIn("permission-issues: write", text)

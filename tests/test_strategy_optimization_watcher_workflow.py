@@ -42,9 +42,11 @@ class StrategyOptimizationWatcherWorkflowTest(unittest.TestCase):
         self.assertIn("p1-status.json", text)
         self.assertIn("soxl_soxx_trend_income", text)
         self.assertIn("python -m scripts.run_research_task_diagnosis", text)
+        self.assertIn("AI_GATEWAY_RESEARCH_PROVIDERS: cursor", text)
+        self.assertIn("Run one bounded Cursor research diagnosis", text)
         self.assertIn("Recover pending verified watcher tasks", text)
         recovery = text.split("      - name: Recover pending verified watcher tasks", 1)[1].split(
-            "      - name: Run one bounded Codex-only research diagnosis", 1
+            "      - name: Run one bounded Cursor research diagnosis", 1
         )[0]
         self.assertIn("github.event.schedule == '23 6 * * *'", recovery)
         self.assertIn("--event schedule --status success --limit 20", text)

@@ -265,7 +265,8 @@ jobs:
           CODEX_AUDIT_SERVICE_URL: ${{ secrets.CODEX_AUDIT_SERVICE_URL }}
           CODEX_AUDIT_SERVICE_AUDIENCE: ${{ vars.CODEX_AUDIT_SERVICE_AUDIENCE || 'quant-codex-audit' }}
           AI_GATEWAY_SOURCE_REPO: QuantStrategyLab/AIAuditBridge
-          AI_GATEWAY_RESEARCH_PROVIDERS: codex
+          # Canary-eligible daily briefing (research_summary): Cursor subscription.
+          AI_GATEWAY_RESEARCH_PROVIDERS: cursor
           PYTHONDONTWRITEBYTECODE: "1"
         run: |
           set -euo pipefail

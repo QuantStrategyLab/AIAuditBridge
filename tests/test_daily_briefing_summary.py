@@ -203,6 +203,7 @@ def test_daily_job_uses_existing_oidc_workflow_and_only_exports_summary():
     assert "ACTIONS_ID_TOKEN_REQUEST_TOKEN" not in job
     assert "uses: actions/upload-artifact@v7" in job and "if: always()" in job
     assert "path: daily-ai-summary.json" in job
+    assert "AI_GATEWAY_RESEARCH_PROVIDERS: cursor" in job.split("\n  operational-diagnosis:", 1)[0]
 
 
 def test_historical_diagnosis_rehearsal_is_manual_oidc_codex_only():
