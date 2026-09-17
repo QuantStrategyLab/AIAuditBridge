@@ -16,20 +16,24 @@ File risk tiers (from codex_auto_merge_policy.json):
     medium            — report generators, helper scripts, params
     low               — docs, tests, README
 
-Decision matrix::
+Decision matrix (matches DEFAULT_DECISION_MATRIX)::
 
     Confidence →
-Risk ↓   <0.60       0.60-0.79    0.80-0.94    ≥0.95
+Risk ↓   <0.60       0.60–0.69    0.70–0.84    ≥0.85
 ───────  ─────────── ──────────── ──────────── ───────────
-    low      auto_pr     auto_merge   auto_merge   auto_merge
-    medium   escalate    auto_pr      auto_pr      auto_pr
-    high     escalate    escalate     auto_pr      auto_pr
+    low      auto_pr     auto_merge¹  auto_merge   auto_merge
+    medium   escalate    escalate     auto_pr      auto_pr
+    high     escalate    escalate     escalate     auto_pr
     critical escalate    escalate     escalate     escalate
+
+¹ low-risk auto_merge begins at confidence ≥ 0.60.
+Empty ``changed_paths`` is treated as medium risk (never auto-merge).
 """
 
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 from dataclasses import dataclass, field
@@ -255,9 +259,10 @@ def classify_changes_risk(changed_paths: list[str], *, policy: dict[str, Any] | 
     """Classify the overall risk of a set of changed file paths.
 
     Returns the highest risk tier among all changed files.
+    Empty path lists are medium (unknown surface) so they cannot auto-merge.
     """
     if not changed_paths:
-        return RISK_LOW
+        return RISK_MEDIUM
     tiers = {classify_file_risk(p, policy=policy) for p in changed_paths}
     for tier in (RISK_CRITICAL, RISK_HIGH, RISK_MEDIUM, RISK_LOW):
         if tier in tiers:
@@ -351,17 +356,21 @@ def extract_confidence(verdicts: list[dict[str, Any]]) -> float:
     """Extract an aggregated confidence score from a list of reviewer verdicts.
 
     Each verdict dict may contain a ``confidence`` field (0.0–1.0).
-    Returns the weighted average, or 0.5 if no confidence data.
+    Returns the average of finite scores, or 0.0 when none are usable (fail-closed).
     """
     scores: list[float] = []
     for v in verdicts:
+        if "confidence" not in v:
+            continue
         try:
-            c = float(v.get("confidence", 0.5))
+            c = float(v["confidence"])
+            if not math.isfinite(c):
+                continue
             scores.append(max(0.0, min(1.0, c)))
         except (TypeError, ValueError):
             pass
     if not scores:
-        return 0.5
+        return 0.0
     return sum(scores) / len(scores)
 
 

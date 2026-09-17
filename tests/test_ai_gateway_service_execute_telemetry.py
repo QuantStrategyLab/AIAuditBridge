@@ -251,6 +251,9 @@ class AiGatewayExecuteTelemetryTests(unittest.TestCase):
         self.assertEqual(execution_result["status"], "succeeded")
         self.assertEqual(execution_result["model"], "gpt-5.4-mini")
         self.assertEqual(call_domain, "cn_equity")
+        self.assertNotIn("output", execution_result)
+        self.assertEqual(execution_result["output_length"], 4)
+        self.assertEqual(len(execution_result["output_sha256"]), 64)
 
     def test_run_job_disables_shell_tool_only_for_readonly_platform_bugfix(self) -> None:
         with patch.object(gateway, "_record_job_automation_run"), patch.object(gateway, "_audit_log"), patch.object(

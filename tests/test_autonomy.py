@@ -55,10 +55,14 @@ class TestDefaultDecisionMatrix(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(classify_file_risk(path), RISK_HIGH)
 
-    def test_low_risk_high_confidence_can_auto_merge(self) -> None:
-        result = recommended_action([{"confidence": 0.96}], ["docs/README.md"])
-        self.assertEqual(result["action"], ACTION_AUTO_MERGE)
-        self.assertEqual(result["risk"], RISK_LOW)
+    def test_empty_changed_paths_are_medium_and_cannot_auto_merge(self) -> None:
+        from service.autonomy import classify_changes_risk
+
+        self.assertEqual(classify_changes_risk([]), RISK_MEDIUM)
+        result = recommended_action([{"confidence": 0.99}], [])
+        self.assertEqual(result["risk"], RISK_MEDIUM)
+        self.assertNotEqual(result["action"], ACTION_AUTO_MERGE)
+        self.assertFalse(result["auto_merge_allowed"])
 
     def test_medium_risk_defaults_to_auto_pr_not_merge(self) -> None:
         self.assertEqual(recommended_action([{"confidence": 0.90}], ["scripts/build.py"])["action"], ACTION_AUTO_PR)

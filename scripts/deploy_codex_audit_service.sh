@@ -661,7 +661,8 @@ deploy() {
   local runner_user
   runner_user="$(id -un)"
 
-  install_file "scripts/codex_audit_service.py" "${DEPLOY_DIR}/scripts/codex_audit_service.py" "0755"
+  # Legacy scripts/codex_audit_service.py is frozen/compat-only and is no longer
+  # installed. Production systemd ExecStart uses service.ai_gateway_service.
   install_service_package
   sudo install -d -m 0700 -o "$runner_user" -g "$runner_user" "$JOB_DIR"
   write_default_execution_policy_if_missing

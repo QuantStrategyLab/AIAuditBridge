@@ -225,7 +225,7 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
                     )
                     with self.assertRaises(urllib.error.HTTPError) as ctx:
                         urllib.request.urlopen(second_request, timeout=5)
-                    self.assertEqual(ctx.exception.code, 401)
+                    self.assertEqual(ctx.exception.code, 403)
                 finally:
                     server.shutdown()
                     server.server_close()
@@ -294,7 +294,7 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
                     )
                     with self.assertRaises(urllib.error.HTTPError) as ctx:
                         urllib.request.urlopen(request, timeout=5)
-                    self.assertEqual(ctx.exception.code, 401)
+                    self.assertEqual(ctx.exception.code, 403)
                     self.assertEqual(get_automation_run_ledger().get("service-run")["task_state"], "running")
                 finally:
                     server.shutdown()
@@ -404,7 +404,7 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
                 )
                 with self.assertRaises(urllib.error.HTTPError) as ctx:
                     urllib.request.urlopen(missing_repo_request, timeout=5)
-                self.assertEqual(ctx.exception.code, 401)
+                self.assertEqual(ctx.exception.code, 403)
             finally:
                 server.shutdown()
                 server.server_close()
@@ -500,7 +500,7 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
                             f"{base_url}/v1/ai/automation/control?repo=QuantStrategyLab/OtherRepo",
                             timeout=5,
                         )
-                    self.assertEqual(ctx.exception.code, 401)
+                    self.assertEqual(ctx.exception.code, 403)
                 finally:
                     server.shutdown()
                     server.server_close()
@@ -557,7 +557,7 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
                         with patch("service.ai_gateway_service.authenticate", return_value=changed_claims):
                             with self.assertRaises(urllib.error.HTTPError) as ctx:
                                 urllib.request.urlopen(f"{base_url}/v1/ai/automation/control?{query}", timeout=5)
-                        self.assertEqual(ctx.exception.code, 401)
+                        self.assertEqual(ctx.exception.code, 403)
 
                     with patch(
                         "service.ai_gateway_service.authenticate",
@@ -565,7 +565,7 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
                     ):
                         with self.assertRaises(urllib.error.HTTPError) as ctx:
                             urllib.request.urlopen(f"{base_url}/v1/ai/automation/control?{query}", timeout=5)
-                    self.assertEqual(ctx.exception.code, 401)
+                    self.assertEqual(ctx.exception.code, 403)
 
                     with patch(
                         "service.ai_gateway_service.load_execution_policy",
@@ -573,13 +573,13 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
                     ), patch("service.ai_gateway_service.authenticate", return_value=claims):
                         with self.assertRaises(urllib.error.HTTPError) as ctx:
                             urllib.request.urlopen(f"{base_url}/v1/ai/automation/control?{query}", timeout=5)
-                    self.assertEqual(ctx.exception.code, 401)
+                    self.assertEqual(ctx.exception.code, 403)
 
                     no_grant = urllib.parse.urlencode({"repo": approval["source_repository"], "mode": "review_and_fix"})
                     with patch("service.ai_gateway_service.authenticate", return_value=claims):
                         with self.assertRaises(urllib.error.HTTPError) as ctx:
                             urllib.request.urlopen(f"{base_url}/v1/ai/automation/control?{no_grant}", timeout=5)
-                    self.assertEqual(ctx.exception.code, 401)
+                    self.assertEqual(ctx.exception.code, 403)
                 finally:
                     server.shutdown()
                     server.server_close()
@@ -1437,7 +1437,7 @@ class AiGatewayGetRoutesTest(unittest.TestCase):
                     )
                     with self.assertRaises(urllib.error.HTTPError) as ctx:
                         urllib.request.urlopen(missing_source_request, timeout=5)
-                    self.assertEqual(ctx.exception.code, 401)
+                    self.assertEqual(ctx.exception.code, 403)
                 finally:
                     server.shutdown()
                     server.server_close()
