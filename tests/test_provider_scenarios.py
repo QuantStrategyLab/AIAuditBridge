@@ -105,6 +105,18 @@ class ProviderScenarioTests(unittest.TestCase):
                 scenarios.SCENARIO_DAILY_BRIEFING,
             ),
         )
+        self.assertEqual(
+            scenarios.cursor_canary_research_stages(),
+            frozenset({"drift_analysis", "research_summary"}),
+        )
+
+    def test_fixed_codex_may_override_research_stage(self) -> None:
+        kwargs = scenarios.resolve_execute_kwargs(
+            scenarios.SCENARIO_RESEARCH_SUMMARY,
+            research_stage="optimization",
+        )
+        self.assertEqual(kwargs["research_stage"], "optimization")
+        self.assertEqual(kwargs["allowed_providers"], [PROVIDER_CODEX])
 
 
 if __name__ == "__main__":

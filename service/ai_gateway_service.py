@@ -300,13 +300,19 @@ def _resolve_codex_reasoning_effort(payload: dict[str, Any], task: str) -> str:
 
 def _admit_codex_execute(quota: Any, repo: str, payload: dict[str, Any]) -> dict[str, Any] | None:
     """Choose a Codex research route before consuming quota or starting a job."""
+    from service.provider_scenarios import cursor_canary_research_stages
+
     providers = payload.get("allowed_providers", ["codex"])
     _validate_platform_bugfix_payload(payload)
     _validate_soxl_rsi2_codegen_payload(payload)
     _validate_global_etf_research_codegen_payload(payload)
     payload["provider"] = "codex"
-    if "cursor" in providers and not payload.get("research_stage"):
-        return {"status": "deferred", "error": "cursor_research_stage_required", "retry_at": None, "execution_started": False}
+    stage = str(payload.get("research_stage") or "").strip()
+    if "cursor" in providers:
+        if not stage:
+            return {"status": "deferred", "error": "cursor_research_stage_required", "retry_at": None, "execution_started": False}
+        if stage not in cursor_canary_research_stages():
+            return {"status": "deferred", "error": "cursor_stage_not_canary", "retry_at": None, "execution_started": False}
     if providers == ["cursor"]:
         return _admit_cursor_execute(quota, repo, payload)
     if "research_stage" in payload:
@@ -324,6 +330,7 @@ def _admit_codex_execute(quota: Any, repo: str, payload: dict[str, Any]) -> dict
         if route["action"] != "run":
             if (providers == ["codex", "cursor"]
                 and os.environ.get("AI_GATEWAY_CURSOR_FALLBACK_ENABLED", "").lower() == "true"
+                and stage in cursor_canary_research_stages()
                 and route["reason"] in {"codex_quota_reserved", "codex_account_unavailable", "codex_account_stale"}
                 and str(payload.get("model") or "") in {"", "auto"}):
                 return _admit_cursor_execute(quota, repo, payload)
@@ -501,6 +508,11 @@ def _platform_bugfix_manual_mode(payload: dict[str, Any]) -> bool:
 
 def _admit_cursor_execute(quota: Any, repo: str, payload: dict[str, Any]) -> dict[str, Any] | None:
     from service.cursor_account import cursor_research_route
+    from service.provider_scenarios import cursor_canary_research_stages
+
+    stage = str(payload.get("research_stage") or "").strip()
+    if stage not in cursor_canary_research_stages():
+        return {"status": "deferred", "error": "cursor_stage_not_canary", "retry_at": None, "execution_started": False}
     cursor_payload = dict(payload)
     levels = ["low", "medium", "high"]
     cursor_payload["complexity"] = max((_normalize_complexity(str(payload.get("complexity") or "")) or "low", _estimate_codex_complexity(payload)), key=levels.index)

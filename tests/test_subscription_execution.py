@@ -209,21 +209,24 @@ def test_cursor_route_requires_fresh_account_and_explicit_spend_quality_policy()
     roster = {'status': 'available', 'source': 'cursor_cli_account', 'updated_at': 900,
               'models': ['synthetic-model', 'unknown-new-model']}
     policy = {'valid_until': 2000, 'on_demand_disabled_verified': True, 'max_daily_calls': 2,
-              'models': {'synthetic-model': {'quality_level': 2, 'supported_reasoning_efforts': ['high']}}}
-    payload = {'research_stage': 'optimization', 'mode': 'review_only'}
+              'models': {'synthetic-model': {'quality_level': 1, 'supported_reasoning_efforts': ['medium']}}}
+    payload = {'research_stage': 'drift_analysis', 'mode': 'review_only'}
     result = resolve_cursor_route(payload, {}, policy=policy, roster=roster, now=1000)
-    assert result == {'action': 'run', 'provider': 'cursor', 'model': 'synthetic-model', 'reasoning_effort': 'high'}
+    assert result == {'action': 'run', 'provider': 'cursor', 'model': 'synthetic-model', 'reasoning_effort': 'medium'}
     for change in ({'status': 'stale'}, {'updated_at': 1001}, {'updated_at': -90000}, {'source': 'openai_api'}, {'models': ['unknown-new-model']}):
         assert resolve_cursor_route(payload, {}, policy=policy, roster={**roster, **change}, now=1000)['action'] == 'defer'
     for change in ({'on_demand_disabled_verified': False}, {'valid_until': 999}, {'max_daily_calls': 0}, {'models': {}}):
         assert resolve_cursor_route(payload, {}, policy={**policy, **change}, roster=roster, now=1000)['action'] == 'defer'
     assert resolve_cursor_route(payload, {'cursor_calls': 2}, policy=policy, roster=roster, now=1000)['action'] == 'defer'
+    assert resolve_cursor_route(
+        {'research_stage': 'optimization', 'mode': 'review_only'}, {}, policy=policy, roster=roster, now=1000,
+    )['reason'] == 'cursor_stage_not_canary'
 
 
 def test_fallback_only_after_eligible_pre_execution_codex_deferral():
     quota = Mock()
     quota._codex_account_snapshot.return_value = None
-    payload = {'prompt': 'synthetic', 'mode': 'review_only', 'research_stage': 'optimization', 'allowed_providers': ['codex', 'cursor']}
+    payload = {'prompt': 'synthetic', 'mode': 'review_only', 'research_stage': 'drift_analysis', 'allowed_providers': ['codex', 'cursor']}
     with patch.dict(gateway.os.environ, {'AI_GATEWAY_CURSOR_FALLBACK_ENABLED': 'true'}, clear=True), patch.object(
         gateway, 'resolve_codex_research_route', return_value={'action': 'defer', 'reason': 'codex_quota_reserved', 'retry_at': 2000}
     ), patch.object(gateway, '_admit_cursor_execute', return_value=None) as cursor:
@@ -232,7 +235,23 @@ def test_fallback_only_after_eligible_pre_execution_codex_deferral():
         cursor.reset_mock()
         gateway._admit_codex_execute(quota, 'Synthetic/caller', {**payload, 'model': 'explicit-codex'})
         gateway._admit_codex_execute(quota, 'Synthetic/caller', {**payload, 'allowed_providers': ['codex']})
+        gateway._admit_codex_execute(
+            quota, 'Synthetic/caller',
+            {**payload, 'research_stage': 'optimization', 'allowed_providers': ['codex', 'cursor']},
+        )
         cursor.assert_not_called()
+
+
+def test_cursor_rejected_for_non_canary_research_stages():
+    quota = Mock()
+    for stage in ('optimization', 'promotion_review'):
+        denial = gateway._admit_codex_execute(
+            quota, 'Synthetic/caller',
+            {'prompt': 'synthetic', 'mode': 'review_only', 'research_stage': stage, 'allowed_providers': ['cursor']},
+        )
+        assert denial == {
+            'status': 'deferred', 'error': 'cursor_stage_not_canary', 'retry_at': None, 'execution_started': False,
+        }
 
 
 def test_soxl_codegen_admission_allows_pinned_luna_but_defers_reserved_quota():

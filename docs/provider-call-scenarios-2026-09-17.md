@@ -10,39 +10,28 @@
 | Cursor 订阅 | CLI execute | 订阅容量；on-demand 须已确认关闭 | 可信 policy + roster + 日调用上限 |
 | OpenAI/Anthropic API | analyze / review | API 美元预算 | `api_budget_admission` |
 
-Cursor 与 Codex 同类；API 失败/预算耗尽不得顶替任一订阅执行。Cursor 美元成本未知，记 `cost_incomplete`，不得报 0。
+**API 永不顶替订阅执行。** 订阅 defer/额度满 → 停或延期，不改打 analyze/review。
+
+## Provider 选型（已定案）
+
+| 场景类 | Provider | 说明 |
+|---|---|---|
+| 诊断 / briefing（canary） | 默认 Codex；可显式 Cursor | 仅 `drift_analysis` / `research_summary` |
+| 晋级主审 / codegen / bugfix / 验收探针 | **Codex only** | 网关拒绝 Cursor |
+| dual-review secondary / analyze | **API** | 独立预算 |
+| Codex→Cursor fallback | **默认关** | 仅 canary stage + 显式链 + `AI_GATEWAY_CURSOR_FALLBACK_ENABLED`；启动后失败不换后端 |
+
+网关强制：`allowed_providers` 含 `cursor` 时，`research_stage` 必须属于 canary（`drift_analysis`/`research_summary`），否则 `cursor_stage_not_canary`。
 
 ## 智能适配 vs 强制指定
 
-**智能适配（默认）**：场景填入 `mode` / `research_stage` / `allowed_providers` / `complexity`；可 pin `reasoning_effort`（如晋级主审 `xhigh`）。`model`/未 pin 的 effort 省略，由网关订阅准入选择。`AI_GATEWAY_RESEARCH_PROVIDERS` 仅软影响 `cursor_eligible` 场景；固定 Codex 场景忽略该 env。
+**智能适配**：场景填 `mode` / `stage` / `providers` / `complexity`；晋级 pin `xhigh`。型号留给订阅准入。
 
-**强制指定**：调用方可传 `allowed_providers` / `model` / `reasoning_effort` / `complexity`。与场景冲突则 `ValueError`，禁止静默改写到其他 provider 或 effort。例：晋级场景强制 `cursor` → 失败；语义验收强制 `gpt-5.6-terra` + `medium` → 透传。
-
-## 场景矩阵
-
-| 场景 | 默认 providers | mode | stage | 复杂度 | pin | Cursor |
-|---|---|---|---|---|---|---|
-| `research_task_diagnosis` | env 软选 | review_only | drift_analysis | medium | — | canary |
-| `portfolio_proposal_diagnosis` | env 软选 | review_only | drift_analysis | medium | — | canary |
-| `daily_briefing` | env 软选 | review_only | research_summary | low | — | canary |
-| `research_summary` | 固定 codex | review_only | research_summary | low | — | 否 |
-| `promotion_primary_review` | 固定 codex | review_only | promotion_review | high | effort=xhigh | **永不** |
-| `platform_bugfix` | 固定 codex | review_only/fix | — | medium | — | 否 |
-| codegen / cn_index | 固定 codex | review_only | optimization | high* | — | 否 |
-| `semantic_quality_acceptance` | 固定 codex | review_only | drift_analysis | medium | 调用方强制型号 | 否 |
-| `account_operational_diagnosis` | 固定 codex | review_only | drift_analysis | high | — | 否 |
-| `api_analyze` / `api_dual_review` | API | — | — | — | — | 否 |
-
-\* Global ETF codegen 调用方强制 `complexity=medium`、固定 Luna 型号。
+**强制指定**：`allowed_providers` / `model` / `effort` / `complexity`；冲突 `ValueError`。固定 Codex 场景可覆盖 `research_stage`（仍不得选 Cursor）。
 
 ## 启用阶梯
 
-1. 契约 + 场景矩阵已合入；默认仍 Codex。
-2. VPS：policy/CLI/目录刷新；示例 policy 未确认 on-demand 关闭前不能跑。
-3. 确认 `on_demand_disabled_verified` + `valid_until` + `max_daily_calls`。
-4. 单次 canary：`AI_GATEWAY_RESEARCH_PROVIDERS=cursor` + `research_task_diagnosis`。
-5. 再扩 portfolio → briefing；晋级/codegen/platform_bugfix 永不自动进 Cursor。
-
-## 停止条件
-
-CLI 非成功、trust/工具逃逸、身份字段缺失、policy/roster/日调用失败、试图跨后端或落到 API、把 advisory 当晋级/下单依据 → 停车 Cursor 路径，保持 Codex。
+1. 默认 Codex；Cursor 未确认 on-demand 关闭前不能跑。
+2. Canary：显式 `AI_GATEWAY_RESEARCH_PROVIDERS=cursor` + diagnosis（不要先开 fallback 链）。
+3. 再扩 portfolio → briefing。
+4. 晋级/codegen/bugfix 永不 Cursor；fallback 默认保持 false。

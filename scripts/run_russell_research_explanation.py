@@ -140,11 +140,20 @@ def explain(*, log_path: Path, run_path: Path, output_path: Path, source_ref: st
     config = GatewayConfig.from_env()
     if config.research_providers != ("codex",):
         raise RussellInputError("Codex-only research route is not configured")
+    from service.provider_scenarios import SCENARIO_RESEARCH_SUMMARY, resolve_execute_kwargs
+
     response = AiGatewayClient(config).execute(
-        build_prompt(input_record), task="russell_research_explanation", mode="review_only",
-        complexity="low", research_stage="research_summary", reasoning_effort="low",
-        sandbox="read-only", allowed_providers=["codex"], source_repository="QuantStrategyLab/AIAuditBridge",
-        source_ref=source_ref, timeout=300,
+        build_prompt(input_record),
+        task="russell_research_explanation",
+        **resolve_execute_kwargs(
+            SCENARIO_RESEARCH_SUMMARY,
+            complexity="low",
+            reasoning_effort="low",
+        ),
+        sandbox="read-only",
+        source_repository="QuantStrategyLab/AIAuditBridge",
+        source_ref=source_ref,
+        timeout=300,
     )
     raw = response.raw if isinstance(response.raw, dict) else {}
     if not (response.success is True and response.provider == "codex" and response.output and raw.get("status") == "succeeded" and raw.get("provider") == "codex" and raw.get("research_stage") == "research_summary"):

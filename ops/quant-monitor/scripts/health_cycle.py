@@ -396,13 +396,19 @@ def run_historical_diagnosis_rehearsal(
     except (ImportError, OSError, RuntimeError, ValueError):
         return {"status": "deferred", "reason": "ai_gateway_not_configured"}
     try:
+        from service.provider_scenarios import (
+            SCENARIO_RESEARCH_TASK_DIAGNOSIS,
+            resolve_execute_kwargs,
+        )
+
         result = client.execute(
             _historical_diagnosis_rehearsal_prompt(),
             task=_HISTORICAL_DIAGNOSIS_REHEARSAL_TASK,
-            mode="review_only",
+            **resolve_execute_kwargs(
+                SCENARIO_RESEARCH_TASK_DIAGNOSIS,
+                allowed_providers=["codex"],
+            ),
             sandbox="read-only",
-            research_stage="drift_analysis",
-            allowed_providers=["codex"],
             source_repository=_OPERATIONAL_DIAGNOSIS_SOURCE_REPOSITORY,
             source_ref="main",
             timeout=600,
@@ -462,13 +468,16 @@ def _run_operational_diagnosis(
     except OSError:
         return {"status": "deferred", "reason": "dedupe_state_unavailable"}
     try:
+        from service.provider_scenarios import (
+            SCENARIO_ACCOUNT_OPERATIONAL_DIAGNOSIS,
+            resolve_execute_kwargs,
+        )
+
         result = client.execute(
             _operational_diagnosis_prompt(data_errors, observation=observation),
             task="operational_data_diagnosis",
-            mode="review_only",
+            **resolve_execute_kwargs(SCENARIO_ACCOUNT_OPERATIONAL_DIAGNOSIS),
             sandbox="read-only",
-            research_stage="drift_analysis",
-            allowed_providers=["codex"],
             source_repository=_OPERATIONAL_DIAGNOSIS_SOURCE_REPOSITORY,
             source_ref="main",
             timeout=600,

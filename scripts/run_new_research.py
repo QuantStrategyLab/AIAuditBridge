@@ -1826,6 +1826,7 @@ def _digest_map(raw: Any) -> dict[str, str]:
 def _codex_codegen_execute(*, source_ref: str, research_objective: str):
     """Return the bounded Codex-only patch callback for the SOXL lane."""
     from ai_gateway_client import AiGatewayClient, GatewayConfig
+    from service.provider_scenarios import SCENARIO_SOXL_RSI2_CODEGEN, resolve_execute_kwargs
 
     config = GatewayConfig.from_env()
     if config.research_providers != ("codex",):
@@ -1836,14 +1837,14 @@ def _codex_codegen_execute(*, source_ref: str, research_objective: str):
         return client.execute(
             prompt,
             task=SOXL_RSI2_CODEGEN_TASK,
-            mode="review_only",
-            model="gpt-5.6-luna",
-            complexity="medium",
-            research_stage="optimization",
+            **resolve_execute_kwargs(
+                SCENARIO_SOXL_RSI2_CODEGEN,
+                model="gpt-5.6-luna",
+                reasoning_effort="medium",
+                complexity="medium",
+            ),
             research_objective=research_objective,
-            reasoning_effort="medium",
             sandbox="read-only",
-            allowed_providers=["codex"],
             source_repository="QuantStrategyLab/AIAuditBridge",
             source_ref=source_ref,
             timeout=1800,
@@ -1859,6 +1860,7 @@ def _codex_callbacks(*, source_ref: str, facts: Mapping[str, Any]):
     advisory; lifecycle gates and source evidence remain deterministic.
     """
     from ai_gateway_client import AiGatewayClient, GatewayConfig
+    from service.provider_scenarios import SCENARIO_NEW_RESEARCH_DESIGN, resolve_execute_kwargs
 
     config = GatewayConfig.from_env()
     if config.research_providers != ("codex",):
@@ -1875,10 +1877,13 @@ def _codex_callbacks(*, source_ref: str, facts: Mapping[str, Any]):
             f"\nLOCAL_FACTS:\n{encoded_facts}"
         )
         response = client.execute(
-            prompt, task="new_research_design", mode="review_only", complexity="low",
-            research_stage="optimization", sandbox="read-only",
-            allowed_providers=["codex"], source_repository="QuantStrategyLab/AIAuditBridge",
-            source_ref=source_ref, timeout=300,
+            prompt,
+            task="new_research_design",
+            **resolve_execute_kwargs(SCENARIO_NEW_RESEARCH_DESIGN),
+            sandbox="read-only",
+            source_repository="QuantStrategyLab/AIAuditBridge",
+            source_ref=source_ref,
+            timeout=300,
         )
         raw = response.raw if isinstance(response.raw, dict) else {}
         if not (response.success is True and raw.get("status") == "succeeded"

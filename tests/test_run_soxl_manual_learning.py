@@ -476,7 +476,7 @@ def test_success_calls_one_codex_job_then_exact_fixed_numeric_cli(
 
     assert len(client.calls) == 1
     assert client.calls[0][1] == {
-        "mode": "review_only", "research_stage": "optimization",
+        "mode": "review_only", "research_stage": "optimization", "complexity": "medium",
         "allowed_providers": ["codex"], "source_repository": "QuantStrategyLab/AIAuditBridge",
         "source_ref": "main", "timeout": 600,
     }

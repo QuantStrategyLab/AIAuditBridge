@@ -7,6 +7,8 @@ import re
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from service.provider_scenarios import SCENARIO_RESEARCH_SUMMARY, resolve_execute_kwargs
+
 
 def unavailable() -> dict[str, str]:
     return {"status": "unavailable", "text": "", "provider": "", "model": ""}
@@ -38,10 +40,16 @@ def make_summary_callback(*, runtime: Any, revision: str, repository: str,
                 f"\nDATA:\n{json.dumps(context, ensure_ascii=False, allow_nan=False, sort_keys=True)}"
             )
             result = client.execute(
-                prompt, mode="review_only", research_stage=research_stage,
-                allowed_providers=["codex"], source_repository=repository,
-                source_ref=revision, timeout=600,
+                prompt,
+                **resolve_execute_kwargs(
+                    SCENARIO_RESEARCH_SUMMARY,
+                    research_stage=research_stage,
+                ),
+                source_repository=repository,
+                source_ref=revision,
+                timeout=600,
             )
+
             if (result.success is not True or result.provider != "codex" or not result.model
                     or result.error or result.note or not isinstance(result.raw, dict)
                     or result.raw.get("status") != "succeeded"):

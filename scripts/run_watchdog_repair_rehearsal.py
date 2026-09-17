@@ -286,13 +286,19 @@ def run_rehearsal(
     except Exception:
         return _park("AI_GATEWAY_NOT_CONFIGURED")
     try:
+        from service.provider_scenarios import (
+            SCENARIO_RESEARCH_TASK_DIAGNOSIS,
+            resolve_execute_kwargs,
+        )
+
         result = client.execute(
             _prompt(),
             task="historical_watchdog_repair_rehearsal",
-            mode="review_only",
+            **resolve_execute_kwargs(
+                SCENARIO_RESEARCH_TASK_DIAGNOSIS,
+                allowed_providers=["codex"],
+            ),
             sandbox="read-only",
-            research_stage="drift_analysis",
-            allowed_providers=["codex"],
             source_repository=SOURCE_REPOSITORY,
             source_ref="main",
             timeout=600,

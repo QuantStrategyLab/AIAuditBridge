@@ -20,6 +20,7 @@ from urllib.parse import urlparse
 
 from client.config import GatewayConfig
 from client.gateway_client import AiGatewayClient
+from service.provider_scenarios import SCENARIO_SOXL_MANUAL_LEARNING, resolve_execute_kwargs
 from service.research_diagnosis import (
     build_research_diagnosis_request,
     marker_for_research_diagnosis,
@@ -1251,9 +1252,11 @@ def run_manual_learning(
     try:
         config = gateway_config or GatewayConfig.from_env()
         result = client_factory(config).execute(
-            _prompt(context, values, manifest_sha256), mode="review_only",
-            research_stage="optimization", allowed_providers=["codex"],
-            source_repository=EXPECTED_REPOSITORY, source_ref="main", timeout=600,
+            _prompt(context, values, manifest_sha256),
+            **resolve_execute_kwargs(SCENARIO_SOXL_MANUAL_LEARNING),
+            source_repository=EXPECTED_REPOSITORY,
+            source_ref="main",
+            timeout=600,
         )
     except Exception:  # noqa: BLE001 - provider detail must not cross this boundary
         artifact["failure_stage"] = "codex_unavailable"

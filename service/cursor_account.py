@@ -103,6 +103,9 @@ def resolve_cursor_route(payload, usage, *, policy, roster, now):
         return {**deferred, 'reason': 'cursor_capacity_unavailable'}
     stage = payload.get('research_stage')
     complexity = payload.get('complexity') or 'low'
+    # Cursor is subscription canary only for advisory stages; never promotion/codegen.
+    if stage not in {'research_summary', 'drift_analysis'}:
+        return {**deferred, 'reason': 'cursor_stage_not_canary'}
     if stage not in _STAGE_LEVELS or complexity not in ('low', 'medium', 'high') or payload.get('mode', 'review_only') != 'review_only':
         return deferred
     # Same deterministic stage/complexity floors as Codex, without assuming

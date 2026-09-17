@@ -46,6 +46,8 @@ SCENARIO_GLOBAL_ETF_CODEGEN = "global_etf_codegen"
 SCENARIO_CN_INDEX_ETF_RESEARCH = "cn_index_etf_research"
 SCENARIO_SEMANTIC_QUALITY_ACCEPTANCE = "semantic_quality_acceptance"
 SCENARIO_ACCOUNT_OPERATIONAL_DIAGNOSIS = "account_operational_diagnosis"
+SCENARIO_SOXL_MANUAL_LEARNING = "soxl_manual_learning"
+SCENARIO_NEW_RESEARCH_DESIGN = "new_research_design"
 SCENARIO_API_ANALYZE = "api_analyze"
 SCENARIO_API_DUAL_REVIEW = "api_dual_review"
 
@@ -191,6 +193,28 @@ SCENARIOS: Mapping[str, ProviderScenario] = {
         purpose="Account operational diagnosis; Codex-only advisory.",
         default_complexity="high",
     ),
+    SCENARIO_SOXL_MANUAL_LEARNING: ProviderScenario(
+        scenario_id=SCENARIO_SOXL_MANUAL_LEARNING,
+        endpoint=ENDPOINT_EXECUTE,
+        mode=MODE_REVIEW_ONLY,
+        research_stage="optimization",
+        provider_policy=POLICY_FIXED_CODEX,
+        cursor_eligible=False,
+        fallback_chain_allowed=False,
+        purpose="SOXL manual learning advisory; Codex-only optimization.",
+        default_complexity="medium",
+    ),
+    SCENARIO_NEW_RESEARCH_DESIGN: ProviderScenario(
+        scenario_id=SCENARIO_NEW_RESEARCH_DESIGN,
+        endpoint=ENDPOINT_EXECUTE,
+        mode=MODE_REVIEW_ONLY,
+        research_stage="optimization",
+        provider_policy=POLICY_FIXED_CODEX,
+        cursor_eligible=False,
+        fallback_chain_allowed=False,
+        purpose="New-research design choice; Codex-only.",
+        default_complexity="low",
+    ),
     SCENARIO_API_ANALYZE: ProviderScenario(
         scenario_id=SCENARIO_API_ANALYZE,
         endpoint=ENDPOINT_ANALYZE,
@@ -278,6 +302,7 @@ def resolve_execute_kwargs(
     model: str | None = None,
     reasoning_effort: str | None = None,
     complexity: str | None = None,
+    research_stage: str | None = None,
 ) -> dict[str, Any]:
     """Build execute() kwargs: adaptive scenario defaults plus optional forced pins."""
     scenario = get_scenario(scenario_id)
@@ -303,8 +328,18 @@ def resolve_execute_kwargs(
         "mode": effective_mode,
         "allowed_providers": allowed,
     }
-    if scenario.research_stage:
-        kwargs["research_stage"] = scenario.research_stage
+    effective_stage = scenario.research_stage
+    if research_stage not in (None, ""):
+        if scenario.provider_policy != POLICY_FIXED_CODEX:
+            raise ValueError("research_stage override requires a fixed_codex scenario")
+        override = str(research_stage).strip()
+        if override not in {"research_summary", "drift_analysis", "optimization", "promotion_review"}:
+            raise ValueError("unsupported research_stage override")
+        effective_stage = override
+    if effective_stage:
+        kwargs["research_stage"] = effective_stage
+        if PROVIDER_CURSOR in allowed and effective_stage not in cursor_canary_research_stages():
+            raise ValueError("Cursor is only allowed for canary research stages")
 
     effective_complexity = (
         str(complexity).strip().lower()
@@ -346,4 +381,13 @@ def cursor_canary_scenarios() -> tuple[str, ...]:
         scenario.scenario_id
         for scenario in SCENARIOS.values()
         if scenario.cursor_eligible and scenario.endpoint == ENDPOINT_EXECUTE
+    )
+
+
+def cursor_canary_research_stages() -> frozenset[str]:
+    """Research stages that may select Cursor (gateway + consumer enforce)."""
+    return frozenset(
+        scenario.research_stage
+        for scenario in SCENARIOS.values()
+        if scenario.cursor_eligible and scenario.research_stage
     )
