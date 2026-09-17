@@ -35,3 +35,17 @@
 2. Canary：显式 `AI_GATEWAY_RESEARCH_PROVIDERS=cursor` + diagnosis（不要先开 fallback 链）。
 3. 再扩 portfolio → briefing。
 4. 晋级/codegen/bugfix 永不 Cursor；fallback 默认保持 false。
+
+## VPS 验收（2026-09-18）
+
+| 项 | 结果 |
+|---|---|
+| AppArmor + `cursor-sandbox-apparmor` + bubblewrap；`--sandbox enabled` | 可用（未改 disabled） |
+| `AI_GATEWAY_CURSOR_HOME` + 去掉 `--exclude-workspace-context` | 已部署（`31838f8`） |
+| `research_task_diagnosis` | PASS（`cursor-grok-4.6-medium`） |
+| `portfolio_proposal_diagnosis` | PASS |
+| `daily_briefing`（`research_summary`） | PASS（`cursor-grok-4.6-low`） |
+| Cursor @ `promotion_review` / `optimization` | `cursor_stage_not_canary` |
+| Fallback | 仍 false |
+
+HTTP `/v1/ai/execute/jobs` 仍需 OIDC（static token 拒执行）。日调用计数含上述 canary；policy `max_daily_calls` 耗尽前勿再压测。
