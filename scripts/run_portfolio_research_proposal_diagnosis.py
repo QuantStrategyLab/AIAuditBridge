@@ -34,6 +34,10 @@ from service.portfolio_research_proposal import (  # noqa: E402
     marker_for_portfolio_research_proposal,
     validate_portfolio_candidate_readiness,
 )
+from service.provider_scenarios import (  # noqa: E402
+    SCENARIO_PORTFOLIO_PROPOSAL_DIAGNOSIS,
+    resolve_execute_kwargs,
+)
 
 
 SOURCE_REPOSITORY = "QuantStrategyLab/UsEquitySnapshotPipelines"
@@ -185,9 +189,10 @@ def run_portfolio_research_proposal_diagnosis(
     try:
         ai_result = client.execute(
             prompt,
-            mode="review_only",
-            research_stage="drift_analysis",
-            **({"allowed_providers": list(config.research_providers)} if config.research_providers != ("codex",) else {}),
+            **resolve_execute_kwargs(
+                SCENARIO_PORTFOLIO_PROPOSAL_DIAGNOSIS,
+                research_providers=config.research_providers,
+            ),
             timeout=300,
             source_repository=repository,
         )
