@@ -264,7 +264,7 @@ class MonitorFailClosedTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            ready, errors = HEALTH_CYCLE._load_lifecycle_artifact_status(
+            ready, source_revisions, errors = HEALTH_CYCLE._load_lifecycle_artifact_status(
                 root,
                 domains=("us_equity", "crypto"),
                 now=HEALTH_CYCLE.datetime.fromisoformat(
@@ -273,6 +273,7 @@ class MonitorFailClosedTests(unittest.TestCase):
             )
 
         self.assertEqual(ready, ("us_equity",))
+        self.assertEqual(source_revisions, {"us_equity": "a" * 40})
         self.assertEqual(
             errors,
             [

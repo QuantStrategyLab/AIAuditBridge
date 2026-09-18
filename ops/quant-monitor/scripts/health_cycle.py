@@ -119,7 +119,7 @@ def _load_lifecycle_artifact_status(
     domains=DOMAINS,
     now: datetime | None = None,
     max_age: timedelta = timedelta(hours=2),
-) -> tuple[tuple[str, ...], list[dict[str, str]]]:
+) -> tuple[tuple[str, ...], dict[str, str], list[dict[str, str]]]:
     path = root / _ARTIFACT_STATUS_RELATIVE_PATH
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -138,12 +138,13 @@ def _load_lifecycle_artifact_status(
         ):
             raise ValueError("artifact status is invalid or stale")
     except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-        return (), [
+        return (), {}, [
             _artifact_status_error(domain, error_type=type(exc).__name__)
             for domain in domains
         ]
 
     ready: list[str] = []
+    source_revisions: dict[str, str] = {}
     errors: list[dict[str, str]] = []
     for domain in domains:
         status = domain_statuses.get(domain)
@@ -151,19 +152,21 @@ def _load_lifecycle_artifact_status(
             errors.append(_artifact_status_error(domain))
             continue
         profiles = status.get("profiles")
+        head_sha = str(status.get("head_sha") or "")
         valid_ready = (
             status.get("status") == "ready"
             and isinstance(status.get("artifact_id"), int)
             and status["artifact_id"] > 0
             and isinstance(status.get("run_id"), int)
             and status["run_id"] > 0
-            and re.fullmatch(r"[0-9a-f]{40}", str(status.get("head_sha") or ""))
+            and re.fullmatch(r"[0-9a-f]{40}", head_sha)
             and isinstance(profiles, list)
             and bool(profiles)
             and all(isinstance(profile, str) and profile for profile in profiles)
         )
         if valid_ready:
             ready.append(domain)
+            source_revisions[domain] = head_sha
             continue
         errors.append(
             _artifact_status_error(
@@ -172,7 +175,7 @@ def _load_lifecycle_artifact_status(
                 error_type=str(status.get("error_type") or "RuntimeError"),
             )
         )
-    return tuple(ready), errors
+    return tuple(ready), source_revisions, errors
 
 
 def _alert_fingerprint(lines: list[str]) -> str:
@@ -683,9 +686,14 @@ def main() -> int:
     from quant_platform_kit.strategy_lifecycle.performance_monitor import run_monitor
     from scripts.run_strategy_optimization_watcher import dispatch_strategy_watch_findings
 
-    ready_domains, artifact_errors = _load_lifecycle_artifact_status(root)
+    ready_domains, source_revisions, artifact_errors = _load_lifecycle_artifact_status(root)
+
+    def run_monitor_with_revision(domain: str):
+        # QPK #615 requires observation provenance; use the trusted artifact head_sha.
+        return run_monitor(domain, source_revision=source_revisions[domain])
+
     snapshot_results, drift_results, lifecycle_errors = _refresh_and_collect_drift(
-        run_monitor,
+        run_monitor_with_revision,
         run_drift_detection,
         domains=ready_domains,
     )
