@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Explain one verified Russell research result with the existing Codex route."""
+"""Explain one verified Russell research result via research_summary advisory."""
 
 from __future__ import annotations
 
@@ -138,8 +138,9 @@ def explain(*, log_path: Path, run_path: Path, output_path: Path, source_ref: st
     from client.gateway_client import AiGatewayClient
 
     config = GatewayConfig.from_env()
-    if config.research_providers != ("codex",):
-        raise RussellInputError("Codex-only research route is not configured")
+    providers = tuple(config.research_providers)
+    if providers not in (("codex",), ("cursor",)):
+        raise RussellInputError("research_summary rejects Codex→Cursor fallback chain")
     from service.provider_scenarios import SCENARIO_RESEARCH_SUMMARY, resolve_execute_kwargs
 
     response = AiGatewayClient(config).execute(
@@ -147,6 +148,7 @@ def explain(*, log_path: Path, run_path: Path, output_path: Path, source_ref: st
         task="russell_research_explanation",
         **resolve_execute_kwargs(
             SCENARIO_RESEARCH_SUMMARY,
+            research_providers=providers,
             complexity="low",
             reasoning_effort="low",
         ),
@@ -156,8 +158,21 @@ def explain(*, log_path: Path, run_path: Path, output_path: Path, source_ref: st
         timeout=300,
     )
     raw = response.raw if isinstance(response.raw, dict) else {}
-    if not (response.success is True and response.provider == "codex" and response.output and raw.get("status") == "succeeded" and raw.get("provider") == "codex" and raw.get("research_stage") == "research_summary"):
-        raise RussellInputError("Codex result did not satisfy the existing route contract: " + json.dumps(_safe_execution_details(response), sort_keys=True))
+    if not (
+        response.success is True
+        and response.provider in providers
+        and response.output
+        and isinstance(response.model, str)
+        and response.model.strip()
+        and raw.get("status") == "succeeded"
+        and raw.get("provider") == response.provider
+        and raw.get("model") == response.model
+        and raw.get("research_stage") == "research_summary"
+    ):
+        raise RussellInputError(
+            "research_summary result did not satisfy the route contract: "
+            + json.dumps(_safe_execution_details(response), sort_keys=True)
+        )
     artifact = {
         "status": "available", "advisory_only": True, "interpretation_kind": "manual_historical_result_explanation",
         "source_run": input_record["source_run"], "source_result": input_record["source_result"],

@@ -10,7 +10,7 @@
 
 Codex→Cursor 仅在请求显式允许、服务 `AI_GATEWAY_CURSOR_FALLBACK_ENABLED=true`、Codex 准入确认未开始且额度预留/账户能力不可用时选择。显式型号不跨后端换型。启动后超时、失败、结果缺失、通信不明不会触发另一后端；没有 API fallback。已有 `analyze/review` API consumer 保留原用途与预算保护。
 
-AAB 两个实际调用者 `run_research_task_diagnosis.py` 与 `run_portfolio_research_proposal_diagnosis.py` 通过 `AI_GATEWAY_RESEARCH_PROVIDERS=cursor` 或 `codex,cursor` 显式采用；默认 `codex`。其权限、去重、输出验收与 advisory 定位保持。场景命名与 canary 阶梯见 [provider-call-scenarios-2026-09-17.md](provider-call-scenarios-2026-09-17.md)。SDK 安装和 QPK consumer 的采用必须单独验证，源代码可用不等于已安装。
+AAB 诊断调用者 `run_research_task_diagnosis.py` 与 `run_portfolio_research_proposal_diagnosis.py` 通过 `AI_GATEWAY_RESEARCH_PROVIDERS=cursor` 或 `codex,cursor` 显式采用；默认 `codex`。独立 `research_summary` advisory（`scripts/research_summary.py`、`run_russell_research_explanation.py`）仅允许显式 `cursor` 单后端 canary，拒绝 `codex,cursor` 链；默认 `codex` 不变。其权限、去重、输出验收与 advisory 定位保持。场景命名与 canary 阶梯见 [provider-call-scenarios-2026-09-17.md](provider-call-scenarios-2026-09-17.md)。SDK 安装和 QPK consumer 的采用必须单独验证，源代码可用不等于已安装。
 
 ## 模型与费用
 

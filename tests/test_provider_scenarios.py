@@ -103,6 +103,7 @@ class ProviderScenarioTests(unittest.TestCase):
                 scenarios.SCENARIO_RESEARCH_TASK_DIAGNOSIS,
                 scenarios.SCENARIO_PORTFOLIO_PROPOSAL_DIAGNOSIS,
                 scenarios.SCENARIO_DAILY_BRIEFING,
+                scenarios.SCENARIO_RESEARCH_SUMMARY,
             ),
         )
         self.assertEqual(
@@ -110,13 +111,53 @@ class ProviderScenarioTests(unittest.TestCase):
             frozenset({"drift_analysis", "research_summary"}),
         )
 
-    def test_fixed_codex_may_override_research_stage(self) -> None:
-        kwargs = scenarios.resolve_execute_kwargs(
+    def test_research_summary_default_and_explicit_codex_unchanged(self) -> None:
+        default_kwargs = scenarios.resolve_execute_kwargs(scenarios.SCENARIO_RESEARCH_SUMMARY)
+        self.assertEqual(
+            default_kwargs,
+            {
+                "mode": MODE_REVIEW_ONLY,
+                "research_stage": "research_summary",
+                "allowed_providers": [PROVIDER_CODEX],
+                "complexity": "low",
+            },
+        )
+        explicit = scenarios.resolve_execute_kwargs(
             scenarios.SCENARIO_RESEARCH_SUMMARY,
+            research_providers=(PROVIDER_CODEX,),
             research_stage="optimization",
         )
-        self.assertEqual(kwargs["research_stage"], "optimization")
-        self.assertEqual(kwargs["allowed_providers"], [PROVIDER_CODEX])
+        self.assertEqual(explicit["allowed_providers"], [PROVIDER_CODEX])
+        self.assertEqual(explicit["research_stage"], "optimization")
+
+    def test_research_summary_explicit_cursor_is_allowed(self) -> None:
+        kwargs = scenarios.resolve_execute_kwargs(
+            scenarios.SCENARIO_RESEARCH_SUMMARY,
+            research_providers=(PROVIDER_CURSOR,),
+        )
+        self.assertEqual(kwargs["allowed_providers"], [PROVIDER_CURSOR])
+        self.assertEqual(kwargs["mode"], MODE_REVIEW_ONLY)
+        self.assertEqual(kwargs["research_stage"], "research_summary")
+
+    def test_research_summary_rejects_codex_cursor_fallback_chain(self) -> None:
+        with self.assertRaisesRegex(ValueError, "does not allow Codex→Cursor fallback chain"):
+            scenarios.resolve_execute_kwargs(
+                scenarios.SCENARIO_RESEARCH_SUMMARY,
+                research_providers=(PROVIDER_CODEX, PROVIDER_CURSOR),
+            )
+        with self.assertRaisesRegex(ValueError, "does not allow Codex→Cursor fallback chain"):
+            scenarios.resolve_execute_kwargs(
+                scenarios.SCENARIO_RESEARCH_SUMMARY,
+                allowed_providers=[PROVIDER_CODEX, PROVIDER_CURSOR],
+            )
+
+    def test_research_summary_cursor_rejects_non_canary_stage_override(self) -> None:
+        with self.assertRaisesRegex(ValueError, "research_stage override"):
+            scenarios.resolve_execute_kwargs(
+                scenarios.SCENARIO_RESEARCH_SUMMARY,
+                research_providers=(PROVIDER_CURSOR,),
+                research_stage="optimization",
+            )
 
 
 if __name__ == "__main__":

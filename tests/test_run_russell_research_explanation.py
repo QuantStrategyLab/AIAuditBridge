@@ -53,7 +53,7 @@ def test_subprocess_explain_writes_only_sanitized_success_artifact(tmp_path: Pat
     (stub / "client" / "__init__.py").write_text("")
     (stub / "client" / "config.py").write_text("class GatewayConfig:\n  research_providers=('codex',)\n  @classmethod\n  def from_env(cls): return cls()\n")
     (stub / "client" / "gateway_client.py").write_text(
-        "class Result:\n  success=True\n  provider='codex'\n  model='gpt-5.6-luna'\n  output='中文 advisory：研究结果仅供人工参考。'\n  raw={'status':'succeeded','job_id':'job-test','provider':'codex','research_stage':'research_summary','reasoning_effort':'low'}\n"
+        "class Result:\n  success=True\n  provider='codex'\n  model='gpt-5.6-luna'\n  output='中文 advisory：研究结果仅供人工参考。'\n  raw={'status':'succeeded','job_id':'job-test','provider':'codex','model':'gpt-5.6-luna','research_stage':'research_summary','reasoning_effort':'low'}\n"
         "class AiGatewayClient:\n  def __init__(self, config): pass\n  def execute(self, *args, **kwargs): return Result()\n"
     )
     run_path = tmp_path / "run.json"
@@ -67,6 +67,76 @@ def test_subprocess_explain_writes_only_sanitized_success_artifact(tmp_path: Pat
     artifact = json.loads(output.read_text())
     assert artifact["ai_execution"]["provider"] == "codex"
     assert artifact["source_result"]["window_end_semantics"] == "exclusive"
+
+
+def test_subprocess_explicit_cursor_writes_success_artifact(tmp_path: Path):
+    stub = tmp_path / "stub"
+    (stub / "client").mkdir(parents=True)
+    (stub / "client" / "__init__.py").write_text("")
+    (stub / "client" / "config.py").write_text(
+        "class GatewayConfig:\n  research_providers=('cursor',)\n  @classmethod\n  def from_env(cls): return cls()\n"
+    )
+    (stub / "client" / "gateway_client.py").write_text(
+        "class Result:\n  success=True\n  provider='cursor'\n  model='cursor-grok-4.6-low'\n  "
+        "output='中文 advisory：研究结果仅供人工参考。'\n  "
+        "raw={'status':'succeeded','job_id':'job-test','provider':'cursor',"
+        "'model':'cursor-grok-4.6-low','research_stage':'research_summary',"
+        "'reasoning_effort':'low'}\n"
+        "class AiGatewayClient:\n  def __init__(self, config): pass\n"
+        "  def execute(self, *args, **kwargs):\n"
+        "    assert kwargs.get('allowed_providers') == ['cursor']\n"
+        "    assert kwargs.get('research_stage') == 'research_summary'\n"
+        "    return Result()\n"
+    )
+    run_path = tmp_path / "run.json"
+    run_path.write_text(json.dumps(_run()))
+    log_path = tmp_path / "run.log"
+    log_path.write_text("research-case step " + json.dumps(_summary()) + "\n")
+    output = tmp_path / "out" / "summary.json"
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join((str(stub), str(Path(__file__).parents[1]))))
+    completed = subprocess.run(
+        [
+            sys.executable, "-m", "scripts.run_russell_research_explanation",
+            "--run-metadata", str(run_path), "--run-log", str(log_path),
+            "--source-ref", "16c5727", "--output", str(output),
+        ],
+        cwd=stub, env=env, capture_output=True, text=True, check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    artifact = json.loads(output.read_text())
+    assert artifact["ai_execution"]["provider"] == "cursor"
+    assert artifact["ai_execution"]["model"] == "cursor-grok-4.6-low"
+
+
+def test_subprocess_codex_cursor_chain_is_rejected(tmp_path: Path):
+    stub = tmp_path / "stub"
+    (stub / "client").mkdir(parents=True)
+    (stub / "client" / "__init__.py").write_text("")
+    (stub / "client" / "config.py").write_text(
+        "class GatewayConfig:\n  research_providers=('codex', 'cursor')\n"
+        "  @classmethod\n  def from_env(cls): return cls()\n"
+    )
+    (stub / "client" / "gateway_client.py").write_text(
+        "class AiGatewayClient:\n  def __init__(self, config): pass\n"
+        "  def execute(self, *args, **kwargs):\n"
+        "    raise AssertionError('execute must not run for fallback chain')\n"
+    )
+    run_path = tmp_path / "run.json"
+    run_path.write_text(json.dumps(_run()))
+    log_path = tmp_path / "run.log"
+    log_path.write_text("research-case step " + json.dumps(_summary()) + "\n")
+    output = tmp_path / "out" / "summary.json"
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join((str(stub), str(Path(__file__).parents[1]))))
+    completed = subprocess.run(
+        [
+            sys.executable, "-m", "scripts.run_russell_research_explanation",
+            "--run-metadata", str(run_path), "--run-log", str(log_path),
+            "--source-ref", "16c5727", "--output", str(output),
+        ],
+        cwd=stub, env=env, capture_output=True, text=True, check=False,
+    )
+    assert completed.returncode == 2
+    assert not output.exists()
 
 
 def test_subprocess_failure_does_not_write_artifact(tmp_path: Path):

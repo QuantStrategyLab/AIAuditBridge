@@ -109,10 +109,10 @@ SCENARIOS: Mapping[str, ProviderScenario] = {
         endpoint=ENDPOINT_EXECUTE,
         mode=MODE_REVIEW_ONLY,
         research_stage="research_summary",
-        provider_policy=POLICY_FIXED_CODEX,
-        cursor_eligible=False,
+        provider_policy=POLICY_RESEARCH_ENV,
+        cursor_eligible=True,
         fallback_chain_allowed=False,
-        purpose="Standalone research summary scripts; stay Codex until separately authorized.",
+        purpose="Standalone research summary advisory; explicit Cursor canary, no Codex→Cursor chain.",
         default_complexity="low",
     ),
     SCENARIO_PROMOTION_PRIMARY_REVIEW: ProviderScenario(
@@ -330,12 +330,19 @@ def resolve_execute_kwargs(
     }
     effective_stage = scenario.research_stage
     if research_stage not in (None, ""):
-        if scenario.provider_policy != POLICY_FIXED_CODEX:
-            raise ValueError("research_stage override requires a fixed_codex scenario")
         override = str(research_stage).strip()
         if override not in {"research_summary", "drift_analysis", "optimization", "promotion_review"}:
             raise ValueError("unsupported research_stage override")
-        effective_stage = override
+        if scenario.provider_policy == POLICY_FIXED_CODEX:
+            effective_stage = override
+        elif (
+            scenario.scenario_id == SCENARIO_RESEARCH_SUMMARY
+            and PROVIDER_CURSOR not in allowed
+        ):
+            # Codex-only shared summary callback may still pin stage (e.g. optimization).
+            effective_stage = override
+        else:
+            raise ValueError("research_stage override requires a fixed_codex scenario")
     if effective_stage:
         kwargs["research_stage"] = effective_stage
         if PROVIDER_CURSOR in allowed and effective_stage not in cursor_canary_research_stages():

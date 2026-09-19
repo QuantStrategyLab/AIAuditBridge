@@ -17,6 +17,7 @@
 | 场景类 | Provider | 说明 |
 |---|---|---|
 | 诊断 / briefing（canary） | 默认 Codex；可显式 Cursor | 仅 `drift_analysis` / `research_summary` |
+| 独立 `research_summary` advisory | 默认 Codex；可显式 Cursor | `review_only` / `research_summary`；**禁止** `codex,cursor` 链 |
 | 晋级主审 / codegen / bugfix / 验收探针 | **Codex only** | 网关拒绝 Cursor |
 | dual-review secondary / analyze | **API** | 独立预算 |
 | Codex→Cursor fallback | **默认关** | 仅 canary stage + 显式链 + `AI_GATEWAY_CURSOR_FALLBACK_ENABLED`；启动后失败不换后端 |
@@ -33,7 +34,7 @@
 
 1. 默认 Codex；Cursor 未确认 on-demand 关闭前不能跑。
 2. Canary：显式 `AI_GATEWAY_RESEARCH_PROVIDERS=cursor` + diagnosis（不要先开 fallback 链）。
-3. 再扩 portfolio → briefing。
+3. 再扩 portfolio → briefing → 独立 `research_summary` advisory（仍禁止该场景的 fallback 链）。
 4. 晋级/codegen/bugfix 永不 Cursor；fallback 默认保持 false。
 
 ## VPS 验收（2026-09-18）
