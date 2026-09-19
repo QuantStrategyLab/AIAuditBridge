@@ -440,7 +440,9 @@ def _acquire_resume_lock(root: Path, identity: Mapping[str, Any]) -> None:
         raise GlobalResearchCodegenError("global_codegen_resume_lock_failed") from None
 
 
-def _load_resumable_deferred(root: Path, identity: Mapping[str, Any]) -> dict[str, Any]:
+def _load_resumable_deferred(
+    root: Path, identity: Mapping[str, Any], *, allow_early_resume: bool = False,
+) -> dict[str, Any]:
     claim = _read_json(root / "claim.json", "global_codegen_claim_invalid")
     result = _read_json(root / "result.json", "global_codegen_terminal_invalid")
     response = _read_json(root / "response.json", "global_codegen_response_unknown")
@@ -452,7 +454,7 @@ def _load_resumable_deferred(root: Path, identity: Mapping[str, Any]) -> dict[st
     deferred = _deferred_result_from_response(result, response, claim=claim)
     if deferred is None:
         raise GlobalResearchCodegenError("global_codegen_resume_unavailable")
-    if deferred["retry_at"] > datetime.now(timezone.utc).timestamp():
+    if deferred["retry_at"] > datetime.now(timezone.utc).timestamp() and not allow_early_resume:
         raise GlobalResearchCodegenError("global_codegen_resume_not_due")
     return deferred
 
@@ -625,6 +627,7 @@ def run_global_etf_research_codegen_case(
     fetch_source: Callable[[], dict[str, Any]] | None = None,
     candidate_test_runner: Callable[..., Mapping[str, Any]] | None = None,
     resume_deferred: bool = False,
+    allow_early_resume: bool = False,
 ) -> dict[str, Any]:
     """Run one fixed Global codegen attempt with exclusive persistent claim."""
     root = Path(run_root).resolve()
@@ -646,7 +649,7 @@ def run_global_etf_research_codegen_case(
         identity = dict(claim["identity"])
         if identity.get("source_commit") != source_commit:
             raise GlobalResearchCodegenError("global_codegen_resume_identity_mismatch")
-        _load_resumable_deferred(root, identity)
+        _load_resumable_deferred(root, identity, allow_early_resume=allow_early_resume)
         _acquire_resume_lock(root, identity)
     else:
         source = (fetch_source or fetch_global_research_source)()
@@ -744,11 +747,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--execute", action="store_true", help="run only in the fixed main self-hosted workflow")
     parser.add_argument("--auth-preflight", action="store_true", help="verify audit-service authentication only")
     parser.add_argument("--resume-deferred", action="store_true", help="resume one due, trusted quota deferral")
+    parser.add_argument(
+        "--allow-early-resume", action="store_true",
+        help="allow one operator-attested early resume after verified quota recovery",
+    )
     parser.add_argument("--project-result", action="store_true", help="project the sanitized persisted advisory result")
     parser.add_argument("--ues-repo-root", type=Path, default=Path("/opt/ues-source"))
     args = parser.parse_args(argv)
     if args.project_result:
-        if args.execute or args.auth_preflight or args.resume_deferred:
+        if args.execute or args.auth_preflight or args.resume_deferred or args.allow_early_resume:
             print("global_codegen_projection_unavailable")
             return 2
         try:
@@ -760,7 +767,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(_public_result(result), ensure_ascii=False, sort_keys=True, separators=(",", ":")))
         return 0
     if args.auth_preflight:
-        if args.resume_deferred:
+        if args.resume_deferred or args.allow_early_resume:
             print("global_codegen_resume_unavailable")
             return 2
         outcome = _auth_preflight()
@@ -768,6 +775,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if outcome == "passed" else 1
     if args.resume_deferred and not args.execute:
         print("global_codegen_resume_unavailable")
+        return 2
+    if args.allow_early_resume and not (args.execute and args.resume_deferred):
+        print("global_codegen_early_resume_unavailable")
         return 2
     if not args.execute:
         print(json.dumps(plan(), ensure_ascii=False, sort_keys=True, separators=(",", ":")))
@@ -787,6 +797,7 @@ def main(argv: list[str] | None = None) -> int:
         result = run_global_etf_research_codegen_case(
             ues_repo_root=args.ues_repo_root, source_ref=environ.get("GITHUB_SHA", ""),
             resume_deferred=args.resume_deferred,
+            allow_early_resume=args.allow_early_resume,
         )
         print(json.dumps(_public_result(result), ensure_ascii=False, sort_keys=True, separators=(",", ":")))
         return 1 if result.get("status") == "failed" else 0
