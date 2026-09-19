@@ -401,7 +401,8 @@ def test_summary_callback_uses_codex_contract_and_trusted_route():
     client = Mock()
     client.execute.return_value = SimpleNamespace(
         success=True, provider="codex", model="codex-test", error="", note="",
-        raw={"status": "succeeded"},
+        raw={"status": "succeeded", "provider": "codex", "model": "codex-test",
+             "research_stage": "optimization"},
         output=json.dumps({"text": "候选与基线在既定窗口内可比较。"}),
     )
     config = SimpleNamespace(research_providers=("codex",))
@@ -434,7 +435,9 @@ def test_summary_callback_rejects_unsafe_model_output_without_retry(output):
 
     client = Mock()
     client.execute.return_value = SimpleNamespace(
-        success=True, provider="codex", model="codex-test", error="", note="", raw={"status": "succeeded"},
+        success=True, provider="codex", model="codex-test", error="", note="",
+        raw={"status": "succeeded", "provider": "codex", "model": "codex-test",
+             "research_stage": "optimization"},
         output=json.dumps(output),
     )
     runtime = SimpleNamespace(
