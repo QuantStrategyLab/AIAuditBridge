@@ -18,6 +18,11 @@ on:
         required: true
         default: false
         type: boolean
+      allow_early_resume:
+        description: One operator-attested early resume after verified quota recovery; requires execute and resume_deferred
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -60,6 +65,14 @@ jobs:
           fi
           if [ "${{ inputs.resume_deferred }}" = "true" ] && [ "${{ inputs.auth_only }}" = "true" ]; then
             echo "resume_deferred_and_auth_only_are_mutually_exclusive" >&2
+            exit 2
+          fi
+          if [ "${{ inputs.allow_early_resume }}" = "true" ] && [ "${{ inputs.execute }}" != "true" ]; then
+            echo "allow_early_resume_requires_execute" >&2
+            exit 2
+          fi
+          if [ "${{ inputs.allow_early_resume }}" = "true" ] && [ "${{ inputs.resume_deferred }}" != "true" ]; then
+            echo "allow_early_resume_requires_resume_deferred" >&2
             exit 2
           fi
 
@@ -115,7 +128,11 @@ jobs:
             if [ "${{ inputs.resume_deferred }}" = "true" ]; then
               resume_arg+=(--resume-deferred)
             fi
-            "$CASE_ROOT/venv/bin/python" -m scripts.run_global_etf_research_codegen --execute --ues-repo-root "$GITHUB_WORKSPACE/ues-source" "${resume_arg[@]}"
+            early_resume_arg=()
+            if [ "${{ inputs.allow_early_resume }}" = "true" ]; then
+              early_resume_arg+=(--allow-early-resume)
+            fi
+            "$CASE_ROOT/venv/bin/python" -m scripts.run_global_etf_research_codegen --execute --ues-repo-root "$GITHUB_WORKSPACE/ues-source" "${resume_arg[@]}" "${early_resume_arg[@]}"
           else
             python3 -m scripts.run_global_etf_research_codegen
           fi

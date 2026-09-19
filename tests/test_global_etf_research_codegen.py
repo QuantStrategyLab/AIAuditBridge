@@ -113,11 +113,27 @@ class GlobalResearchCodegenTests(TestCase):
         inputs = workflow.split("    inputs:\n", 1)[1].split("\npermissions:", 1)[0]
         self.assertIn("      resume_deferred:\n", inputs)
         self.assertIn("        default: false\n", inputs.split("      resume_deferred:\n", 1)[1])
+        self.assertIn("      allow_early_resume:\n", inputs)
+        self.assertIn("        default: false\n", inputs.split("      allow_early_resume:\n", 1)[1])
         guard = workflow.split("      - name: Reject conflicting execution modes\n", 1)[1].split("\n      - name:", 1)[0]
         self.assertIn("resume_deferred_requires_execute", guard)
         self.assertIn("resume_deferred_and_auth_only_are_mutually_exclusive", guard)
+        self.assertIn("allow_early_resume_requires_execute", guard)
+        self.assertIn("allow_early_resume_requires_resume_deferred", guard)
         execute = workflow.split("      - name: Run the fixed plan or execute path\n", 1)[1].split("\n      - name:", 1)[0]
         self.assertIn("resume_arg+=(--resume-deferred)", execute)
+        self.assertIn("early_resume_arg+=(--allow-early-resume)", execute)
+
+    def test_workflow_rejects_early_resume_without_deferred_resume(self):
+        workflow = (Path(__file__).parents[1] / ".github/workflows/global_etf_research_codegen.yml").read_text()
+        step = workflow.split("      - name: Reject conflicting execution modes\n", 1)[1]
+        run_block = step.split("        run: |\n", 1)[1].split("\n      - name:", 1)[0]
+        script = textwrap.dedent(run_block)
+        for name, value in (("execute", "true"), ("auth_only", "false"), ("resume_deferred", "false"), ("allow_early_resume", "true")):
+            script = script.replace("${{ inputs." + name + " }}", value)
+        result = subprocess.run(["bash", "-euo", "pipefail", "-c", script], capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("allow_early_resume_requires_resume_deferred", result.stderr)
 
     def test_auth_preflight_hides_exception_and_stops_before_research(self):
         class FakeAuthenticationError(Exception):
@@ -445,6 +461,25 @@ class GlobalResearchCodegenTests(TestCase):
                     self.assertTrue(docker.called)
                 else:
                     docker.assert_not_called()
+
+    def test_explicit_early_resume_allows_one_trusted_quota_deferral(self):
+        retry_at = int(codegen.datetime.now(codegen.timezone.utc).timestamp()) + 60
+        with TemporaryDirectory() as tmp, patch.object(codegen, "_docker_preflight"), patch.object(
+            codegen, "_read_global_base", return_value=(codegen.GLOBAL_ETF_RESEARCH_CODEGEN_UES_COMMIT, {})), patch.dict(
+                sys.modules, {"scripts.run_new_research": SimpleNamespace(_archive_codegen_base=lambda *a, **k: None)}):
+            root = Path(tmp)
+            self._write_legacy_deferred(root, retry_at=retry_at)
+            calls = []
+            result = codegen.run_global_etf_research_codegen_case(
+                ues_repo_root=root, run_root=root, source_ref="a" * 40, resume_deferred=True,
+                allow_early_resume=True,
+                candidate_test_runner=lambda *args, **kwargs: {"status": "passed"},
+                execute=lambda _: calls.append("model") or _response(),
+            )
+            self.assertEqual(result["status"], "review_completed")
+            self.assertEqual(calls, ["model"])
+            self.assertTrue((root / "resume.lock").exists())
+            self.assertTrue((root / "resume-result.json").exists())
 
     def test_resume_unknown_response_leaves_permanent_lock_and_no_retry_result(self):
         retry_at = int(codegen.datetime.now(codegen.timezone.utc).timestamp()) - 1
