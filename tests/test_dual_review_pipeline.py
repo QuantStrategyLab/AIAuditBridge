@@ -22,6 +22,9 @@ class DualReviewPipelineTests(unittest.TestCase):
         self.assertIn("dual_review_gate_disabled", result.get("skipped", []))
 
     def test_pipeline_with_injected_primary(self) -> None:
+        # Research triggers ignore stub secondary and keep unavailable slots;
+        # low-confidence primary + unavailable secondaries is availability
+        # failure (degraded), not a completed substantive veto.
         with patch.dict("os.environ", {"DUAL_REVIEW_SECONDARY_MODE": "stub"}, clear=False):
             result = run_pipeline(
                 trigger="drift",
@@ -29,8 +32,12 @@ class DualReviewPipelineTests(unittest.TestCase):
                 context={"drift_score": 0.95},
                 primary_review={"verdict": "approve", "confidence": 0.4},
             )
-        self.assertTrue(result.get("ok"))
-        self.assertIn("outcome", result)
+        self.assertEqual(result.get("outcome"), "review_unavailable")
+        self.assertFalse(result.get("ok"))
+        self.assertTrue(result.get("degraded"))
+        self.assertEqual(result.get("error"), "reviewers_unavailable")
+        self.assertEqual(result.get("reason"), "two-reviewer quorum unavailable")
+        self.assertEqual(_exit_code(result), 3)
 
     @patch("scripts.run_dual_review_pipeline.orchestrate_from_payload")
     @patch.dict("os.environ", {"DUAL_REVIEW_SECONDARY_MODE": "stub"}, clear=False)
@@ -84,6 +91,41 @@ class DualReviewPipelineTests(unittest.TestCase):
 
     def test_disagreement_is_a_hard_block(self) -> None:
         self.assertEqual(_exit_code({"ok": True, "outcome": "disagreement"}), 2)
+
+    def test_partial_unavailable_pipeline_maps_to_degraded_not_completed_block(self) -> None:
+        from service.dual_review import VERDICT_UNAVAILABLE, DualReviewTrigger
+        from service.dual_review_orchestrator import DualReviewResult
+
+        with patch("scripts.run_dual_review_pipeline.orchestrate_from_payload") as mock_orchestrate:
+            mock_orchestrate.return_value = DualReviewResult(
+                trigger=DualReviewTrigger.DRIFT,
+                strategy_profile="demo",
+                primary_review={"verdict": "pass", "confidence": 0.9},
+                secondary_review={"verdict": VERDICT_UNAVAILABLE, "confidence": 0.0},
+                comparison={
+                    "verdict": VERDICT_UNAVAILABLE,
+                    "reason": "two-reviewer quorum unavailable",
+                    "primary_verdict": "pass",
+                    "secondary_verdict": VERDICT_UNAVAILABLE,
+                    "agreement": False,
+                },
+                outcome=VERDICT_UNAVAILABLE,
+                reason="two-reviewer quorum unavailable",
+            )
+            result = run_pipeline(
+                trigger="drift",
+                strategy_profile="demo",
+                context={"drift_score": 0.95},
+                primary_review={"verdict": "pass", "confidence": 0.9},
+            )
+        self.assertEqual(result["outcome"], VERDICT_UNAVAILABLE)
+        self.assertEqual(result["reason"], "two-reviewer quorum unavailable")
+        self.assertEqual(result["warning"], "two-reviewer quorum unavailable")
+        self.assertTrue(result["degraded"])
+        self.assertEqual(result["error"], "reviewers_unavailable")
+        self.assertFalse(result["ok"])
+        self.assertEqual(_exit_code(result), 3)
+        self.assertNotEqual(result["outcome"], "disagreement")
 
     @patch("scripts.run_dual_review_pipeline.orchestrate_from_payload")
     def test_reconciliation_baseline_requires_human_recovery_approval(self, mock_orchestrate) -> None:

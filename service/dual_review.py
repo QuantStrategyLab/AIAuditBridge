@@ -131,11 +131,16 @@ def compare_three_reviews(
             verdict = available[0]
             reason = "primary and one available secondary reviewer agree"
         elif require_all_reviewers:
-            verdict = VERDICT_DISAGREEMENT
+            # Mandatory multi-review still fail-closes; classify incomplete
+            # quorum as availability rather than a finished substantive veto.
+            verdict = VERDICT_UNAVAILABLE
             reason = "all required reviewers must return a valid verdict"
-        else:
+        elif len(available) >= 2 and len(set(available)) > 1:
             verdict = VERDICT_DISAGREEMENT
-            reason = "primary unavailable or available reviewer quorum conflicts"
+            reason = "available reviewer quorum conflicts"
+        else:
+            verdict = VERDICT_UNAVAILABLE
+            reason = "two-reviewer quorum unavailable"
     elif primary_verdict == gpt_verdict == claude_verdict:
         verdict = primary_verdict
         reason = "codex, gpt, and claude unanimous"
@@ -177,8 +182,11 @@ def compare_reviews(primary: dict[str, Any], secondary: dict[str, Any]) -> dict[
         verdict = VERDICT_UNAVAILABLE
         reason = "primary and secondary reviewers unavailable"
     elif VERDICT_UNAVAILABLE in {primary_verdict, secondary_verdict}:
-        # DISAGREEMENT is a hard block in run_dual_review_pipeline._exit_code.
-        verdict = VERDICT_DISAGREEMENT
+        # Quorum incomplete is an availability failure, not a completed
+        # substantive veto. Pipeline maps UNAVAILABLE to degraded/exit 3 while
+        # still fail-closing (never promote). Consumers must not treat this as
+        # review_completed_blocked the way disagreement/fail do.
+        verdict = VERDICT_UNAVAILABLE
         reason = "two-reviewer quorum unavailable"
     elif primary_verdict == secondary_verdict:
         verdict = primary_verdict

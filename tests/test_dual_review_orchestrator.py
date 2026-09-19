@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from service.dual_review import VERDICT_DISAGREEMENT, VERDICT_FAIL, VERDICT_PASS, DualReviewTrigger
+from service.dual_review import VERDICT_DISAGREEMENT, VERDICT_FAIL, VERDICT_PASS, VERDICT_UNAVAILABLE, DualReviewTrigger
 from service.dual_review_orchestrator import (
     DualReviewRequest,
     build_request_from_payload,
@@ -142,7 +142,8 @@ class DualReviewOrchestratorTests(unittest.TestCase):
         )
 
         assert result is not None
-        self.assertEqual(result.outcome, VERDICT_DISAGREEMENT)
+        self.assertEqual(result.outcome, VERDICT_UNAVAILABLE)
+        self.assertEqual(result.reason, "all required reviewers must return a valid verdict")
 
     def test_other_triggers_preserve_available_reviewer_quorum(self) -> None:
         result = orchestrate_from_payload(

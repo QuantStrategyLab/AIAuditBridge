@@ -63,7 +63,10 @@ def test_research_low_confidence_never_selects_paid_secondary(trigger, gateway):
     ):
         result = run_pipeline(trigger=trigger, strategy_profile="synthetic", context={},
                               primary_review={"verdict": "approve", "confidence": 0.5})
-    assert result["outcome"] == "disagreement" and _exit_code(result) == 2
+    assert result["outcome"] == "review_unavailable" and _exit_code(result) == 3
+    assert result["degraded"] is True
+    assert result["error"] == "reviewers_unavailable"
+    assert result["reason"] == "two-reviewer quorum unavailable"
     for reviewer in ("gpt", "claude"):
         assert result["secondary_review"][reviewer]["verdict"] == "review_unavailable"
         assert result["secondary_review"][reviewer]["executed"] is False
@@ -103,7 +106,10 @@ def test_reconciliation_still_requires_all_reviewers_and_human_recovery():
         result = run_pipeline(trigger="reconciliation_baseline", strategy_profile="synthetic",
             context={"reconciliation_candidate_sha256": "a" * 64}, primary_review={"verdict": "approve", "confidence": 0.99})
     legacy.assert_called_once()
-    assert result["outcome"] == "disagreement" and _exit_code(result) == 2
+    assert result["outcome"] == "review_unavailable" and _exit_code(result) == 3
+    assert result["degraded"] is True
+    assert result["error"] == "reviewers_unavailable"
+    assert result["reason"] == "all required reviewers must return a valid verdict"
     assert result["requires_human_recovery_approval"] is True
     assert result["evidence_binding_sha256"] == "a" * 64
     assert result["recovery_authority"]["final_action"] == "escalate"
