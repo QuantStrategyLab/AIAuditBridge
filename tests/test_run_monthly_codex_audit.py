@@ -3203,6 +3203,8 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertIn("audit service did not become healthy", deploy_script)
         self.assertIn("nginx config test failed; restoring previous config", deploy_script)
         self.assertIn("zzzz-managed-allowlists.conf", deploy_script)
+        self.assertIn("clear_legacy_audit_service_model_overrides", deploy_script)
+        self.assertIn('Environment="CODEX_AUDIT_SERVICE_MODEL=%s"', deploy_script)
         self.assertIn('Environment="CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES=${ALLOWED_REPOSITORIES}"', deploy_script)
         self.assertIn('Environment="CODEX_AUDIT_SERVICE_ALLOWED_JOB_WORKFLOW_REFS=${ALLOWED_JOB_WORKFLOW_REFS}"', deploy_script)
         self.assertIn('Environment="CODEX_AUDIT_SERVICE_ALLOWED_DIRECT_REPOSITORIES=${ALLOWED_DIRECT_REPOSITORIES}"', deploy_script)

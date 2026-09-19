@@ -228,8 +228,12 @@ Configure these values in `QuantStrategyLab/AIAuditBridge`:
   (minimal/low→fast, medium→standard, high→capable, xhigh→flagship). Catalog
   file updates are picked up on the next call. Explicit non-auto request or env
   model values are preserved as-is. Auto selection refuses retired legacy
-  `gpt-5.4` / `gpt-5.4-mini` catalog pins and falls back to another non-retired
-  catalog model (or errors) rather than forwarding that family to the CLI.
+  `gpt-5.4` / `gpt-5.4-mini` catalog pins and any model outside the Codex
+  research roster allowlist (`_CODEX_RESEARCH_MODELS`), so Claude/Anthropic and
+  OpenAI API-only ids are never chosen for auto. Missing usable roster entries
+  fail closed. Deploy with `CODEX_AUDIT_SERVICE_MODEL` set (including `auto`)
+  writes it into the managed systemd drop-in and clears leftover MODEL overrides
+  from older drop-ins so they cannot win.
 - Optional repository variable `CODEX_AUDIT_SERVICE_REASONING_EFFORT` for a
   VPS Codex reasoning-effort hard override. Leave it unset or set `auto` to let
   the service choose low/medium/high effort from task complexity.

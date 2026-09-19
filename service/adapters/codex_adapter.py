@@ -16,11 +16,15 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from service.model_resolver import _CODEX_RESEARCH_MODELS as _CODEX_AUTO_ROSTER
+
 SECRET_ENV_MARKERS = ("TOKEN", "SECRET", "PASSWORD", "PRIVATE_KEY", "CREDENTIAL", "API_KEY", "ADMIN_KEY")
 CODEX_REASONING_EFFORTS = frozenset({"minimal", "low", "medium", "high", "xhigh"})
 _AUTO_MODEL_TOKENS = frozenset({"", "auto", "tier:auto"})
 # Exact ids only — auto path must never forward these retired legacy models to CLI.
 _RETIRED_LEGACY_MODELS = frozenset({"gpt-5.4", "gpt-5.4-mini"})
+# Codex CLI auto resolves only against the host Codex research roster, never the
+# mixed OpenAI/Anthropic API catalog. Reuse the resolver allowlist in place.
 _EFFORT_TO_TIER = {
     "minimal": "fast",
     "low": "fast",
@@ -60,13 +64,15 @@ def _catalog_model_usable(model_id: str, catalog) -> bool:
     mid = str(model_id or "").strip()
     if not mid or _is_auto_model(mid) or _is_retired_legacy_model(mid):
         return False
+    if mid not in _CODEX_AUTO_ROSTER:
+        return False
     if mid in set(catalog.deprecated):
         return False
     return mid in catalog.models
 
 
 def _select_non_retired_catalog_model(catalog, preferred_tier: str) -> str:
-    """Pick a concrete non-retired model for auto; never return gpt-5.4 family/auto."""
+    """Pick a concrete Codex roster model for auto; fail closed if none usable."""
     preferred = str(preferred_tier or "standard").strip() or "standard"
     assignment = catalog.tiers.get(preferred)
     if assignment is not None and _catalog_model_usable(assignment.model, catalog):
@@ -85,7 +91,7 @@ def _select_non_retired_catalog_model(catalog, preferred_tier: str) -> str:
         if _catalog_model_usable(model_id, catalog)
     ]
     if not scored:
-        raise RuntimeError("model catalog has no usable non-retired Codex model for auto")
+        raise RuntimeError("model catalog has no usable Codex roster model for auto")
     scored.sort(key=lambda record: float(record.capability_score), reverse=True)
     return scored[0].model_id
 
@@ -106,8 +112,13 @@ def _resolve_codex_model(model: str | None, reasoning_effort: str) -> str:
     # Read the live catalog path each call so on-disk updates apply without adapter caching.
     catalog = load_catalog(catalog_path())
     resolved = _select_non_retired_catalog_model(catalog, tier)
-    if not resolved or _is_auto_model(resolved) or _is_retired_legacy_model(resolved):
-        raise RuntimeError("model catalog did not resolve a concrete non-retired Codex model")
+    if (
+        not resolved
+        or _is_auto_model(resolved)
+        or _is_retired_legacy_model(resolved)
+        or resolved not in _CODEX_AUTO_ROSTER
+    ):
+        raise RuntimeError("model catalog did not resolve a concrete Codex roster model")
     return resolved
 
 

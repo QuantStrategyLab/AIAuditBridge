@@ -10,9 +10,12 @@ Fully automatic monthly model tier maintenance:
 - long-running workers reload when the on-disk catalog mtime changes
 - VPS Codex service default `CODEX_AUDIT_SERVICE_MODEL=auto` resolves per call
   from that catalog (effort→tier); never pin a static deprecated model name in
-  the adapter, and never forward `auto` to the Codex CLI. Auto selection also
-  refuses retired legacy `gpt-5.4` / `gpt-5.4-mini` tier pins and falls back to
-  another non-retired catalog model.
+  the adapter, and never forward `auto` to the Codex CLI. Auto selection only
+  accepts the Codex research roster allowlist (`_CODEX_RESEARCH_MODELS`), so it
+  refuses retired `gpt-5.4` / `gpt-5.4-mini`, Claude/Anthropic, and OpenAI
+  API-only catalog ids; missing usable roster entries fail closed. Deploy with
+  `CODEX_AUDIT_SERVICE_MODEL` set (including `auto`) rewrites the managed
+  systemd drop-in and strips leftover MODEL pins from older drop-ins.
 
 ### Zero-touch VPS deploy
 
