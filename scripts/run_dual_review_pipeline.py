@@ -166,7 +166,9 @@ def run_pipeline(
     if outcome.outcome == VERDICT_UNAVAILABLE:
         result["skipped"] = ["reviewers_unavailable"]
         result["degraded"] = True
-        result["warning"] = "all configured reviewers are unavailable"
+        # Prefer comparison reason so partial quorum loss is not labeled as a
+        # finished substantive veto the way disagreement/fail are.
+        result["warning"] = str(outcome.reason or "all configured reviewers are unavailable")
         result["error"] = "reviewers_unavailable"
     if dispatch:
         result["dispatch"] = dispatch_dual_review_result(outcome, dry_run=dry_run)

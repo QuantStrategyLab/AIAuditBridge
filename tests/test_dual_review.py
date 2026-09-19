@@ -59,9 +59,46 @@ class TestCompareReviews(unittest.TestCase):
     def test_disagreement(self) -> None:
         result = compare_reviews({"verdict": "approve"}, {"verdict": "reject"})
         self.assertEqual(result["verdict"], VERDICT_DISAGREEMENT)
+        self.assertEqual(result["reason"], "reviews disagree")
         self.assertFalse(result["agreement"])
         self.assertEqual(result["primary_verdict"], VERDICT_PASS)
         self.assertEqual(result["secondary_verdict"], VERDICT_FAIL)
+
+    def test_pass_plus_unavailable_is_availability_failure_not_substantive_veto(self) -> None:
+        result = compare_reviews(
+            {"verdict": "pass", "confidence": 0.9},
+            {"verdict": VERDICT_UNAVAILABLE, "confidence": 0.0},
+        )
+        self.assertEqual(result["verdict"], VERDICT_UNAVAILABLE)
+        self.assertEqual(result["reason"], "two-reviewer quorum unavailable")
+        self.assertFalse(result["agreement"])
+        self.assertEqual(result["primary_verdict"], VERDICT_PASS)
+        self.assertEqual(result["secondary_verdict"], VERDICT_UNAVAILABLE)
+
+    def test_fail_plus_unavailable_is_availability_failure_not_completed_reject(self) -> None:
+        result = compare_reviews(
+            {"verdict": "fail", "confidence": 0.9},
+            {"verdict": VERDICT_UNAVAILABLE, "confidence": 0.0},
+        )
+        self.assertEqual(result["verdict"], VERDICT_UNAVAILABLE)
+        self.assertEqual(result["reason"], "two-reviewer quorum unavailable")
+        self.assertFalse(result["agreement"])
+
+    def test_both_unavailable_remains_unavailable(self) -> None:
+        unavailable = {"verdict": VERDICT_UNAVAILABLE, "confidence": 0.0}
+        result = compare_reviews(unavailable, unavailable)
+        self.assertEqual(result["verdict"], VERDICT_UNAVAILABLE)
+        self.assertEqual(result["reason"], "primary and secondary reviewers unavailable")
+        self.assertFalse(result["agreement"])
+
+    def test_invalid_response_remains_hard_block_disagreement(self) -> None:
+        result = compare_reviews(
+            {"verdict": "pass", "confidence": 0.9},
+            {"verdict": VERDICT_INVALID, "confidence": 0.0},
+        )
+        self.assertEqual(result["verdict"], VERDICT_DISAGREEMENT)
+        self.assertEqual(result["reason"], "one or more reviewer responses are invalid")
+        self.assertFalse(result["agreement"])
 
     def test_missing_verdict_is_disagreement(self) -> None:
         result = compare_reviews({"confidence": 0.9}, {"verdict": "pass"})
@@ -117,15 +154,40 @@ class TestCompareThreeReviews(unittest.TestCase):
             {"verdict": "approve", "confidence": 0.9},
             {"verdict": "approve", "confidence": 0.9},
         )
-        self.assertEqual(result["verdict"], VERDICT_DISAGREEMENT)
+        self.assertEqual(result["verdict"], VERDICT_UNAVAILABLE)
+        self.assertEqual(result["reason"], "two-reviewer quorum unavailable")
+        self.assertFalse(result["agreement"])
 
-    def test_one_available_reviewer_is_not_a_quorum(self) -> None:
+    def test_one_available_reviewer_is_availability_failure_not_substantive_veto(self) -> None:
         result = compare_three_reviews(
             {"verdict": "approve", "confidence": 0.9},
             {"verdict": VERDICT_UNAVAILABLE, "confidence": 0.0, "error": "provider unavailable"},
             {"verdict": VERDICT_UNAVAILABLE, "confidence": 0.0, "error": "provider unavailable"},
         )
+        self.assertEqual(result["verdict"], VERDICT_UNAVAILABLE)
+        self.assertEqual(result["reason"], "two-reviewer quorum unavailable")
+        self.assertFalse(result["agreement"])
+
+    def test_available_reviewers_split_remains_substantive_disagreement(self) -> None:
+        result = compare_three_reviews(
+            {"verdict": "approve", "confidence": 0.9},
+            {"verdict": "reject", "confidence": 0.9},
+            {"verdict": VERDICT_UNAVAILABLE, "confidence": 0.0, "error": "provider unavailable"},
+        )
         self.assertEqual(result["verdict"], VERDICT_DISAGREEMENT)
+        self.assertIn("quorum conflicts", result["reason"])
+        self.assertFalse(result["agreement"])
+
+    def test_require_all_reviewers_unavailable_is_availability_failure(self) -> None:
+        result = compare_three_reviews(
+            {"verdict": "approve", "confidence": 0.9},
+            {"verdict": "approve", "confidence": 0.9},
+            {"verdict": VERDICT_UNAVAILABLE, "confidence": 0.0},
+            require_all_reviewers=True,
+        )
+        self.assertEqual(result["verdict"], VERDICT_UNAVAILABLE)
+        self.assertEqual(result["reason"], "all required reviewers must return a valid verdict")
+        self.assertFalse(result["agreement"])
 
     def test_parse_error_is_not_dropped_from_quorum(self) -> None:
         result = compare_three_reviews(
