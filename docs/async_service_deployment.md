@@ -61,7 +61,7 @@ CODEX_AUDIT_SERVICE_ALLOWED_REFS='refs/heads/main' \
 CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORY_VISIBILITIES='public' \
 CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES='QuantStrategyLab/AIAuditBridge,QuantStrategyLab/CryptoLivePoolPipelines,QuantStrategyLab/HkEquitySnapshotPipelines,QuantStrategyLab/UsEquitySnapshotPipelines,QuantStrategyLab/ResearchSignalContextPipelines' \
 CODEX_AUDIT_SERVICE_AUDIENCE=quant-codex-audit \
-CODEX_AUDIT_SERVICE_MODEL=gpt-5.4 \
+CODEX_AUDIT_SERVICE_MODEL=auto \
 CODEX_AUDIT_SERVICE_REASONING_EFFORT=auto \
 CODEX_AUDIT_SERVICE_CODEX_ACCOUNT_USAGE=1 \
 CODEX_AUDIT_SERVICE_OPENAI_USAGE_WINDOW_DAYS=7 \
@@ -93,6 +93,13 @@ keys. When those filters are set, costs are omitted to avoid mixing filtered
 usage with an unfiltered cost total.
 Set `CODEX_AUDIT_SERVICE_REASONING_EFFORT` only when a hard override is needed;
 unset or `auto` keeps task-complexity routing.
+Prefer `CODEX_AUDIT_SERVICE_MODEL=auto` so each Codex CLI call resolves a concrete
+model from the live catalog restricted to the Codex research roster allowlist
+(never Claude, never retired `gpt-5.4` / `gpt-5.4-mini`, never OpenAI API-only
+ids). Missing catalog or usable roster entries fail closed. Explicit request or
+env model values are preserved as-is. Deploy rewrites the managed systemd drop-in
+and strips leftover `CODEX_AUDIT_SERVICE_MODEL` pins from older drop-ins when this
+variable is set (preserving other variables on the same Environment line).
 
 Dashboard health panels intentionally separate online service health, organization workflow health, background job status, and artifact/content evidence. See [`health_taxonomy.md`](health_taxonomy.md) before treating a dashboard status as an automation gate.
 

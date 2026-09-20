@@ -419,10 +419,73 @@ WantedBy=multi-user.target
 EOF_UNIT
 }
 
+clear_legacy_audit_service_model_overrides() {
+  # When deploy explicitly sets CODEX_AUDIT_SERVICE_MODEL (including auto), strip
+  # leftover Environment pins from older drop-ins so they cannot override it.
+  if [ -z "$AUDIT_MODEL" ]; then
+    return 0
+  fi
+  local dropin_dir="/etc/systemd/system/${AUDIT_SERVICE_NAME}.service.d"
+  if [ ! -d "$dropin_dir" ]; then
+    return 0
+  fi
+  local conf
+  for conf in "$dropin_dir"/*.conf; do
+    [ -e "$conf" ] || continue
+    case "$(basename "$conf")" in
+      zzzz-managed-allowlists.conf) continue ;;
+    esac
+    sudo python3 - "$conf" <<'PY'
+from __future__ import annotations
+
+from pathlib import Path
+import shlex
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+out: list[str] = []
+changed = False
+for line in text.splitlines(keepends=True):
+    ending = ""
+    body = line
+    if body.endswith("\r\n"):
+        ending = "\r\n"
+        body = body[:-2]
+    elif body.endswith("\n"):
+        ending = "\n"
+        body = body[:-1]
+    stripped = body.lstrip(" \t")
+    indent = body[: len(body) - len(stripped)]
+    if not stripped.startswith("Environment="):
+        out.append(line)
+        continue
+    raw = stripped[len("Environment=") :]
+    try:
+        tokens = shlex.split(raw, posix=True)
+    except ValueError:
+        tokens = [raw] if raw else []
+    kept = [token for token in tokens if not token.startswith("CODEX_AUDIT_SERVICE_MODEL=")]
+    if kept == tokens:
+        out.append(line)
+        continue
+    changed = True
+    if not kept:
+        continue
+    formatted = " ".join('"' + token.replace("\\", "\\\\").replace('"', '\\"') + '"' for token in kept)
+    out.append(f"{indent}Environment={formatted}{ending}")
+updated = "".join(out)
+if changed:
+    path.write_text(updated, encoding="utf-8")
+PY
+  done
+}
+
 write_managed_audit_service_dropin() {
   local dropin_dir="/etc/systemd/system/${AUDIT_SERVICE_NAME}.service.d"
   sudo install -d -m 0755 "$dropin_dir"
-  sudo tee "${dropin_dir}/zzzz-managed-allowlists.conf" >/dev/null <<EOF_DROPIN
+  {
+    cat <<EOF_DROPIN
 [Service]
 # Managed by scripts/deploy_codex_audit_service.sh; parsed after legacy drop-ins.
 Environment="CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES=${ALLOWED_REPOSITORIES}"
@@ -434,6 +497,13 @@ Environment="CODEX_AUDIT_SERVICE_ALLOWED_DIRECT_REPOSITORIES=${ALLOWED_DIRECT_RE
 Environment="CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES=${ALLOWED_SOURCE_REPOSITORIES}"
 Environment="CODEX_AUDIT_SERVICE_EXECUTION_POLICY_PATH=${EXECUTION_POLICY_FILE}"
 EOF_DROPIN
+    if [ -n "$AUDIT_MODEL" ]; then
+      printf 'Environment="CODEX_AUDIT_SERVICE_MODEL=%s"\n' "$AUDIT_MODEL"
+    fi
+    if [ -n "$AUDIT_REASONING_EFFORT" ]; then
+      printf 'Environment="CODEX_AUDIT_SERVICE_REASONING_EFFORT=%s"\n' "$AUDIT_REASONING_EFFORT"
+    fi
+  } | sudo tee "${dropin_dir}/zzzz-managed-allowlists.conf" >/dev/null
 }
 
 configure_nginx_codex_audit_route() {
@@ -664,6 +734,7 @@ deploy() {
   write_admin_env_file_if_needed
   write_service_token_env_file_if_needed
   write_audit_service_unit
+  clear_legacy_audit_service_model_overrides
   write_managed_audit_service_dropin
   sudo systemctl daemon-reload
   sudo systemctl enable --now "$AUDIT_SERVICE_NAME"

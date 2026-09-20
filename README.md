@@ -92,7 +92,14 @@ Configure these values in `QuantStrategyLab/AIAuditBridge`:
 - Monthly audits with `CODEX_AUDIT_PROVIDER=auto` fall back to the configured
   API reviewers when the Codex service hits quota/capacity failures.
 - Repository variable `CODEX_AUDIT_SERVICE_MODEL` for the VPS Codex service primary
-  path; `VPS Codex Service Ops` deploy writes it into the systemd unit.
+  path (default `auto`); `VPS Codex Service Ops` deploy writes it into the systemd
+  unit. When unset/`auto`/`tier:auto`, each Codex CLI call resolves a concrete
+  model from the live model catalog by reasoning-effort tier. Auto selection
+  refuses retired `gpt-5.4` / `gpt-5.4-mini` and any model outside the Codex
+  research roster; missing catalog or usable roster entries fail closed.
+  Explicit request/env model values are preserved as-is. Deploy with
+  `CODEX_AUDIT_SERVICE_MODEL` set (including `auto`) also clears leftover MODEL
+  overrides from older systemd drop-ins.
 - Optional repository variable `CODEX_AUDIT_SERVICE_REASONING_EFFORT` for a
   VPS Codex reasoning-effort hard override. Leave it unset or set `auto` to let
   the service choose low/medium/high effort from task complexity.
@@ -118,7 +125,7 @@ Run the service host with:
 CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES=QuantStrategyLab/AIAuditBridge \
 CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES='QuantStrategyLab/AIAuditBridge,QuantStrategyLab/CryptoLivePoolPipelines,QuantStrategyLab/HkEquitySnapshotPipelines,QuantStrategyLab/UsEquitySnapshotPipelines,QuantStrategyLab/ResearchSignalContextPipelines' \
 CODEX_AUDIT_SERVICE_AUDIENCE=quant-codex-audit \
-CODEX_AUDIT_SERVICE_MODEL=gpt-5.4 \
+CODEX_AUDIT_SERVICE_MODEL=auto \
 CODEX_AUDIT_SERVICE_REASONING_EFFORT=auto \
 CODEX_AUDIT_SERVICE_CODEX_ACCOUNT_USAGE=1 \
 CODEX_AUDIT_SERVICE_OPENAI_USAGE_WINDOW_DAYS=7 \

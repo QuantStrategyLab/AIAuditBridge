@@ -8,6 +8,15 @@ Fully automatic monthly model tier maintenance:
 - writes `/var/lib/codex-audit-bridge/model_catalog.json` (or `MODEL_CATALOG_PATH`)
 - `service/model_resolver.py` resolves task → tier → concrete model at runtime
 - long-running workers reload when the on-disk catalog mtime changes
+- VPS Codex service default `CODEX_AUDIT_SERVICE_MODEL=auto` resolves per call
+  from that catalog (effort→tier); never pin a static deprecated model name in
+  the adapter, and never forward `auto` to the Codex CLI. Auto selection only
+  accepts the Codex research roster allowlist, so it refuses retired
+  `gpt-5.4` / `gpt-5.4-mini`, Claude/Anthropic, and OpenAI API-only catalog ids;
+  missing usable roster entries fail closed. Explicit request/env models are
+  preserved. Deploy with `CODEX_AUDIT_SERVICE_MODEL` set (including `auto`)
+  rewrites the managed systemd drop-in and strips leftover MODEL pins from
+  older drop-ins.
 
 ### Zero-touch VPS deploy
 

@@ -87,8 +87,10 @@ AIAuditBridge 只使用 service backend。workflow 运行在 `ubuntu-latest`，�
   默认 `auto`，`long_horizon_signal_shadow` 默认 `codex`；如需固定 provider，
   请显式设置 `CODEX_AUDIT_PROVIDER`。workflow dispatch 使用 `task_default`
   把 provider 选择交给 task policy。
-- repository variable `CODEX_AUDIT_SERVICE_MODEL`，VPS Codex service 主路径模型；
-  `VPS Codex Service Ops` deploy 会写入 systemd unit。
+- repository variable `CODEX_AUDIT_SERVICE_MODEL`，VPS Codex service 主路径模型
+  （默认 `auto`）；`VPS Codex Service Ops` deploy 会写入 systemd。`auto` 时按
+  catalog + Codex roster 解析具体模型，拒绝已下架的 `gpt-5.4` / `gpt-5.4-mini`；
+  目录缺失或无可用 roster 模型时 fail-closed。显式 request/env 模型不被静默改写。
 - workflow 已配置 `id-token: write`，用于向 service 提供 GitHub Actions OIDC token。
 
 service host 启动示例：
@@ -97,7 +99,7 @@ service host 启动示例：
 CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES=QuantStrategyLab/AIAuditBridge \
 CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES='QuantStrategyLab/AIAuditBridge,QuantStrategyLab/CryptoLivePoolPipelines,QuantStrategyLab/HkEquitySnapshotPipelines,QuantStrategyLab/UsEquitySnapshotPipelines,QuantStrategyLab/ResearchSignalContextPipelines' \
 CODEX_AUDIT_SERVICE_AUDIENCE=quant-codex-audit \
-CODEX_AUDIT_SERVICE_MODEL=gpt-5.4 \
+CODEX_AUDIT_SERVICE_MODEL=auto \
 python3 -m service.ai_gateway_service
 ```
 
