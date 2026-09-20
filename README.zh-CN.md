@@ -83,7 +83,10 @@ AIAuditBridge 只使用 service backend。workflow 运行在 `ubuntu-latest`，�
   service 相同的 patch contract，并可以开 remediation PR，而不只是发 review 评论。
 - 可选 repository variable `CODEX_AUDIT_API_FALLBACK_PROVIDER_ORDER`，默认
   `openai,anthropic`。
-- repository variable `OPENAI_MODEL`，API fallback 使用的 OpenAI 模型。
+- repository variable `OPENAI_MODEL`，显式指定时覆盖 API/OpenAI 路径模型；未设置时由
+  服务按 live model catalog 中 `provider=openai` 的可用模型解析，不使用 Codex
+  subscription roster，也不再静默默认 `gpt-5.4` / `gpt-5.4-mini`；catalog 无可用
+  OpenAI 模型时 fail-closed。
 - repository variable `ANTHROPIC_MODEL`，API fallback 使用的 Anthropic 模型。
 - monthly audit 的默认 provider 随 task 而变：`monthly_snapshot_audit`
   默认 `auto`，`long_horizon_signal_shadow` 默认 `codex`；如需固定 provider，

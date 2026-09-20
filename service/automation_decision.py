@@ -28,7 +28,6 @@ AUTONOMY_ORDER = (AUTONOMY_MANUAL, AUTONOMY_REVIEW_ONLY, AUTONOMY_AUTO_PR, AUTON
 AUTONOMY_RANK = {level: index for index, level in enumerate(AUTONOMY_ORDER)}
 
 DEFAULT_MAX_CONSECUTIVE_FAILURES = 3
-DEFAULT_LOW_COST_MODEL = "gpt-5.4-mini"
 DEFAULT_LOW_COST_PROVIDER = "openai"
 EXECUTION_POLICY_PATH_ENV = "CODEX_AUDIT_SERVICE_EXECUTION_POLICY_PATH"
 EXECUTION_POLICY_OWNER_ENV = "CODEX_AUDIT_SERVICE_EXECUTION_POLICY_OWNER"
@@ -115,13 +114,25 @@ def _repo_from_run(run: dict[str, Any]) -> str:
     return str(metadata.get("source_repository") or metadata.get("repository") or "")
 
 
+def default_low_cost_model() -> str:
+    """Resolve the OpenAI low-cost API default from the live catalog; fail closed."""
+    from service.model_resolver import resolve_openai_api_model
+
+    return resolve_openai_api_model(preferred_tier="nano", prefer_low_cost=True)
+
+
 def _fail_closed_policy(reason: str) -> dict[str, Any]:
+    try:
+        low_cost_model = default_low_cost_model()
+    except (FileNotFoundError, OSError, ValueError, KeyError, RuntimeError):
+        # Manual autonomy already blocks execution; do not invent a retired model id.
+        low_cost_model = ""
     return {
         POLICY_LOAD_ERROR_KEY: reason,
         "default": {
             "max_autonomy": AUTONOMY_MANUAL,
             "max_consecutive_failures": 1,
-            "low_cost_model": DEFAULT_LOW_COST_MODEL,
+            "low_cost_model": low_cost_model,
             "low_cost_provider": DEFAULT_LOW_COST_PROVIDER,
         },
     }
@@ -369,7 +380,7 @@ def decide_automation_execution(
     policy_load_error = str((policy or {}).get(POLICY_LOAD_ERROR_KEY) or "") if isinstance(policy, dict) else ""
     max_autonomy, autonomy_config_error = _parse_autonomy(repo_policy.get("max_autonomy"), AUTONOMY_AUTO_PR)
     max_failures = _safe_positive_int(repo_policy.get("max_consecutive_failures"), DEFAULT_MAX_CONSECUTIVE_FAILURES)
-    low_cost_model = str(repo_policy.get("low_cost_model") or DEFAULT_LOW_COST_MODEL)
+    configured_low_cost = str(repo_policy.get("low_cost_model") or "").strip()
     low_cost_provider = str(repo_policy.get("low_cost_provider") or DEFAULT_LOW_COST_PROVIDER).strip().lower()
     quota_low_behavior = str(repo_policy.get("quota_low_behavior") or "low_cost_model").strip().lower()
 
@@ -453,9 +464,17 @@ def decide_automation_execution(
         elif quota_low_behavior == "defer":
             reasons.append(f"quota status is {quota}; automation already review_only")
         else:
-            effective_model = low_cost_model or recommend_model(0.0)
-            effective_provider = low_cost_provider or "auto"
-            reasons.append(f"quota status is {quota}; recommending low-cost model")
+            try:
+                low_cost_model = configured_low_cost or default_low_cost_model()
+            except (FileNotFoundError, OSError, ValueError, KeyError, RuntimeError) as exc:
+                action = EXECUTION_HUMAN_REVIEW
+                effective_mode = MODE_REVIEW_ONLY
+                human_review_required = True
+                reasons.append(f"quota status is {quota}; low-cost OpenAI model unavailable ({exc})")
+            else:
+                effective_model = low_cost_model or recommend_model(0.0)
+                effective_provider = low_cost_provider or "auto"
+                reasons.append(f"quota status is {quota}; recommending low-cost model")
     elif quota in {"exhausted", "blocked"}:
         if action != EXECUTION_HUMAN_REVIEW:
             action = EXECUTION_DEFER

@@ -221,6 +221,13 @@ Configure these values in `QuantStrategyLab/AIAuditBridge`:
   uses `task_default` to defer provider selection to the task policy.
 - Monthly audits with `CODEX_AUDIT_PROVIDER=auto` do not make direct paid API
   calls after Codex quota/capacity failure; the disabled fallback reports failure.
+- Repository variable `OPENAI_MODEL` (and explicit dual-review / execution-policy
+  model fields) remain caller overrides for paid OpenAI API paths. When those
+  overrides are unset, service defaults resolve a concrete OpenAI model from the
+  live model catalog with `provider=openai` only — never from the Codex research
+  roster allowlist, and never by hardcoding retired `gpt-5.4` / `gpt-5.4-mini`.
+  Missing usable OpenAI catalog entries fail closed instead of issuing a dead
+  request.
 - Repository variable `CODEX_AUDIT_SERVICE_MODEL` for the VPS Codex service primary
   path (default `auto`); `VPS Codex Service Ops` deploy writes it into the systemd
   unit. When unset/`auto`/`tier:auto`, each Codex CLI call resolves a concrete

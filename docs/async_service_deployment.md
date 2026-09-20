@@ -100,6 +100,12 @@ ids). Deploy rewrites the managed systemd drop-in and strips leftover
 `CODEX_AUDIT_SERVICE_MODEL` pins from older drop-ins when this variable is set
 (preserving other variables on the same Environment line).
 
+Paid OpenAI API defaults (adapter / dual-review GPT fallback / low-cost automation
+when policy omits `low_cost_model`) resolve from the same live catalog filtered to
+`provider=openai`. They must not reuse the Codex roster allowlist. Explicit
+`OPENAI_MODEL`, `DUAL_REVIEW_GPT_MODEL`, and policy `low_cost_model` values stay
+as-is. If the catalog has no usable OpenAI model, those defaults fail closed.
+
 Dashboard health panels intentionally separate online service health, organization workflow health, background job status, and artifact/content evidence. See [`health_taxonomy.md`](health_taxonomy.md) before treating a dashboard status as an automation gate.
 
 ### 2. Deploy the Cloudflare Worker

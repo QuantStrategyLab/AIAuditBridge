@@ -16,6 +16,11 @@ Fully automatic monthly model tier maintenance:
   API-only catalog ids; missing usable roster entries fail closed. Deploy with
   `CODEX_AUDIT_SERVICE_MODEL` set (including `auto`) rewrites the managed
   systemd drop-in and strips leftover MODEL pins from older drop-ins.
+- OpenAI API defaults (unset `OPENAI_MODEL` / dual-review GPT fallback / policy
+  low-cost when omitted) resolve from the same catalog with `provider=openai`
+  only. Do not mix that path with the Codex roster. Retired `gpt-5.4` /
+  `gpt-5.4-mini` are not used as silent defaults; missing OpenAI entries fail
+  closed.
 
 ### Zero-touch VPS deploy
 
