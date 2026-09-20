@@ -16,8 +16,6 @@ from service.model_router import default_dual_review_model_for_reviewer
 if TYPE_CHECKING:
     from service.dual_review_orchestrator import DualReviewRequest
 
-_DEFAULT_GPT_MODEL = "gpt-5.4-mini"
-_DEFAULT_CLAUDE_MODEL = "claude-sonnet-4-6"
 _REVIEW_JSON_RE = re.compile(r"\{[\s\S]*\}")
 
 _SECONDARY_SYSTEM = (

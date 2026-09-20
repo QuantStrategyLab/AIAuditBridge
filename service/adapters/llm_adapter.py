@@ -27,8 +27,8 @@ PROVIDER_ANTHROPIC = "anthropic"
 
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1"
-DEFAULT_OPENAI_MODEL = "gpt-5.4-mini"
 DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6"
+_AUTO_OPENAI_MODEL_TOKENS = frozenset({"", "auto", "tier:auto"})
 DEFAULT_ANTHROPIC_VERSION = "2023-06-01"
 DEFAULT_MAX_TOKENS = 4000
 DEFAULT_TIMEOUT = 120.0
@@ -166,13 +166,27 @@ def _retry_with_backoff(fn, *, max_retries: int = DEFAULT_MAX_RETRIES, base_seco
     raise LlmAdapterError("LLM retry limit is invalid")
 
 
+def default_openai_model() -> str:
+    """Resolve the OpenAI API default: explicit OPENAI_MODEL, else live catalog.
+
+    Missing usable OpenAI catalog entries fail closed (raised by resolver).
+    """
+    explicit = _env("OPENAI_MODEL")
+    if explicit.lower() not in _AUTO_OPENAI_MODEL_TOKENS:
+        return explicit
+    from service.model_resolver import resolve_openai_api_model
+
+    return resolve_openai_api_model(preferred_tier="fast", prefer_low_cost=True)
+
+
 def resolve_model(model: str) -> tuple[str, str]:
     """Return (provider, resolved_model)."""
-    m = model.strip().lower()
+    raw = model.strip()
+    m = raw.lower()
     if m.startswith("claude"):
-        return PROVIDER_ANTHROPIC, model.strip() or DEFAULT_ANTHROPIC_MODEL
+        return PROVIDER_ANTHROPIC, raw or DEFAULT_ANTHROPIC_MODEL
     if m.startswith("gpt") or m.startswith("o1") or m.startswith("o3"):
-        return PROVIDER_OPENAI, model.strip() or DEFAULT_OPENAI_MODEL
+        return PROVIDER_OPENAI, raw or default_openai_model()
     # default to anthropic
     return PROVIDER_ANTHROPIC, DEFAULT_ANTHROPIC_MODEL
 
@@ -333,7 +347,7 @@ class LlmAdapter:
         result = adapter.complete(model="claude-sonnet-4-6", system="...", user="...")
         # or
         results = adapter.parallel_review(
-            reviewers=[("claude", "claude-sonnet-4-6"), ("gpt", "gpt-5.4-mini")],
+            reviewers=[("claude", "claude-sonnet-4-6"), ("gpt", "gpt-5.5")],
             system="...",
             user="...",
         )

@@ -51,7 +51,10 @@ def default_dual_review_model_for_reviewer(reviewer: str) -> str:
         if reviewer_key == "claude" and routed_model.startswith("claude"):
             return routed_model
     if reviewer_key == "gpt":
-        return "gpt-5.4-mini"
+        from service.model_resolver import resolve_openai_api_model
+
+        # dual_review GPT default: OpenAI API catalog only (not Codex roster).
+        return resolve_openai_api_model(preferred_tier="flagship", prefer_low_cost=False)
     return "claude-sonnet-4-6"
 
 

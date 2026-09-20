@@ -217,12 +217,98 @@ def recommend_model(budget_remaining: float, min_confidence: float = 0.0) -> str
     return catalog.model_for_tier(tier)
 
 
+# OpenAI API / analyze / dual-review GPT defaults resolve against the live API
+# catalog only. Never reuse the Codex research roster allowlist here.
+_RETIRED_OPENAI_API_DEFAULTS = frozenset({"gpt-5.4", "gpt-5.4-mini"})
+_AUTO_MODEL_TOKENS = frozenset({"", "auto", "tier:auto"})
+_OPENAI_API_TIER_ORDER_LOW_COST = ("nano", "fast", "standard", "capable", "flagship")
+_OPENAI_API_TIER_ORDER_DEFAULT = ("standard", "capable", "flagship", "fast", "nano")
+
+
+def _is_auto_model_token(value: str | None) -> bool:
+    return str(value or "").strip().lower() in _AUTO_MODEL_TOKENS
+
+
+def _openai_api_model_usable(model_id: str, catalog: ModelCatalog) -> bool:
+    """Usable for paid OpenAI API defaults: provider=openai, chat-capable, not retired."""
+    from service.model_catalog import is_chat_candidate
+
+    mid = str(model_id or "").strip()
+    if not mid or _is_auto_model_token(mid) or mid in _RETIRED_OPENAI_API_DEFAULTS:
+        return False
+    if mid in set(catalog.deprecated):
+        return False
+    record = catalog.models.get(mid)
+    if record is None:
+        return False
+    if str(record.provider or "").strip().lower() != "openai":
+        return False
+    return is_chat_candidate(mid)
+
+
+def resolve_openai_api_model(
+    *,
+    preferred_tier: str = "fast",
+    prefer_low_cost: bool = False,
+) -> str:
+    """Pick a concrete OpenAI API model from the live catalog; fail closed if none.
+
+    Explicit OPENAI_MODEL / reviewer / policy overrides belong to callers and are
+    never replaced here. Codex subscription roster entries are ignored.
+    """
+    from service.model_catalog import catalog_path, load_catalog
+
+    preferred = str(preferred_tier or "").strip() or ("nano" if prefer_low_cost else "standard")
+    order = _OPENAI_API_TIER_ORDER_LOW_COST if prefer_low_cost else _OPENAI_API_TIER_ORDER_DEFAULT
+    # Read the live catalog path each call so on-disk updates apply without resolver caching.
+    catalog = load_catalog(catalog_path())
+
+    assignment = catalog.tiers.get(preferred)
+    if (
+        assignment is not None
+        and str(assignment.provider or "").strip().lower() == "openai"
+        and _openai_api_model_usable(assignment.model, catalog)
+    ):
+        return assignment.model
+
+    for tier_name in order:
+        if tier_name == preferred:
+            continue
+        candidate = catalog.tiers.get(tier_name)
+        if (
+            candidate is not None
+            and str(candidate.provider or "").strip().lower() == "openai"
+            and _openai_api_model_usable(candidate.model, catalog)
+        ):
+            return candidate.model
+
+    scored = [
+        record
+        for model_id, record in catalog.models.items()
+        if _openai_api_model_usable(model_id, catalog)
+    ]
+    if not scored:
+        raise RuntimeError("model catalog has no usable OpenAI API model for default")
+    if prefer_low_cost:
+        scored.sort(
+            key=lambda record: (
+                float(record.input_cost_per_1m) if record.input_cost_per_1m is not None else 999.0,
+                float(record.capability_score),
+                record.model_id,
+            )
+        )
+    else:
+        scored.sort(key=lambda record: (-float(record.capability_score), record.model_id))
+    return scored[0].model_id
+
+
 __all__ = [
     "effort_for_task",
     "list_task_routes",
     "recommend_model",
     "reset_catalog_cache",
     "resolve_model",
+    "resolve_openai_api_model",
     "tier_for_budget",
     "tier_for_task",
 ]
