@@ -386,6 +386,85 @@ class GlobalResearchCodegenTests(TestCase):
             self.assertEqual(result["reason"], "global_codegen_quota_deferred")
             self.assertEqual(result["retry_at"], retry_at)
 
+    def test_gateway_failure_records_allowlisted_failure_category_without_retry(self):
+        secret = "sk-live-secret-token"
+        provider_text = "provider said OPENAI_API_KEY=super-secret"
+        cases = {
+            "quota_or_capacity_failure": {"failure_category": "quota_or_capacity_failure"},
+            "auth_or_config_failure": {"failure_category": "auth_or_config_failure"},
+            "patch_contract_failure": {"failure_category": "patch_contract_failure"},
+            "transient_service_failure": {"failure_category": "transient_service_failure"},
+            "missing": {},
+            "empty": {"failure_category": ""},
+            "none": {"failure_category": None},
+            "unknown": {"failure_category": provider_text},
+            "list": {"failure_category": ["quota_or_capacity_failure", secret]},
+            "non_mapping": secret,
+        }
+        self.assertNotIn("failure_category", codegen._public_result({"status": "review_completed"}))
+        for name, raw in cases.items():
+            with self.subTest(name=name), TemporaryDirectory() as tmp, patch.object(
+                codegen, "_docker_preflight"), patch.object(
+                codegen, "_read_global_base",
+                return_value=(codegen.GLOBAL_ETF_RESEARCH_CODEGEN_UES_COMMIT, {})), patch.dict(
+                sys.modules, {"scripts.run_new_research": SimpleNamespace(
+                    _archive_codegen_base=lambda *args, **kwargs: None)}):
+                calls = []
+                response = SimpleNamespace(
+                    success=False, provider="codex", model=secret, output=provider_text,
+                    error=secret, note=provider_text, raw=raw,
+                )
+                result = codegen.run_global_etf_research_codegen_case(
+                    ues_repo_root=tmp, run_root=tmp, source_ref="a" * 40, fetch_source=_source,
+                    candidate_test_runner=lambda *args, **kwargs: {"status": "passed"},
+                    execute=lambda prompt: calls.append("model") or response,
+                )
+                allowlisted = {
+                    "quota_or_capacity_failure", "auth_or_config_failure",
+                    "patch_contract_failure", "transient_service_failure",
+                }
+                expected = name if name in allowlisted else "unknown_failure"
+                self.assertEqual(result["status"], "failed")
+                self.assertEqual(result["reason"], "global_codegen_gateway_failed")
+                self.assertEqual(result["failure_category"], expected)
+                self.assertNotIn("retry_at", result)
+                self.assertEqual(result["candidate_tests"], {"status": "passed"})
+                self.assertEqual(result["identity"]["task"], codegen.GLOBAL_ETF_RESEARCH_CODEGEN_TASK)
+                self.assertEqual(
+                    result["identity"]["source_commit"], codegen.GLOBAL_ETF_RESEARCH_CODEGEN_UES_COMMIT)
+                self.assertTrue(result["no_order"])
+                self.assertTrue(result["research_only"])
+                self.assertFalse(result["promotion_eligible"])
+                self.assertFalse(result["live_authority_granted"])
+                rendered = json.dumps(result)
+                self.assertNotIn(secret, rendered)
+                self.assertNotIn(provider_text, rendered)
+                stored = (Path(tmp) / "result.json").read_text(encoding="utf-8")
+                self.assertNotIn(secret, stored)
+                self.assertNotIn(provider_text, stored)
+                public = codegen._public_result(result)
+                self.assertEqual(public["failure_category"], expected)
+                self.assertEqual(public["status"], "failed")
+                self.assertEqual(public["reason"], "global_codegen_gateway_failed")
+                self.assertNotIn("identity", public)
+                self.assertTrue(public["no_order"])
+                self.assertFalse(public["promotion_eligible"])
+                self.assertFalse(public["live_authority_granted"])
+                self.assertNotIn(secret, json.dumps(public))
+                self.assertNotIn(provider_text, json.dumps(public))
+                replay = codegen.run_global_etf_research_codegen_case(
+                    ues_repo_root=tmp, run_root=tmp, source_ref="a" * 40,
+                    fetch_source=lambda: self.fail("must not refetch"),
+                    execute=lambda _: self.fail("failure category must not retry"),
+                )
+                self.assertEqual(replay["status"], "failed")
+                self.assertEqual(replay["reason"], "global_codegen_gateway_failed")
+                self.assertEqual(replay["failure_category"], expected)
+                self.assertEqual(calls, ["model"])
+                poisoned = codegen._public_result({**public, "failure_category": secret})
+                self.assertEqual(poisoned["failure_category"], "unknown_failure")
+                self.assertNotIn(secret, json.dumps(poisoned))
+
     def test_legacy_gateway_failure_is_deferred_only_for_the_exact_saved_quota_shape(self):
         source = _source()
         identity = codegen._identity(source=source, source_commit=codegen.GLOBAL_ETF_RESEARCH_CODEGEN_UES_COMMIT)
