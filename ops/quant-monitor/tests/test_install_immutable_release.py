@@ -173,6 +173,7 @@ class TestInstallImmutableRelease:
         release = release_root / sha
         payload = release / "ops" / "quant-monitor" / "scripts" / "tracked_payload.txt"
         assert payload.read_text(encoding="utf-8") == "committed-payload\n"
+        assert release.stat().st_mode & 0o555 == 0o555
         assert not (release / "untracked-secret").exists()
         data_link = release / "ops" / "quant-monitor" / "data"
         venv_link = release / "ops" / "quant-monitor" / ".venv"

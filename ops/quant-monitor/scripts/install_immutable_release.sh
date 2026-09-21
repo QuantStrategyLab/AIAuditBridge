@@ -142,6 +142,10 @@ required_paths=(
 
 stage_release() {
   local destination="$1"
+  # mktemp creates the top-level directory as 0700.  The systemd service runs
+  # as ubuntu, so make only this release root traversable/readable; preserve
+  # the archive's modes for all files and nested directories.
+  chmod 755 "$destination" || die "unable to make staged release readable"
   git -C "$REPO_ROOT" archive --format=tar "$SHA" | tar -x -C "$destination" \
     || die "git archive or extraction failed for ${SHA}"
 
