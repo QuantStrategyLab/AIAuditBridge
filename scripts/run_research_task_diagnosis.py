@@ -404,15 +404,19 @@ def run_diagnosis(
     candidates = diagnosis_candidates(result)
     if max_per_run < 1:
         raise ValueError("max_per_run must be positive")
-    pending = [
-        item
-        for item in candidates
-        if not marker_present(
-            str(item["repository"]),
-            str(item["issue_url"]),
-            marker_for_research_diagnosis(build_research_diagnosis_request(item["task"], trigger=item["trigger"])),
-        )
-    ]
+    pending: list[dict[str, Any]] = []
+    for item in candidates:
+        try:
+            marker = marker_for_research_diagnosis(
+                build_research_diagnosis_request(item["task"], trigger=item["trigger"])
+            )
+        except (TypeError, ValueError):
+            # Fail-closed: unverifiable digests still enter the reject path below.
+            # Never probe markers, call AI, or write comments for them.
+            pending.append(item)
+            continue
+        if not marker_present(str(item["repository"]), str(item["issue_url"]), marker):
+            pending.append(item)
     summary: dict[str, Any] = {
         "schema_version": "qsl.research_diagnosis_dispatch.v1",
         "status": "ok",

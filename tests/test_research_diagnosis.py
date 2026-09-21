@@ -466,6 +466,38 @@ class ResearchDiagnosisTests(unittest.TestCase):
         with self.assertRaises(ResearchTaskError):
             build_research_diagnosis_request(task)
 
+    def test_digest_mismatch_early_rejects_without_ai_or_comment(self) -> None:
+        tampered = _result()
+        tampered["research_task_source_snapshot"]["tasks"][0]["task_sha256"] = "0" * 64  # type: ignore[index]
+        marker_calls: list[object] = []
+        comments: list[str] = []
+        fake = FakeClient()
+
+        def marker_present(*args: object) -> bool:
+            marker_calls.append(args)
+            return False
+
+        summary = run_diagnosis(
+            tampered,
+            marker_present=marker_present,
+            create_comment=lambda _repo, _url, body: comments.append(body) or "https://example.test/c/1",
+            client_factory=lambda _config: fake,
+        )
+
+        self.assertEqual(summary["status"], "partial_error")
+        self.assertEqual(summary["candidate_count"], 1)
+        self.assertEqual(len(summary["diagnoses"]), 1)
+        self.assertEqual(summary["diagnoses"][0]["status"], "rejected")
+        error = summary["diagnoses"][0]["error"]
+        self.assertIsInstance(error, str)
+        self.assertIn("digest", error.lower())
+        self.assertNotIn("\n", error)
+        self.assertNotIn("\r", error)
+        self.assertLessEqual(len(error), 300)
+        self.assertEqual(marker_calls, [])
+        self.assertEqual(comments, [])
+        self.assertEqual(fake.calls, [])
+
     def test_candidate_join_requires_exact_event_key_and_issue_url(self) -> None:
         self.assertEqual(len(diagnosis_candidates(_result())), 1)
         no_match = _result()
