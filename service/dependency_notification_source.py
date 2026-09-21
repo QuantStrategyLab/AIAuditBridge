@@ -31,7 +31,9 @@ __all__ = [
     "DependencyAuditError",
     "GitHubRequestError",
     "MAX_ALLOWLIST_REPOS",
+    "MAX_CHECK_RUN_PAGES",
     "MAX_PRS_PER_REPO",
+    "CHECK_RUNS_PER_PAGE",
     "assert_repo_allowed",
     "build_trusted_event",
     "build_trusted_intake_payload",
@@ -46,6 +48,8 @@ __all__ = [
 
 MAX_ALLOWLIST_REPOS = 10
 MAX_PRS_PER_REPO = 20
+MAX_CHECK_RUN_PAGES = 3
+CHECK_RUNS_PER_PAGE = 100
 _PLACEHOLDER_SHA = "0" * 40
 _MISSING_FILES_SENTINEL = "__missing_changed_files__"
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -217,27 +221,58 @@ def build_trusted_intake_payload(events: Sequence[Mapping[str, Any]]) -> dict[st
 
 
 def resolve_ci_status(token: str, repository: str, head_sha: str) -> str:
-    """Map commit check-runs to a coarse ci_status; unknown when inconclusive."""
+    """Map commit check-runs to a coarse ci_status; unknown when inconclusive.
+
+    Uses bounded pagination. If the page cap is hit, the payload is incomplete,
+    or total coverage cannot be proven, returns ``unknown`` (never quiet success).
+    """
     if not _SHA_RE.fullmatch(str(head_sha or "").strip().lower()):
         return "unknown"
-    try:
-        payload = github_request(
-            token,
-            "GET",
-            f"/repos/{repository}/commits/{head_sha}/check-runs?per_page=100",
-        )
-    except (GitHubRequestError, OSError, ValueError, TypeError):
+
+    collected: list[Mapping[str, Any]] = []
+    total_count: int | None = None
+    for page in range(1, MAX_CHECK_RUN_PAGES + 1):
+        try:
+            payload = github_request(
+                token,
+                "GET",
+                (
+                    f"/repos/{repository}/commits/{head_sha}/check-runs"
+                    f"?per_page={CHECK_RUNS_PER_PAGE}&page={page}"
+                ),
+            )
+        except (GitHubRequestError, OSError, ValueError, TypeError):
+            return "unknown"
+        if not isinstance(payload, Mapping):
+            return "unknown"
+        if "total_count" in payload:
+            raw_total = payload.get("total_count")
+            if not isinstance(raw_total, int) or raw_total < 0:
+                return "unknown"
+            total_count = raw_total
+        runs = payload.get("check_runs")
+        if not isinstance(runs, list):
+            return "unknown"
+        for item in runs:
+            if isinstance(item, Mapping):
+                collected.append(item)
+        if len(runs) < CHECK_RUNS_PER_PAGE:
+            break
+        if page == MAX_CHECK_RUN_PAGES:
+            # Full final page at the hard cap — cannot prove full coverage.
+            return "unknown"
+    else:
+        # Loop exhausted without a short page (should be unreachable given break).
         return "unknown"
-    if not isinstance(payload, Mapping):
+
+    if total_count is not None and len(collected) < total_count:
         return "unknown"
-    runs = payload.get("check_runs")
-    if not isinstance(runs, list) or not runs:
+    if not collected:
         return "unknown"
+
     statuses: list[str] = []
     conclusions: list[str] = []
-    for item in runs:
-        if not isinstance(item, Mapping):
-            continue
+    for item in collected:
         statuses.append(str(item.get("status") or "").strip().lower())
         conclusions.append(str(item.get("conclusion") or "").strip().lower())
     if not statuses:
@@ -256,13 +291,22 @@ def resolve_ci_status(token: str, repository: str, head_sha: str) -> str:
     return "unknown"
 
 
+def _raise_source_truncated(reason: str) -> None:
+    raise DependencyNotificationSourceError(f"source_truncated: {reason}")
+
+
 def collect_trusted_events(
     *,
     token: str,
     allowlist: Sequence[str],
     max_prs_per_repo: int = MAX_PRS_PER_REPO,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """GET open PRs for allowlisted repos and convert to trusted events."""
+    """GET open PRs for allowlisted repos and convert to trusted events.
+
+    Hard PR/event caps are fail-closed: if the cap is reached while open PRs or
+    allowlisted repos remain, raises ``DependencyNotificationSourceError`` with a
+    ``source_truncated`` reason instead of silently dropping work.
+    """
     repos = parse_repo_allowlist(list(allowlist))
     if max_prs_per_repo <= 0 or max_prs_per_repo > MAX_PRS_PER_REPO:
         raise DependencyNotificationSourceError(
@@ -270,7 +314,7 @@ def collect_trusted_events(
         )
 
     events: list[dict[str, Any]] = []
-    for repository in repos:
+    for repo_index, repository in enumerate(repos):
         assert_repo_allowed(repository, repos)
         # Bound pages: github_list_all default max_pages=20; we only need first page worth.
         pulls = github_list_all(
@@ -278,8 +322,12 @@ def collect_trusted_events(
             f"/repos/{repository}/pulls?state=open",
             max_pages=1,
         )
-        selected = [pr for pr in pulls if isinstance(pr, dict)][:max_prs_per_repo]
-        for pr in selected:
+        valid_pulls = [pr for pr in pulls if isinstance(pr, dict)]
+        if len(valid_pulls) > max_prs_per_repo:
+            _raise_source_truncated(
+                f"open PRs exceed max_prs_per_repo ({max_prs_per_repo})"
+            )
+        for pr_index, pr in enumerate(valid_pulls):
             number = pr.get("number")
             if not isinstance(number, int) or number <= 0:
                 events.append(
@@ -290,23 +338,29 @@ def collect_trusted_events(
                         ci_status="unknown",
                     )
                 )
-                continue
-            files = github_list_all(
-                token,
-                f"/repos/{repository}/pulls/{number}/files",
-                max_pages=1,
-            )
-            head_sha = str((pr.get("head") or {}).get("sha") or "").strip().lower()
-            ci_status = resolve_ci_status(token, repository, head_sha)
-            events.append(
-                build_trusted_event(
-                    repository=repository,
-                    pr=pr,
-                    files=files,
-                    ci_status=ci_status,
+            else:
+                files = github_list_all(
+                    token,
+                    f"/repos/{repository}/pulls/{number}/files",
+                    max_pages=1,
                 )
-            )
+                head_sha = str((pr.get("head") or {}).get("sha") or "").strip().lower()
+                ci_status = resolve_ci_status(token, repository, head_sha)
+                events.append(
+                    build_trusted_event(
+                        repository=repository,
+                        pr=pr,
+                        files=files,
+                        ci_status=ci_status,
+                    )
+                )
             if len(events) >= MAX_TRUSTED_INTAKE_EVENTS:
+                more_prs = pr_index + 1 < len(valid_pulls)
+                more_repos = repo_index + 1 < len(repos)
+                if more_prs or more_repos:
+                    _raise_source_truncated(
+                        f"events exceed limit of {MAX_TRUSTED_INTAKE_EVENTS}"
+                    )
                 break
         if len(events) >= MAX_TRUSTED_INTAKE_EVENTS:
             break
@@ -366,7 +420,10 @@ def collect_or_fail_closed(
             max_prs_per_repo=max_prs_per_repo,
         )
     except DependencyNotificationSourceError as exc:
-        return _source_fail_closed("allowlist_or_limits", reasons=[str(exc)])
+        message = str(exc)
+        if message.startswith("source_truncated"):
+            return _source_fail_closed("source_truncated", reasons=[message])
+        return _source_fail_closed("allowlist_or_limits", reasons=[message])
     except DependencyAuditError:
         return _source_fail_closed("github_pagination_or_list_failed")
     except GitHubRequestError:
