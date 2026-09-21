@@ -93,11 +93,16 @@ Behavior:
   `DEPENDENCY_NOTIFICATION_REPO_ALLOWLIST`). Empty default is rejected; there is
   no org-wide scan.
 - Hard caps: `MAX_ALLOWLIST_REPOS`, `MAX_PRS_PER_REPO`, and the existing
-  `MAX_TRUSTED_INTAKE_EVENTS`. GitHub list pagination reuses
-  `scripts/run_dependency_audit.github_list_all` with `max_pages=1` and never
-  calls Schwab audit write/merge paths.
-- GET-only: open PR list, PR files, commit check-runs. No POST/PATCH/PUT/DELETE,
-  no issue/comment/merge, no workflow schedule changes, no model calls.
+  `MAX_TRUSTED_INTAKE_EVENTS`. Hitting a PR/event hard cap while open PRs or
+  allowlisted repos remain is **fail-closed** (`source_truncated` → Telegram /
+  `review_required`); remaining work is never silently dropped. GitHub list
+  pagination reuses `scripts/run_dependency_audit.github_list_all` with
+  `max_pages=1` and never calls Schwab audit write/merge paths.
+- GET-only: open PR list, PR files, commit check-runs. Check-runs use bounded
+  pagination (`MAX_CHECK_RUN_PAGES`); incomplete coverage, a full page at the
+  cap, or a malformed response yields `ci_status=unknown` (never quiet success).
+  No POST/PATCH/PUT/DELETE, no issue/comment/merge, no workflow schedule
+  changes, no model calls.
 - Converts structured fields (author, files, base/head SHA, CI check-run status,
   Dependabot `version-update:semver-*` marker / security labels) into schema v1
   events. **Title/body free text never alone grants quiet**; missing
@@ -117,6 +122,20 @@ network when callers already have structured PR snapshots.
 
 This path is still **dry-run only**. It does not enable live notification
 sending, auto-merge, or `dependency_audit.yml` schedules.
+
+## Manual Actions verification entry (batch 4)
+
+Workflow: `.github/workflows/dependency_notification_source_dry_run.yml`
+(`workflow_dispatch` only).
+
+- Required input: `repos` (same allowlist as `--repos`; no empty/org-wide default).
+- Runs `python3 -m scripts.run_dependency_notification_source_dry_run` in
+  GitHub-hosted Ubuntu so real GET calls use Actions' trusted Python/TLS.
+- Permissions: `contents` / `pull-requests` / `actions` read only.
+- Tokens: existing `GITHUB_TOKEN` (single-repo) plus
+  `CODEX_AUDIT_GH_TOKEN` / `GH_TOKEN` when already configured; no new secrets.
+- Still dry-run preview only: no Telegram/issue send, model, ledger, deploy,
+  schedule, or write permissions. Non-zero CLI exit fails the job.
 
 ## Non-goals
 

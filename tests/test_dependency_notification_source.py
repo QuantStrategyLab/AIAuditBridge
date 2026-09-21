@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import unittest
 from unittest.mock import patch
 
@@ -175,6 +176,66 @@ class BuildTrustedEventTests(unittest.TestCase):
         self.assertTrue(preview["events"][0]["review_required"])
 
 
+class ResolveCiStatusPaginationTests(unittest.TestCase):
+    def test_second_page_failure_is_not_success(self) -> None:
+        """Failures beyond the first 100 check-runs must not be skipped."""
+        page1 = [
+            {"status": "completed", "conclusion": "success", "name": f"ok-{i}"}
+            for i in range(100)
+        ]
+        page2 = [
+            {"status": "completed", "conclusion": "failure", "name": "late-fail"},
+        ]
+        calls: list[str] = []
+
+        def fake_request(token, method, path, payload=None):
+            self.assertEqual(method, "GET")
+            calls.append(path)
+            if "page=2" in path:
+                return {"total_count": 101, "check_runs": page2}
+            if "check-runs" in path:
+                return {"total_count": 101, "check_runs": page1}
+            raise AssertionError(path)
+
+        with patch.object(source, "github_request", side_effect=fake_request):
+            status = source.resolve_ci_status("token", "QuantStrategyLab/ExampleRepo", HEAD_SHA)
+        self.assertEqual(status, "failure")
+        self.assertGreaterEqual(len(calls), 2)
+
+    def test_page_cap_without_full_coverage_returns_unknown(self) -> None:
+        """Hitting the bounded page cap must fail closed, never quiet success."""
+        full_page = [
+            {"status": "completed", "conclusion": "success", "name": f"ok-{i}"}
+            for i in range(100)
+        ]
+        pages_seen: list[int] = []
+
+        def fake_request(token, method, path, payload=None):
+            self.assertEqual(method, "GET")
+            match = re.search(r"[?&]page=(\d+)", path)
+            page = int(match.group(1)) if match else 1
+            pages_seen.append(page)
+            # Always a full page; total_count proves more remain after the cap.
+            return {
+                "total_count": source.MAX_CHECK_RUN_PAGES * 100 + 1,
+                "check_runs": full_page,
+            }
+
+        with patch.object(source, "github_request", side_effect=fake_request):
+            status = source.resolve_ci_status("token", "QuantStrategyLab/ExampleRepo", HEAD_SHA)
+        self.assertEqual(status, "unknown")
+        self.assertEqual(len(pages_seen), source.MAX_CHECK_RUN_PAGES)
+        self.assertLessEqual(max(pages_seen), source.MAX_CHECK_RUN_PAGES)
+
+    def test_incomplete_check_runs_response_returns_unknown(self) -> None:
+        def fake_request(token, method, path, payload=None):
+            return {"total_count": 2}  # missing check_runs
+
+        with patch.object(source, "github_request", side_effect=fake_request):
+            status = source.resolve_ci_status("token", "QuantStrategyLab/ExampleRepo", HEAD_SHA)
+        self.assertEqual(status, "unknown")
+
+
 class CollectAndCliTests(unittest.TestCase):
     def test_allowlist_rejects_unlisted_repo(self) -> None:
         with self.assertRaises(source.DependencyNotificationSourceError) as ctx:
@@ -201,8 +262,9 @@ class CollectAndCliTests(unittest.TestCase):
                 return [pr]
             if "/pulls/101/files" in path:
                 return _files("requirements.txt", "requirements-lock.txt")
-            if "/commits/" in path and path.endswith("/check-runs?per_page=100"):
+            if "/commits/" in path and "/check-runs" in path:
                 return {
+                    "total_count": 1,
                     "check_runs": [
                         {"status": "completed", "conclusion": "success", "name": "test"}
                     ]
@@ -260,6 +322,85 @@ class CollectAndCliTests(unittest.TestCase):
         blob = json.dumps(result)
         self.assertNotIn("secret-body", blob)
         self.assertNotIn("token", blob.lower().replace("token_missing", ""))
+
+    def test_max_prs_per_repo_truncation_fail_closed(self) -> None:
+        allowlist = ("QuantStrategyLab/ExampleRepo",)
+        pulls = [
+            _pr(number=100 + i, head_sha=f"{i:040x}")
+            for i in range(3)
+        ]
+
+        def fake_list_all(token, path, *, max_pages=20):
+            if "/files" in path:
+                return _files("requirements.txt")
+            return pulls
+
+        def fake_request(token, method, path, payload=None):
+            self.assertEqual(method, "GET")
+            if "check-runs" in path:
+                return {
+                    "total_count": 1,
+                    "check_runs": [
+                        {"status": "completed", "conclusion": "success", "name": "ci"}
+                    ],
+                }
+            return {}
+
+        with (
+            patch.object(source, "github_list_all", side_effect=fake_list_all),
+            patch.object(source, "github_request", side_effect=fake_request),
+        ):
+            result = source.collect_or_fail_closed(
+                token="token",
+                allowlist=allowlist,
+                max_prs_per_repo=2,
+            )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["action"], "telegram")
+        self.assertTrue(result["review_required"])
+        self.assertEqual(result["error"], "source_truncated")
+        self.assertIn("truncat", str(result["source"]["safe_summary"]).lower())
+        self.assertEqual(result["counts"].get("quiet", 0), 0)
+
+    def test_event_limit_truncation_fail_closed(self) -> None:
+        allowlist = ("QuantStrategyLab/ExampleRepo",)
+        pulls = [
+            _pr(number=200 + i, head_sha=f"{i:040x}")
+            for i in range(3)
+        ]
+
+        def fake_list_all(token, path, *, max_pages=20):
+            if "/files" in path:
+                return _files("requirements.txt")
+            return pulls
+
+        def fake_request(token, method, path, payload=None):
+            self.assertEqual(method, "GET")
+            if "check-runs" in path:
+                return {
+                    "total_count": 1,
+                    "check_runs": [
+                        {"status": "completed", "conclusion": "success", "name": "ci"}
+                    ],
+                }
+            return {}
+
+        with (
+            patch.object(source, "github_list_all", side_effect=fake_list_all),
+            patch.object(source, "github_request", side_effect=fake_request),
+            patch.object(source, "MAX_TRUSTED_INTAKE_EVENTS", 2),
+        ):
+            result = source.collect_or_fail_closed(
+                token="token",
+                allowlist=allowlist,
+                max_prs_per_repo=5,
+            )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["action"], "telegram")
+        self.assertTrue(result["review_required"])
+        self.assertEqual(result["error"], "source_truncated")
+        self.assertIn("truncat", str(result["source"]["safe_summary"]).lower())
+        self.assertEqual(result["counts"].get("quiet", 0), 0)
 
     def test_cli_requires_allowlist_and_redacts_output(self) -> None:
         with (

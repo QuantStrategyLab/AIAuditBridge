@@ -1,0 +1,44 @@
+name: Dependency Notification Source Dry Run
+
+# Manual verification only: run the existing source dry-run CLI in Actions'
+# trusted Python/TLS environment. Not production automation — no schedule,
+# no live Telegram/GitHub issue send, no model calls, no ledger writes.
+on:
+  workflow_dispatch:
+    inputs:
+      repos:
+        description: "Comma-separated owner/name allowlist (required; empty/org-wide default forbidden)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: read
+  actions: read
+
+concurrency:
+  group: dependency-notification-source-dry-run
+  cancel-in-progress: false
+
+jobs:
+  dry-run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout bridge
+        uses: actions/checkout@v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Run dependency notification source dry-run
+        env:
+          # Cross-repo reads reuse existing secrets when present; empty is fine.
+          # Single-repo GITHUB_TOKEN is only accepted when allowlist == GITHUB_REPOSITORY.
+          CODEX_AUDIT_GH_TOKEN: ${{ secrets.CODEX_AUDIT_GH_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO_ALLOWLIST: ${{ inputs.repos }}
+        run: |
+          set -euo pipefail
+          python3 -m scripts.run_dependency_notification_source_dry_run \
+            --repos "$REPO_ALLOWLIST"
