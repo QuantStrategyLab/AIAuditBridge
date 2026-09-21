@@ -147,6 +147,28 @@ Workflow: `.github/workflows/dependency_notification_source_dry_run.yml`
 - Still dry-run preview only: no Telegram/issue send, model, ledger, deploy,
   schedule, or write permissions. Non-zero CLI exit fails the job.
 
+## Sender configuration-check dry-run (batch after 9.15.10)
+
+Entry: `dispatch_briefing_result(..., send_dry_run=True)` and
+`scripts/consume_daily_briefing.py --send-dry-run`.
+
+- Reuses the existing dispatch path and dry-run preview assembly; does **not**
+  add a second router.
+- Reports non-secret booleans: `telegram_token_present`,
+  `telegram_chat_ids_present`, `github_issue_target_valid`,
+  `gh_executable_present`.
+- Emits the same redacted preview shape as trusted intake
+  (`telegram_dry_run` / `github_dry_run` with `present` + `safe_summary` only).
+- Missing Telegram token/chat ids → `telegram_missing_env`; invalid issue
+  target → `github_issue_target_invalid`; missing `gh` → `gh_executable_missing`.
+  These remain fail-closed (`errors` non-empty / non-success CLI exit). Quiet
+  actions stay quiet and do not require sender env.
+- **Zero external side effects:** no Telegram HTTP/`sendMessage`, no
+  `gh issue create`, no `automation_run_ledger` writes, no model / source-network
+  / schedule / deploy / trading calls.
+- This proves local configuration readiness for a future send identity only. It
+  does **not** enable live notification sending.
+
 ## Non-goals
 
 - No GitHub notifications API consumer (still open)
@@ -168,3 +190,6 @@ Workflow: `.github/workflows/dependency_notification_source_dry_run.yml`
 - `build_trusted_event` / `collect_or_fail_closed` /
   `run_source_dry_run` → schema v1 + dry-run preview from allowlisted PR GETs
 - CLI: `scripts/run_dependency_notification_source_dry_run.py`
+- `dispatch_briefing_result(..., send_dry_run=True)` / `sender_prerequisites()`
+  → sender configuration-check + redacted preview (no live send)
+- CLI: `scripts/consume_daily_briefing.py --send-dry-run`

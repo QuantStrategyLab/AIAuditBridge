@@ -51,6 +51,61 @@ def _telegram_chat_ids() -> tuple[str, ...]:
     return ()
 
 
+def _github_issue_target() -> str:
+    return str(
+        os.environ.get("QSL_GITHUB_REPO")
+        or os.environ.get("GITHUB_REPOSITORY")
+        or "QuantStrategyLab/QuantStrategyLab"
+    ).strip()
+
+
+def sender_prerequisites() -> dict[str, bool]:
+    """Non-secret presence checks for already-configured sender env/tools."""
+    return {
+        "telegram_token_present": bool(_telegram_token()),
+        "telegram_chat_ids_present": bool(_telegram_chat_ids()),
+        "github_issue_target_valid": _REPOSITORY_RE.fullmatch(_github_issue_target()) is not None,
+        "gh_executable_present": bool(shutil_which("gh")),
+    }
+
+
+def _redact_send_dry_run_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    """Replace previews with safe presence flags; never emit secrets or bodies."""
+    redacted = {
+        "action": summary.get("action"),
+        "send_dry_run": True,
+        "sender_prerequisites": dict(summary.get("sender_prerequisites") or {}),
+        "telegram_sent": False,
+        "github_issue": None,
+        "optimization_watch": None,
+        "operational_fallback_sent": False,
+        "errors": list(summary.get("errors") or []),
+        "skipped": list(summary.get("skipped") or []),
+        "telegram_dry_run": {"present": False},
+        "github_dry_run": {"present": False},
+    }
+    if "telegram_dry_run" in summary:
+        redacted["telegram_dry_run"] = {
+            "present": True,
+            "safe_summary": "telegram_preview_available",
+        }
+    if "github_dry_run" in summary:
+        redacted["github_dry_run"] = {
+            "present": True,
+            "safe_summary": "github_issue_preview_available",
+        }
+    if summary.get("optimization_watch") is not None:
+        watch = summary["optimization_watch"]
+        if isinstance(watch, dict):
+            redacted["optimization_watch"] = {
+                "status": str(watch.get("status") or "dry_run"),
+                "errors": int(watch.get("errors") or 0),
+            }
+        else:
+            redacted["optimization_watch"] = {"status": "dry_run", "errors": 0}
+    return redacted
+
+
 def _format_telegram_body(result: BriefingConsumptionResult) -> str:
     lines = [f"🚨 量化哨兵 daily briefing ({result.day})", ""]
     for finding in result.findings:
@@ -108,11 +163,7 @@ def send_telegram_alert(*, text: str, token: str, chat_ids: tuple[str, ...]) -> 
 
 
 def create_github_issue(*, title: str, body: str, labels: tuple[str, ...] = ()) -> str | None:
-    repo = str(
-        os.environ.get("QSL_GITHUB_REPO")
-        or os.environ.get("GITHUB_REPOSITORY")
-        or "QuantStrategyLab/QuantStrategyLab"
-    ).strip()
+    repo = _github_issue_target()
     if _REPOSITORY_RE.fullmatch(repo) is None:
         return None
     if not shutil_which("gh"):
@@ -193,8 +244,17 @@ def dispatch_briefing_result(
     result: BriefingConsumptionResult,
     *,
     dry_run: bool = False,
+    send_dry_run: bool = False,
 ) -> dict[str, Any]:
-    """Execute notification side-effects for a briefing consumption result."""
+    """Execute notification side-effects for a briefing consumption result.
+
+    When ``send_dry_run`` is true, reuse dry-run preview semantics, report
+    non-secret sender prerequisite booleans, and never call Telegram HTTP,
+    ``gh issue create``, or external write paths.
+    """
+    if send_dry_run:
+        dry_run = True
+
     summary: dict[str, Any] = {
         "action": result.action.value,
         "telegram_sent": False,
@@ -207,8 +267,12 @@ def dispatch_briefing_result(
 
     if result.action == BriefingAction.QUIET:
         summary["skipped"].append("quiet")
+        if send_dry_run:
+            summary["sender_prerequisites"] = sender_prerequisites()
+            return _redact_send_dry_run_summary(summary)
         return summary
 
+    needs_github_issue = False
     if result.action in {BriefingAction.GITHUB_ISSUE, BriefingAction.TELEGRAM}:
         try:
             optimization_findings = _strategy_monitoring_findings(result)
@@ -234,6 +298,7 @@ def dispatch_briefing_result(
             and not (finding.kind == "strategy_monitoring" and finding.strategy_profile)
         ]
         if github_findings:
+            needs_github_issue = True
             title = f"[briefing] {result.day} — {len(github_findings)} review-level alert(s)"
             body = _format_github_body(result, github_findings)
             if dry_run:
@@ -247,7 +312,8 @@ def dispatch_briefing_result(
         error in {"optimization_record_failed", "github_issue_record_failed"}
         for error in summary["errors"]
     )
-    if result.action == BriefingAction.TELEGRAM or record_failed:
+    needs_telegram = result.action == BriefingAction.TELEGRAM or record_failed
+    if needs_telegram:
         if result.action == BriefingAction.TELEGRAM:
             text = _format_telegram_body(result)
         else:
@@ -271,5 +337,24 @@ def dispatch_briefing_result(
             else:
                 summary["skipped"].append("telegram_missing_env")
                 summary["errors"].append("telegram_missing_env")
+
+    if send_dry_run:
+        prereqs = sender_prerequisites()
+        summary["sender_prerequisites"] = prereqs
+        if needs_telegram and not (
+            prereqs["telegram_token_present"] and prereqs["telegram_chat_ids_present"]
+        ):
+            if "telegram_missing_env" not in summary["errors"]:
+                summary["errors"].append("telegram_missing_env")
+            if "telegram_missing_env" not in summary["skipped"]:
+                summary["skipped"].append("telegram_missing_env")
+        if needs_github_issue:
+            if not prereqs["github_issue_target_valid"]:
+                if "github_issue_target_invalid" not in summary["errors"]:
+                    summary["errors"].append("github_issue_target_invalid")
+            elif not prereqs["gh_executable_present"]:
+                if "gh_executable_missing" not in summary["errors"]:
+                    summary["errors"].append("gh_executable_missing")
+        return _redact_send_dry_run_summary(summary)
 
     return summary

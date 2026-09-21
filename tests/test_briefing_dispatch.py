@@ -11,7 +11,12 @@ from service.briefing_consumer import (
     BriefingFinding,
     consume_briefing_report,
 )
-from service.briefing_dispatch import create_github_issue, dispatch_briefing_result, send_telegram_alert
+from service.briefing_dispatch import (
+    create_github_issue,
+    dispatch_briefing_result,
+    sender_prerequisites,
+    send_telegram_alert,
+)
 
 
 class BriefingDispatchTests(unittest.TestCase):
@@ -164,6 +169,228 @@ class BriefingDispatchTests(unittest.TestCase):
             self.assertIsNone(issue)
 
         check_output.assert_not_called()
+
+    def test_sender_prerequisites_are_non_secret_booleans(self) -> None:
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "TELEGRAM_TOKEN": "secret-token-value",
+                    "GLOBAL_TELEGRAM_CHAT_ID": "12345",
+                    "QSL_GITHUB_REPO": "QuantStrategyLab/AIAuditBridge",
+                },
+                clear=True,
+            ),
+            patch("service.briefing_dispatch.shutil_which", return_value="/usr/bin/gh"),
+        ):
+            prereqs = sender_prerequisites()
+        self.assertEqual(
+            prereqs,
+            {
+                "telegram_token_present": True,
+                "telegram_chat_ids_present": True,
+                "github_issue_target_valid": True,
+                "gh_executable_present": True,
+            },
+        )
+        blob = str(prereqs)
+        self.assertNotIn("secret-token-value", blob)
+        self.assertNotIn("12345", blob)
+
+    def test_send_dry_run_quiet_preserves_success_without_side_effects(self) -> None:
+        result = BriefingConsumptionResult(day="2026-07-08", report_dir="/tmp", findings=[])
+        with (
+            patch("service.briefing_dispatch.urllib.request.urlopen") as urlopen,
+            patch("service.briefing_dispatch.subprocess.check_output") as check_output,
+            patch("service.briefing_dispatch.create_github_issue") as create_issue,
+            patch("service.briefing_dispatch.send_telegram_alert") as send_tg,
+            patch("service.automation_run_ledger.get_automation_run_ledger") as get_ledger,
+        ):
+            summary = dispatch_briefing_result(result, send_dry_run=True)
+        self.assertEqual(summary["action"], "quiet")
+        self.assertTrue(summary["send_dry_run"])
+        self.assertIn("sender_prerequisites", summary)
+        self.assertFalse(summary["telegram_sent"])
+        self.assertIsNone(summary["github_issue"])
+        self.assertEqual(summary["errors"], [])
+        urlopen.assert_not_called()
+        check_output.assert_not_called()
+        create_issue.assert_not_called()
+        send_tg.assert_not_called()
+        get_ledger.assert_not_called()
+
+    def test_send_dry_run_telegram_configured_redacts_preview_and_skips_network(self) -> None:
+        result = BriefingConsumptionResult(
+            day="2026-07-08",
+            report_dir="/tmp",
+            findings=[
+                BriefingFinding(
+                    source="us.json",
+                    level=BriefingAction.TELEGRAM,
+                    reason="drift_score=0.9",
+                    strategy_profile="demo-profile",
+                )
+            ],
+        )
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "TELEGRAM_TOKEN": "secret-token-value",
+                    "GLOBAL_TELEGRAM_CHAT_ID": "999",
+                    "QSL_GITHUB_REPO": "QuantStrategyLab/AIAuditBridge",
+                },
+                clear=True,
+            ),
+            patch("service.briefing_dispatch.shutil_which", return_value="/usr/bin/gh"),
+            patch("service.briefing_dispatch.urllib.request.urlopen") as urlopen,
+            patch("service.briefing_dispatch.subprocess.check_output") as check_output,
+            patch("service.briefing_dispatch.create_github_issue") as create_issue,
+            patch("service.briefing_dispatch.send_telegram_alert") as send_tg,
+            patch("service.automation_run_ledger.get_automation_run_ledger") as get_ledger,
+        ):
+            summary = dispatch_briefing_result(result, send_dry_run=True)
+
+        self.assertTrue(summary["send_dry_run"])
+        self.assertEqual(summary["action"], "telegram")
+        self.assertTrue(summary["sender_prerequisites"]["telegram_token_present"])
+        self.assertTrue(summary["sender_prerequisites"]["telegram_chat_ids_present"])
+        self.assertEqual(
+            summary["telegram_dry_run"],
+            {"present": True, "safe_summary": "telegram_preview_available"},
+        )
+        self.assertFalse(summary["telegram_sent"])
+        self.assertEqual(summary["errors"], [])
+        blob = str(summary)
+        self.assertNotIn("secret-token-value", blob)
+        self.assertNotIn("999", blob)
+        self.assertNotIn("demo-profile", blob)
+        self.assertNotIn("drift_score=0.9", blob)
+        urlopen.assert_not_called()
+        check_output.assert_not_called()
+        create_issue.assert_not_called()
+        send_tg.assert_not_called()
+        get_ledger.assert_not_called()
+
+    def test_send_dry_run_telegram_missing_env_fail_closed(self) -> None:
+        result = BriefingConsumptionResult(
+            day="2026-07-08",
+            report_dir="/tmp",
+            findings=[
+                BriefingFinding(
+                    source="us.json",
+                    level=BriefingAction.TELEGRAM,
+                    reason="circuit_open",
+                )
+            ],
+        )
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("service.briefing_dispatch.shutil_which", return_value="/usr/bin/gh"),
+            patch("service.briefing_dispatch.urllib.request.urlopen") as urlopen,
+            patch("service.briefing_dispatch.send_telegram_alert") as send_tg,
+        ):
+            summary = dispatch_briefing_result(result, send_dry_run=True)
+
+        self.assertIn("telegram_missing_env", summary["errors"])
+        self.assertFalse(summary["sender_prerequisites"]["telegram_token_present"])
+        self.assertFalse(summary["sender_prerequisites"]["telegram_chat_ids_present"])
+        self.assertEqual(
+            summary["telegram_dry_run"],
+            {"present": True, "safe_summary": "telegram_preview_available"},
+        )
+        urlopen.assert_not_called()
+        send_tg.assert_not_called()
+
+    def test_send_dry_run_github_missing_gh_fail_closed(self) -> None:
+        result = BriefingConsumptionResult(
+            day="2026-07-08",
+            report_dir="/tmp",
+            findings=[
+                BriefingFinding(
+                    source="review.json",
+                    level=BriefingAction.GITHUB_ISSUE,
+                    reason="needs_human_review",
+                    kind="engineering_review",
+                )
+            ],
+        )
+        with (
+            patch.dict(
+                os.environ,
+                {"QSL_GITHUB_REPO": "QuantStrategyLab/AIAuditBridge"},
+                clear=True,
+            ),
+            patch("service.briefing_dispatch.shutil_which", return_value=None),
+            patch("service.briefing_dispatch.subprocess.check_output") as check_output,
+            patch("service.briefing_dispatch.create_github_issue") as create_issue,
+            patch("service.briefing_dispatch.urllib.request.urlopen") as urlopen,
+        ):
+            summary = dispatch_briefing_result(result, send_dry_run=True)
+
+        self.assertIn("gh_executable_missing", summary["errors"])
+        self.assertFalse(summary["sender_prerequisites"]["gh_executable_present"])
+        self.assertTrue(summary["sender_prerequisites"]["github_issue_target_valid"])
+        self.assertEqual(
+            summary["github_dry_run"],
+            {"present": True, "safe_summary": "github_issue_preview_available"},
+        )
+        blob = str(summary)
+        self.assertNotIn("needs_human_review", blob)
+        self.assertNotIn("[briefing]", blob)
+        check_output.assert_not_called()
+        create_issue.assert_not_called()
+        urlopen.assert_not_called()
+
+    def test_send_dry_run_github_invalid_target_fail_closed(self) -> None:
+        result = BriefingConsumptionResult(
+            day="2026-07-08",
+            report_dir="/tmp",
+            findings=[
+                BriefingFinding(
+                    source="review.json",
+                    level=BriefingAction.GITHUB_ISSUE,
+                    reason="ordinary_source_review",
+                    kind="engineering_review",
+                )
+            ],
+        )
+        with (
+            patch.dict(
+                os.environ,
+                {"QSL_GITHUB_REPO": "bad/repo --assignee admin"},
+                clear=True,
+            ),
+            patch("service.briefing_dispatch.shutil_which", return_value="/usr/bin/gh"),
+            patch("service.briefing_dispatch.create_github_issue") as create_issue,
+        ):
+            summary = dispatch_briefing_result(result, send_dry_run=True)
+
+        self.assertIn("github_issue_target_invalid", summary["errors"])
+        self.assertFalse(summary["sender_prerequisites"]["github_issue_target_valid"])
+        self.assertNotIn("gh_executable_missing", summary["errors"])
+        create_issue.assert_not_called()
+
+    def test_ordinary_dry_run_unchanged_keeps_preview_text(self) -> None:
+        result = BriefingConsumptionResult(
+            day="2026-07-08",
+            report_dir="/tmp",
+            findings=[
+                BriefingFinding(
+                    source="us.json",
+                    level=BriefingAction.TELEGRAM,
+                    reason="drift_score=0.9",
+                    strategy_profile="demo",
+                )
+            ],
+        )
+        with patch.dict(os.environ, {}, clear=True):
+            summary = dispatch_briefing_result(result, dry_run=True)
+        self.assertNotIn("send_dry_run", summary)
+        self.assertIn("telegram_dry_run", summary)
+        self.assertIsInstance(summary["telegram_dry_run"], str)
+        self.assertIn("demo", summary["telegram_dry_run"])
+        self.assertEqual(summary["errors"], [])
 
 
 if __name__ == "__main__":

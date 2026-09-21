@@ -39,6 +39,14 @@ def main(argv: list[str] | None = None) -> int:
         help="Send Telegram / GitHub notifications per briefing severity",
     )
     parser.add_argument("--dry-run", action="store_true", help="Print dispatch actions without sending")
+    parser.add_argument(
+        "--send-dry-run",
+        action="store_true",
+        help=(
+            "Configuration-check dispatch: report non-secret sender prerequisites and "
+            "redacted preview; never send Telegram, create GitHub issues, or write ledger"
+        ),
+    )
     parser.add_argument("--ai-summary", action="store_true", help="Add an advisory subscription AI summary (requires GitHub OIDC)")
     parser.add_argument("--summary-only", action="store_true", help="Export only the advisory summary; never dispatch alerts or run dual review")
     parser.add_argument(
@@ -47,8 +55,10 @@ def main(argv: list[str] | None = None) -> int:
         help="Run dual-review orchestration for briefing strategies with primary_review metadata",
     )
     args = parser.parse_args(argv)
-    if args.summary_only and (args.dispatch or args.dual_review):
+    if args.summary_only and (args.dispatch or args.send_dry_run or args.dual_review):
         parser.error("--summary-only cannot dispatch alerts or run dual review")
+    if args.send_dry_run and (args.ai_summary or args.dual_review):
+        parser.error("--send-dry-run cannot run AI summary or dual review")
 
     report_dir = Path(args.report_dir)
     if not report_dir.is_dir():
@@ -72,8 +82,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if summary["status"] in {"available", "dry_run", "deferred"} else 3
     result = consume_briefing_dir(report_dir, day=args.day)
     payload: dict = result.to_dict()
-    if args.dispatch:
-        payload["dispatch"] = dispatch_briefing_result(result, dry_run=args.dry_run)
+    should_dispatch = bool(args.dispatch or args.send_dry_run)
+    if should_dispatch:
+        payload["dispatch"] = dispatch_briefing_result(
+            result,
+            dry_run=bool(args.dry_run or args.send_dry_run),
+            send_dry_run=bool(args.send_dry_run),
+        )
     if args.ai_summary:
         payload["ai_summary"] = summarize_briefing(result, dry_run=args.dry_run)
     if args.dual_review:
@@ -83,16 +98,18 @@ def main(argv: list[str] | None = None) -> int:
             if outcome is None:
                 continue
             entry = outcome.to_dict()
-            if args.dispatch:
+            if args.dispatch and not args.send_dry_run:
                 entry["dispatch"] = dispatch_dual_review_result(outcome, dry_run=args.dry_run)
             dual_results.append(entry)
         payload["dual_review"] = summarize_dual_review_runs(dual_results)
     print(json.dumps(payload, ensure_ascii=False, indent=2))
-    if result.action.value == "quiet":
+    if args.send_dry_run:
+        exit_code = 0 if not _dispatch_failed(payload.get("dispatch")) else 2
+    elif result.action.value == "quiet":
         exit_code = 0
     elif (
         result.action.value == "github_issue"
-        and args.dispatch
+        and should_dispatch
         and not _dispatch_failed(payload.get("dispatch"))
     ):
         exit_code = 0
@@ -101,7 +118,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.dual_review and payload.get("dual_review", {}).get("disagreements"):
         exit_code = 2
     return exit_code
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

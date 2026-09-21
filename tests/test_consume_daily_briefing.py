@@ -69,6 +69,82 @@ def test_undispatched_optimization_finding_exits_nonzero() -> None:
         assert main(["--report-dir", str(report_dir)]) == 2
 
 
+def _write_telegram_report(report_dir: Path) -> None:
+    (report_dir / "us_equity.json").write_text(
+        json.dumps(
+            {
+                "domain": "us_equity",
+                "ok": False,
+                "data_status": "unavailable",
+                "error": "synthetic unavailable",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_send_dry_run_cli_fail_closed_nonzero_without_side_effects(capsys) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        report_dir = Path(tmp)
+        _write_telegram_report(report_dir)
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            patch("service.briefing_dispatch.urllib.request.urlopen") as urlopen,
+            patch("service.briefing_dispatch.subprocess.check_output") as check_output,
+            patch("service.briefing_dispatch.create_github_issue") as create_issue,
+            patch("service.briefing_dispatch.send_telegram_alert") as send_tg,
+            patch("service.automation_run_ledger.get_automation_run_ledger") as get_ledger,
+        ):
+            code = main(["--report-dir", str(report_dir), "--send-dry-run"])
+        payload = json.loads(capsys.readouterr().out)
+        dispatch = payload["dispatch"]
+        assert code == 2
+        assert dispatch["send_dry_run"] is True
+        assert "telegram_missing_env" in dispatch["errors"]
+        assert dispatch["telegram_sent"] is False
+        assert dispatch["github_issue"] is None
+        assert dispatch["telegram_dry_run"] == {
+            "present": True,
+            "safe_summary": "telegram_preview_available",
+        }
+        urlopen.assert_not_called()
+        check_output.assert_not_called()
+        create_issue.assert_not_called()
+        send_tg.assert_not_called()
+        get_ledger.assert_not_called()
+
+
+def test_send_dry_run_cli_configured_still_skips_send(capsys) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        report_dir = Path(tmp)
+        _write_telegram_report(report_dir)
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "TELEGRAM_TOKEN": "secret-token-value",
+                    "GLOBAL_TELEGRAM_CHAT_ID": "123",
+                    "QSL_GITHUB_REPO": "QuantStrategyLab/AIAuditBridge",
+                },
+                clear=True,
+            ),
+            patch("service.briefing_dispatch.shutil_which", return_value="/usr/bin/gh"),
+            patch("service.briefing_dispatch.urllib.request.urlopen") as urlopen,
+            patch("service.briefing_dispatch.send_telegram_alert") as send_tg,
+        ):
+            code = main(["--report-dir", str(report_dir), "--send-dry-run"])
+        payload = json.loads(capsys.readouterr().out)
+        dispatch = payload["dispatch"]
+        # A configuration-check dry-run succeeds when prerequisites are present.
+        assert code == 0
+        assert dispatch["errors"] == []
+        assert dispatch["sender_prerequisites"]["telegram_token_present"] is True
+        assert "secret-token-value" not in json.dumps(dispatch)
+        assert "123" not in json.dumps(dispatch)
+        urlopen.assert_not_called()
+        send_tg.assert_not_called()
+
+
 def _write_summary_report(report_dir, *, as_of='2026-09-09T22:00:00+00:00'):
     (report_dir / 'us_equity.json').write_text(json.dumps({
         'domain': 'us_equity', 'ok': True, 'data_status': 'ready', 'as_of': as_of,
