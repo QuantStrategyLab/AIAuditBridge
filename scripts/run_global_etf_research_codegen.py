@@ -54,6 +54,12 @@ _TERMINAL_STATUSES = frozenset({"review_completed", "failed", "deferred"})
 _DEFERRED_RETRY_MAX_SECONDS = 7 * 24 * 60 * 60
 _DEFERRED_QUOTA_ERROR = "codex_quota_reserved"
 _DEFERRED_FAILURE_CATEGORY = "quota_or_capacity_failure"
+_SAFE_FAILURE_CATEGORIES = frozenset({
+    "quota_or_capacity_failure",
+    "auth_or_config_failure",
+    "patch_contract_failure",
+    "transient_service_failure",
+})
 
 
 class GlobalResearchCodegenError(ValueError):
@@ -231,6 +237,15 @@ def _read_json(path: Path, reason: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise GlobalResearchCodegenError(reason)
     return value
+
+
+def _safe_failure_category(raw: Any) -> str:
+    """Return an allowlisted category. Unrecognized values stay unknown and are not echoed."""
+    if isinstance(raw, Mapping):
+        category = raw.get("failure_category")
+        if isinstance(category, str) and category in _SAFE_FAILURE_CATEGORIES:
+            return category
+    return "unknown_failure"
 
 
 def _trusted_deferred_retry_at(raw: Any, *, now: float | None = None) -> int | None:
@@ -698,6 +713,7 @@ def run_global_etf_research_codegen_case(
         else:
             result = {
                 "status": "failed", "reason": "global_codegen_gateway_failed",
+                "failure_category": _safe_failure_category(raw),
                 "candidate_tests": test_result, "identity": identity,
             }
         (_write_resume_terminal if resumed else _write_terminal)(root, result)
@@ -738,6 +754,8 @@ def plan() -> dict[str, Any]:
 
 def _public_result(result: Mapping[str, Any]) -> dict[str, Any]:
     public = {key: value for key, value in result.items() if key not in {"identity", "source"}}
+    if "failure_category" in public:
+        public["failure_category"] = _safe_failure_category(public)
     public.update(no_order=True, promotion_eligible=False, live_authority_granted=False)
     return public
 
