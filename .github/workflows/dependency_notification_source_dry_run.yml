@@ -3,11 +3,16 @@ name: Dependency Notification Source Dry Run
 # Manual verification only: run the existing source dry-run CLI in Actions'
 # trusted Python/TLS environment. Not production automation — no schedule,
 # no live Telegram/GitHub issue send, no model calls, no ledger writes.
+#
+# Cross-repo QuantStrategyLab allowlists mint a temporary read-only GitHub App
+# installation token from existing CROSS_REPO_GITHUB_APP_* credentials (no new
+# secrets). Self-repo allowlist keeps the GITHUB_TOKEN path. Fail-closed: no
+# GITHUB_TOKEN fallback for cross-repo reads.
 on:
   workflow_dispatch:
     inputs:
       repos:
-        description: "Comma-separated owner/name allowlist (required; empty/org-wide default forbidden)"
+        description: "Single QuantStrategyLab/owner-name allowlist entry (required; empty/org-wide/multi-repo forbidden)"
         required: true
         type: string
 
@@ -30,14 +35,105 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Run dependency notification source dry-run
+      - name: Validate QuantStrategyLab allowlist
+        id: allowlist
         env:
-          # Cross-repo reads reuse existing secrets when present; empty is fine.
-          # Single-repo GITHUB_TOKEN is only accepted when allowlist == GITHUB_REPOSITORY.
+          REPO_ALLOWLIST: ${{ inputs.repos }}
+        run: |
+          set -euo pipefail
+          # Collapse whitespace only; never eval or interpolate into action args raw.
+          raw="$(printf '%s' "${REPO_ALLOWLIST}" | tr -d '[:space:]')"
+          if [ -z "${raw}" ]; then
+            echo "repository allowlist is required (empty forbidden)" >&2
+            exit 1
+          fi
+          # This batch: exactly one owner/name. Reject commas / multi-entry lists.
+          case "${raw}" in
+            *,*)
+              echo "multi-repo allowlist forbidden this batch; pass one QuantStrategyLab/name" >&2
+              exit 1
+              ;;
+          esac
+          # Owner must be QuantStrategyLab; name must match existing adapter path charset.
+          if [[ ! "${raw}" =~ ^QuantStrategyLab/[A-Za-z0-9_.-]+$ ]]; then
+            echo "allowlist must be a single QuantStrategyLab/<name> entry; got: ${raw}" >&2
+            exit 1
+          fi
+          repository="${raw#QuantStrategyLab/}"
+          if [ -z "${repository}" ] || [ "${repository}" = "${raw}" ]; then
+            echo "invalid repository allowlist entry: ${raw}" >&2
+            exit 1
+          fi
+          if [ "${#repository}" -gt 100 ]; then
+            echo "repository name exceeds length limit" >&2
+            exit 1
+          fi
+          echo "full=${raw}" >> "$GITHUB_OUTPUT"
+          echo "repository=${repository}" >> "$GITHUB_OUTPUT"
+          if [ "${raw}" = "${GITHUB_REPOSITORY}" ]; then
+            echo "cross_repo=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "cross_repo=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Detect cross-repo GitHub App credentials
+        id: app_credentials
+        if: steps.allowlist.outputs.cross_repo == 'true'
+        env:
+          APP_ID: ${{ vars.CROSS_REPO_GITHUB_APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.CROSS_REPO_GITHUB_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -n "${APP_ID:-}" ] && [ -n "${APP_PRIVATE_KEY:-}" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "CROSS_REPO_GITHUB_APP_ID / CROSS_REPO_GITHUB_APP_PRIVATE_KEY required for cross-repo dry-run" >&2
+            exit 1
+          fi
+
+      - name: Create read-only cross-repo App token
+        id: source_app_token
+        if: steps.allowlist.outputs.cross_repo == 'true'
+        uses: actions/create-github-app-token@v3.2.0
+        with:
+          app-id: ${{ vars.CROSS_REPO_GITHUB_APP_ID }}
+          private-key: ${{ secrets.CROSS_REPO_GITHUB_APP_PRIVATE_KEY }}
+          owner: QuantStrategyLab
+          repositories: ${{ steps.allowlist.outputs.repository }}
+          permission-contents: read
+          permission-pull-requests: read
+          permission-actions: read
+
+      - name: Verify cross-repo App token
+        if: steps.allowlist.outputs.cross_repo == 'true'
+        env:
+          SOURCE_APP_TOKEN: ${{ steps.source_app_token.outputs.token }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SOURCE_APP_TOKEN:-}" ]; then
+            echo "cross-repo App token creation failed; refusing GITHUB_TOKEN fallback" >&2
+            exit 1
+          fi
+
+      - name: Run dependency notification source dry-run (self-repo)
+        if: steps.allowlist.outputs.cross_repo == 'false'
+        env:
+          # Self-repo: existing GITHUB_TOKEN / optional org tokens; no App mint.
           CODEX_AUDIT_GH_TOKEN: ${{ secrets.CODEX_AUDIT_GH_TOKEN }}
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO_ALLOWLIST: ${{ inputs.repos }}
+          REPO_ALLOWLIST: ${{ steps.allowlist.outputs.full }}
+        run: |
+          set -euo pipefail
+          python3 -m scripts.run_dependency_notification_source_dry_run \
+            --repos "$REPO_ALLOWLIST"
+
+      - name: Run dependency notification source dry-run (cross-repo)
+        if: steps.allowlist.outputs.cross_repo == 'true'
+        env:
+          # Inject only the temporary App token for this path.
+          CODEX_AUDIT_GH_TOKEN: ${{ steps.source_app_token.outputs.token }}
+          REPO_ALLOWLIST: ${{ steps.allowlist.outputs.full }}
         run: |
           set -euo pipefail
           python3 -m scripts.run_dependency_notification_source_dry_run \

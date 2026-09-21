@@ -113,27 +113,37 @@ Behavior:
 - Network / pagination / allowlist failures exit non-zero with a fail-closed
   Telegram summary.
 
-Token gap: prefers existing `CODEX_AUDIT_GH_TOKEN` / `GH_TOKEN`. Workflow
-`GITHUB_TOKEN` is only accepted when the allowlist is exactly
-`GITHUB_REPOSITORY` (single-repo). Cross-repo allowlists need a broader read
-token; this batch does not add secrets. Pure payload conversion
+Token gap (adapter/CLI): prefers existing `CODEX_AUDIT_GH_TOKEN` / `GH_TOKEN`.
+Workflow `GITHUB_TOKEN` is only accepted when the allowlist is exactly
+`GITHUB_REPOSITORY` (single-repo). The manual Actions workflow (batch 4 /
+9.15.9 follow-up) can mint a temporary read-only App token from existing
+`CROSS_REPO_GITHUB_APP_*` credentials for one QuantStrategyLab allowlist entry;
+the adapter itself still does not invent secrets. Pure payload conversion
 (`build_trusted_event` / `build_trusted_intake_payload`) works offline without
 network when callers already have structured PR snapshots.
 
 This path is still **dry-run only**. It does not enable live notification
 sending, auto-merge, or `dependency_audit.yml` schedules.
 
-## Manual Actions verification entry (batch 4)
+## Manual Actions verification entry (batch 4 / 9.15.9 follow-up)
 
 Workflow: `.github/workflows/dependency_notification_source_dry_run.yml`
 (`workflow_dispatch` only).
 
-- Required input: `repos` (same allowlist as `--repos`; no empty/org-wide default).
+- Required input: `repos` — **exactly one** `QuantStrategyLab/<name>` entry
+  (no empty, org-wide, other-owner, illegal path, or multi-repo lists this batch).
 - Runs `python3 -m scripts.run_dependency_notification_source_dry_run` in
   GitHub-hosted Ubuntu so real GET calls use Actions' trusted Python/TLS.
-- Permissions: `contents` / `pull-requests` / `actions` read only.
-- Tokens: existing `GITHUB_TOKEN` (single-repo) plus
-  `CODEX_AUDIT_GH_TOKEN` / `GH_TOKEN` when already configured; no new secrets.
+- Permissions: `contents` / `pull-requests` / `actions` read only (workflow and
+  App token). No write / `id-token` / administration / merge permissions.
+- Self-repo allowlist (`GITHUB_REPOSITORY`): existing `GITHUB_TOKEN` /
+  optional `CODEX_AUDIT_GH_TOKEN` / `GH_TOKEN` path.
+- Cross-repo QuantStrategyLab allowlist: require existing
+  `vars.CROSS_REPO_GITHUB_APP_ID` + `secrets.CROSS_REPO_GITHUB_APP_PRIVATE_KEY`,
+  mint a temporary installation token via `actions/create-github-app-token`
+  (`permission-contents/pull-requests/actions: read` only), inject **only** into
+  `CODEX_AUDIT_GH_TOKEN`. Credential / mint / allowlist failures are fail-closed
+  (non-zero); no `GITHUB_TOKEN` fallback for cross-repo reads. No new secrets.
 - Still dry-run preview only: no Telegram/issue send, model, ledger, deploy,
   schedule, or write permissions. Non-zero CLI exit fails the job.
 
