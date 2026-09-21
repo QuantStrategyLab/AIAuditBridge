@@ -6,6 +6,11 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from scripts.build_strategy_watcher_artifact_payload import (
+    StrategyWatcherArtifactError,
+    build_strategy_watcher_artifact_payload,
+    select_strategy_watcher_artifact_payload,
+)
 from scripts.run_research_task_diagnosis import (
     diagnosis_candidates,
     issue_is_open_and_undiagnosed,
@@ -16,6 +21,7 @@ from scripts.run_research_task_diagnosis import (
     run_diagnosis,
 )
 from scripts.run_soxl_manual_learning import prepare_watcher_learning
+from scripts.run_strategy_optimization_watcher import no_comparable_metrics_result, run_watcher
 from service.research_diagnosis import (
     MARKER,
     build_research_diagnosis_prompt,
@@ -23,7 +29,14 @@ from service.research_diagnosis import (
     format_research_diagnosis_comment,
     marker_for_research_diagnosis,
 )
-from service.research_task import ResearchTaskError, build_strategy_diagnosis_task
+from service.research_task import (
+    SOXL_WATCHER_CANDIDATE_ID,
+    SOXL_WATCHER_P2_CONFIG_SHA256,
+    SOXL_WATCHER_PARAMETER_BOUNDS_SHA256,
+    SOXL_WATCHER_UES_REVISION,
+    ResearchTaskError,
+    build_strategy_diagnosis_task,
+)
 
 
 def _task(*, event_key: str = "a1b2c3d4e5f6") -> dict[str, object]:
@@ -121,6 +134,60 @@ def _empty_result() -> dict[str, object]:
     }
 
 
+_SOXL_SOURCE_REPO = "QuantStrategyLab/UsEquitySnapshotPipelines"
+_SOXL_WORKFLOW = "soxl-p1-p3-daily-research.yml"
+_SOXL_ISSUE_URL = "https://github.com/QuantStrategyLab/UsEquitySnapshotPipelines/issues/496"
+
+
+def _soxl_observation(
+    *,
+    generated_at: str,
+    as_of: str,
+    sharpe: float,
+    profile: str = SOXL_WATCHER_CANDIDATE_ID,
+) -> dict[str, object]:
+    return {
+        "schema_version": "strategy_performance.v2",
+        "metrics_kind": "performance",
+        "repository": _SOXL_SOURCE_REPO,
+        "strategy_profile": profile,
+        "candidate_kind": "individual",
+        "domain": "us_equity",
+        "generated_at": generated_at,
+        "as_of": as_of,
+        "current_metrics": {"sharpe": sharpe, "cagr": 0.1, "calmar": 0.7, "win_rate": 0.52, "max_dd": 0.12},
+        "evidence": {
+            "p1_input_digest": "a" * 64,
+            "p2_config_digest": SOXL_WATCHER_P2_CONFIG_SHA256,
+            "p3_evidence_id": "c" * 64,
+            "strategy_revision": SOXL_WATCHER_UES_REVISION,
+            "producer_revision": "e" * 40,
+        },
+        "lifecycle": {"stage": "P3", "status": "verified"},
+        "authority": {"research_only": True, "no_order": True, "p4_p5_p6_authorized": False},
+    }
+
+
+def _soxl_watcher_result() -> dict[str, object]:
+    """Build the scheduled watcher JSON the diagnosis consumer actually reads."""
+    payload = build_strategy_watcher_artifact_payload(
+        current_artifact=_soxl_observation(generated_at="2026-09-11T07:30:11Z", as_of="2026-09-10", sharpe=0.5),
+        baseline_artifact=_soxl_observation(generated_at="2026-09-10T07:30:11Z", as_of="2026-09-09", sharpe=1.0),
+        source_repository=_SOXL_SOURCE_REPO,
+        workflow_file=_SOXL_WORKFLOW,
+        current_run_id="200",
+        baseline_run_id="100",
+    )
+    return run_watcher(
+        payload,
+        source_repo=_SOXL_SOURCE_REPO,
+        dry_run=False,
+        create_issue=lambda _repo, _title, _body: _SOXL_ISSUE_URL,
+        list_issues=lambda _repo: {},
+        list_archived_issues=lambda _repo: {},
+    )
+
+
 def _soxl_task() -> dict[str, object]:
     return build_strategy_diagnosis_task(
         event_key="798ac840f875",
@@ -146,6 +213,21 @@ class FakeClient:
     def execute(self, prompt: str, **kwargs: object) -> SimpleNamespace:
         self.calls.append({"prompt": prompt, **kwargs})
         return SimpleNamespace(success=True, output="## 已验证事实\n已绑定。", provider="codex", model="codex-cli", error="", raw={"status": "succeeded"})
+
+
+def _cursor_client(raw_status: str) -> FakeClient:
+    client = FakeClient()
+    output = "## 已验证事实\n已绑定。" if raw_status == "succeeded" else "synthetic text"
+
+    def execute(prompt: str, **kwargs: object) -> SimpleNamespace:
+        client.calls.append({"prompt": prompt, **kwargs})
+        return SimpleNamespace(
+            success=True, output=output, provider="cursor", model="fake-cursor", error="", note="",
+            raw={"status": raw_status, "provider": "cursor", "output": output},
+        )
+
+    client.execute = execute  # type: ignore[method-assign]
+    return client
 
 
 class ResearchDiagnosisTests(unittest.TestCase):
@@ -685,6 +767,167 @@ class ResearchDiagnosisTests(unittest.TestCase):
         )
         self.assertIn("输出已按安全上限截断", comment)
         self.assertLess(len(comment), 14_000)
+
+
+class SoXLWatcherDiagnosisConsumerTests(unittest.TestCase):
+    """Offline wiring from the existing SOXL watcher result into diagnosis."""
+
+    def _assert_zero_diagnosis_calls(self, watcher_result: dict[str, object]) -> None:
+        summary = run_diagnosis(
+            watcher_result,
+            create_comment=lambda *_args: (_ for _ in ()).throw(AssertionError("must not comment")),
+            client_factory=lambda _config: (_ for _ in ()).throw(AssertionError("must not call diagnosis")),
+        )
+        self.assertEqual(summary["status"], "skipped")
+        self.assertEqual(summary["candidate_count"], 0)
+        self.assertEqual(summary["diagnoses"], [])
+
+    def test_verified_soxl_watcher_result_requests_one_advisory_diagnosis(self) -> None:
+        result = _soxl_watcher_result()
+        task = result["research_task_source_snapshot"]["tasks"][0]  # type: ignore[index]
+        issue = result["issues"][0]  # type: ignore[index]
+        self.assertEqual(task["target"]["candidate_id"], SOXL_WATCHER_CANDIDATE_ID)
+        self.assertEqual(task["target"]["repository"], "QuantStrategyLab/UsEquityStrategies")
+        self.assertEqual(task["target"]["strategy_revision"], SOXL_WATCHER_UES_REVISION)
+        self.assertEqual(task["evidence"]["p1_input_digest"], "a" * 64)
+        self.assertEqual(task["evidence"]["p2_config_digest"], SOXL_WATCHER_P2_CONFIG_SHA256)
+        self.assertEqual(task["evidence"]["p3_evidence_id"], "c" * 64)
+        self.assertEqual(task["experiment"]["parameter_bounds_sha256"], SOXL_WATCHER_PARAMETER_BOUNDS_SHA256)
+        self.assertEqual(task["authority"], {
+            "research_only": True, "no_order": True, "size_zero_required": True, "p4_p5_p6_authorized": False,
+        })
+        self.assertEqual(issue["repo"], _SOXL_SOURCE_REPO)
+        self.assertEqual(issue["url"], _SOXL_ISSUE_URL)
+        self.assertEqual(task["task_id"], "watcher-" + issue["task"]["event_key"])
+
+        client = _cursor_client("succeeded")
+        comments: list[str] = []
+
+        def marker_present(_repo: str, _url: str, marker: str) -> bool:
+            return any(marker in body for body in comments)
+
+        with patch.dict(os.environ, {
+            "CODEX_AUDIT_SERVICE_URL": "https://example.test",
+            "AI_GATEWAY_RESEARCH_PROVIDERS": "cursor",
+        }, clear=False):
+            first = run_diagnosis(
+                result,
+                marker_present=marker_present,
+                create_comment=lambda _repo, _url, body: comments.append(body) or "https://example.test/comment/1",
+                client_factory=lambda _config: client,
+            )
+            second = run_diagnosis(
+                result,
+                marker_present=marker_present,
+                create_comment=lambda *_args: (_ for _ in ()).throw(AssertionError("must not comment again")),
+                client_factory=lambda _config: (_ for _ in ()).throw(AssertionError("must not call diagnosis again")),
+            )
+
+        self.assertEqual(first["status"], "ok")
+        self.assertEqual(first["diagnoses"][0]["status"], "diagnosed")
+        self.assertEqual(len(client.calls), 1)
+        call = client.calls[0]
+        self.assertEqual(call["mode"], "review_only")
+        self.assertEqual(call["research_stage"], "drift_analysis")
+        self.assertEqual(call["allowed_providers"], ["cursor"])
+        self.assertEqual(call["source_repository"], "QuantStrategyLab/UsEquityStrategies")
+        self.assertEqual(call["source_ref"], SOXL_WATCHER_UES_REVISION)
+        self.assertIn(SOXL_WATCHER_CANDIDATE_ID, str(call["prompt"]))
+        self.assertIn("禁止：修改代码或参数", str(call["prompt"]))
+        self.assertIn("下单", str(call["prompt"]))
+        self.assertEqual(len(comments), 2)
+        self.assertIn("qsl-research-diagnosis-attempt:v1", comments[0])
+        self.assertIn("仅生成诊断建议", comments[1])
+        self.assertEqual(second["status"], "skipped")
+        self.assertEqual(second["reason"], "no_pending_verified_research_task")
+
+    def test_missing_nonpreceding_incomparable_or_mismatched_soxl_inputs_make_zero_diagnosis_calls(self) -> None:
+        current = _soxl_observation(generated_at="2026-09-11T07:30:11Z", as_of="2026-09-10", sharpe=0.5)
+        baseline = _soxl_observation(generated_at="2026-09-10T07:30:11Z", as_of="2026-09-09", sharpe=1.0)
+        missing = dict(current)
+        missing["evidence"] = {key: value for key, value in current["evidence"].items() if key != "p3_evidence_id"}  # type: ignore[union-attr]
+        with self.assertRaises(StrategyWatcherArtifactError):
+            build_strategy_watcher_artifact_payload(
+                current_artifact=missing, baseline_artifact=baseline,
+                source_repository=_SOXL_SOURCE_REPO, workflow_file=_SOXL_WORKFLOW,
+                current_run_id="200", baseline_run_id="100",
+            )
+        later = _soxl_observation(generated_at="2026-09-12T07:30:11Z", as_of="2026-09-11", sharpe=1.0)
+        with self.assertRaisesRegex(StrategyWatcherArtifactError, "baseline must precede"):
+            build_strategy_watcher_artifact_payload(
+                current_artifact=current, baseline_artifact=later,
+                source_repository=_SOXL_SOURCE_REPO, workflow_file=_SOXL_WORKFLOW,
+                current_run_id="200", baseline_run_id="100",
+            )
+        self.assertIsNone(select_strategy_watcher_artifact_payload(
+            observations=[("200", current), ("100", {**baseline, "as_of": current["as_of"], "generated_at": "2026-09-10T08:00:00Z"})],
+            source_repository=_SOXL_SOURCE_REPO, workflow_file=_SOXL_WORKFLOW,
+        ))
+        other = _soxl_observation(
+            generated_at="2026-09-10T07:30:11Z", as_of="2026-09-09", sharpe=1.0, profile="other_profile",
+        )
+        self.assertIsNone(select_strategy_watcher_artifact_payload(
+            observations=[("200", current), ("100", other)],
+            source_repository=_SOXL_SOURCE_REPO, workflow_file=_SOXL_WORKFLOW,
+        ))
+
+        unavailable = no_comparable_metrics_result(dry_run=False)
+        self._assert_zero_diagnosis_calls(unavailable)
+
+        payload = build_strategy_watcher_artifact_payload(
+            current_artifact=current, baseline_artifact=baseline,
+            source_repository=_SOXL_SOURCE_REPO, workflow_file=_SOXL_WORKFLOW,
+            current_run_id="200", baseline_run_id="100",
+        )
+        payload["current_metrics"] = {key: value for key, value in payload["current_metrics"].items() if key != "sharpe"}  # type: ignore[union-attr]
+        incomplete = run_watcher(
+            payload, source_repo=_SOXL_SOURCE_REPO, dry_run=False,
+            create_issue=lambda _repo, _title, _body: _SOXL_ISSUE_URL,
+            list_issues=lambda _repo: {}, list_archived_issues=lambda _repo: {},
+        )
+        self.assertEqual(incomplete["research_task_source_snapshot"]["data_status"], "unavailable")  # type: ignore[index]
+        self.assertEqual(diagnosis_candidates(incomplete), [])
+        self._assert_zero_diagnosis_calls(incomplete)
+
+    def test_unknown_soxl_diagnosis_result_stays_parked(self) -> None:
+        result = _soxl_watcher_result()
+        issue_comments: list[str] = []
+        client = _cursor_client("unknown")
+
+        def read_issue(args: list[str], **_kwargs: object) -> SimpleNamespace:
+            if "/comments?" in args[-1]:
+                return SimpleNamespace(stdout=json.dumps([
+                    {
+                        "id": index + 1,
+                        "body": body,
+                        "performed_via_github_app": {"id": 42},
+                        "created_at": "2026-09-16T00:00:00Z",
+                    }
+                    for index, body in enumerate(issue_comments)
+                ]))
+            return SimpleNamespace(stdout=json.dumps({"state": "open"}))
+
+        def create_comment(_repo: str, _url: str, body: str) -> str:
+            issue_comments.append(body)
+            return "https://github.com/QuantStrategyLab/UsEquitySnapshotPipelines/issues/496#issuecomment-7"
+
+        with patch.dict(os.environ, {
+            "CODEX_AUDIT_SERVICE_URL": "https://example.test",
+            "AI_GATEWAY_RESEARCH_PROVIDERS": "cursor",
+            "SOURCE_GITHUB_APP_ID": "42",
+        }, clear=False), patch("scripts.run_research_task_diagnosis.subprocess.run", side_effect=read_issue):
+            first = run_diagnosis(result, create_comment=create_comment, client_factory=lambda _config: client)
+            second = run_diagnosis(result, create_comment=create_comment, client_factory=lambda _config: client)
+
+        self.assertEqual(first["status"], "partial_error")
+        self.assertEqual(first["diagnoses"][0]["status"], "unavailable")
+        self.assertEqual(len(client.calls), 1)
+        self.assertEqual(len(issue_comments), 1)
+        self.assertIn("qsl-research-diagnosis-attempt:v1", issue_comments[0])
+        self.assertNotIn("qsl-research-diagnosis:v1:", issue_comments[0])
+        self.assertEqual(second["status"], "skipped")
+        self.assertEqual(len(client.calls), 1)
+        self.assertEqual(len(issue_comments), 1)
 
 
 if __name__ == "__main__":
