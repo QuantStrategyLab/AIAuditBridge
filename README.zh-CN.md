@@ -41,6 +41,8 @@ GitHub PR 的 AI review 只有一个责任方：GitHub Codex App。AIAuditBridge
 
 唯一的窄例外是 `SchwabTokenAutoRefresher` 依赖 lane。每 6 小时运行的 `dependency_audit.yml` 只把符合条件的 `otpauth` 和 `playwright` Dependabot 更新送到 VPS Codex service 做只读审查；它不会 checkout 或执行 PR 代码，只有在 exact base/head、manifest、lockfile、workflow path 和 CI 成功等确定性门槛通过后才调用 service。普通 PR review 仍由 GitHub Codex App 负责。
 
+`service/dependency_notification_triage.py` 是纯函数、fail-closed 的适配层：把结构化的依赖/工程 review 证据映射到现有 `BriefingFinding` / `BriefingAction`（`quiet` / `github_issue` / `telegram`），供后续接入 `dispatch_briefing_result`。它不增加第二个 PR reviewer，不调用 GitHub notifications API，不发送 Telegram/GitHub issue，也不调用真实模型。影响低风险放行的关键证据缺失、冲突或未知会升级为 `telegram` 并保持 `review_required` / `unknown`；明确的普通 source-code 或非 Dependabot review 仍走 `github_issue`。
+
 当 `CODEX_AUDIT_AUTO_MERGE=true` 时，bridge 会先检查变更文件面和总增删行数，只在低风险或中风险且未超过 policy 上限时给生成的 PR 添加 `auto-merge-ok` label，请求源仓库的受控自动合并。bridge 会在打标前按需创建配置的 label；如果源仓 token 没有创建 label 的权限，需要先手动创建该 label。若 source checkout 里存在 `.github/codex_auto_merge_policy.json`，bridge 会在 Codex 执行修改前读取基线策略，否则才使用内置默认值。高风险、未知文件面、策略文件变更、文件移除/重命名/复制或无效 policy 配置不会添加 `auto-merge-ok`，而是给 PR 添加配置的人工复核 label（默认 `human-review-required`），并在源 issue 评论中列出风险原因和文件，等待人工复核。bridge 不会直接调用 GitHub native auto-merge。最终是否合并仍由源仓库自己的 CI 和 merge-guard workflow 决定。
 
 当源 issue 中出现 CI 失败或 requested-changes review 产生的 `codex-pr-feedback` marker 时，bridge 会把本次运行视为有界重试。只要 marker 指向的 PR 仍然 open、同仓、base 是请求的 source ref，并且 head 分支属于同一个 monthly issue，bridge 会更新现有 PR 分支，而不是再创建一个新 PR。在清理该 PR 上旧的受控自动合并 label 前，bridge 会复用 baseline policy label；如果 policy 无效，或 auto-merge / human-review label 无法安全区分，则跳过 label mutation。
