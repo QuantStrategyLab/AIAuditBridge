@@ -11,8 +11,44 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 from service.briefing_consumer import BriefingAction, BriefingConsumptionResult, BriefingFinding
+from service.briefing_dispatch import dispatch_briefing_result
 
 DEPENDABOT_LOGINS = frozenset({"dependabot[bot]", "app/dependabot"})
+
+TRUSTED_INTAKE_SCHEMA_VERSION = 1
+MAX_TRUSTED_INTAKE_EVENTS = 50
+
+_REQUIRED_EVENT_FIELDS = (
+    "repository",
+    "pr_number",
+    "author_login",
+    "update_class",
+    "changed_files",
+    "base_sha",
+    "head_sha",
+    "ci_status",
+    "dependency_only_manifest_change",
+)
+
+_OPTIONAL_EVENT_FIELDS = frozenset(
+    {
+        "dependency_names",
+        "qpk_pin_changed",
+        "notification_kind",
+        "event_type",
+        "security_advisory_id",
+        "security_advisory_ids",
+    }
+)
+
+_EVIDENCE_PASSTHROUGH_FIELDS = (
+    *_REQUIRED_EVENT_FIELDS,
+    "dependency_names",
+    "qpk_pin_changed",
+    "notification_kind",
+    "security_advisory_id",
+    "security_advisory_ids",
+)
 
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
@@ -547,6 +583,265 @@ def triage_to_briefing_result(
         report_dir=report_dir,
         findings=findings,
     )
+
+
+def _intake_fail_closed(
+    reasons: list[str],
+    *,
+    error: str,
+    confidence: str = "unknown",
+) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "action": BriefingAction.TELEGRAM.value,
+        "review_required": True,
+        "confidence": confidence,
+        "error": error,
+        "reasons": list(reasons),
+        "counts": {
+            "events": 0,
+            "quiet": 0,
+            "telegram": 0,
+            "github_issue": 0,
+            "deduped": 0,
+        },
+        "events": [],
+        "dispatch": {
+            "action": BriefingAction.TELEGRAM.value,
+            "telegram_sent": False,
+            "github_issue": None,
+            "telegram_dry_run": {
+                "present": True,
+                "safe_summary": "intake_validation_failed",
+            },
+            "github_dry_run": {"present": False},
+            "errors": [],
+            "skipped": [],
+        },
+    }
+
+
+def _validate_trusted_event(event: Any, *, index: int) -> tuple[dict[str, Any] | None, str | None]:
+    if not isinstance(event, Mapping):
+        return None, f"event[{index}] type invalid"
+    missing = [name for name in _REQUIRED_EVENT_FIELDS if name not in event]
+    if missing:
+        return None, f"event[{index}] required fields missing: {', '.join(missing)}"
+
+    repository = str(event.get("repository") or "").strip()
+    if not repository:
+        return None, f"event[{index}] repository missing"
+
+    pr_number = event.get("pr_number")
+    if isinstance(pr_number, bool) or not isinstance(pr_number, int) or pr_number <= 0:
+        return None, f"event[{index}] pr_number invalid"
+
+    author_login = str(event.get("author_login") or "").strip()
+    if not author_login:
+        return None, f"event[{index}] author_login missing"
+
+    update_class = str(event.get("update_class") or "").strip()
+    if not update_class:
+        return None, f"event[{index}] update_class missing"
+
+    changed_files = event.get("changed_files")
+    if not isinstance(changed_files, list) or not changed_files:
+        return None, f"event[{index}] changed_files missing"
+    if not all(isinstance(item, str) and item.strip() for item in changed_files):
+        return None, f"event[{index}] changed_files invalid"
+
+    base_sha = event.get("base_sha")
+    head_sha = event.get("head_sha")
+    if not _valid_sha(base_sha) or not _valid_sha(head_sha):
+        return None, f"event[{index}] base/head sha missing or invalid"
+
+    ci_status = str(event.get("ci_status") or "").strip()
+    if not ci_status:
+        return None, f"event[{index}] ci_status missing"
+
+    dependency_only = event.get("dependency_only_manifest_change")
+    if not isinstance(dependency_only, bool):
+        return None, f"event[{index}] dependency_only_manifest_change invalid"
+
+    if "dependency_names" in event:
+        names = event.get("dependency_names")
+        if not isinstance(names, list) or not all(isinstance(item, str) for item in names):
+            return None, f"event[{index}] dependency_names invalid"
+
+    if "qpk_pin_changed" in event and not isinstance(event.get("qpk_pin_changed"), bool):
+        return None, f"event[{index}] qpk_pin_changed invalid"
+
+    if "event_type" in event:
+        event_type = str(event.get("event_type") or "").strip()
+        if event_type and event_type not in {"dependabot_pr", "engineering_review"}:
+            return None, f"event[{index}] event type invalid"
+
+    normalized: dict[str, Any] = {
+        "repository": repository,
+        "pr_number": pr_number,
+        "author_login": author_login,
+        "update_class": update_class.lower(),
+        "changed_files": [str(item).strip() for item in changed_files],
+        "base_sha": str(base_sha).strip().lower(),
+        "head_sha": str(head_sha).strip().lower(),
+        "ci_status": ci_status.lower(),
+        "dependency_only_manifest_change": dependency_only,
+    }
+    for key in _OPTIONAL_EVENT_FIELDS:
+        if key in event and key not in normalized:
+            normalized[key] = event[key]
+    return normalized, None
+
+
+def _evidence_from_trusted_event(event: Mapping[str, Any]) -> dict[str, Any]:
+    evidence: dict[str, Any] = {}
+    for key in _EVIDENCE_PASSTHROUGH_FIELDS:
+        if key in event:
+            evidence[key] = event[key]
+    # Never pass title/body: trusted intake must not use free text as a quiet gate.
+    return evidence
+
+
+def _redact_dispatch_summary(summary: Mapping[str, Any]) -> dict[str, Any]:
+    known_errors = {
+        "optimization_record_failed",
+        "github_issue_record_failed",
+        "telegram_delivery_failed",
+        "telegram_missing_env",
+    }
+    safe_errors: list[str] = []
+    for item in summary.get("errors") or ():
+        text = str(item or "").strip()
+        if text in known_errors:
+            safe_errors.append(text)
+        elif text:
+            safe_errors.append("dispatch_error")
+
+    redacted: dict[str, Any] = {
+        "action": str(summary.get("action") or BriefingAction.QUIET.value),
+        "telegram_sent": False,
+        "github_issue": None,
+        "errors": safe_errors,
+        "skipped": [str(item) for item in (summary.get("skipped") or ())],
+        "telegram_dry_run": {"present": False},
+        "github_dry_run": {"present": False},
+    }
+    if "telegram_dry_run" in summary:
+        redacted["telegram_dry_run"] = {
+            "present": True,
+            "safe_summary": "telegram_preview_available",
+        }
+    if "github_dry_run" in summary:
+        redacted["github_dry_run"] = {
+            "present": True,
+            "safe_summary": "github_issue_preview_available",
+        }
+    return redacted
+
+
+def run_trusted_intake_dry_run(
+    payload: Mapping[str, Any] | None,
+    *,
+    parse_error: str | None = None,
+) -> dict[str, Any]:
+    """Validate trusted structured intake and preview triage+dispatch with dry_run=True.
+
+    Reads no GitHub notifications, calls no model, and never sends Telegram/issues.
+    """
+    if parse_error:
+        return _intake_fail_closed(
+            [f"input {parse_error}"],
+            error=parse_error,
+        )
+    if not isinstance(payload, Mapping):
+        return _intake_fail_closed(
+            ["top-level schema invalid"],
+            error="schema_invalid",
+        )
+    if payload.get("schema_version") != TRUSTED_INTAKE_SCHEMA_VERSION:
+        return _intake_fail_closed(
+            [f"schema_version must be {TRUSTED_INTAKE_SCHEMA_VERSION}"],
+            error="schema_version",
+        )
+    events = payload.get("events")
+    if not isinstance(events, list):
+        return _intake_fail_closed(
+            ["events must be a list"],
+            error="events_type",
+        )
+    if len(events) > MAX_TRUSTED_INTAKE_EVENTS:
+        return _intake_fail_closed(
+            [f"events exceed limit of {MAX_TRUSTED_INTAKE_EVENTS}"],
+            error="events_limit",
+        )
+
+    normalized_events: list[dict[str, Any]] = []
+    for index, raw_event in enumerate(events):
+        normalized, error = _validate_trusted_event(raw_event, index=index)
+        if error is not None:
+            return _intake_fail_closed([error], error="required_fields")
+        assert normalized is not None
+        normalized_events.append(normalized)
+
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[str, int, str]] = set()
+    duplicate_count = 0
+    for event in normalized_events:
+        key = (event["repository"], int(event["pr_number"]), str(event["head_sha"]))
+        if key in seen:
+            duplicate_count += 1
+            continue
+        seen.add(key)
+        deduped.append(event)
+
+    event_rows: list[dict[str, Any]] = []
+    findings: list[BriefingFinding] = []
+    counts = {
+        "events": len(deduped),
+        "quiet": 0,
+        "telegram": 0,
+        "github_issue": 0,
+        "deduped": duplicate_count,
+    }
+
+    for event in deduped:
+        triage_result = triage_dependency_notification(_evidence_from_trusted_event(event))
+        decision = triage_result.action.value
+        counts[decision] = int(counts.get(decision, 0)) + 1
+        event_rows.append(
+            {
+                "repository": event["repository"],
+                "pr_number": event["pr_number"],
+                "decision": decision,
+                "confidence": triage_result.confidence,
+                "review_required": triage_result.review_required,
+                "reasons": list(triage_result.reasons),
+            }
+        )
+        adapted = triage_to_briefing_result(triage_result)
+        findings.extend(adapted.findings)
+
+    briefing = BriefingConsumptionResult(
+        day="dependency-notification-dry-run",
+        report_dir="dependency-notification-triage",
+        findings=findings,
+    )
+    dispatch = dispatch_briefing_result(briefing, dry_run=True)
+    review_required = any(bool(row["review_required"]) for row in event_rows)
+    confidence = "known"
+    if review_required:
+        confidence = "review_required"
+    elif any(row["confidence"] != "known" for row in event_rows):
+        confidence = "unknown"
+    return {
+        "ok": True,
+        "action": briefing.action.value,
+        "review_required": review_required,
+        "confidence": confidence,
+        "counts": counts,
+        "events": event_rows,
+        "dispatch": _redact_dispatch_summary(dispatch),
+    }
 
 
 def _result(
