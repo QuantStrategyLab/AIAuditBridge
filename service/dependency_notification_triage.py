@@ -144,13 +144,17 @@ def _normalize_path(path: str) -> str:
     return normalized.lower()
 
 
-def _is_manifest_or_lock(path: str) -> bool:
+def is_manifest_or_lock(path: str) -> bool:
     name = _basename(path)
     if name in _MANIFEST_LOCK_EXACT:
         return True
     if name.startswith("requirements") and name.endswith(".txt"):
         return True
     return False
+
+
+# Keep private alias for in-module call sites.
+_is_manifest_or_lock = is_manifest_or_lock
 
 
 def _path_high_risk_reasons(path: str) -> list[str]:

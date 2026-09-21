@@ -73,6 +73,51 @@ GitHub personal notifications, call the notifications API, invoke a model, send
 Telegram, create GitHub issues, write remotes, or touch
 `automation_run_ledger`.
 
+## Controlled PR source adapter (batch 3)
+
+Entry: `scripts/run_dependency_notification_source_dry_run.py` →
+`service/dependency_notification_source.py` → existing
+`run_trusted_intake_dry_run(...)`.
+
+```bash
+python3 scripts/run_dependency_notification_source_dry_run.py \
+  --repos QuantStrategyLab/ExampleRepo,QuantStrategyLab/OtherRepo
+# or:
+# DEPENDENCY_NOTIFICATION_REPO_ALLOWLIST=org/a,org/b \
+#   python3 scripts/run_dependency_notification_source_dry_run.py
+```
+
+Behavior:
+
+- **Explicit repository allowlist only** (`--repos` / `--repo` /
+  `DEPENDENCY_NOTIFICATION_REPO_ALLOWLIST`). Empty default is rejected; there is
+  no org-wide scan.
+- Hard caps: `MAX_ALLOWLIST_REPOS`, `MAX_PRS_PER_REPO`, and the existing
+  `MAX_TRUSTED_INTAKE_EVENTS`. GitHub list pagination reuses
+  `scripts/run_dependency_audit.github_list_all` with `max_pages=1` and never
+  calls Schwab audit write/merge paths.
+- GET-only: open PR list, PR files, commit check-runs. No POST/PATCH/PUT/DELETE,
+  no issue/comment/merge, no workflow schedule changes, no model calls.
+- Converts structured fields (author, files, base/head SHA, CI check-run status,
+  Dependabot `version-update:semver-*` marker / security labels) into schema v1
+  events. **Title/body free text never alone grants quiet**; missing
+  `update_class` or other key evidence becomes `unknown` and the existing
+  triage escalates to Telegram / `review_required`.
+- Output is the redacted dry-run preview plus a safe `source` summary. Tokens,
+  PR title/body, and raw API error bodies are not printed.
+- Network / pagination / allowlist failures exit non-zero with a fail-closed
+  Telegram summary.
+
+Token gap: prefers existing `CODEX_AUDIT_GH_TOKEN` / `GH_TOKEN`. Workflow
+`GITHUB_TOKEN` is only accepted when the allowlist is exactly
+`GITHUB_REPOSITORY` (single-repo). Cross-repo allowlists need a broader read
+token; this batch does not add secrets. Pure payload conversion
+(`build_trusted_event` / `build_trusted_intake_payload`) works offline without
+network when callers already have structured PR snapshots.
+
+This path is still **dry-run only**. It does not enable live notification
+sending, auto-merge, or `dependency_audit.yml` schedules.
+
 ## Non-goals
 
 - No GitHub notifications API consumer (still open)
@@ -81,6 +126,7 @@ Telegram, create GitHub issues, write remotes, or touch
 - No second PR reviewer, event bus, or parallel notification system
 - No changes to trading, strategy, QPK, broker, credentials, production
   workflows, or auto-merge policy
+- No org-wide repository discovery; no schedule wiring this batch
 
 ## Entry points
 
@@ -90,3 +136,6 @@ Telegram, create GitHub issues, write remotes, or touch
   `dispatch_briefing_result(..., dry_run=True|False)`
 - `run_trusted_intake_dry_run(payload)` → redacted dry-run preview dict
 - CLI: `scripts/run_dependency_notification_dry_run.py`
+- `build_trusted_event` / `collect_or_fail_closed` /
+  `run_source_dry_run` → schema v1 + dry-run preview from allowlisted PR GETs
+- CLI: `scripts/run_dependency_notification_source_dry_run.py`
