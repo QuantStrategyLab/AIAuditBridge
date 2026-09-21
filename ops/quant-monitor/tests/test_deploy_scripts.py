@@ -58,6 +58,19 @@ class DeployScriptTests(unittest.TestCase):
         self.assertIn("checkout --detach --quiet origin/main", script)
         self.assertNotIn("pull --ff-only", script)
 
+    def test_health_check_sources_telegram_env_after_common_env(self) -> None:
+        script = (ROOT / "scripts" / "health_check.sh").read_text(encoding="utf-8")
+
+        self.assertIn('source "$ROOT/scripts/common_env.sh"', script)
+        self.assertIn(
+            'source "$ROOT/scripts/source_telegram_env.sh" 2>/dev/null || true',
+            script,
+        )
+        self.assertLess(
+            script.index('source "$ROOT/scripts/common_env.sh"'),
+            script.index('source "$ROOT/scripts/source_telegram_env.sh"'),
+        )
+
     def test_health_check_syncs_artifacts_before_monitoring(self) -> None:
         script = (ROOT / "scripts" / "health_check.sh").read_text(encoding="utf-8")
 

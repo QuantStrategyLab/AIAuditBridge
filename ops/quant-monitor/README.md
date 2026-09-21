@@ -65,6 +65,10 @@ export GLOBAL_TELEGRAM_CHAT_ID="<your-chat-id>"
 bash scripts/load_telegram_env.sh /run/quant-monitor/telegram.env
 ```
 
+systemd unit 通过 `RuntimeDirectory=quant-monitor` 与 `ExecStartPre=.../load_telegram_env.sh`
+写入该临时 env；`health_check.sh` / `daily_briefing.sh` 再经 `source_telegram_env.sh`
+导入，不把 token 或 chat id 写入仓库。
+
 ## VPS 部署
 
 ```bash
