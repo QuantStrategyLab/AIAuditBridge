@@ -28,8 +28,8 @@ Entry: `scripts/run_dependency_notification_dry_run.py` →
 `run_trusted_intake_dry_run(...)`.
 
 ```bash
-python3 scripts/run_dependency_notification_dry_run.py --input sample.json
-python3 scripts/run_dependency_notification_dry_run.py --input - < sample.json
+python3 -m scripts.run_dependency_notification_dry_run --input sample.json
+python3 -m scripts.run_dependency_notification_dry_run --input - < sample.json
 ```
 
 Input schema (local JSON only):
@@ -80,11 +80,11 @@ Entry: `scripts/run_dependency_notification_source_dry_run.py` →
 `run_trusted_intake_dry_run(...)`.
 
 ```bash
-python3 scripts/run_dependency_notification_source_dry_run.py \
+python3 -m scripts.run_dependency_notification_source_dry_run \
   --repos QuantStrategyLab/ExampleRepo,QuantStrategyLab/OtherRepo
 # or:
 # DEPENDENCY_NOTIFICATION_REPO_ALLOWLIST=org/a,org/b \
-#   python3 scripts/run_dependency_notification_source_dry_run.py
+#   python3 -m scripts.run_dependency_notification_source_dry_run
 ```
 
 Behavior:
