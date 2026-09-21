@@ -83,6 +83,30 @@ sudo systemctl daemon-reload && sudo systemctl enable --now codex-quant.service
 
 收盘简报 + AIAuditBridge 分发：`bash scripts/daily_briefing_pipeline.sh`
 
+## Immutable release 安装（仅安装）
+
+生产 oneshot 服务从 `/opt/quant-monitor/releases/<40-hex-SHA>` 读代码。用本地已有仓库中的**精确
+commit** 安装不可变 release；**不** fetch/pull，**不**改 systemd/drop-in，**不**
+daemon-reload，也**不**启停服务。switch、rollback 与 `deploy_to_vps.sh` 是独立步骤，本脚本不执行。
+
+```bash
+# release root 须对当前用户可写（测试可改 QUANT_MONITOR_RELEASE_ROOT）
+bash ops/quant-monitor/scripts/install_immutable_release.sh \
+  --sha <40-hex-commit> \
+  --repo /path/to/AIAuditBridge \
+  --runtime-data /home/ubuntu/quant-monitor-runtime/AIAuditBridge/ops/quant-monitor/data \
+  --runtime-venv /home/ubuntu/quant-monitor-runtime/AIAuditBridge/ops/quant-monitor/.venv
+```
+
+行为摘要：
+
+- 校验 SHA 为 40 位小写十六进制，且在 `--repo` 中作为 commit 存在；
+- `git archive` 导出该 commit 的完整树到 release root 下临时目录，校验必需路径后原子
+  `mv` 到 `/opt/quant-monitor/releases/<SHA>`（可用 `--release-root` / `QUANT_MONITOR_RELEASE_ROOT`）；
+- 仅将 release 内 `ops/quant-monitor/data` 与 `.venv` 符号链接到显式传入的 runtime 目录，不复制、不删除 runtime 数据；
+- 已存在目标只有在与该 commit 的完整 archive 树一致时才幂等复用；内容不一致则拒绝覆盖；
+- 失败时只清理本脚本自己的临时目录。
+
 ## 策略健康快照（只读）
 
 `health_cycle.py` 会把生命周期 dashboard 规范化为
