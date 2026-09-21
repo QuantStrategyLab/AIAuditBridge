@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import unittest
 from unittest.mock import patch
 
@@ -16,6 +17,25 @@ BASE_SHA = "a" * 40
 HEAD_SHA = "b" * 40
 HEAD_SHA_2 = "c" * 40
 HEAD_SHA_3 = "d" * 40
+
+_CLI_TOKEN_ENV_KEYS = (
+    "DEPENDENCY_NOTIFICATION_REPO_ALLOWLIST",
+    "CODEX_AUDIT_GH_TOKEN",
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GITHUB_REPOSITORY",
+)
+
+
+def _isolated_cli_env(**overrides: str) -> dict[str, str]:
+    """Drop ambient GitHub/token env so CLI tests do not depend on CI globals."""
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in _CLI_TOKEN_ENV_KEYS
+    }
+    env.update(overrides)
+    return env
 
 
 def _pr(
@@ -242,19 +262,8 @@ class CollectAndCliTests(unittest.TestCase):
         self.assertNotIn("token", blob.lower().replace("token_missing", ""))
 
     def test_cli_requires_allowlist_and_redacts_output(self) -> None:
-        env = {
-            key: value
-            for key, value in __import__("os").environ.items()
-            if key
-            not in {
-                "DEPENDENCY_NOTIFICATION_REPO_ALLOWLIST",
-                "CODEX_AUDIT_GH_TOKEN",
-                "GH_TOKEN",
-                "GITHUB_TOKEN",
-            }
-        }
         with (
-            patch.dict("os.environ", env, clear=True),
+            patch.dict("os.environ", _isolated_cli_env(), clear=True),
             patch("sys.stdout", new_callable=io.StringIO),
         ):
             code = cli.main([])
@@ -278,11 +287,19 @@ class CollectAndCliTests(unittest.TestCase):
                 }
             return {}
 
+        # Exercise real token resolution with an org-scoped token. Ambient
+        # GITHUB_REPOSITORY (set in Actions) must not flip this into the
+        # workflow-token single-repo restriction.
+        buf = io.StringIO()
         with (
-            patch.object(cli, "resolve_source_token", return_value="token"),
+            patch.dict(
+                "os.environ",
+                _isolated_cli_env(CODEX_AUDIT_GH_TOKEN="org-read-token"),
+                clear=True,
+            ),
             patch.object(source, "github_list_all", side_effect=fake_list_all),
             patch.object(source, "github_request", side_effect=fake_request),
-            patch("sys.stdout", new_callable=io.StringIO),
+            patch("sys.stdout", buf),
         ):
             code = cli.main(
                 [
@@ -291,10 +308,45 @@ class CollectAndCliTests(unittest.TestCase):
                 ]
             )
         self.assertEqual(code, 0)
+        result = json.loads(buf.getvalue())
+        self.assertTrue(result["ok"])
+        self.assertIn("source", result)
+        self.assertNotIn("org-read-token", buf.getvalue())
+
+    def test_cli_workflow_token_rejects_foreign_allowlist(self) -> None:
+        """CI sets GITHUB_REPOSITORY; workflow token may only read that repo."""
+        buf = io.StringIO()
+        with (
+            patch.dict(
+                "os.environ",
+                _isolated_cli_env(
+                    GITHUB_TOKEN="workflow-token",
+                    GITHUB_REPOSITORY="QuantStrategyLab/AIAuditBridge",
+                ),
+                clear=True,
+            ),
+            patch("sys.stdout", buf),
+        ):
+            code = cli.main(
+                [
+                    "--repos",
+                    "QuantStrategyLab/SchwabTokenAutoRefresher",
+                ]
+            )
+        self.assertEqual(code, 2)
+        result = json.loads(buf.getvalue())
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "allowlist_or_limits")
+        self.assertNotIn("workflow-token", buf.getvalue())
 
     def test_cli_network_failure_nonzero_redacted(self) -> None:
+        buf = io.StringIO()
         with (
-            patch.object(cli, "resolve_source_token", return_value="token"),
+            patch.dict(
+                "os.environ",
+                _isolated_cli_env(CODEX_AUDIT_GH_TOKEN="org-read-token"),
+                clear=True,
+            ),
             patch.object(
                 source,
                 "collect_or_fail_closed",
@@ -328,10 +380,13 @@ class CollectAndCliTests(unittest.TestCase):
                     },
                 },
             ),
-            patch("sys.stdout", new_callable=io.StringIO),
+            patch("sys.stdout", buf),
         ):
             code = cli.main(["--repos", "QuantStrategyLab/ExampleRepo"])
         self.assertNotEqual(code, 0)
+        result = json.loads(buf.getvalue())
+        self.assertEqual(result["error"], "github_api_failed")
+        self.assertNotIn("org-read-token", buf.getvalue())
 
     def test_no_write_methods_on_github_request(self) -> None:
         seen: list[str] = []
