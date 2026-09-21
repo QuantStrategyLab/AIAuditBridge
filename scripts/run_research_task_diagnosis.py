@@ -126,15 +126,18 @@ def run_diagnosis(
     candidates = diagnosis_candidates(result)
     if max_per_run < 1:
         raise ValueError("max_per_run must be positive")
-    pending = [
-        item
-        for item in candidates
-        if not marker_present(
-            str(item["repository"]),
-            str(item["issue_url"]),
-            marker_for_research_diagnosis(build_research_diagnosis_request(item["task"], trigger=item["trigger"])),
-        )
-    ]
+    pending: list[dict[str, Any]] = []
+    early_rejects: list[dict[str, Any]] = []
+    for item in candidates:
+        try:
+            request = build_research_diagnosis_request(item["task"], trigger=item["trigger"])
+            marker = marker_for_research_diagnosis(request)
+        except (TypeError, ValueError) as exc:
+            # Identity/contract failures park without constructing an AI client.
+            early_rejects.append({"status": "rejected", "error": _error_summary(exc)})
+            continue
+        if not marker_present(str(item["repository"]), str(item["issue_url"]), marker):
+            pending.append(item)
     summary: dict[str, Any] = {
         "schema_version": "qsl.research_diagnosis_dispatch.v1",
         "status": "ok",
@@ -142,11 +145,14 @@ def run_diagnosis(
         "pending_count": len(pending),
         "max_per_run": max_per_run,
         "dry_run": dry_run,
-        "diagnoses": [],
+        "diagnoses": list(early_rejects),
     }
     if not pending:
-        summary["status"] = "skipped"
-        summary["reason"] = "no_pending_verified_research_task"
+        if early_rejects:
+            summary["status"] = "partial_error"
+        else:
+            summary["status"] = "skipped"
+            summary["reason"] = "no_pending_verified_research_task"
         return summary
 
     try:
