@@ -42,6 +42,9 @@ jobs:
       id-token: write
     env:
       CASE_ROOT: ${{ github.workspace }}/.aab-global-etf-codegen
+      # Persisted claim/result identity is fixed in the script as
+      # global-etf-review-20260922-quota-recovery-once; execute and
+      # --project-result both read that same one-shot recovery root.
       CODEX_AUDIT_SERVICE_URL: ${{ secrets.CODEX_AUDIT_SERVICE_URL }}
       CODEX_AUDIT_SERVICE_AUDIENCE: ${{ vars.CODEX_AUDIT_SERVICE_AUDIENCE || 'quant-codex-audit' }}
       AI_GATEWAY_SOURCE_REPO: QuantStrategyLab/AIAuditBridge
@@ -150,7 +153,7 @@ jobs:
         if: always() && inputs.execute == true
         uses: actions/upload-artifact@v7
         with:
-          name: global-etf-research-codegen-${{ github.run_id }}-${{ github.run_attempt }}
+          name: global-etf-research-codegen-20260922-quota-recovery-once-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ env.CASE_ROOT }}/artifact/result.json
           if-no-files-found: warn

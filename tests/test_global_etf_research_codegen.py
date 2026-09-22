@@ -23,6 +23,17 @@ import scripts.run_global_etf_research_codegen as codegen
 import service.ai_gateway_service as gateway
 from service.model_resolver import resolve_codex_research_route
 
+# Offline claim binding used by assertions. Clear ambient Actions vars so CI does
+# not make `_resolve_actions_binding()` inherit the live workflow run/job.
+_OFFLINE_ACTIONS = {"run_id": "1", "job_id": "offline"}
+_AMBIENT_ACTIONS_ENV = ("GITHUB_ACTIONS", "GITHUB_RUN_ID", "GITHUB_JOB")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_ambient_github_actions_env(monkeypatch):
+    for key in _AMBIENT_ACTIONS_ENV:
+        monkeypatch.delenv(key, raising=False)
+
 
 def _source():
     body = ("<h1>Alan Moreira</h1><h2>Volatility Managed Portfolios</h2>"
@@ -50,6 +61,24 @@ def _response():
                            output=json.dumps(_review()))
 
 
+def _core_result(result: dict) -> dict:
+    return {key: value for key, value in result.items() if key not in codegen._PUBLIC_META_KEYS}
+
+
+def _assert_fresh_projection(result: dict, *, run_id: str = _OFFLINE_ACTIONS["run_id"], job_id: str = _OFFLINE_ACTIONS["job_id"]) -> None:
+    assert result["execution_id"] == codegen.GLOBAL_ETF_EXECUTION_ID
+    assert result["replay"] is False
+    assert result["run_id"] == run_id
+    assert result["job_id"] == job_id
+
+
+def _assert_replay_projection(result: dict, *, run_id: str = _OFFLINE_ACTIONS["run_id"], job_id: str = _OFFLINE_ACTIONS["job_id"]) -> None:
+    assert result["execution_id"] == codegen.GLOBAL_ETF_EXECUTION_ID
+    assert result["replay"] is True
+    assert result["run_id"] == run_id
+    assert result["job_id"] == job_id
+
+
 def test_global_codegen_docker_integration_fixture(tmp_path):
     if os.environ.get("AAB_RUN_GLOBAL_ETF_DOCKER_INTEGRATION") != "1":
         pytest.skip("Global Docker integration is opt-in")
@@ -57,21 +86,25 @@ def test_global_codegen_docker_integration_fixture(tmp_path):
     calls = []
     result = codegen.run_global_etf_research_codegen_case(
         ues_repo_root=root, run_root=tmp_path / "run", source_ref="a" * 40,
-        execute=lambda prompt: calls.append(prompt) or _response(), fetch_source=_source)
+        execute=lambda prompt: calls.append(prompt) or _response(), fetch_source=_source,
+        actions=_OFFLINE_ACTIONS)
     assert result["status"] == "review_completed"
     assert result["candidate_tests"]["execution_isolation"] == "docker"
     assert result["changed_paths"] == []
     assert len(calls) == 1
-    assert codegen.run_global_etf_research_codegen_case(
+    _assert_fresh_projection(result)
+    replay = codegen.run_global_etf_research_codegen_case(
         ues_repo_root=root, run_root=tmp_path / "run", source_ref="a" * 40,
-        execute=lambda _: pytest.fail("repeated model"), fetch_source=lambda: pytest.fail("repeated source")) == result
+        execute=lambda _: pytest.fail("repeated model"), fetch_source=lambda: pytest.fail("repeated source"))
+    assert _core_result(replay) == _core_result(result)
+    _assert_replay_projection(replay)
 
 
 class GlobalResearchCodegenTests(TestCase):
     def _write_legacy_deferred(self, root: Path, *, retry_at: int) -> dict[str, object]:
         source = _source()
         identity = codegen._identity(source=source, source_commit=codegen.GLOBAL_ETF_RESEARCH_CODEGEN_UES_COMMIT)
-        codegen._claim_or_recover(root, identity, source)
+        codegen._claim_or_recover(root, identity, source, actions=_OFFLINE_ACTIONS)
         claim = json.loads((root / "claim.json").read_text(encoding="utf-8"))
         claim["claimed_at"] = (codegen.datetime.now(codegen.timezone.utc) - timedelta(seconds=120)).isoformat()
         (root / "claim.json").write_text(json.dumps(claim), encoding="utf-8")
@@ -299,7 +332,7 @@ class GlobalResearchCodegenTests(TestCase):
         source = _source()
         identity = codegen._identity(source=source, source_commit=codegen.GLOBAL_ETF_RESEARCH_CODEGEN_UES_COMMIT)
         with TemporaryDirectory() as tmp:
-            codegen._claim_or_recover(Path(tmp), identity, source)
+            codegen._claim_or_recover(Path(tmp), identity, source, actions=_OFFLINE_ACTIONS)
             with self.assertRaisesRegex(codegen.GlobalResearchCodegenError, "claim_unknown"):
                 codegen.run_global_etf_research_codegen_case(ues_repo_root=tmp, run_root=tmp, source_ref="a" * 40,
                     fetch_source=lambda: self.fail("source must not run"))
@@ -330,9 +363,11 @@ class GlobalResearchCodegenTests(TestCase):
                     source_ref="a" * 40, fetch_source=_source, candidate_test_runner=tests, execute=model)
                 self.assertEqual(result["status"], "review_completed" if passing else "failed")
                 self.assertEqual(calls, ["tests", "model"] if passing else ["tests"])
+                _assert_fresh_projection(result)
                 replay = codegen.run_global_etf_research_codegen_case(ues_repo_root=tmp, run_root=tmp,
                     source_ref="a" * 40, fetch_source=lambda: self.fail("refetched"), execute=lambda _: self.fail("recalled"))
-                self.assertEqual(replay, result)
+                self.assertEqual(_core_result(replay), _core_result(result))
+                _assert_replay_projection(replay)
 
     def test_trusted_quota_deferral_preserves_completed_test_summary_and_replays_without_model(self):
         retry_at = int(codegen.datetime.now(codegen.timezone.utc).timestamp()) + 60
@@ -358,12 +393,14 @@ class GlobalResearchCodegenTests(TestCase):
             self.assertEqual(result["retry_at"], retry_at)
             self.assertEqual(result["candidate_tests"], {"status": "passed", "profile": "fixed"})
             self.assertEqual(len(calls), 1)
+            _assert_fresh_projection(result)
             replay = codegen.run_global_etf_research_codegen_case(
                 ues_repo_root=tmp, run_root=tmp, source_ref="a" * 40,
                 fetch_source=lambda: self.fail("deferred source must not run"),
                 execute=lambda _: self.fail("deferred model must not run"),
             )
-            self.assertEqual(replay, result)
+            self.assertEqual(_core_result(replay), _core_result(result))
+            _assert_replay_projection(replay)
 
     def test_service_shape_quota_deferral_without_failure_category_is_deferred(self):
         retry_at = int(codegen.datetime.now(codegen.timezone.utc).timestamp()) + 60
@@ -461,6 +498,7 @@ class GlobalResearchCodegenTests(TestCase):
                 self.assertEqual(replay["reason"], "global_codegen_gateway_failed")
                 self.assertEqual(replay["failure_category"], expected)
                 self.assertEqual(calls, ["model"])
+                _assert_replay_projection(replay)
                 poisoned = codegen._public_result({**public, "failure_category": secret})
                 self.assertEqual(poisoned["failure_category"], "unknown_failure")
                 self.assertNotIn(secret, json.dumps(poisoned))
@@ -471,7 +509,7 @@ class GlobalResearchCodegenTests(TestCase):
         retry_at = int(codegen.datetime.now(codegen.timezone.utc).timestamp()) + 60
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
-            codegen._claim_or_recover(root, identity, source)
+            codegen._claim_or_recover(root, identity, source, actions=_OFFLINE_ACTIONS)
             codegen._write_terminal(root, {
                 "status": "failed", "reason": "global_codegen_gateway_failed", "identity": identity,
             })
@@ -507,11 +545,16 @@ class GlobalResearchCodegenTests(TestCase):
             self.assertEqual(json.loads((root / "result.json").read_text())["status"], "failed")
             self.assertTrue((root / "resume.lock").exists())
             self.assertTrue((root / "resume-response.json").exists())
-            self.assertEqual(codegen._recover_existing(root), result)
-            self.assertEqual(codegen.run_global_etf_research_codegen_case(
+            _assert_fresh_projection(result)
+            recovered = codegen._with_projection(codegen._recover_existing(root), root, replay=True)
+            self.assertEqual(_core_result(recovered), _core_result(result))
+            _assert_replay_projection(recovered)
+            replayed = codegen.run_global_etf_research_codegen_case(
                 ues_repo_root=root, run_root=root, source_ref="a" * 40, resume_deferred=True,
                 execute=lambda _: self.fail("a completed recovery must not run twice"),
-            ), result)
+            )
+            self.assertEqual(_core_result(replayed), _core_result(result))
+            _assert_replay_projection(replayed)
 
     def test_resume_without_an_existing_deferred_record_stops_before_docker_or_model(self):
         with TemporaryDirectory() as tmp, patch.object(codegen, "_docker_preflight") as docker:
@@ -663,6 +706,10 @@ class GlobalResearchCodegenTests(TestCase):
                 self.assertEqual(codegen.main(["--project-result"]), 0)
             deferred = json.loads(output.getvalue())
             self.assertEqual(deferred["status"], "deferred")
+            self.assertEqual(deferred["execution_id"], codegen.GLOBAL_ETF_EXECUTION_ID)
+            self.assertTrue(deferred["replay"])
+            self.assertEqual(deferred["run_id"], _OFFLINE_ACTIONS["run_id"])
+            self.assertEqual(deferred["job_id"], _OFFLINE_ACTIONS["job_id"])
             self.assertNotIn("source", deferred)
             self.assertNotIn("raw", deferred)
 
@@ -673,6 +720,10 @@ class GlobalResearchCodegenTests(TestCase):
                 self.assertEqual(codegen.main(["--project-result"]), 0)
             completed = json.loads(output.getvalue())
             self.assertEqual(completed["status"], "review_completed")
+            self.assertEqual(completed["execution_id"], codegen.GLOBAL_ETF_EXECUTION_ID)
+            self.assertTrue(completed["replay"])
+            self.assertEqual(completed["run_id"], _OFFLINE_ACTIONS["run_id"])
+            self.assertEqual(completed["job_id"], _OFFLINE_ACTIONS["job_id"])
             self.assertNotIn("source", completed)
             self.assertNotIn("raw", completed)
 
@@ -682,8 +733,11 @@ class GlobalResearchCodegenTests(TestCase):
             with redirect_stdout(output):
                 self.assertEqual(codegen.main(["--project-result"]), 0)
             self.assertEqual(json.loads(output.getvalue()), {
+                "execution_id": codegen.GLOBAL_ETF_EXECUTION_ID,
+                "job_id": "",
                 "live_authority_granted": False, "no_order": True,
-                "promotion_eligible": False, "status": "unknown",
+                "promotion_eligible": False, "replay": False, "run_id": "",
+                "status": "unknown",
             })
 
     def test_global_gateway_payload_is_fixed_and_tools_are_disabled(self):
@@ -762,11 +816,154 @@ class GlobalResearchCodegenTests(TestCase):
             "GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "self-hosted",
             "GITHUB_REF": "refs/heads/main", "GITHUB_WORKFLOW": codegen.GLOBAL_ETF_WORKFLOW_NAME,
             "GITHUB_RUN_ATTEMPT": "1", "GITHUB_SHA": "a" * 40,
+            "GITHUB_RUN_ID": "35565950756", "GITHUB_JOB": "codegen",
         }
         output = io.StringIO()
         with patch.dict(os.environ, env, clear=True), patch.object(codegen.platform, "system", return_value="Linux"), patch.object(
-            codegen, "run_global_etf_research_codegen_case", return_value={"status": "failed", "reason": "safe"}
+            codegen, "run_global_etf_research_codegen_case", return_value={
+                "status": "failed", "reason": "safe",
+                "execution_id": codegen.GLOBAL_ETF_EXECUTION_ID,
+                "replay": False, "run_id": "35565950756", "job_id": "codegen",
+            }
         ), redirect_stdout(output):
             status = codegen.main(["--execute", "--ues-repo-root", "/tmp/ues"])
         self.assertEqual(status, 1)
         self.assertIn('"no_order":true', output.getvalue())
+        self.assertIn('"execution_id":"global-etf-review-20260922-quota-recovery-once"', output.getvalue())
+        self.assertIn('"run_id":"35565950756"', output.getvalue())
+
+    def test_fixed_execution_id_is_stable_and_ignores_legacy_terminal(self):
+        self.assertEqual(codegen.GLOBAL_ETF_EXECUTION_ID, "global-etf-review-20260922-quota-recovery-once")
+        self.assertEqual(
+            codegen.GLOBAL_ETF_STATE_ROOT,
+            codegen.GLOBAL_ETF_STATE_PARENT / codegen.GLOBAL_ETF_EXECUTION_ID,
+        )
+        self.assertNotEqual(codegen.GLOBAL_ETF_STATE_ROOT, codegen.GLOBAL_ETF_LEGACY_STATE_ROOT)
+        with TemporaryDirectory() as tmp, patch.object(codegen, "_docker_preflight"), patch.object(
+            codegen, "_read_global_base", return_value=(codegen.GLOBAL_ETF_RESEARCH_CODEGEN_UES_COMMIT, {})), patch.dict(
+                sys.modules, {"scripts.run_new_research": SimpleNamespace(_archive_codegen_base=lambda *a, **k: None)}):
+            parent = Path(tmp)
+            legacy = parent / "legacy"
+            fresh = parent / "fresh"
+            legacy.mkdir()
+            source = _source()
+            identity = codegen._identity(source=source, source_commit=codegen.GLOBAL_ETF_RESEARCH_CODEGEN_UES_COMMIT)
+            (legacy / "claim.json").write_text(json.dumps({
+                "status": "claimed", "identity": identity, "source": source,
+            }), encoding="utf-8")
+            (legacy / "result.json").write_text(json.dumps({
+                "status": "failed", "reason": "global_codegen_gateway_failed",
+                "failure_category": "quota_or_capacity_failure", "identity": identity,
+                "no_order": True, "promotion_eligible": False, "research_only": True,
+                "live_authority_granted": False,
+            }), encoding="utf-8")
+            calls = []
+            result = codegen.run_global_etf_research_codegen_case(
+                ues_repo_root=fresh, run_root=fresh, source_ref="a" * 40, fetch_source=_source,
+                candidate_test_runner=lambda *args, **kwargs: {"status": "passed"},
+                execute=lambda _: calls.append("model") or _response(),
+                actions={"run_id": "99", "job_id": "codegen"},
+            )
+            self.assertEqual(result["status"], "review_completed")
+            self.assertEqual(calls, ["model"])
+            _assert_fresh_projection(result, run_id="99", job_id="codegen")
+            claim = json.loads((fresh / "claim.json").read_text(encoding="utf-8"))
+            self.assertEqual(claim["execution_id"], codegen.GLOBAL_ETF_EXECUTION_ID)
+            self.assertEqual(claim["actions"], {"run_id": "99", "job_id": "codegen"})
+            self.assertEqual(
+                claim["input_summary"],
+                codegen._input_summary(source=source, identity=identity),
+            )
+            self.assertFalse((legacy / "response.json").exists())
+            replay = codegen.run_global_etf_research_codegen_case(
+                ues_repo_root=fresh, run_root=fresh, source_ref="a" * 40,
+                fetch_source=lambda: self.fail("legacy must not leak"),
+                execute=lambda _: self.fail("fresh terminal must replay once"),
+            )
+            self.assertEqual(_core_result(replay), _core_result(result))
+            _assert_replay_projection(replay, run_id="99", job_id="codegen")
+            self.assertEqual(calls, ["model"])
+
+    def test_concurrent_fresh_claims_allow_at_most_one_model_call(self):
+        with TemporaryDirectory() as tmp, patch.object(codegen, "_docker_preflight"), patch.object(
+            codegen, "_read_global_base", return_value=(codegen.GLOBAL_ETF_RESEARCH_CODEGEN_UES_COMMIT, {})), patch.dict(
+                sys.modules, {"scripts.run_new_research": SimpleNamespace(_archive_codegen_base=lambda *a, **k: None)}):
+            root = Path(tmp)
+            barrier = threading.Barrier(2)
+            original_claim = codegen._claim_or_recover
+            calls, outcomes = [], []
+
+            def synchronized_claim(*args, **kwargs):
+                barrier.wait(timeout=5)
+                return original_claim(*args, **kwargs)
+
+            def run_once():
+                try:
+                    outcomes.append(codegen.run_global_etf_research_codegen_case(
+                        ues_repo_root=root, run_root=root, source_ref="a" * 40, fetch_source=_source,
+                        candidate_test_runner=lambda *args, **kwargs: {"status": "passed"},
+                        execute=lambda _: calls.append("model") or _response(),
+                        actions={"run_id": "42", "job_id": "codegen"},
+                    ))
+                except codegen.GlobalResearchCodegenError as exc:
+                    outcomes.append(str(exc))
+
+            with patch.object(codegen, "_claim_or_recover", side_effect=synchronized_claim):
+                threads = [threading.Thread(target=run_once), threading.Thread(target=run_once)]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join(timeout=10)
+                    self.assertFalse(thread.is_alive())
+            self.assertEqual(calls, ["model"])
+            self.assertEqual(sum(isinstance(item, dict) for item in outcomes), 1)
+            self.assertIn("global_codegen_claim_unknown", outcomes)
+            winner = next(item for item in outcomes if isinstance(item, dict))
+            _assert_fresh_projection(winner, run_id="42", job_id="codegen")
+
+    def test_unknown_claim_without_result_parks_and_does_not_retry(self):
+        source = _source()
+        identity = codegen._identity(source=source, source_commit=codegen.GLOBAL_ETF_RESEARCH_CODEGEN_UES_COMMIT)
+        with TemporaryDirectory() as tmp, patch.object(codegen, "_docker_preflight") as docker:
+            root = Path(tmp)
+            codegen._claim_or_recover(root, identity, source, actions={"run_id": "7", "job_id": "codegen"})
+            with self.assertRaisesRegex(codegen.GlobalResearchCodegenError, "claim_unknown"):
+                codegen.run_global_etf_research_codegen_case(
+                    ues_repo_root=root, run_root=root, source_ref="a" * 40,
+                    fetch_source=lambda: self.fail("unknown must not fetch"),
+                    execute=lambda _: self.fail("unknown must not call"),
+                )
+            with self.assertRaisesRegex(codegen.GlobalResearchCodegenError, "claim_unknown"):
+                codegen.run_global_etf_research_codegen_case(
+                    ues_repo_root=root, run_root=root, source_ref="a" * 40,
+                    fetch_source=lambda: self.fail("unknown must not retry"),
+                    execute=lambda _: self.fail("unknown must not retry"),
+                )
+            docker.assert_not_called()
+
+    def test_project_result_rejects_foreign_execution_identity(self):
+        with TemporaryDirectory() as tmp, patch.object(codegen, "GLOBAL_ETF_STATE_ROOT", Path(tmp)):
+            root = Path(tmp)
+            source = _source()
+            identity = codegen._identity(source=source, source_commit=codegen.GLOBAL_ETF_RESEARCH_CODEGEN_UES_COMMIT)
+            codegen._claim_or_recover(root, identity, source, actions={"run_id": "8", "job_id": "codegen"})
+            claim = json.loads((root / "claim.json").read_text(encoding="utf-8"))
+            claim["execution_id"] = "foreign-execution-id"
+            (root / "claim.json").write_text(json.dumps(claim), encoding="utf-8")
+            codegen._write_terminal(root, {
+                "status": "failed", "reason": "global_codegen_gateway_failed", "identity": identity,
+            })
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(codegen.main(["--project-result"]), 0)
+            projected = json.loads(output.getvalue())
+            self.assertEqual(projected["status"], "unknown")
+            self.assertEqual(projected["execution_id"], codegen.GLOBAL_ETF_EXECUTION_ID)
+            self.assertFalse(projected["replay"])
+            self.assertEqual(projected["run_id"], "")
+            self.assertEqual(projected["job_id"], "")
+
+    def test_workflow_artifact_name_binds_fixed_execution_id(self):
+        workflow = (Path(__file__).parents[1] / ".github/workflows/global_etf_research_codegen.yml").read_text()
+        self.assertIn("global-etf-research-codegen-20260922-quota-recovery-once-", workflow)
+        self.assertIn("global-etf-review-20260922-quota-recovery-once", workflow)

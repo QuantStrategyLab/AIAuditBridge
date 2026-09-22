@@ -54,9 +54,16 @@ actual synthetic test status; its structured assessments remain advisory.
 `review_completed` proves a returned review and successful synthetic checks,
 not correct financial claims, profitability, or out-of-sample validation.
 
-The old `global-etf-review-20260917` claim, result, and response are retained as the
-authorization failure record; this explicitly authorized recovery uses
-`~/.local/state/aiauditbridge/global-etf-review-20260917-auth-recovery-35124525442`.
+The old `global-etf-review-20260917` claim, result, and response, and the later
+`global-etf-review-20260917-auth-recovery-35124525442` terminal, are retained and
+not reused. The one-shot quota-recovery execution uses the fixed identity
+`global-etf-review-20260922-quota-recovery-once` under
+`~/.local/state/aiauditbridge/`. That `execution_id` is stable across repeated
+workflow triggers (not time- or UUID-derived). A new exclusive claim binds it to
+the candidate identity, input summary, and creating Actions run/job; execute and
+`--project-result` always select that same root. Public projections expose
+`execution_id`, a `replay` flag, and the bound `run_id`/`job_id` without private
+source or raw response bodies.
 The older `global-etf-codegen-20260916` directory is not changed or replayed.
 The manual workflow also has an `auth_only` path for its existing OIDC and
 audit-service health check. It cannot be combined with `execute`, and it does
