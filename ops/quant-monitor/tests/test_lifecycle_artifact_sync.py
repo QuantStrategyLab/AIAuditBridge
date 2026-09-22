@@ -337,6 +337,130 @@ class LifecycleArtifactSyncTests(unittest.TestCase):
             with self.assertRaises(SYNC.LifecycleArtifactError):
                 SYNC.validate_stored_version(version, manifest, self.config)
 
+    def test_classify_gh_api_rate_limit_without_leaking_stderr(self) -> None:
+        secret = "ghs_this_is_not_a_real_token_leak_check"
+        classified = SYNC.classify_gh_api_failure(
+            "gh: HTTP 403: API rate limit exceeded for user ID 1 "
+            f"Authorization: token {secret}\n"
+            "X-RateLimit-Reset: 1695398400\n"
+        )
+        self.assertEqual(classified["code"], "github_api_rate_limit")
+        self.assertEqual(classified["reason_code"], "github_api_rate_limit")
+        self.assertEqual(classified["http_status"], 403)
+        self.assertEqual(
+            classified["rate_limit_reset_at"],
+            "2023-09-22T16:00:00+00:00",
+        )
+        self.assertNotIn(secret, json.dumps(classified))
+        self.assertNotIn("Authorization", json.dumps(classified))
+
+    def test_run_gh_skips_short_retry_on_rate_limit(self) -> None:
+        calls: list[int] = []
+        sleeps: list[float] = []
+
+        class Result:
+            def __init__(self) -> None:
+                self.returncode = 1
+                self.stdout = b""
+                self.stderr = (
+                    b"gh: HTTP 403: API rate limit exceeded\n"
+                    b"X-RateLimit-Reset: 1695398400\n"
+                )
+
+        def fake_run(*_args, **_kwargs):
+            calls.append(1)
+            return Result()
+
+        original_run = SYNC.subprocess.run
+        original_sleep = SYNC.time.sleep
+        SYNC.subprocess.run = fake_run  # type: ignore[assignment]
+        SYNC.time.sleep = sleeps.append  # type: ignore[assignment]
+        try:
+            with self.assertRaises(SYNC.LifecycleArtifactError) as ctx:
+                SYNC._run_gh(["/rate_limit"])
+        finally:
+            SYNC.subprocess.run = original_run  # type: ignore[assignment]
+            SYNC.time.sleep = original_sleep  # type: ignore[assignment]
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(sleeps, [])
+        self.assertEqual(ctx.exception.code, "github_api_rate_limit")
+        self.assertEqual(ctx.exception.http_status, 403)
+
+    def test_run_gh_retries_transient_failures(self) -> None:
+        calls: list[int] = []
+        sleeps: list[float] = []
+
+        class Result:
+            def __init__(self) -> None:
+                self.returncode = 1
+                self.stdout = "{}"
+                self.stderr = "gh: HTTP 502: Bad Gateway"
+
+        def fake_run(*_args, **_kwargs):
+            calls.append(1)
+            return Result()
+
+        original_run = SYNC.subprocess.run
+        original_sleep = SYNC.time.sleep
+        SYNC.subprocess.run = fake_run  # type: ignore[assignment]
+        SYNC.time.sleep = sleeps.append  # type: ignore[assignment]
+        try:
+            with self.assertRaises(SYNC.LifecycleArtifactError) as ctx:
+                SYNC._run_gh(["/repos/example"])
+        finally:
+            SYNC.subprocess.run = original_run  # type: ignore[assignment]
+            SYNC.time.sleep = original_sleep  # type: ignore[assignment]
+
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(sleeps, [1, 2])
+        self.assertEqual(ctx.exception.code, "github_api_unavailable")
+
+    def test_shared_upstream_annotates_multi_domain_github_failures(self) -> None:
+        statuses = {
+            "cn_equity": {
+                "status": "error",
+                "code": "github_api_rate_limit",
+                "error_type": "LifecycleArtifactError",
+                "reason_code": "github_api_rate_limit",
+                "http_status": 403,
+                "rate_limit_reset_at": "2023-09-22T16:00:00+00:00",
+            },
+            "hk_equity": {
+                "status": "error",
+                "code": "github_api_rate_limit",
+                "error_type": "LifecycleArtifactError",
+                "reason_code": "github_api_rate_limit",
+                "shared_root_cause": "github_api_rate_limit",
+            },
+            "us_equity": {
+                "status": "error",
+                "code": "github_api_rate_limit",
+                "error_type": "LifecycleArtifactError",
+                "reason_code": "github_api_rate_limit",
+                "shared_root_cause": "github_api_rate_limit",
+            },
+            "crypto": {
+                "status": "error",
+                "code": "github_api_rate_limit",
+                "error_type": "LifecycleArtifactError",
+                "reason_code": "github_api_rate_limit",
+                "shared_root_cause": "github_api_rate_limit",
+            },
+        }
+        shared = SYNC._build_shared_upstream(statuses)
+        self.assertIsNotNone(shared)
+        assert shared is not None
+        self.assertEqual(shared["kind"], "github_api")
+        self.assertEqual(shared["reason_code"], "github_api_rate_limit")
+        self.assertEqual(
+            shared["affected_domains"],
+            ["cn_equity", "crypto", "hk_equity", "us_equity"],
+        )
+        SYNC._annotate_shared_root_cause(statuses, shared)
+        for domain in statuses:
+            self.assertEqual(statuses[domain]["shared_root_cause"], "github_api_rate_limit")
+
 
 if __name__ == "__main__":
     unittest.main()

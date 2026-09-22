@@ -68,14 +68,40 @@ _MAX_FILES = 256
 _MAX_FILE_BYTES = 32 * 1024 * 1024
 _MAX_TOTAL_BYTES = 256 * 1024 * 1024
 _MANIFEST_NAME = ".artifact-manifest.json"
+_GH_HTTP_STATUS_RE = re.compile(r"\bHTTP\s+(\d{3})\b", re.IGNORECASE)
+_GH_RATE_LIMIT_RESET_RE = re.compile(r"X-RateLimit-Reset:\s*(\d+)\b", re.IGNORECASE)
+_GH_RATE_LIMIT_MSG_RE = re.compile(
+    r"(?:API\s+)?rate\s*limit|secondary\s+rate\s*limit|too\s+many\s+requests",
+    re.IGNORECASE,
+)
+_GITHUB_UPSTREAM_CODES = frozenset(
+    {
+        "github_api_invalid",
+        "github_api_rate_limit",
+        "github_api_unavailable",
+    }
+)
+_SAFE_REASON_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,99}$")
+_SAFE_RESET_AT_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:+.\-Z]{8,32}$")
 
 
 class LifecycleArtifactError(RuntimeError):
     """A fail-closed lifecycle artifact synchronization error."""
 
-    def __init__(self, message: str, *, code: str = "artifact_invalid") -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "artifact_invalid",
+        http_status: int | None = None,
+        rate_limit_reset_at: str | None = None,
+        reason_code: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
+        self.http_status = http_status
+        self.rate_limit_reset_at = rate_limit_reset_at
+        self.reason_code = reason_code or code
 
 
 def _parse_timestamp(value: Any) -> datetime:
@@ -508,8 +534,150 @@ def activate_version(
     )
 
 
+def _decode_gh_stderr(stderr: Any) -> str:
+    if isinstance(stderr, bytes):
+        return stderr.decode("utf-8", errors="replace")
+    if isinstance(stderr, str):
+        return stderr
+    return ""
+
+
+def classify_gh_api_failure(stderr: Any) -> dict[str, Any]:
+    """Return sanitized GitHub API failure metadata. Never returns stderr/tokens."""
+
+    text = _decode_gh_stderr(stderr)
+    http_status: int | None = None
+    status_match = _GH_HTTP_STATUS_RE.search(text)
+    if status_match is not None:
+        http_status = int(status_match.group(1))
+
+    rate_limit_reset_at: str | None = None
+    reset_match = _GH_RATE_LIMIT_RESET_RE.search(text)
+    if reset_match is not None:
+        try:
+            epoch = int(reset_match.group(1))
+        except ValueError:
+            epoch = 0
+        # Reject absurd timestamps; keep only UTC ISO for status.json diagnostics.
+        if 1_000_000_000 <= epoch <= 4_102_444_800:
+            rate_limit_reset_at = datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat()
+
+    rate_limited = bool(_GH_RATE_LIMIT_MSG_RE.search(text)) or http_status == 429
+    if rate_limited and http_status in {None, 403, 429}:
+        code = "github_api_rate_limit"
+    else:
+        code = "github_api_unavailable"
+    return {
+        "code": code,
+        "reason_code": code,
+        "http_status": http_status,
+        "rate_limit_reset_at": rate_limit_reset_at,
+    }
+
+
+def _domain_error_status(
+    exc: BaseException,
+    *,
+    shared_root_cause: str | None = None,
+) -> dict[str, Any]:
+    if isinstance(exc, LifecycleArtifactError):
+        payload: dict[str, Any] = {
+            "status": "error",
+            "code": exc.code,
+            "error_type": type(exc).__name__,
+            "reason_code": (
+                exc.reason_code
+                if _SAFE_REASON_RE.fullmatch(str(exc.reason_code or ""))
+                else exc.code
+            ),
+        }
+        if isinstance(exc.http_status, int) and 100 <= exc.http_status <= 599:
+            payload["http_status"] = exc.http_status
+        if (
+            isinstance(exc.rate_limit_reset_at, str)
+            and _SAFE_RESET_AT_RE.fullmatch(exc.rate_limit_reset_at)
+        ):
+            payload["rate_limit_reset_at"] = exc.rate_limit_reset_at
+    else:
+        payload = {
+            "status": "error",
+            "code": "artifact_sync_unexpected",
+            "error_type": type(exc).__name__,
+            "reason_code": "artifact_sync_unexpected",
+        }
+    if shared_root_cause and _SAFE_REASON_RE.fullmatch(shared_root_cause):
+        payload["shared_root_cause"] = shared_root_cause
+    return payload
+
+
+def _build_shared_upstream(
+    statuses: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    upstream_domains = [
+        domain
+        for domain, status in statuses.items()
+        if status.get("status") == "error"
+        and (
+            str(status.get("code") or "") in _GITHUB_UPSTREAM_CODES
+            or str(status.get("shared_root_cause") or "") in _GITHUB_UPSTREAM_CODES
+        )
+    ]
+    if len(upstream_domains) < 2:
+        return None
+
+    reason_code = "github_api_unavailable"
+    http_status: int | None = None
+    rate_limit_reset_at: str | None = None
+    for domain in upstream_domains:
+        status = statuses[domain]
+        for candidate in (
+            status.get("shared_root_cause"),
+            status.get("reason_code"),
+            status.get("code"),
+        ):
+            text = str(candidate or "")
+            if text == "github_api_rate_limit":
+                reason_code = text
+                break
+            if reason_code != "github_api_rate_limit" and text in _GITHUB_UPSTREAM_CODES:
+                reason_code = text
+        if http_status is None and isinstance(status.get("http_status"), int):
+            http_status = status["http_status"]
+        if rate_limit_reset_at is None and isinstance(
+            status.get("rate_limit_reset_at"), str
+        ):
+            rate_limit_reset_at = status["rate_limit_reset_at"]
+
+    shared: dict[str, Any] = {
+        "kind": "github_api",
+        "reason_code": reason_code,
+        "affected_domains": sorted(upstream_domains),
+    }
+    if isinstance(http_status, int) and 100 <= http_status <= 599:
+        shared["http_status"] = http_status
+    if isinstance(rate_limit_reset_at, str) and _SAFE_RESET_AT_RE.fullmatch(
+        rate_limit_reset_at
+    ):
+        shared["rate_limit_reset_at"] = rate_limit_reset_at
+    return shared
+
+
+def _annotate_shared_root_cause(
+    statuses: dict[str, dict[str, Any]],
+    shared_upstream: Mapping[str, Any],
+) -> None:
+    reason = str(shared_upstream.get("reason_code") or "")
+    if not _SAFE_REASON_RE.fullmatch(reason):
+        return
+    affected = set(shared_upstream.get("affected_domains") or [])
+    for domain, status in statuses.items():
+        if domain in affected or str(status.get("code") or "") in _GITHUB_UPSTREAM_CODES:
+            status["shared_root_cause"] = reason
+
+
 def _run_gh(args: Sequence[str], *, binary: bool = False) -> Any:
     env = {**os.environ, "GH_PROMPT": "disabled"}
+    last_failure: dict[str, Any] | None = None
     for attempt in range(3):
         result = subprocess.run(
             ["gh", "api", *args],
@@ -528,12 +696,27 @@ def _run_gh(args: Sequence[str], *, binary: bool = False) -> Any:
                 raise LifecycleArtifactError(
                     "GitHub API returned invalid JSON",
                     code="github_api_invalid",
+                    reason_code="github_api_invalid",
                 ) from exc
+        failure = classify_gh_api_failure(result.stderr)
+        last_failure = failure
+        # Rate-limit exhaustion is not a transient blip; do not burn the short retry budget.
+        if failure["code"] == "github_api_rate_limit":
+            raise LifecycleArtifactError(
+                "GitHub API rate limit exhausted",
+                code="github_api_rate_limit",
+                http_status=failure.get("http_status"),
+                rate_limit_reset_at=failure.get("rate_limit_reset_at"),
+                reason_code="github_api_rate_limit",
+            )
         if attempt < 2:
             time.sleep(2**attempt)
     raise LifecycleArtifactError(
         "GitHub API request failed",
-        code="github_api_unavailable",
+        code=(last_failure or {}).get("code") or "github_api_unavailable",
+        http_status=(last_failure or {}).get("http_status"),
+        rate_limit_reset_at=(last_failure or {}).get("rate_limit_reset_at"),
+        reason_code=(last_failure or {}).get("reason_code") or "github_api_unavailable",
     )
 
 
@@ -735,7 +918,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     now = datetime.now(timezone.utc)
     domains = tuple(args.domain or DOMAIN_CONFIGS)
     statuses: dict[str, dict[str, Any]] = {}
+    rate_limit_error: LifecycleArtifactError | None = None
     for domain in domains:
+        if rate_limit_error is not None:
+            statuses[domain] = _domain_error_status(
+                rate_limit_error,
+                shared_root_cause="github_api_rate_limit",
+            )
+            continue
         try:
             statuses[domain] = _sync_domain(
                 DOMAIN_CONFIGS[domain],
@@ -746,23 +936,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                 now=now,
             )
         except LifecycleArtifactError as exc:
-            statuses[domain] = {
-                "status": "error",
-                "code": exc.code,
-                "error_type": type(exc).__name__,
-            }
+            statuses[domain] = _domain_error_status(exc)
+            if exc.code == "github_api_rate_limit":
+                rate_limit_error = exc
         except Exception as exc:
-            statuses[domain] = {
-                "status": "error",
-                "code": "artifact_sync_unexpected",
-                "error_type": type(exc).__name__,
-            }
-    summary = {
+            statuses[domain] = _domain_error_status(exc)
+
+    shared_upstream = _build_shared_upstream(statuses)
+    if shared_upstream is not None:
+        _annotate_shared_root_cause(statuses, shared_upstream)
+
+    summary: dict[str, Any] = {
         "schema_version": "quant_monitor_lifecycle_artifact_status.v1",
         "as_of": now.isoformat(),
         "domains": statuses,
         "ok": all(status.get("status") == "ready" for status in statuses.values()),
     }
+    if shared_upstream is not None:
+        summary["shared_upstream"] = shared_upstream
     _atomic_write_json(artifacts_root / "status.json", summary)
     print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
     return 0
