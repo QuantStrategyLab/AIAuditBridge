@@ -23,6 +23,17 @@ import scripts.run_global_etf_research_codegen as codegen
 import service.ai_gateway_service as gateway
 from service.model_resolver import resolve_codex_research_route
 
+# Offline claim binding used by assertions. Clear ambient Actions vars so CI does
+# not make `_resolve_actions_binding()` inherit the live workflow run/job.
+_OFFLINE_ACTIONS = {"run_id": "1", "job_id": "offline"}
+_AMBIENT_ACTIONS_ENV = ("GITHUB_ACTIONS", "GITHUB_RUN_ID", "GITHUB_JOB")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_ambient_github_actions_env(monkeypatch):
+    for key in _AMBIENT_ACTIONS_ENV:
+        monkeypatch.delenv(key, raising=False)
+
 
 def _source():
     body = ("<h1>Alan Moreira</h1><h2>Volatility Managed Portfolios</h2>"
@@ -54,14 +65,14 @@ def _core_result(result: dict) -> dict:
     return {key: value for key, value in result.items() if key not in codegen._PUBLIC_META_KEYS}
 
 
-def _assert_fresh_projection(result: dict, *, run_id: str = "1", job_id: str = "offline") -> None:
+def _assert_fresh_projection(result: dict, *, run_id: str = _OFFLINE_ACTIONS["run_id"], job_id: str = _OFFLINE_ACTIONS["job_id"]) -> None:
     assert result["execution_id"] == codegen.GLOBAL_ETF_EXECUTION_ID
     assert result["replay"] is False
     assert result["run_id"] == run_id
     assert result["job_id"] == job_id
 
 
-def _assert_replay_projection(result: dict, *, run_id: str = "1", job_id: str = "offline") -> None:
+def _assert_replay_projection(result: dict, *, run_id: str = _OFFLINE_ACTIONS["run_id"], job_id: str = _OFFLINE_ACTIONS["job_id"]) -> None:
     assert result["execution_id"] == codegen.GLOBAL_ETF_EXECUTION_ID
     assert result["replay"] is True
     assert result["run_id"] == run_id
@@ -75,7 +86,8 @@ def test_global_codegen_docker_integration_fixture(tmp_path):
     calls = []
     result = codegen.run_global_etf_research_codegen_case(
         ues_repo_root=root, run_root=tmp_path / "run", source_ref="a" * 40,
-        execute=lambda prompt: calls.append(prompt) or _response(), fetch_source=_source)
+        execute=lambda prompt: calls.append(prompt) or _response(), fetch_source=_source,
+        actions=_OFFLINE_ACTIONS)
     assert result["status"] == "review_completed"
     assert result["candidate_tests"]["execution_isolation"] == "docker"
     assert result["changed_paths"] == []
@@ -92,7 +104,7 @@ class GlobalResearchCodegenTests(TestCase):
     def _write_legacy_deferred(self, root: Path, *, retry_at: int) -> dict[str, object]:
         source = _source()
         identity = codegen._identity(source=source, source_commit=codegen.GLOBAL_ETF_RESEARCH_CODEGEN_UES_COMMIT)
-        codegen._claim_or_recover(root, identity, source)
+        codegen._claim_or_recover(root, identity, source, actions=_OFFLINE_ACTIONS)
         claim = json.loads((root / "claim.json").read_text(encoding="utf-8"))
         claim["claimed_at"] = (codegen.datetime.now(codegen.timezone.utc) - timedelta(seconds=120)).isoformat()
         (root / "claim.json").write_text(json.dumps(claim), encoding="utf-8")
@@ -320,7 +332,7 @@ class GlobalResearchCodegenTests(TestCase):
         source = _source()
         identity = codegen._identity(source=source, source_commit=codegen.GLOBAL_ETF_RESEARCH_CODEGEN_UES_COMMIT)
         with TemporaryDirectory() as tmp:
-            codegen._claim_or_recover(Path(tmp), identity, source)
+            codegen._claim_or_recover(Path(tmp), identity, source, actions=_OFFLINE_ACTIONS)
             with self.assertRaisesRegex(codegen.GlobalResearchCodegenError, "claim_unknown"):
                 codegen.run_global_etf_research_codegen_case(ues_repo_root=tmp, run_root=tmp, source_ref="a" * 40,
                     fetch_source=lambda: self.fail("source must not run"))
@@ -497,7 +509,7 @@ class GlobalResearchCodegenTests(TestCase):
         retry_at = int(codegen.datetime.now(codegen.timezone.utc).timestamp()) + 60
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
-            codegen._claim_or_recover(root, identity, source)
+            codegen._claim_or_recover(root, identity, source, actions=_OFFLINE_ACTIONS)
             codegen._write_terminal(root, {
                 "status": "failed", "reason": "global_codegen_gateway_failed", "identity": identity,
             })
@@ -696,8 +708,8 @@ class GlobalResearchCodegenTests(TestCase):
             self.assertEqual(deferred["status"], "deferred")
             self.assertEqual(deferred["execution_id"], codegen.GLOBAL_ETF_EXECUTION_ID)
             self.assertTrue(deferred["replay"])
-            self.assertEqual(deferred["run_id"], "1")
-            self.assertEqual(deferred["job_id"], "offline")
+            self.assertEqual(deferred["run_id"], _OFFLINE_ACTIONS["run_id"])
+            self.assertEqual(deferred["job_id"], _OFFLINE_ACTIONS["job_id"])
             self.assertNotIn("source", deferred)
             self.assertNotIn("raw", deferred)
 
@@ -710,8 +722,8 @@ class GlobalResearchCodegenTests(TestCase):
             self.assertEqual(completed["status"], "review_completed")
             self.assertEqual(completed["execution_id"], codegen.GLOBAL_ETF_EXECUTION_ID)
             self.assertTrue(completed["replay"])
-            self.assertEqual(completed["run_id"], "1")
-            self.assertEqual(completed["job_id"], "offline")
+            self.assertEqual(completed["run_id"], _OFFLINE_ACTIONS["run_id"])
+            self.assertEqual(completed["job_id"], _OFFLINE_ACTIONS["job_id"])
             self.assertNotIn("source", completed)
             self.assertNotIn("raw", completed)
 
