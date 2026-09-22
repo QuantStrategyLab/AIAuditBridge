@@ -27,10 +27,17 @@ _OPERATIONAL_ERROR_CODES = frozenset({
     "consumer_path_conflict",
     "drift_data_unavailable",
     "github_api_invalid",
+    "github_api_rate_limit",
     "github_api_unavailable",
     "monitor_data_unavailable",
     "trusted_artifact_unavailable",
 })
+_GITHUB_UPSTREAM_CODES = frozenset({
+    "github_api_invalid",
+    "github_api_rate_limit",
+    "github_api_unavailable",
+})
+_SAFE_RESET_AT = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:+.\-Z]{8,32}$")
 _OPERATIONAL_ERROR_TYPES = frozenset({
     "FileNotFoundError",
     "JSONDecodeError",
@@ -107,10 +114,27 @@ def _artifact_status_error(
     *,
     code: str = "artifact_sync_status_unavailable",
     error_type: str = "RuntimeError",
-) -> dict[str, str]:
+    reason_code: str | None = None,
+    shared_root_cause: str | None = None,
+    http_status: int | None = None,
+    rate_limit_reset_at: str | None = None,
+) -> dict[str, Any]:
     safe_code = code if _SAFE_TOKEN.fullmatch(code) else "artifact_sync_status_unavailable"
     safe_error_type = error_type if _SAFE_TOKEN.fullmatch(error_type) else "RuntimeError"
-    return {"domain": domain, "code": safe_code, "error_type": safe_error_type}
+    error: dict[str, Any] = {
+        "domain": domain,
+        "code": safe_code,
+        "error_type": safe_error_type,
+    }
+    if reason_code and _SAFE_TOKEN.fullmatch(reason_code):
+        error["reason_code"] = reason_code
+    if shared_root_cause and _SAFE_TOKEN.fullmatch(shared_root_cause):
+        error["shared_root_cause"] = shared_root_cause
+    if isinstance(http_status, int) and 100 <= http_status <= 599:
+        error["http_status"] = http_status
+    if isinstance(rate_limit_reset_at, str) and _SAFE_RESET_AT.fullmatch(rate_limit_reset_at):
+        error["rate_limit_reset_at"] = rate_limit_reset_at
+    return error
 
 
 def _load_lifecycle_artifact_status(
@@ -119,7 +143,7 @@ def _load_lifecycle_artifact_status(
     domains=DOMAINS,
     now: datetime | None = None,
     max_age: timedelta = timedelta(hours=2),
-) -> tuple[tuple[str, ...], dict[str, str], list[dict[str, str]]]:
+) -> tuple[tuple[str, ...], dict[str, str], list[dict[str, Any]]]:
     path = root / _ARTIFACT_STATUS_RELATIVE_PATH
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -143,9 +167,16 @@ def _load_lifecycle_artifact_status(
             for domain in domains
         ]
 
+    shared_upstream = payload.get("shared_upstream")
+    shared_reason = None
+    if isinstance(shared_upstream, dict):
+        candidate = str(shared_upstream.get("reason_code") or "")
+        if candidate in _GITHUB_UPSTREAM_CODES:
+            shared_reason = candidate
+
     ready: list[str] = []
     source_revisions: dict[str, str] = {}
-    errors: list[dict[str, str]] = []
+    errors: list[dict[str, Any]] = []
     for domain in domains:
         status = domain_statuses.get(domain)
         if not isinstance(status, dict):
@@ -168,14 +199,99 @@ def _load_lifecycle_artifact_status(
             ready.append(domain)
             source_revisions[domain] = head_sha
             continue
+        domain_shared = status.get("shared_root_cause")
+        if isinstance(domain_shared, str) and domain_shared in _GITHUB_UPSTREAM_CODES:
+            shared_for_domain = domain_shared
+        elif shared_reason and (
+            str(status.get("code") or "") in _GITHUB_UPSTREAM_CODES
+            or str(status.get("reason_code") or "") in _GITHUB_UPSTREAM_CODES
+        ):
+            shared_for_domain = shared_reason
+        else:
+            shared_for_domain = None
+        reason = status.get("reason_code")
         errors.append(
             _artifact_status_error(
                 domain,
                 code=str(status.get("code") or "artifact_sync_status_unavailable"),
                 error_type=str(status.get("error_type") or "RuntimeError"),
+                reason_code=str(reason) if reason is not None else None,
+                shared_root_cause=shared_for_domain,
+                http_status=status.get("http_status")
+                if isinstance(status.get("http_status"), int)
+                else None,
+                rate_limit_reset_at=str(status["rate_limit_reset_at"])
+                if isinstance(status.get("rate_limit_reset_at"), str)
+                else (
+                    str(shared_upstream.get("rate_limit_reset_at"))
+                    if isinstance(shared_upstream, dict)
+                    and isinstance(shared_upstream.get("rate_limit_reset_at"), str)
+                    else None
+                ),
             )
         )
     return tuple(ready), source_revisions, errors
+
+
+def _format_data_error_alerts(
+    data_errors: list[dict[str, Any]],
+) -> tuple[list[str], list[str]]:
+    """Build Telegram lines/identities; compress shared GitHub upstream roots."""
+
+    notify_lines: list[str] = []
+    alert_identities: list[str] = []
+    shared_groups: dict[str, list[dict[str, Any]]] = {}
+    remainder: list[dict[str, Any]] = []
+
+    for error in data_errors:
+        shared = str(error.get("shared_root_cause") or "")
+        code = str(error.get("code") or "")
+        reason = str(error.get("reason_code") or code)
+        if shared in _GITHUB_UPSTREAM_CODES or (
+            shared
+            and _SAFE_TOKEN.fullmatch(shared)
+            and (code in _GITHUB_UPSTREAM_CODES or reason in _GITHUB_UPSTREAM_CODES)
+        ):
+            shared_groups.setdefault(shared or reason, []).append(error)
+        else:
+            remainder.append(error)
+
+    for shared_key, group in sorted(shared_groups.items()):
+        domains = ",".join(sorted(str(item.get("domain") or "") for item in group))
+        sample = group[0]
+        reason = str(sample.get("reason_code") or sample.get("code") or shared_key)
+        if reason not in _OPERATIONAL_ERROR_CODES:
+            reason = shared_key if shared_key in _OPERATIONAL_ERROR_CODES else "github_api_unavailable"
+        line = (
+            f"[github_api_upstream] {reason} domains={domains} "
+            "(not a strategy/trading signal)"
+        )
+        reset_at = sample.get("rate_limit_reset_at")
+        if isinstance(reset_at, str) and _SAFE_RESET_AT.fullmatch(reset_at):
+            line += f" rate_limit_reset_at={reset_at}"
+        notify_lines.append(line)
+        alert_identities.append(f"data_error:github_api_upstream:{reason}:{domains}")
+
+    for error in remainder:
+        domain = str(error.get("domain") or "")
+        code = str(error.get("code") or "")
+        error_type = str(error.get("error_type") or "")
+        reason = error.get("reason_code")
+        if (
+            isinstance(reason, str)
+            and _SAFE_TOKEN.fullmatch(reason)
+            and reason != code
+        ):
+            notify_lines.append(
+                f"[{domain}] {code} reason={reason} ({error_type})"
+            )
+            alert_identities.append(
+                f"data_error:{domain}:{code}:{reason}:{error_type}"
+            )
+        else:
+            notify_lines.append(f"[{domain}] {code} ({error_type})")
+            alert_identities.append(f"data_error:{domain}:{code}:{error_type}")
+    return notify_lines, alert_identities
 
 
 def _alert_fingerprint(lines: list[str]) -> str:
@@ -749,7 +865,8 @@ def main() -> int:
     elif not json_path.is_file():
         collector_payload_invalid = True
 
-    alert_identities: list[str] = []
+    data_error_lines, data_alert_identities = _format_data_error_alerts(data_errors)
+    alert_identities: list[str] = list(data_alert_identities)
     monitoring_findings = _build_monitoring_findings(strategies, drift_results)
     optimization_watch = dispatch_strategy_watch_findings(
         monitoring_findings,
@@ -757,14 +874,6 @@ def main() -> int:
         comment_existing=False,
     )
 
-    data_error_lines: list[str] = []
-    for error in data_errors:
-        data_error_lines.append(
-            f"[{error['domain']}] {error['code']} ({error['error_type']})"
-        )
-        alert_identities.append(
-            f"data_error:{error['domain']}:{error['code']}:{error['error_type']}"
-        )
     if collector_payload_invalid:
         data_error_lines.append("[collector] dashboard_data_unavailable")
         alert_identities.append("data_error:collector:dashboard_data_unavailable")

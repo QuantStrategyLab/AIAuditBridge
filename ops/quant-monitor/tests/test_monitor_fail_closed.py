@@ -285,6 +285,76 @@ class MonitorFailClosedTests(unittest.TestCase):
             ],
         )
 
+    def test_health_cycle_passes_through_safe_reason_code(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            status_path = root / "data" / "lifecycle-artifacts" / "status.json"
+            status_path.parent.mkdir(parents=True)
+            status_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "quant_monitor_lifecycle_artifact_status.v1",
+                        "as_of": "2026-07-30T07:00:00+00:00",
+                        "domains": {
+                            "crypto": {
+                                "status": "error",
+                                "code": "artifact_sync_status_unavailable",
+                                "error_type": "RuntimeError",
+                                "source": "binance_live_runs",
+                                "reason_code": "github_api_unavailable",
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            ready, source_revisions, errors = HEALTH_CYCLE._load_lifecycle_artifact_status(
+                root,
+                domains=("crypto",),
+                now=HEALTH_CYCLE.datetime.fromisoformat("2026-07-30T07:30:00+00:00"),
+            )
+
+        self.assertEqual(ready, ())
+        self.assertEqual(source_revisions, {})
+        self.assertEqual(
+            errors,
+            [
+                {
+                    "domain": "crypto",
+                    "code": "artifact_sync_status_unavailable",
+                    "error_type": "RuntimeError",
+                    "reason_code": "github_api_unavailable",
+                }
+            ],
+        )
+        self.assertNotIn("token", json.dumps(errors))
+
+    def test_health_cycle_compresses_shared_github_upstream_alerts(self) -> None:
+        errors = [
+            {
+                "domain": domain,
+                "code": "github_api_rate_limit",
+                "error_type": "LifecycleArtifactError",
+                "reason_code": "github_api_rate_limit",
+                "shared_root_cause": "github_api_rate_limit",
+                "rate_limit_reset_at": "2023-09-22T16:00:00+00:00",
+            }
+            for domain in ("cn_equity", "hk_equity", "us_equity", "crypto")
+        ]
+        lines, identities = HEALTH_CYCLE._format_data_error_alerts(errors)
+        self.assertEqual(len(lines), 1)
+        self.assertIn("github_api_upstream", lines[0])
+        self.assertIn("github_api_rate_limit", lines[0])
+        self.assertIn("domains=cn_equity,crypto,hk_equity,us_equity", lines[0])
+        self.assertIn("not a strategy/trading signal", lines[0])
+        self.assertIn("rate_limit_reset_at=2023-09-22T16:00:00+00:00", lines[0])
+        self.assertEqual(len(identities), 1)
+        self.assertTrue(identities[0].startswith("data_error:github_api_upstream:"))
+        body = HEALTH_CYCLE._build_alert_body(lines)
+        self.assertIn("github_api_upstream", body)
+        self.assertNotIn("ghs_", body)
+
     def test_daily_briefing_collects_drift_errors_without_aborting(self) -> None:
         def unavailable(_domain):
             raise RuntimeError("sensitive path must not escape")
