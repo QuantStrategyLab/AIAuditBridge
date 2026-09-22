@@ -45,11 +45,21 @@ GLOBAL_ETF_ALLOWED_PATHS = frozenset({
     "docs/research/global_etf_absolute_volatility.md",
 })
 GLOBAL_ETF_TARGET_PATH = "src/us_equity_strategies/research/global_etf_absolute_volatility.py"
-GLOBAL_ETF_STATE_ROOT = Path.home() / ".local/state/aiauditbridge/global-etf-review-20260917-auth-recovery-35124525442"
+# Fixed one-shot recovery identity. Must stay stable across repeated workflow
+# triggers; do not derive from time or random UUIDs. The prior auth-recovery
+# terminal under GLOBAL_ETF_LEGACY_STATE_ROOT is retained and never reused.
+GLOBAL_ETF_EXECUTION_ID = "global-etf-review-20260922-quota-recovery-once"
+GLOBAL_ETF_STATE_PARENT = Path.home() / ".local/state/aiauditbridge"
+GLOBAL_ETF_LEGACY_STATE_ROOT = (
+    GLOBAL_ETF_STATE_PARENT / "global-etf-review-20260917-auth-recovery-35124525442"
+)
+GLOBAL_ETF_STATE_ROOT = GLOBAL_ETF_STATE_PARENT / GLOBAL_ETF_EXECUTION_ID
 GLOBAL_ETF_WORKFLOW_NAME = "Global ETF Candidate Review"
 GLOBAL_ETF_SOURCE_REPOSITORY = "QuantStrategyLab/AIAuditBridge"
 _REVISION = re.compile(r"^[0-9a-f]{40}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_ACTIONS_RUN_ID = re.compile(r"^[1-9][0-9]*$")
+_ACTIONS_JOB_ID = re.compile(r"^[A-Za-z0-9_-]+$")
 _TERMINAL_STATUSES = frozenset({"review_completed", "failed", "deferred"})
 _DEFERRED_RETRY_MAX_SECONDS = 7 * 24 * 60 * 60
 _DEFERRED_QUOTA_ERROR = "codex_quota_reserved"
@@ -60,6 +70,7 @@ _SAFE_FAILURE_CATEGORIES = frozenset({
     "patch_contract_failure",
     "transient_service_failure",
 })
+_PUBLIC_META_KEYS = frozenset({"execution_id", "replay", "run_id", "job_id"})
 
 
 class GlobalResearchCodegenError(ValueError):
@@ -229,6 +240,82 @@ def _validate_stored_source(source: Any, identity: Mapping[str, Any]) -> None:
         raise GlobalResearchCodegenError("global_codegen_claim_source_mismatch")
 
 
+def _input_summary(*, source: Mapping[str, Any], identity: Mapping[str, Any]) -> dict[str, str]:
+    title = source.get("title")
+    return {
+        "objective": str(identity.get("objective") or ""),
+        "source_body_sha256": str(identity.get("source_body_sha256") or ""),
+        "source_commit": str(identity.get("source_commit") or ""),
+        "source_title": title if isinstance(title, str) else "",
+        "source_url": str(identity.get("source_url") or ""),
+    }
+
+
+def _resolve_actions_binding(actions: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Bind the creating Actions run/job. Offline callers may pass an explicit binding."""
+    if actions is not None:
+        run_id = str(actions.get("run_id", ""))
+        job_id = str(actions.get("job_id", ""))
+    elif os.environ.get("GITHUB_ACTIONS") == "true":
+        run_id = os.environ.get("GITHUB_RUN_ID", "")
+        job_id = os.environ.get("GITHUB_JOB", "")
+    else:
+        run_id, job_id = "1", "offline"
+    if not _ACTIONS_RUN_ID.fullmatch(run_id) or not _ACTIONS_JOB_ID.fullmatch(job_id):
+        raise GlobalResearchCodegenError("global_codegen_actions_binding_invalid")
+    return {"run_id": run_id, "job_id": job_id}
+
+
+def _validate_actions_binding(actions: Any) -> dict[str, str]:
+    if not isinstance(actions, Mapping):
+        raise GlobalResearchCodegenError("global_codegen_claim_invalid")
+    run_id, job_id = actions.get("run_id"), actions.get("job_id")
+    if not isinstance(run_id, str) or not _ACTIONS_RUN_ID.fullmatch(run_id):
+        raise GlobalResearchCodegenError("global_codegen_claim_invalid")
+    if not isinstance(job_id, str) or not _ACTIONS_JOB_ID.fullmatch(job_id):
+        raise GlobalResearchCodegenError("global_codegen_claim_invalid")
+    return {"run_id": run_id, "job_id": job_id}
+
+
+def _validate_stored_claim(claim: Any) -> None:
+    if not isinstance(claim, Mapping):
+        raise GlobalResearchCodegenError("global_codegen_claim_invalid")
+    if claim.get("execution_id") != GLOBAL_ETF_EXECUTION_ID:
+        raise GlobalResearchCodegenError("global_codegen_claim_identity_mismatch")
+    identity = claim.get("identity")
+    _validate_stored_identity(identity)
+    _validate_stored_source(claim.get("source"), identity)
+    _validate_actions_binding(claim.get("actions"))
+    summary = claim.get("input_summary")
+    expected = _input_summary(source=claim["source"], identity=identity)
+    if not isinstance(summary, Mapping) or dict(summary) != expected:
+        raise GlobalResearchCodegenError("global_codegen_claim_identity_mismatch")
+
+
+def _projection_fields(root: Path, *, replay: bool) -> dict[str, Any]:
+    fields: dict[str, Any] = {
+        "execution_id": GLOBAL_ETF_EXECUTION_ID,
+        "job_id": "",
+        "replay": bool(replay),
+        "run_id": "",
+    }
+    claim_path = root / "claim.json"
+    if not claim_path.exists():
+        return fields
+    claim = _read_json(claim_path, "global_codegen_claim_invalid")
+    _validate_stored_claim(claim)
+    actions = _validate_actions_binding(claim.get("actions"))
+    fields["run_id"] = actions["run_id"]
+    fields["job_id"] = actions["job_id"]
+    return fields
+
+
+def _with_projection(result: Mapping[str, Any], root: Path, *, replay: bool) -> dict[str, Any]:
+    annotated = {key: value for key, value in result.items() if key not in _PUBLIC_META_KEYS}
+    annotated.update(_projection_fields(root, replay=replay))
+    return annotated
+
+
 def _read_json(path: Path, reason: str) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -323,11 +410,10 @@ def _recover_existing(root: Path) -> dict[str, Any] | None:
             raise GlobalResearchCodegenError("global_codegen_terminal_claim_missing")
         resume_result = _read_json(resume_result_path, "global_codegen_terminal_invalid")
         claim = _read_json(claim_path, "global_codegen_claim_invalid")
+        _validate_stored_claim(claim)
         _validate_stored_identity(resume_result.get("identity"))
-        _validate_stored_identity(claim.get("identity"))
         if claim.get("identity") != resume_result.get("identity"):
             raise GlobalResearchCodegenError("global_codegen_terminal_identity_mismatch")
-        _validate_stored_source(claim.get("source"), resume_result["identity"])
         if resume_result.get("status") not in _TERMINAL_STATUSES:
             raise GlobalResearchCodegenError("global_codegen_terminal_invalid")
         if resume_result.get("status") == "deferred":
@@ -344,11 +430,10 @@ def _recover_existing(root: Path) -> dict[str, Any] | None:
             raise GlobalResearchCodegenError("global_codegen_terminal_claim_missing")
         result = _read_json(result_path, "global_codegen_terminal_invalid")
         claim = _read_json(claim_path, "global_codegen_claim_invalid")
+        _validate_stored_claim(claim)
         _validate_stored_identity(result.get("identity"))
-        _validate_stored_identity(claim.get("identity"))
         if claim.get("identity") != result.get("identity"):
             raise GlobalResearchCodegenError("global_codegen_terminal_identity_mismatch")
-        _validate_stored_source(claim.get("source"), result["identity"])
         if result.get("source") is not None:
             _validate_stored_source(result.get("source"), result["identity"])
         if result.get("status") not in _TERMINAL_STATUSES:
@@ -364,30 +449,49 @@ def _recover_existing(root: Path) -> dict[str, Any] | None:
         return result
     if claim_path.exists():
         claim = _read_json(claim_path, "global_codegen_claim_invalid")
-        identity = claim.get("identity")
-        _validate_stored_identity(identity)
-        _validate_stored_source(claim.get("source"), identity)
+        _validate_stored_claim(claim)
         raise GlobalResearchCodegenError("global_codegen_claim_unknown")
     return None
 
 
-def _claim_or_recover(root: Path, identity: dict[str, Any], source: Mapping[str, Any]) -> dict[str, Any] | None:
+def _claim_or_recover(
+    root: Path,
+    identity: dict[str, Any],
+    source: Mapping[str, Any],
+    *,
+    actions: Mapping[str, str] | None = None,
+) -> dict[str, Any] | None:
     root.mkdir(parents=True, exist_ok=True)
     claim_path = root / "claim.json"
     result_path = root / "result.json"
     if result_path.exists():
+        if not claim_path.exists():
+            raise GlobalResearchCodegenError("global_codegen_terminal_claim_missing")
         result = _read_json(result_path, "global_codegen_terminal_invalid")
-        if result.get("identity") != identity or result.get("status") not in _TERMINAL_STATUSES:
+        claim = _read_json(claim_path, "global_codegen_claim_invalid")
+        _validate_stored_claim(claim)
+        if (
+            claim.get("identity") != identity
+            or result.get("identity") != identity
+            or result.get("status") not in _TERMINAL_STATUSES
+        ):
             raise GlobalResearchCodegenError("global_codegen_terminal_identity_mismatch")
         return result
     if claim_path.exists():
         claim = _read_json(claim_path, "global_codegen_claim_invalid")
+        _validate_stored_claim(claim)
         if claim.get("identity") != identity:
             raise GlobalResearchCodegenError("global_codegen_claim_identity_mismatch")
         raise GlobalResearchCodegenError("global_codegen_claim_unknown")
+    binding = _resolve_actions_binding(actions)
     claim = {
-        "status": "claimed", "claimed_at": datetime.now(timezone.utc).isoformat(),
-        "identity": identity, "source": dict(source),
+        "status": "claimed",
+        "claimed_at": datetime.now(timezone.utc).isoformat(),
+        "execution_id": GLOBAL_ETF_EXECUTION_ID,
+        "identity": identity,
+        "input_summary": _input_summary(source=source, identity=identity),
+        "source": dict(source),
+        "actions": binding,
     }
     try:
         fd = os.open(claim_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -461,9 +565,8 @@ def _load_resumable_deferred(
     claim = _read_json(root / "claim.json", "global_codegen_claim_invalid")
     result = _read_json(root / "result.json", "global_codegen_terminal_invalid")
     response = _read_json(root / "response.json", "global_codegen_response_unknown")
-    _validate_stored_identity(claim.get("identity"))
+    _validate_stored_claim(claim)
     _validate_stored_identity(result.get("identity"))
-    _validate_stored_source(claim.get("source"), claim["identity"])
     if claim.get("identity") != result.get("identity") or claim.get("identity") != identity:
         raise GlobalResearchCodegenError("global_codegen_resume_identity_mismatch")
     deferred = _deferred_result_from_response(result, response, claim=claim)
@@ -643,12 +746,13 @@ def run_global_etf_research_codegen_case(
     candidate_test_runner: Callable[..., Mapping[str, Any]] | None = None,
     resume_deferred: bool = False,
     allow_early_resume: bool = False,
+    actions: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Run one fixed Global codegen attempt with exclusive persistent claim."""
     root = Path(run_root).resolve()
     recovered = _recover_existing(root)
     if recovered is not None and not (resume_deferred and recovered.get("status") == "deferred"):
-        return recovered
+        return _with_projection(recovered, root, replay=True)
     if resume_deferred and recovered is None:
         raise GlobalResearchCodegenError("global_codegen_resume_unavailable")
     if resume_deferred and (root / "resume-result.json").exists():
@@ -658,8 +762,7 @@ def run_global_etf_research_codegen_case(
     resumed = recovered is not None
     if resumed:
         claim = _read_json(root / "claim.json", "global_codegen_claim_invalid")
-        _validate_stored_identity(claim.get("identity"))
-        _validate_stored_source(claim.get("source"), claim["identity"])
+        _validate_stored_claim(claim)
         source = dict(claim["source"])
         identity = dict(claim["identity"])
         if identity.get("source_commit") != source_commit:
@@ -669,9 +772,9 @@ def run_global_etf_research_codegen_case(
     else:
         source = (fetch_source or fetch_global_research_source)()
         identity = _identity(source=source, source_commit=source_commit)
-        recovered = _claim_or_recover(root, identity, source)
+        recovered = _claim_or_recover(root, identity, source, actions=actions)
         if recovered is not None:
-            return recovered
+            return _with_projection(recovered, root, replay=True)
     from scripts.run_new_research import _archive_codegen_base
 
     # Validate the published source before spending a model call. No model patch
@@ -689,7 +792,7 @@ def run_global_etf_research_codegen_case(
         if test_result is not None:
             result["candidate_tests"] = test_result
         (_write_resume_terminal if resumed else _write_terminal)(root, result)
-        return result
+        return _with_projection(result, root, replay=False)
     prompt = _prompt(files, source, test_result)
     try:
         response = (execute or _codex_execute(source_ref=source_ref))(prompt)
@@ -717,7 +820,7 @@ def run_global_etf_research_codegen_case(
                 "candidate_tests": test_result, "identity": identity,
             }
         (_write_resume_terminal if resumed else _write_terminal)(root, result)
-        return result
+        return _with_projection(result, root, replay=False)
     if (
         getattr(response, "provider", "") != "codex"
         or getattr(response, "model", "") != GLOBAL_ETF_RESEARCH_CODEGEN_MODEL
@@ -728,23 +831,24 @@ def run_global_etf_research_codegen_case(
         result = {"status": "failed", "reason": "global_codegen_result_invalid", "identity": identity}
         result["candidate_tests"] = test_result
         (_write_resume_terminal if resumed else _write_terminal)(root, result)
-        return result
+        return _with_projection(result, root, replay=False)
     try:
         review = _validate_review(getattr(response, "output", ""))
     except GlobalResearchCodegenError:
         result = {"status": "failed", "reason": "global_review_invalid", "identity": identity}
         result["candidate_tests"] = test_result
         (_write_resume_terminal if resumed else _write_terminal)(root, result)
-        return result
+        return _with_projection(result, root, replay=False)
     result = {"status": "review_completed", "review": review, "changed_paths": [],
               "candidate_tests": test_result, "identity": identity, "advisory_only": True}
     (_write_resume_terminal if resumed else _write_terminal)(root, result)
-    return result
+    return _with_projection(result, root, replay=False)
 
 
 def plan() -> dict[str, Any]:
     return {
         "status": "PLAN_ONLY", "task": GLOBAL_ETF_RESEARCH_CODEGEN_TASK,
+        "execution_id": GLOBAL_ETF_EXECUTION_ID,
         "source_repository": GLOBAL_ETF_SOURCE_REPOSITORY, "ues_commit": GLOBAL_ETF_RESEARCH_CODEGEN_UES_COMMIT,
         "source_url": GLOBAL_ETF_RESEARCH_SOURCE_URL, "read_paths": sorted(GLOBAL_ETF_ALLOWED_PATHS),
         "objective": GLOBAL_ETF_RESEARCH_OBJECTIVE, "research_only": True,
@@ -756,6 +860,15 @@ def _public_result(result: Mapping[str, Any]) -> dict[str, Any]:
     public = {key: value for key, value in result.items() if key not in {"identity", "source"}}
     if "failure_category" in public:
         public["failure_category"] = _safe_failure_category(public)
+    execution_id = public.get("execution_id", GLOBAL_ETF_EXECUTION_ID)
+    if execution_id != GLOBAL_ETF_EXECUTION_ID:
+        raise GlobalResearchCodegenError("global_codegen_projection_identity_mismatch")
+    public["execution_id"] = GLOBAL_ETF_EXECUTION_ID
+    public["replay"] = bool(public.get("replay", False))
+    run_id = public.get("run_id", "")
+    job_id = public.get("job_id", "")
+    public["run_id"] = run_id if isinstance(run_id, str) else ""
+    public["job_id"] = job_id if isinstance(job_id, str) else ""
     public.update(no_order=True, promotion_eligible=False, live_authority_granted=False)
     return public
 
@@ -779,10 +892,27 @@ def main(argv: list[str] | None = None) -> int:
         try:
             result = _recover_existing(GLOBAL_ETF_STATE_ROOT)
         except GlobalResearchCodegenError:
-            result = {"status": "unknown"}
+            result = None
         if result is None:
-            result = {"status": "unknown"}
-        print(json.dumps(_public_result(result), ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+            projected = _public_result({
+                "status": "unknown",
+                "execution_id": GLOBAL_ETF_EXECUTION_ID,
+                "replay": False,
+                "run_id": "",
+                "job_id": "",
+            })
+        else:
+            try:
+                projected = _public_result(_with_projection(result, GLOBAL_ETF_STATE_ROOT, replay=True))
+            except GlobalResearchCodegenError:
+                projected = _public_result({
+                    "status": "unknown",
+                    "execution_id": GLOBAL_ETF_EXECUTION_ID,
+                    "replay": False,
+                    "run_id": "",
+                    "job_id": "",
+                })
+        print(json.dumps(projected, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
         return 0
     if args.auth_preflight:
         if args.resume_deferred or args.allow_early_resume:
@@ -808,6 +938,8 @@ def main(argv: list[str] | None = None) -> int:
         or environ.get("GITHUB_REF") != "refs/heads/main"
         or environ.get("GITHUB_WORKFLOW") != GLOBAL_ETF_WORKFLOW_NAME
         or environ.get("GITHUB_RUN_ATTEMPT") != "1"
+        or not _ACTIONS_RUN_ID.fullmatch(environ.get("GITHUB_RUN_ID", ""))
+        or not _ACTIONS_JOB_ID.fullmatch(environ.get("GITHUB_JOB", ""))
     ):
         print("global_codegen_unavailable")
         return 2
@@ -816,6 +948,7 @@ def main(argv: list[str] | None = None) -> int:
             ues_repo_root=args.ues_repo_root, source_ref=environ.get("GITHUB_SHA", ""),
             resume_deferred=args.resume_deferred,
             allow_early_resume=args.allow_early_resume,
+            actions=_resolve_actions_binding(),
         )
         print(json.dumps(_public_result(result), ensure_ascii=False, sort_keys=True, separators=(",", ":")))
         return 1 if result.get("status") == "failed" else 0
