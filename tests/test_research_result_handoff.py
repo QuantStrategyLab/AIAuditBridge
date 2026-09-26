@@ -165,7 +165,7 @@ def _walk_keys(value):
 
 
 class ResearchResultHandoffTests(unittest.TestCase):
-    def test_complete_m1_aggregate_stays_advisory_and_incompatible(self) -> None:
+    def test_published_m1_output_set_stays_advisory_and_incompatible(self) -> None:
         sealed = _seal(_m1_fields())
         projected = map_research_result(sealed, sealed)
 

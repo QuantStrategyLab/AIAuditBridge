@@ -1,6 +1,6 @@
 """Map one sanitized aggregate research result onto the research-task consumer.
 
-The helper checks bindings and canonical digests. It does not emit
+The helper checks supplied bindings and canonical digests. It does not emit
 ``qsl.research_task.v1``. Development summaries, including the published M1 and
 R9 digests, are not native P3 evidence, even when a 64-character SHA-256 would
 pass the structural task validators.
@@ -61,7 +61,9 @@ _BODY_KEYS = (
     "summary_digest",
 )
 _PAYLOAD_KEYS = frozenset((*_BODY_KEYS, "aggregate_sha256"))
-_M1_INPUTS = (
+# This is the published M1 output-evidence set consumed by this helper, not the
+# full upstream research-input inventory.
+_M1_OUTPUTS = (
     {"name": "b0_ledger", "digest": M1_B0_LEDGER_DIGEST},
     {"name": "dynamic_ledger", "digest": M1_DYNAMIC_LEDGER_DIGEST},
 )
@@ -273,7 +275,7 @@ def _match_published_m1(aggregate: Mapping[str, Any]) -> None:
         ("policy_digest", M1_POLICY_DIGEST, "policy_mismatch"),
         ("settlement_policy_id", M1_POLICY_ID, "settlement_mismatch"),
         ("settlement_policy_digest", M1_POLICY_DIGEST, "settlement_mismatch"),
-        ("inputs", list(_M1_INPUTS), "input_mismatch"),
+        ("inputs", list(_M1_OUTPUTS), "input_mismatch"),
         ("cost_contract", _M1_COST, "cost_mismatch"),
         ("result", _M1_RESULT, "missing_result"),
     )
