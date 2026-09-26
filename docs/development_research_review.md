@@ -7,9 +7,14 @@ convert it into a research task.
 
 ## Producer and provenance
 
-Run `python3 scripts/build_development_research_review.py --summary <A-summary>
---output <message.json>`. The producer reads the caller-selected file once and
-requires its exact bytes to match the frozen A summary SHA-256
+From a checkout, run `python3 scripts/build_development_research_review.py
+--summary <A-summary> --output <message.json>`. For a clean local install,
+install the separate `review_producer/` package. It exposes the same
+`build-development-research-review` entry point outside the checkout and
+packages the existing producer source through links, without adding the service
+module to the `ai-gateway-client` SDK wheel. No repository is needed on
+`PYTHONPATH`. The producer reads the caller-selected file
+once and requires its exact bytes to match the frozen A summary SHA-256
 `7c4a2dcf03c2becb19c012e015f86c5a1f5b6f845afd7d88516a2c515462da91`. It then
 checks the complete aggregate shape, fixed candidate identity, matched recovery,
 source assurance, non-certified PIT state, and upstream inputs. It does not
