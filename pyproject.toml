@@ -9,11 +9,7 @@ description = "Internal client for the QuantStrategyLab AI gateway"
 requires-python = ">=3.10"
 dependencies = []
 
-[project.scripts]
-build-development-research-review = "build_development_research_review:main"
-
 [tool.setuptools]
 packages = ["ai_gateway_client"]
-py-modules = ["service.development_research_review", "build_development_research_review"]
-package-dir = {ai_gateway_client = "client", service = "service", "" = "scripts"}
+package-dir = {ai_gateway_client = "client"}
 include-package-data = false
