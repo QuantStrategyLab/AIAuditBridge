@@ -18,6 +18,14 @@ A_SUMMARY_PATH = Path(
     "/Users/lisiyi/Projects/.private-research/post-r9-batch2-20260927-001/A/summary.json"
 )
 A_SUMMARY_SHA256 = "7c4a2dcf03c2becb19c012e015f86c5a1f5b6f845afd7d88516a2c515462da91"
+A_UPSTREAM_INPUT_INDEX_SHA256 = "c2bf94e786c2674bebcc893e0a054a1f15dd7a40b0749aaf4ca6ca755e3322e4"
+A_NORMALIZED_RESULT_SHA256 = "6db9f5fa6faed193b03fd6d053e7ad378754310b4d59e74d68dddd55d8528be2"
+A_STRATEGY_REVISION_SHA256 = "9d23d3ccc8e15cbdb0d5e42fdcc2232b76899f9f269ba0442a33120660919599"
+A_RUNNER_SHA256 = "0d05facfa7f35b53b95eee1e580204ece00c226c84ea13fa990c9e20a8a818c3"
+A_POLICY_ID = "post_r9_active_capital_boundary_v1"
+A_POLICY_SHA256 = "59a70fefa6c4714206f73945c02bc153c2c1c6d7a52adefaa9574bed30359a01"
+A_SETTLEMENT_POLICY_ID = "post_r9_us_equity_dtc_standard_settlement_v1"
+A_SETTLEMENT_POLICY_SHA256 = "c135c023ee7329ad6103021ffbb79d4cdfea01e903ac331865c157a6a1246853"
 _IDENTITY = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _FORBIDDEN_KEY = re.compile(r"(?:^|_)(?:uri|path|raw|account|credential|personal)(?:_|$)", re.IGNORECASE)
@@ -419,10 +427,14 @@ def validate_development_research_review(payload: object) -> dict[str, Any]:
     _digest(message["result_digest"], "result_digest_mismatch")
     if _sha256(message["result"]) != message["result_digest"]:
         raise DevelopmentResearchReviewError("result_digest_mismatch")
+    if message["result_digest"] != A_NORMALIZED_RESULT_SHA256:
+        raise DevelopmentResearchReviewError("result_anchor_mismatch")
     if provenance.get("normalized_result_sha256") != message["result_digest"]:
         raise DevelopmentResearchReviewError("result_digest_mismatch")
     if provenance.get("upstream_input_index_sha256") != _sha256(message["upstream_input_index"]):
         raise DevelopmentResearchReviewError("input_index_digest_mismatch")
+    if provenance["upstream_input_index_sha256"] != A_UPSTREAM_INPUT_INDEX_SHA256:
+        raise DevelopmentResearchReviewError("input_index_anchor_mismatch")
     index = message["upstream_input_index"]
     if not isinstance(index, list) or len(index) != 25:
         raise DevelopmentResearchReviewError("missing_upstream_input")
@@ -434,6 +446,17 @@ def validate_development_research_review(payload: object) -> dict[str, Any]:
         _digest(item["sha256"], "invalid_upstream_input")
     if len(set(names)) != 25:
         raise DevelopmentResearchReviewError("invalid_upstream_input")
+    input_digests = {item["name"]: item["sha256"] for item in index}
+    if identities["policy_id"] != A_POLICY_ID or identities["policy_sha256"] != A_POLICY_SHA256:
+        raise DevelopmentResearchReviewError("policy_anchor_mismatch")
+    if identities["settlement_policy_id"] != A_SETTLEMENT_POLICY_ID or identities["settlement_policy_sha256"] != A_SETTLEMENT_POLICY_SHA256:
+        raise DevelopmentResearchReviewError("settlement_anchor_mismatch")
+    if identities["strategy_revision_sha256"] != A_STRATEGY_REVISION_SHA256 or input_digests.get("r8_engine") != A_STRATEGY_REVISION_SHA256:
+        raise DevelopmentResearchReviewError("strategy_anchor_mismatch")
+    if identities["runner_id"] != A_RUNNER_SHA256 or input_digests.get("research_runner") != A_RUNNER_SHA256:
+        raise DevelopmentResearchReviewError("runner_anchor_mismatch")
+    if input_digests.get("capital_policy") != A_POLICY_SHA256 or input_digests.get("settlement_policy") != A_SETTLEMENT_POLICY_SHA256:
+        raise DevelopmentResearchReviewError("policy_input_anchor_mismatch")
     if message["session_count"] != 856 or message["capital_scales_usd"] != [1000, 10000, 100000]:
         raise DevelopmentResearchReviewError("incomplete_aggregate")
     _validate_normalized_result(message["result"])

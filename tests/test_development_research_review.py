@@ -28,6 +28,29 @@ class DevelopmentResearchReviewTests(unittest.TestCase):
         self.summary = json.loads(self.summary_bytes)
         self.message = build_message_from_file(A_SUMMARY_PATH)
 
+    def _reseal_projection(self, message: dict) -> dict:
+        message["result_digest"] = hashlib.sha256(canonical_json(message["result"]).encode("utf-8")).hexdigest()
+        message["provenance"]["normalized_result_sha256"] = message["result_digest"]
+        message["provenance"]["upstream_input_index_sha256"] = hashlib.sha256(
+            canonical_json(message["upstream_input_index"]).encode("utf-8")
+        ).hexdigest()
+        identities = message["identities"]
+        key_material = {
+            "schema": message["schema"],
+            "identities": identities,
+            "upstream_input_index_sha256": message["provenance"]["upstream_input_index_sha256"],
+            "policy_id": identities["policy_id"],
+            "policy_sha256": identities["policy_sha256"],
+            "settlement_policy_id": identities["settlement_policy_id"],
+            "settlement_policy_sha256": identities["settlement_policy_sha256"],
+            "cost_id": identities["cost_id"],
+            "message_version": message["message_version"],
+        }
+        message["duplicate_key"] = hashlib.sha256(canonical_json(key_material).encode("utf-8")).hexdigest()
+        message.pop("message_sha256", None)
+        message["message_sha256"] = hashlib.sha256(canonical_json(message).encode("utf-8")).hexdigest()
+        return message
+
     def test_fixed_a_summary_builds_complete_advisory_review_message(self) -> None:
         validated = validate_development_research_review(self.message)
 
@@ -102,6 +125,49 @@ class DevelopmentResearchReviewTests(unittest.TestCase):
         with self.assertRaisesRegex(DevelopmentResearchReviewError, "producer_revision_mismatch"):
             validate_development_research_review(changed)
 
+    def test_resealed_projection_tampering_is_rejected_against_fixed_a_anchors(self) -> None:
+        def change_policy_id(message: dict) -> None:
+            message["identities"]["policy_id"] = "forged_policy"
+
+        def change_policy_digest(message: dict) -> None:
+            message["identities"]["policy_sha256"] = "a" * 64
+            next(item for item in message["upstream_input_index"] if item["name"] == "capital_policy")["sha256"] = "a" * 64
+
+        def change_settlement(message: dict) -> None:
+            message["identities"]["settlement_policy_id"] = "forged_settlement"
+            message["identities"]["settlement_policy_sha256"] = "b" * 64
+            next(item for item in message["upstream_input_index"] if item["name"] == "settlement_policy")["sha256"] = "b" * 64
+
+        def change_runner(message: dict) -> None:
+            message["identities"]["runner_id"] = "c" * 64
+            next(item for item in message["upstream_input_index"] if item["name"] == "research_runner")["sha256"] = "c" * 64
+
+        def change_strategy(message: dict) -> None:
+            message["identities"]["strategy_revision_sha256"] = "d" * 64
+            next(item for item in message["upstream_input_index"] if item["name"] == "r8_engine")["sha256"] = "d" * 64
+
+        def change_input_index(message: dict) -> None:
+            next(item for item in message["upstream_input_index"] if item["name"] == "source_manifest")["sha256"] = "e" * 64
+
+        def change_result(message: dict) -> None:
+            message["result"]["paths"]["1000"]["C0"]["cumulative_return"] += 0.01
+
+        for label, mutation in (
+            ("policy_id", change_policy_id),
+            ("policy_digest", change_policy_digest),
+            ("settlement", change_settlement),
+            ("runner", change_runner),
+            ("strategy", change_strategy),
+            ("input_index", change_input_index),
+            ("result", change_result),
+        ):
+            with self.subTest(label=label):
+                forged = copy.deepcopy(self.message)
+                mutation(forged)
+                self._reseal_projection(forged)
+                with self.assertRaises(DevelopmentResearchReviewError):
+                    validate_development_research_review(forged)
+
     def test_digest_conflicts_and_old_p3_schema_relabeling_are_rejected(self) -> None:
         message = copy.deepcopy(self.message)
         message["result_digest"] = "0" * 64
@@ -140,7 +206,7 @@ class DevelopmentResearchReviewTests(unittest.TestCase):
         conflict["message_sha256"] = hashlib.sha256(
             canonical_json(conflict).encode("utf-8")
         ).hexdigest()
-        with self.assertRaisesRegex(DevelopmentResearchReviewError, "duplicate_key_conflict"):
+        with self.assertRaisesRegex(DevelopmentResearchReviewError, "result_anchor_mismatch"):
             registry.record(conflict)
 
     def test_valid_negative_differences_are_preserved(self) -> None:

@@ -30,7 +30,11 @@ digest. This is an explicit source limitation, not an independently verified
 portfolio registry identity. `producer_revision_sha256` is computed from the
 current `service/development_research_review.py` source bytes and checked again
 by the producer validator. It identifies those source bytes; it is not a
-signature or an authenticated build attestation.
+signature or an authenticated build attestation. The producer validator also
+pins the complete upstream-index digest, normalized-result digest, and the
+R8 strategy, runner, capital-policy, and settlement identities to the fixed A
+projection. Recomputing message seals after changing any of these values does
+not make the modified projection valid.
 
 ## Authority and validation
 
