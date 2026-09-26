@@ -3,6 +3,9 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -208,6 +211,27 @@ class DevelopmentResearchReviewTests(unittest.TestCase):
         ).hexdigest()
         with self.assertRaisesRegex(DevelopmentResearchReviewError, "result_anchor_mismatch"):
             registry.record(conflict)
+
+    def test_cli_builds_outside_the_checkout_without_pythonpath(self) -> None:
+        script = Path(__file__).resolve().parents[1] / "scripts" / "build_development_research_review.py"
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "message.json"
+            env = os.environ.copy()
+            env.pop("PYTHONPATH", None)
+            completed = subprocess.run(
+                [sys.executable, str(script), "--summary", str(A_SUMMARY_PATH), "--output", str(output)],
+                cwd=directory,
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            message = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(len(message["upstream_input_index"]), 25)
+            self.assertEqual(message["duplicate_key"], self.message["duplicate_key"])
+            self.assertEqual(message["result_digest"], self.message["result_digest"])
+            self.assertEqual(output.stat().st_mode & 0o777, 0o600)
 
     def test_valid_negative_differences_are_preserved(self) -> None:
         message = self.message
