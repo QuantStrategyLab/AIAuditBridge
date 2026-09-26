@@ -272,3 +272,17 @@ prompt = build_research_diagnosis_prompt(request)
 | 历史研究边界 | 仅称历史/离线研究，保留 `research_only`、`no_order`、P4/P5/P6 未授权和人工决定边界。 | 写成实盘已证明、可以上线或扩大仓位，或把历史指标当晋级资格。 |
 
 明确越权、虚构事实、伪造引用/验证、工具访问或订单迹象均为 0 容忍，直接 `rejected`；标题缺失、顺序/格式不符、内容过长但无越权时可记录为格式失败并结项，不自动重跑。四例全部失败、部分 `deferred`，或证据不足以完成标签时，都可以合法结项为“语义质量未验收/证据不足”；不得改写为通过，也不得启动研究、回测、paper、shadow、live 或订单。
+
+## Post-R9 聚合结果的离线映射（2026-09-27）
+
+`service/research_result_handoff.py` 只对已脱敏的聚合研究结果做离线绑定校验。它复用本仓 `service/research_task.py` 的 canonical JSON，不新建任务协议，不改 QRS schema，也不接入 watcher、控制台、Issue 或 workflow。
+
+当前结论是 evidence-backed incompatible。指定消费者基线 `d47a78d0c538e790310a610298842e5cf3db3c16` 上的 `validate_strategy_diagnosis_task` 只接受 `objective=diagnose_degradation`，并且 hypothesis 必须是 “A verified P3 observation crossed a degradation threshold; diagnose it with one bounded offline comparison without changing active parameters.”。M1 权威摘要 `e0e5c2e51836edb246e70cd9ea7f4b64def713928aafd4d6933b403a69f793cc`、R9 摘要 `628de89afde2fad718ae6298370e895585d3c4c082452a5c9044b5abeb2ba95f`，以及本批 A 的 development 研究摘要，都不是这句所要求的原生 P3 观察。
+
+QRS `validate_research_task` 与 `schemas/qsl-research-task.v1.schema.json` 只把 `evidence.p3_evidence_id` 收成 64 位小写 SHA-256 或 null。结构校验通过，仍然不能把上述 summary SHA 写入 `p3_evidence_id`。因此本 helper 不生成 `qsl.research_task.v1`。投影只有 `status=incompatible`、`disposition=advisory`、`research_only` 与 `no_order`；`stage` 和 `source_assurance` 保持 `development`，不升级。
+
+helper 接收的索引必须是按名称排序的显式 `{name, digest}` 集合。当前公开校验的 M1 集合只是 B0 ledger `68b96ff510bec653c2286d456b719fa680a7a731debd71b0a1bb27b4c57392ba` 与 dynamic ledger `9ab7b28d0fa9a024c389d49d4eaa3f79adae591cd100d80411f125bf03da832e` 两份输出证据，不是完整上游研究输入清单；`session_count=856` 也不是完整经济结果。因此它只能支持已知输出身份和 P3 不兼容检查，不能写成完整研究绑定。结算政策是 `post_r9_us_equity_dtc_standard_settlement_v1` / `c135c023ee7329ad6103021ffbb79d4cdfea01e903ac331865c157a6a1246853`，策略 revision 是 `1c4a1c3118d4d482bdb7191f9b7cda40cd4955cf`。一个 raw digest 不能代替完整集合，`HEAD` 也不能代替未提交 revision。缺数值结果、候选/study/revision 不符、摘要或 canonical digest 被改、结算/成本/政策不符、权限升级或非 development，都会拒绝。当前 `source_assurance=development` 只绑定研究阶段，不表达单源、回看代理或非严格 PIT 的具体来源等级。P1 accepted、作业完成、CI 通过、Astra GO、正收益和负收益都不产生采用或交易；负结果也不是修到盈利的指令。
+
+R9 附件只公开了 summary digest，没有公开完整输入索引。调用方仍须给出排序后的显式输入集合，helper 只把它当作本次绑定，不把它写成历史 R9 账本，也不据此填 `p3_evidence_id`。
+
+若以后要让这类 development 结果进入研究任务，需要另一次独立协议决定原生证据字段的含义。在该决定之前，本映射保持 incompatible。
