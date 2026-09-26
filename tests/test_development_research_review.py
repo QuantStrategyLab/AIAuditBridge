@@ -22,6 +22,8 @@ from service.development_research_review import (
 
 class DevelopmentResearchReviewTests(unittest.TestCase):
     def setUp(self) -> None:
+        if not A_SUMMARY_PATH.is_file():
+            self.skipTest("requires the fixed private A summary")
         self.summary_bytes = A_SUMMARY_PATH.read_bytes()
         self.summary = json.loads(self.summary_bytes)
         self.message = build_message_from_file(A_SUMMARY_PATH)
