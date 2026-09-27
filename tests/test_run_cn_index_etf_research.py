@@ -384,6 +384,23 @@ def test_real_sdk_quota_defers_and_sanitizes_without_polling():
     assert http.call_count == 3 and "private" not in str(result)
 
 
+def _summary_locales():
+    return {
+        "zh-CN": {
+            "question": "要决定是否继续观察该候选。",
+            "basis": "材料只给出既定窗口内的可比结果。",
+            "limits": "这只是研究说明，不能当成可交易结论。",
+            "suggestion": "请人工考虑证据是否足够。",
+        },
+        "en": {
+            "question": "Decide whether to keep observing this candidate.",
+            "basis": "The materials only show a comparison in the given window.",
+            "limits": "This is research context and not a tradable conclusion.",
+            "suggestion": "Consider whether the evidence is sufficient.",
+        },
+    }
+
+
 def summary_context():
     return {
         "identity": {"strategy_profile": job.PROFILE, "domain": "cn_equity", "proposed_params": {"top_n": 1}},
@@ -403,15 +420,15 @@ def test_summary_callback_uses_codex_contract_and_trusted_route():
         success=True, provider="codex", model="codex-test", error="", note="",
         raw={"status": "succeeded", "provider": "codex", "model": "codex-test",
              "research_stage": "optimization"},
-        output=json.dumps({"text": "候选与基线在既定窗口内可比较。"}),
+        output=json.dumps({"locales": _summary_locales()}, ensure_ascii=False),
     )
     config = SimpleNamespace(research_providers=("codex",))
     runtime = SimpleNamespace(config=SimpleNamespace(from_env=Mock(return_value=config)), client=Mock(return_value=client))
 
     result = job._summary_callback(runtime, REVISION)(summary_context())
 
-    assert result == {"status": "available", "text": "候选与基线在既定窗口内可比较。",
-                     "provider": "codex", "model": "codex-test"}
+    assert result == {"status": "available", "provider": "codex", "model": "codex-test",
+                     "locales": _summary_locales()}
     args, kwargs = client.execute.call_args
     assert "不可信 data" in args[0] and "动量+趋势+基准risk-off" in args[0]
     assert kwargs == {
