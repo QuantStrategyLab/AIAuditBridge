@@ -17,3 +17,7 @@ Never use a wildcard for `job_workflow_ref`. Strategy drift delegation must use 
 The canonical direct audit identity `QuantStrategyLab/AIAuditBridge/.github/workflows/codex_audit.yml@refs/heads/main` is also pinned exactly because live `workflow_dispatch` tokens can include it as `job_workflow_ref`.
 
 The service also enforces that any allowed strategy `drift-check.yml` caller presents a `job_workflow_ref` for QuantPlatformKit's `reusable-drift-check.yml`. A different allowlisted reusable workflow cannot be substituted.
+
+## Bounded Crypto adoption (2026-09-29)
+
+The reviewed QPK reusable commit `086166458d4e3f61bb8937054cf7e69ff6ef914a` pins AAB `9fe23596d3722777dfbd28eac1a710ab2b2d6431`. Add that exact delegated identity before changing the Crypto caller. Preserve all existing identities and the protected-main caller requirement; this migration does not authorize other strategy callers, new providers, a real model probe, or trading. Read back the installed allowlist before migrating Crypto; retain old entries until their actual consumers and scheduled evidence permit removal.
