@@ -793,11 +793,37 @@ class MonitorFailClosedTests(unittest.TestCase):
             )
             self.assertEqual(bad["errors"], ["alert_state_unreadable"])
             self.assertFalse(bad["all_sent"])
+            missing_root = root / "missing"
             missing = HEALTH_CYCLE.deliver_telegram_targets(
-                root / "missing", event, ("chat",), lambda chat_id: "sent",
+                missing_root, event, ("chat",), lambda chat_id: "sent",
             )
             self.assertEqual(missing["errors"], ["alert_state_root_unavailable"])
             self.assertFalse(missing["all_sent"])
+            self.assertFalse(missing_root.exists())
+
+    def test_diagnosis_attempt_creates_consumer_directory_and_keeps_delivery_locked(self) -> None:
+        event = "a" * 64
+        fingerprint = "ab" * 32
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            consumer = root / "data/diagnosis-consumer"
+            self.assertFalse(consumer.exists())
+            HEALTH_CYCLE._record_operational_diagnosis_attempt(
+                consumer, fingerprint, attempt_date="2026-09-28",
+            )
+            self.assertTrue(consumer.is_dir())
+            self.assertEqual(
+                HEALTH_CYCLE._load_operational_diagnosis_state(consumer)["operational_diagnosis_attempts"],
+                [fingerprint],
+            )
+            missing_root = root / "missing-monitor"
+            result = HEALTH_CYCLE.deliver_telegram_targets(
+                missing_root, event, ("chat",),
+                lambda chat_id: (_ for _ in ()).throw(AssertionError("sent")),
+            )
+            self.assertEqual(result["errors"], ["alert_state_root_unavailable"])
+            self.assertFalse(result["all_sent"])
+            self.assertFalse(missing_root.exists())
 
     def test_recovery_keeps_unknown_and_diagnosis_but_drops_sent_fingerprint(self) -> None:
         event = "f" * 64

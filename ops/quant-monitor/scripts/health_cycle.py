@@ -742,7 +742,19 @@ def _load_operational_diagnosis_state(root: Path) -> dict[str, Any]:
     return payload
 
 
+def _prepare_operational_diagnosis_root(root: Path) -> None:
+    """Create the diagnosis consumer directory before the shared state lock.
+
+    Delivery refuses a missing monitor root before taking that lock. Diagnosis
+    still has to create ``data/diagnosis-consumer`` on the first attempt.
+    """
+    if not isinstance(root, Path):
+        raise OSError("operational diagnosis state is unavailable")
+    root.mkdir(parents=True, exist_ok=True)
+
+
 def _record_operational_diagnosis_attempt(root: Path, fingerprint: str, *, attempt_date: str | None = None) -> None:
+    _prepare_operational_diagnosis_root(root)
     with _alert_state_exclusive(root):
         payload = _load_operational_diagnosis_state(root)
         attempts = payload.get("operational_diagnosis_attempts")
