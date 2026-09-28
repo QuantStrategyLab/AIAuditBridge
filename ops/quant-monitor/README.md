@@ -75,8 +75,8 @@ systemd unit 通过 `RuntimeDirectory=quant-monitor` 与 `ExecStartPre=.../load_
 ## VPS 部署
 
 ```bash
-# 从本机（已 clone AIAuditBridge）
-bash ops/quant-monitor/scripts/deploy_to_vps.sh
+# 从本机（已 clone AIAuditBridge）；REVIEWED_MAIN_SHA 为已审阅的 40 位 main SHA
+AIAUDIT_BRIDGE_SOURCE_SHA="$REVIEWED_MAIN_SHA" bash ops/quant-monitor/scripts/deploy_to_vps.sh
 
 # VPS 上
 sudo cp ops/quant-monitor/systemd/codex-quant.service.example /etc/systemd/system/codex-quant.service

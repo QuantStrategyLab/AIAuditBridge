@@ -156,6 +156,60 @@ def _write_summary_report(report_dir, *, as_of='2026-09-09T22:00:00+00:00'):
     }))
 
 
+def test_summary_report_keeps_source_and_generation_clocks_separate():
+    from service.briefing_consumer import _summary_report
+
+    report = _summary_report({
+        'domain': 'us_equity', 'ok': True, 'data_status': 'ready',
+        'as_of': '2026-09-09T21:45:00+00:00',
+        'generated_at': '2026-09-09T22:00:00+00:00',
+        'strategies': [{'strategy_profile': 'private', 'status': 'healthy', 'as_of': '2026-09-09'}],
+    }, source='us_equity.json')
+
+    assert report['source_as_of'] == '2026-09-09T21:45:00+00:00'
+    assert report['report_generated_at'] == '2026-09-09T22:00:00+00:00'
+    assert report['data_ready'] is True
+
+
+def test_summary_report_accepts_only_explicit_not_configured_domain():
+    from service.briefing_consumer import _summary_report
+
+    report = _summary_report({
+        'domain': 'crypto', 'ok': True, 'data_status': 'not_configured',
+        'as_of': '2026-09-09T21:45:00+00:00',
+        'generated_at': '2026-09-09T22:00:00+00:00',
+        'coverage': {'expected_profiles': [], 'observed_profiles': [], 'missing_profiles': []},
+        'strategies': [],
+    }, source='crypto.json')
+    unstated = _summary_report({
+        'domain': 'crypto', 'ok': True, 'data_status': 'not_configured',
+        'as_of': '2026-09-09T21:45:00+00:00', 'generated_at': '2026-09-09T22:00:00+00:00',
+        'strategies': [],
+    }, source='crypto.json')
+
+    assert report['not_configured'] is True
+    assert report['data_ready'] is False
+    assert unstated['not_configured'] is False
+
+
+def test_summary_report_rejects_empty_ready_with_missing_profile_coverage():
+    from service.briefing_consumer import _summary_report
+
+    report = _summary_report({
+        'domain': 'us_equity', 'ok': True, 'data_status': 'ready',
+        'as_of': '2026-09-09T21:45:00+00:00',
+        'generated_at': '2026-09-09T22:00:00+00:00',
+        'coverage': {
+            'expected_profiles': ['expected_profile'],
+            'observed_profiles': [],
+            'missing_profiles': ['expected_profile'],
+        },
+        'strategies': [],
+    }, source='us_equity.json')
+
+    assert report['data_ready'] is False
+
+
 def test_ai_summary_dry_run_never_authenticates_or_calls_model(tmp_path, capsys):
     _write_summary_report(tmp_path)
     with patch('client.gateway_client.AiGatewayClient.execute') as execute:

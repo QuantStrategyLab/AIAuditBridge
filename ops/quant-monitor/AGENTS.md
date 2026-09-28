@@ -35,8 +35,10 @@ VPS Codex 定时监控（`codex-quant.timer` 每 30 分钟）+ 收盘简报（`c
 ## 部署
 
 ```bash
-bash ops/quant-monitor/scripts/deploy_to_vps.sh
+AIAUDIT_BRIDGE_SOURCE_SHA="$REVIEWED_MAIN_SHA" bash ops/quant-monitor/scripts/deploy_to_vps.sh
 ```
+
+Set `REVIEWED_MAIN_SHA` to the exact reviewed 40-character commit. It must match fetched `origin/main`; the deploy script refuses an omitted or mismatched SHA.
 
 ## Codex 执行纪律
 
