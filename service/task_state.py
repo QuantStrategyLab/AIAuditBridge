@@ -55,17 +55,9 @@ def job_task_state(job: dict[str, Any]) -> str:
 
 
 def change_requires_human_review(change: Any) -> bool:
-    """Whether a feedback/change record should appear in the human queue."""
+    """Whether a change explicitly requires a person to decide or authorize it."""
     action = str(_get(change, "action", "") or "").strip().lower()
-    risk = str(_get(change, "risk", "") or "").strip().lower()
-    effect = str(_get(change, "effect", "") or "").strip().lower()
-    return (
-        action in {"escalate", "manual"}
-        or risk in {"critical", "high"}
-        or effect == "degraded"
-        or bool(_get(change, "rollback_issue_required", False))
-        or bool(_get(change, "rollback_issue_url", ""))
-    )
+    return action in {"escalate", "manual"}
 
 
 def change_task_state(change: Any) -> str:
@@ -76,8 +68,17 @@ def change_task_state(change: Any) -> str:
     action = str(_get(change, "action", "") or "").strip().lower()
     pr_number = _get(change, "pr_number", None)
     external_url = str(_get(change, "external_url", "") or "")
-    effect = str(_get(change, "effect", "") or "").strip().lower()
+    risk = str(_get(change, "risk", "") or "").strip().lower()
     needs_human_review = change_requires_human_review(change)
+    effect = str(_get(change, "effect", "") or "").strip().lower()
+    engineering_evidence_blocked = (
+        risk in {"high", "critical", "unknown"}
+        or effect == "degraded"
+        or bool(_get(change, "rollback_issue_required", False))
+        or bool(_get(change, "rollback_issue_url", ""))
+    )
+    if engineering_evidence_blocked and not needs_human_review:
+        return STATE_BLOCKED
     if action == "auto_merge" and pr_number:
         return STATE_HUMAN_REVIEW_AUTO_MERGE_REQUESTED if needs_human_review else STATE_AUTO_MERGE_REQUESTED
     if pr_number:

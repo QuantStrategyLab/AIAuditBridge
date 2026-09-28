@@ -21,6 +21,7 @@ from scripts.run_monthly_codex_audit import (
     DEFAULT_GUARDED_AUTO_MERGE_POLICY,
     GUARDED_AUTO_MERGE_LABEL,
     HUMAN_REVIEW_LABEL,
+    ENGINEERING_EVIDENCE_BLOCKED_LABEL,
     GitHubRequestError,
     PLATFORM_BUGFIX_MAX_EDITS_PER_FILE,
     PLATFORM_BUGFIX_MAX_REPLACEMENT_BYTES,
@@ -64,6 +65,7 @@ from scripts.run_monthly_codex_audit import (
     request_codex_service,
     request_guarded_auto_merge,
     request_human_review,
+    request_engineering_evidence_block,
     RemediationWorkspace,
     resolve_feedback_retry_pr,
     resolve_source_repo_token,
@@ -2095,7 +2097,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
     def test_guarded_auto_merge_default_high_reason_matches_source_policy(self) -> None:
         self.assertEqual(
             DEFAULT_GUARDED_AUTO_MERGE_POLICY["risk_policy"]["high"]["reason"],
-            "blocked/high-risk files require human review",
+            "high-risk or unknown engineering changes need evidence and independent AI review",
         )
 
     def test_guarded_auto_merge_default_policy_matches_local_source_policy_when_available(self) -> None:
@@ -2177,8 +2179,8 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
 
         self.assertFalse(risk["label_allowed"])
         self.assertEqual(risk["high_risk_files"], ["README.md"])
-        self.assertEqual(risk["policy_errors"], ["invalid auto-merge policy requires human review"])
-        self.assertEqual(risk["risk_reasons"], ["invalid auto-merge policy requires human review"])
+        self.assertEqual(risk["policy_errors"], ["invalid auto-merge policy fails closed"])
+        self.assertEqual(risk["risk_reasons"], ["invalid auto-merge policy fails closed"])
 
     def test_guarded_auto_merge_policy_fails_closed_when_existing_policy_schema_is_incomplete(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2191,7 +2193,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
 
         self.assertFalse(risk["label_allowed"])
         self.assertEqual(risk["high_risk_files"], ["README.md"])
-        self.assertEqual(risk["risk_reasons"], ["invalid auto-merge policy schema requires human review"])
+        self.assertEqual(risk["risk_reasons"], ["invalid auto-merge policy schema fails closed"])
 
     def test_guarded_auto_merge_policy_fails_closed_when_policy_labels_match(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2208,7 +2210,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertEqual(risk["high_risk_files"], ["README.md"])
         self.assertEqual(
             risk["risk_reasons"],
-            ["auto-merge and human-review labels must be distinct requires human review"],
+            ["auto-merge and human-review labels must be distinct"],
         )
 
     def test_guarded_auto_merge_policy_fails_closed_when_policy_allows_control_plane_exact_path(self) -> None:
@@ -2309,7 +2311,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
 
         self.assertFalse(risk["label_allowed"])
         self.assertEqual(risk["high_risk_files"], ["docs/runbook.md"])
-        self.assertEqual(risk["risk_reasons"], ["unsupported auto-merge policy version requires human review"])
+        self.assertEqual(risk["risk_reasons"], ["unsupported auto-merge policy version fails closed"])
 
     def test_guarded_auto_merge_policy_fails_closed_on_invalid_blocked_regex(self) -> None:
         risk = classify_guarded_auto_merge_risk(
@@ -2326,7 +2328,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
 
         self.assertFalse(risk["label_allowed"])
         self.assertEqual(risk["high_risk_files"], ["docs/runbook.md"])
-        self.assertEqual(risk["risk_reasons"], ["invalid blocked_path_patterns regex requires human review"])
+        self.assertEqual(risk["risk_reasons"], ["invalid blocked_path_patterns regex fails closed"])
 
     def test_guarded_auto_merge_policy_fails_closed_on_malformed_lists(self) -> None:
         risk = classify_guarded_auto_merge_risk(
@@ -2342,7 +2344,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
 
         self.assertFalse(risk["label_allowed"])
         self.assertEqual(risk["high_risk_files"], ["data/output/report.json"])
-        self.assertEqual(risk["risk_reasons"], ["invalid risk_policy.low.prefixes list requires human review"])
+        self.assertEqual(risk["risk_reasons"], ["invalid risk_policy.low.prefixes list fails closed"])
 
     def test_baseline_auto_merge_policy_blocks_policy_self_escalation(self) -> None:
         baseline_policy = {
@@ -2407,7 +2409,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertEqual(risk["high_risk_files"], paths)
         self.assertEqual(
             risk["risk_reasons"],
-            ["changed file count exceeds auto-merge limit requires human review: 21 > 20"],
+            ["changed file count exceeds auto-merge limit: 21 > 20"],
         )
 
     def test_classify_guarded_auto_merge_risk_blocks_large_low_risk_diff(self) -> None:
@@ -2422,7 +2424,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertEqual(risk["changed_lines"], 1201)
         self.assertEqual(
             risk["risk_reasons"],
-            ["changed line count exceeds auto-merge limit requires human review: 1201 > 1200"],
+            ["changed line count exceeds auto-merge limit: 1201 > 1200"],
         )
 
     def test_classify_guarded_auto_merge_risk_blocks_binary_diff(self) -> None:
@@ -2433,7 +2435,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
 
         self.assertFalse(risk["label_allowed"])
         self.assertEqual(risk["risk_level"], "high")
-        self.assertEqual(risk["risk_reasons"], ["binary file changes require human review"])
+        self.assertEqual(risk["risk_reasons"], ["binary file changes block auto-merge"])
 
     def test_classify_guarded_auto_merge_risk_blocks_file_removals_renames_and_copies(self) -> None:
         risk = classify_guarded_auto_merge_risk(
@@ -2454,9 +2456,9 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertEqual(
             risk["risk_reasons"],
             [
-                "file deletions require human review",
-                "file renames require human review",
-                "file copies require human review",
+                "file deletions block auto-merge",
+                "file renames block auto-merge",
+                "file copies block auto-merge",
             ],
         )
         self.assertEqual(risk["deleted_files"], 1)
@@ -2496,6 +2498,28 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
             "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12",
         )
 
+    def test_request_guarded_auto_merge_refuses_engineering_evidence_block(self) -> None:
+        with (
+            patch(
+                "scripts.run_monthly_codex_audit.github_request",
+                return_value={"labels": [{"name": ENGINEERING_EVIDENCE_BLOCKED_LABEL}]},
+            ) as request,
+            self.assertRaisesRegex(BridgeError, "engineering-evidence-blocked.*present"),
+        ):
+            request_guarded_auto_merge(
+                "token",
+                "QuantStrategyLab/UsEquitySnapshotPipelines",
+                12,
+                ["docs/operator_runbook.md"],
+                diff_stats={"additions": 10, "deletions": 2, "binary_files": 0},
+            )
+
+        request.assert_has_calls(
+            [
+                call("token", "GET", "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12"),
+            ]
+        )
+
     def test_request_guarded_auto_merge_refuses_existing_human_review_label(self) -> None:
         with (
             patch(
@@ -2512,14 +2536,15 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
                 diff_stats={"additions": 10, "deletions": 2, "binary_files": 0},
             )
 
-        request.assert_called_once_with(
-            "token",
-            "GET",
-            "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12",
+        request.assert_has_calls(
+            [
+                call("token", "GET", "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12"),
+                call("token", "GET", "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12"),
+            ]
         )
 
     def test_request_guarded_auto_merge_adds_source_guard_label(self) -> None:
-        with patch("scripts.run_monthly_codex_audit.github_request", side_effect=[{"labels": []}, {}, {}]) as request:
+        with patch("scripts.run_monthly_codex_audit.github_request", side_effect=[{"labels": []}, {"labels": []}, {}, {}]) as request:
             guard = request_guarded_auto_merge(
                 "token",
                 "QuantStrategyLab/UsEquitySnapshotPipelines",
@@ -2532,6 +2557,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertEqual(guard["risk_level"], "low")
         request.assert_has_calls(
             [
+                call("token", "GET", "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12"),
                 call("token", "GET", "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12"),
                 call("token", "GET", "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/labels/auto-merge-ok"),
                 call(
@@ -2552,7 +2578,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         )
         with patch(
             "scripts.run_monthly_codex_audit.github_request",
-            side_effect=[{"labels": []}, not_found, {}, {}],
+            side_effect=[{"labels": []}, {"labels": []}, not_found, {}, {}],
         ) as request:
             guard = request_guarded_auto_merge(
                 "token",
@@ -2565,6 +2591,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertEqual(guard["label"], GUARDED_AUTO_MERGE_LABEL)
         request.assert_has_calls(
             [
+                call("token", "GET", "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12"),
                 call("token", "GET", "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12"),
                 call("token", "GET", "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/labels/auto-merge-ok"),
                 call(
@@ -2596,7 +2623,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
             '{"message":"Forbidden"}',
         )
         with (
-            patch("scripts.run_monthly_codex_audit.github_request", side_effect=[{"labels": []}, forbidden]) as request,
+            patch("scripts.run_monthly_codex_audit.github_request", side_effect=[{"labels": []}, {"labels": []}, forbidden]) as request,
             self.assertRaises(BridgeError),
         ):
             request_guarded_auto_merge(
@@ -2610,6 +2637,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         request.assert_has_calls(
             [
                 call("token", "GET", "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12"),
+                call("token", "GET", "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12"),
                 call("token", "GET", "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/labels/auto-merge-ok"),
             ]
         )
@@ -2622,7 +2650,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
             '{"message":"Forbidden"}',
         )
         with (
-            patch("scripts.run_monthly_codex_audit.github_request", side_effect=[{"labels": []}, {}, forbidden]) as request,
+            patch("scripts.run_monthly_codex_audit.github_request", side_effect=[{"labels": []}, {"labels": []}, {}, forbidden]) as request,
             self.assertRaises(GitHubRequestError),
         ):
             request_guarded_auto_merge(
@@ -2635,6 +2663,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
 
         request.assert_has_calls(
             [
+                call("token", "GET", "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12"),
                 call("token", "GET", "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12"),
                 call("token", "GET", "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/labels/auto-merge-ok"),
                 call(
@@ -2656,7 +2685,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
                 "high": {"reason": "high"},
             },
         }
-        with patch("scripts.run_monthly_codex_audit.github_request", side_effect=[{"labels": []}, {}, {}]) as request:
+        with patch("scripts.run_monthly_codex_audit.github_request", side_effect=[{"labels": []}, {"labels": []}, {}, {}]) as request:
             guard = request_guarded_auto_merge(
                 "token",
                 "QuantStrategyLab/UsEquitySnapshotPipelines",
@@ -2669,6 +2698,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertEqual(guard["label"], "custom-auto-ok")
         request.assert_has_calls(
             [
+                call("token", "GET", "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12"),
                 call("token", "GET", "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12"),
                 call("token", "GET", "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/labels/custom-auto-ok"),
                 call(
@@ -2814,14 +2844,14 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
     def test_guarded_auto_merge_label_for_mutation_skips_invalid_policy(self) -> None:
         label, reason = guarded_auto_merge_label_for_mutation(
             {
-                "policy_errors": ["invalid auto-merge policy requires human review"],
+                "policy_errors": ["invalid auto-merge policy fails closed"],
                 "auto_merge_label": "auto-merge-ok",
                 "human_review_label": "human-review-required",
             }
         )
 
         self.assertEqual(label, "")
-        self.assertEqual(reason, "invalid auto-merge policy requires human review")
+        self.assertEqual(reason, "invalid auto-merge policy fails closed")
 
     def test_guarded_auto_merge_label_for_mutation_rejects_label_collision(self) -> None:
         label, reason = guarded_auto_merge_label_for_mutation(
@@ -2832,7 +2862,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         )
 
         self.assertEqual(label, "")
-        self.assertEqual(reason, "auto-merge and human-review labels must be distinct requires human review")
+        self.assertEqual(reason, "auto-merge and human-review labels must be distinct")
 
     def test_main_clears_stale_auto_merge_label_before_no_change_feedback_retry_exit(self) -> None:
         def fake_clone(token: str, source_repo: str, source_ref: str, work_root: Path) -> Path:
@@ -2948,7 +2978,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         body = comment.call_args.args[3]
         self.assertIn("No changes.", body)
         self.assertIn("Skipped stale guarded auto-merge label cleanup", body)
-        self.assertIn("auto-merge and human-review labels must be distinct requires human review", body)
+        self.assertIn("auto-merge and human-review labels must be distinct", body)
 
     def test_format_guarded_risk_details_includes_reasons_and_files(self) -> None:
         risk = classify_guarded_auto_merge_risk(
@@ -2958,9 +2988,37 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         details = format_guarded_risk_details(risk)
 
         self.assertIn("Risk level: `high`", details)
-        self.assertIn("blocked/high-risk files require human review", details)
+        self.assertIn("independent AI review", details)
         self.assertIn("`src/us_equity_snapshot_pipelines/contracts.py`", details)
         self.assertIn("`pyproject.toml`", details)
+
+    def test_request_engineering_evidence_block_adds_block_label(self) -> None:
+        risk = classify_guarded_auto_merge_risk(["src/us_equity_snapshot_pipelines/contracts.py"])
+        with (
+            patch("scripts.run_monthly_codex_audit.ensure_repo_label") as ensure_label,
+            patch("scripts.run_monthly_codex_audit.github_request") as request,
+        ):
+            blocked = request_engineering_evidence_block(
+                "token",
+                "QuantStrategyLab/UsEquitySnapshotPipelines",
+                12,
+                risk,
+            )
+
+        self.assertEqual(blocked["label"], ENGINEERING_EVIDENCE_BLOCKED_LABEL)
+        ensure_label.assert_called_once_with(
+            "token",
+            "QuantStrategyLab/UsEquitySnapshotPipelines",
+            ENGINEERING_EVIDENCE_BLOCKED_LABEL,
+            color="FBCA04",
+            description="Engineering evidence and independent AI review required; auto-merge blocked",
+        )
+        request.assert_called_once_with(
+            "token",
+            "POST",
+            "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12/labels",
+            {"labels": [ENGINEERING_EVIDENCE_BLOCKED_LABEL]},
+        )
 
     def test_request_human_review_adds_review_label(self) -> None:
         risk = classify_guarded_auto_merge_risk(["src/us_equity_snapshot_pipelines/contracts.py"])

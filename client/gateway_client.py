@@ -20,6 +20,34 @@ from typing import Any
 from .config import GatewayConfig
 from .errors import AuthenticationError, CircuitBreaker, CircuitBreakerOpenError
 
+_FAILURE_CATEGORIES = frozenset({
+    "auth_or_config_failure",
+    "quota_or_capacity_failure",
+    "service_restart",
+    "stale_job_timeout",
+    "transient_service_failure",
+    "patch_contract_failure",
+    "unknown_failure",
+})
+_REQUEST_PHASES = frozenset({"oidc", "health", "submit", "poll"})
+
+
+def _diagnostic_raw(
+    *,
+    failure_category: str = "",
+    request_phase: str = "",
+    http_status: object = None,
+) -> dict[str, Any]:
+    """Keep only safe execution diagnostics. Never copy response bodies."""
+    raw: dict[str, Any] = {}
+    if isinstance(failure_category, str) and failure_category in _FAILURE_CATEGORIES:
+        raw["failure_category"] = failure_category
+    if isinstance(request_phase, str) and request_phase in _REQUEST_PHASES:
+        raw["request_phase"] = request_phase
+    if type(http_status) is int and 100 <= http_status <= 599:
+        raw["http_status"] = http_status
+    return raw
+
 
 @dataclass(frozen=True)
 class AiResult:
@@ -41,15 +69,21 @@ class AiResult:
         reason: str,
         *,
         failure_category: str = "",
+        request_phase: str = "",
+        http_status: object = None,
     ) -> "AiResult":
-        raw = {"failure_category": failure_category} if failure_category else None
+        raw = _diagnostic_raw(
+            failure_category=failure_category,
+            request_phase=request_phase,
+            http_status=http_status,
+        )
         return cls(
             provider=provider,
             model="",
             success=False,
             error=reason,
             note=reason,
-            raw=raw,
+            raw=raw or None,
         )
 
 
@@ -183,18 +217,23 @@ class AiGatewayClient:
             return AiResult.unavailable("", "invalid_execution_providers", failure_category="auth_or_config_failure")
         subscription_route = "cursor" in providers
         selected_provider = providers[0] if len(providers) == 1 else ""
-        request_phase = "health"
+        request_phase = ""
 
         try:
             self._breaker.before_call()
+            request_phase = "oidc"
             submit_token = _fetch_oidc_token(self.config.audience)
             if research_stage or subscription_route:
+                request_phase = "health"
                 health_request = urllib.request.Request(f"{self.config.service_url}/healthz", headers=_headers(submit_token))
                 with urllib.request.urlopen(health_request, timeout=10) as response:
                     capabilities = json.loads(response.read().decode("utf-8"))
                 capability = "subscription_research_routing" if subscription_route else "codex_research_routing"
                 if not isinstance(capabilities, dict) or capabilities.get(capability) != "v1":
-                    return AiResult.unavailable(selected_provider, f"{capability}_unavailable", failure_category="auth_or_config_failure")
+                    return AiResult.unavailable(
+                        selected_provider, f"{capability}_unavailable",
+                        failure_category="auth_or_config_failure", request_phase=request_phase,
+                    )
             payload = json.dumps({
                 "task": task,
                 "prompt": prompt,
@@ -211,14 +250,15 @@ class AiGatewayClient:
                 "timeout_seconds": int(timeout),
             }).encode("utf-8")
 
-            # Submit job
+            # Submit job. A damaged body may already name a job, so this stays
+            # a contract failure rather than a retryable transport error.
+            request_phase = "submit"
             req = urllib.request.Request(
                 f"{self.config.service_url}/v1/ai/execute/jobs",
                 data=payload,
                 method="POST",
                 headers=_headers(submit_token),
             )
-            request_phase = "submit"
             with urllib.request.urlopen(req, timeout=30) as resp:
                 job = json.loads(resp.read().decode("utf-8"))
 
@@ -228,6 +268,7 @@ class AiGatewayClient:
                     selected_provider,
                     "No job_id from gateway",
                     failure_category="patch_contract_failure",
+                    request_phase=request_phase,
                 )
 
             admitted_route = {key: job.get(key) for key in ("provider", "research_stage", "model", "reasoning_effort")}
@@ -240,7 +281,10 @@ class AiGatewayClient:
                     or ((model or self.config.default_execute_model) not in (None, "", "auto")
                         and admitted_route["model"] != (model or self.config.default_execute_model))
                     or (reasoning_effort not in ("", "auto") and admitted_route["reasoning_effort"] != reasoning_effort)):
-                    return AiResult.unavailable("" if subscription_route else selected_provider, route_error, failure_category="patch_contract_failure")
+                    return AiResult.unavailable(
+                        "" if subscription_route else selected_provider, route_error,
+                        failure_category="patch_contract_failure", request_phase=request_phase,
+                    )
                 selected_provider = admitted_route["provider"]
 
             # Poll until completion; a submitted job is never retried on another provider.
@@ -248,7 +292,9 @@ class AiGatewayClient:
             deadline = time.time() + timeout + 60
             while time.time() < deadline:
                 time.sleep(poll_interval)
+                request_phase = "oidc"
                 poll_token = _fetch_oidc_token(self.config.audience)
+                request_phase = "poll"
                 req2 = urllib.request.Request(
                     f"{self.config.service_url}/v1/ai/execute/jobs/{job_id}",
                     method="GET",
@@ -263,12 +309,18 @@ class AiGatewayClient:
                     continue
 
                 if (research_stage or subscription_route) and (status_data.get("job_id") != job_id or any(status_data.get(key) != value for key, value in admitted_route.items())):
-                    return AiResult.unavailable(selected_provider, route_error, failure_category="patch_contract_failure")
+                    return AiResult.unavailable(
+                        selected_provider, route_error,
+                        failure_category="patch_contract_failure", request_phase=request_phase,
+                    )
                 status = status_data.get("status")
                 if status == "succeeded":
                     if (status_data.get("provider", "codex") not in providers
                         or (subscription_route and any(status_data.get(key) != value for key, value in admitted_route.items()))):
-                        return AiResult.unavailable(selected_provider, "subscription_research_route_mismatch", failure_category="patch_contract_failure")
+                        return AiResult.unavailable(
+                            selected_provider, "subscription_research_route_mismatch",
+                            failure_category="patch_contract_failure", request_phase=request_phase,
+                        )
                     if research_stage and (
                         not isinstance(status_data.get("output"), str) or not status_data["output"].strip()
                         or status_data.get("policy_verdict", "advisory") not in {"ok", "eligible", "advisory"}
@@ -279,7 +331,10 @@ class AiGatewayClient:
                             and status_data["model"] != (model or self.config.default_execute_model))
                         or (reasoning_effort not in ("", "auto") and status_data["reasoning_effort"] != reasoning_effort)
                     ):
-                        return AiResult.unavailable(selected_provider, "codex_research_route_mismatch", failure_category="patch_contract_failure")
+                        return AiResult.unavailable(
+                            selected_provider, "codex_research_route_mismatch",
+                            failure_category="patch_contract_failure", request_phase=request_phase,
+                        )
                     self._breaker.on_success()
                     return AiResult(
                         provider=selected_provider, model=str(status_data.get("model") or "codex-cli"), success=True,
@@ -293,7 +348,10 @@ class AiGatewayClient:
                         category = status_data.get("failure_category")
                         if category not in {"quota_or_capacity_failure", "auth_or_config_failure", "transient_service_failure", "patch_contract_failure", "unknown_failure"}:
                             category = "unknown_failure"
-                        return AiResult.unavailable(selected_provider, "subscription_research_failed", failure_category=category)
+                        return AiResult.unavailable(
+                            selected_provider, "subscription_research_failed",
+                            failure_category=category, request_phase=request_phase,
+                        )
                     return AiResult(
                         provider=selected_provider, model=str(status_data.get("model") or ""), success=False,
                         error=str(status_data.get("error", "")), raw=status_data,
@@ -304,6 +362,7 @@ class AiGatewayClient:
                 selected_provider,
                 "Job polling timed out",
                 failure_category="transient_service_failure",
+                request_phase="poll",
             )
 
         except CircuitBreakerOpenError:
@@ -327,8 +386,14 @@ class AiGatewayClient:
                     # provider failures. Do not poll, retry or open the breaker.
                     return AiResult(provider=selected_provider, model="", success=False,
                         error="subscription_research_deferred" if subscription_route else "codex_research_deferred", note="deferred",
-                        raw={"status": "deferred", "error": data.get("error"), "retry_at": retry,
-                             "execution_started": False, "failure_category": "quota_or_capacity_failure"})
+                        raw={
+                            "status": "deferred", "error": data.get("error"), "retry_at": retry,
+                            "execution_started": False,
+                            **_diagnostic_raw(
+                                failure_category="quota_or_capacity_failure",
+                                request_phase="submit", http_status=exc.code,
+                            ),
+                        })
                 category = "quota_or_capacity_failure"
             elif exc.code >= 500:
                 category = "transient_service_failure"
@@ -341,6 +406,8 @@ class AiGatewayClient:
                 selected_provider,
                 "subscription_research_http_failure" if research_stage or subscription_route else f"HTTP {exc.code}: {body}",
                 failure_category=category,
+                request_phase=request_phase,
+                http_status=exc.code,
             )
         except (urllib.error.URLError, OSError) as exc:
             self._breaker.on_failure()
@@ -348,10 +415,15 @@ class AiGatewayClient:
                 selected_provider,
                 "subscription_research_transport_failure" if research_stage or subscription_route else str(exc),
                 failure_category="transient_service_failure",
+                request_phase=request_phase,
             )
         except Exception as exc:
             self._breaker.on_failure()
-            return AiResult.unavailable(selected_provider, "subscription_research_unavailable" if research_stage or subscription_route else str(exc))
+            return AiResult.unavailable(
+                selected_provider,
+                "subscription_research_unavailable" if research_stage or subscription_route else str(exc),
+                request_phase=request_phase,
+            )
 
     # ── review ─────────────────────────────────────────────────────
 

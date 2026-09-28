@@ -8,6 +8,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from http.server import ThreadingHTTPServer
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from service.adapters.llm_adapter import LlmResult
@@ -18,6 +19,7 @@ from service.ai_gateway_service import (
     _automation_run_access_allowed,
     _automation_run_owner_repository,
     _automation_snapshot_for_claims,
+    _automation_triage_snapshot,
     service_failure_category,
 )
 from service.automation_run_ledger import get_automation_run_ledger
@@ -53,6 +55,105 @@ STRATEGY_AUTOMATION_REGISTRY = {
 
 
 class AiGatewayGetRoutesTest(unittest.TestCase):
+    def test_unknown_and_high_engineering_risk_block_without_human_investment_review(self) -> None:
+        control = {
+            "effective_action": "continue",
+            "action": "continue",
+            "auto_fix_allowed": True,
+            "requires_human_review": False,
+            "execution": {"auto_fix_allowed": True, "human_review_required": False},
+            "quota_status": "ok",
+            "org_health_status": "healthy",
+        }
+        with (
+            patch("service.ai_gateway_service._automation_control_snapshot", return_value=control),
+            patch("service.ai_gateway_service.load_autonomy_policy", return_value={}),
+            patch("service.ai_gateway_service.get_health_monitor", return_value=SimpleNamespace(status="healthy")),
+        ):
+            unknown = _automation_triage_snapshot("local/repo")
+            high = _automation_triage_snapshot("local/repo", changed_paths=["src/quant_strategy.py"])
+
+        for triage in (unknown, high):
+            with self.subTest(file_risk=triage["file_risk"]):
+                self.assertEqual(triage["incident_class"], "blocked")
+                self.assertEqual(triage["recommended_action"], "independent_ai_review")
+                self.assertTrue(triage["engineering_blocked"])
+                self.assertTrue(triage["engineering_review_required"])
+                self.assertFalse(triage["human_review_required"])
+                self.assertFalse(triage["auto_fix_allowed"])
+                self.assertFalse(triage["deploy_allowed"])
+        self.assertEqual(unknown["file_risk"], "unknown")
+        self.assertEqual(unknown["next_step"], "provide_changed_paths")
+        self.assertEqual(high["file_risk"], "high")
+        self.assertEqual(high["next_step"], "collect_validation_and_recovery_evidence")
+
+    def test_critical_and_auth_config_block_for_engineering_ai_review(self) -> None:
+        control = {
+            "effective_action": "continue",
+            "action": "continue",
+            "auto_fix_allowed": True,
+            "requires_human_review": False,
+            "execution": {"auto_fix_allowed": True, "human_review_required": False},
+            "quota_status": "ok",
+            "org_health_status": "healthy",
+        }
+        with (
+            patch("service.ai_gateway_service._automation_control_snapshot", return_value=control),
+            patch("service.ai_gateway_service.load_autonomy_policy", return_value={}),
+            patch("service.ai_gateway_service.get_health_monitor", return_value=SimpleNamespace(status="healthy")),
+        ):
+            critical = _automation_triage_snapshot("local/repo", changed_paths=["config/private.pem"])
+            auth = _automation_triage_snapshot("local/repo", failure_category="auth_or_config_failure")
+
+        self.assertTrue(critical["engineering_blocked"])
+        self.assertEqual(critical["recommended_action"], "independent_ai_review")
+        self.assertFalse(critical["human_review_required"])
+        self.assertFalse(critical["auto_fix_allowed"])
+        self.assertTrue(auth["engineering_blocked"])
+        self.assertEqual(auth["recommended_action"], "open_issue")
+        self.assertFalse(auth["human_review_required"])
+
+    def test_explicit_control_escalation_keeps_human_authorization_gate(self) -> None:
+        control = {
+            "effective_action": "escalate",
+            "action": "escalate",
+            "auto_fix_allowed": False,
+            "requires_human_review": True,
+            "execution": {"auto_fix_allowed": False, "human_review_required": True},
+            "quota_status": "ok",
+            "org_health_status": "healthy",
+        }
+        with (
+            patch("service.ai_gateway_service._automation_control_snapshot", return_value=control),
+            patch("service.ai_gateway_service.load_autonomy_policy", return_value={}),
+            patch("service.ai_gateway_service.get_health_monitor", return_value=SimpleNamespace(status="healthy")),
+        ):
+            triage = _automation_triage_snapshot("local/repo", changed_paths=["src/quant_strategy.py"])
+
+        self.assertTrue(triage["human_review_required"])
+        self.assertTrue(triage["engineering_blocked"])
+        self.assertEqual(triage["recommended_action"], "escalate")
+
+    def test_trusted_execution_authorization_gate_survives_auth_config_failure(self) -> None:
+        control = {
+            "effective_action": "continue",
+            "action": "continue",
+            "auto_fix_allowed": False,
+            "requires_human_review": True,
+            "execution": {"auto_fix_allowed": False, "human_review_required": True},
+            "quota_status": "ok",
+            "org_health_status": "healthy",
+        }
+        with (
+            patch("service.ai_gateway_service._automation_control_snapshot", return_value=control),
+            patch("service.ai_gateway_service.load_autonomy_policy", return_value={}),
+            patch("service.ai_gateway_service.get_health_monitor", return_value=SimpleNamespace(status="healthy")),
+        ):
+            triage = _automation_triage_snapshot("local/repo", failure_category="auth_or_config_failure")
+
+        self.assertTrue(triage["human_review_required"])
+        self.assertTrue(triage["engineering_blocked"])
+
     def test_automation_snapshot_filters_to_calling_repository(self) -> None:
         snapshot = {
             "runs": [
