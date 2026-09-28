@@ -98,44 +98,61 @@ def _valid_dashboard_rows(
     payload: Any,
     *,
     today: date | None = None,
-) -> tuple[list[dict[str, Any]], dict[str, str] | None]:
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, str]], dict[str, str] | None]:
     if not isinstance(payload, dict) or not isinstance(payload.get("strategies"), list):
-        return [], {"code": "dashboard_data_unavailable", "error_type": "ValueError"}
+        return [], {}, {"code": "dashboard_data_unavailable", "error_type": "ValueError"}
     rows: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
+    errors_by_domain: dict[str, dict[str, str]] = {}
     for row in payload["strategies"]:
         if not isinstance(row, dict):
-            return [], {"code": "dashboard_data_unavailable", "error_type": "ValueError"}
+            return [], {}, {"code": "dashboard_data_unavailable", "error_type": "ValueError"}
         domain = row.get("domain")
+        if not isinstance(domain, str) or domain not in DOMAINS:
+            return [], {}, {"code": "dashboard_data_unavailable", "error_type": "ValueError"}
         profile = row.get("strategy_profile")
         status = row.get("status")
         observed_raw = row.get("as_of")
+        if status == "unavailable":
+            errors_by_domain.setdefault(
+                domain, {"code": "dashboard_data_unavailable", "error_type": "ValueError"}
+            )
+            continue
         try:
             observed = date.fromisoformat(observed_raw)
             observation_age_days = ((today or datetime.now(timezone.utc).date()) - observed).days
         except (TypeError, ValueError):
-            return [], {"code": "dashboard_data_unavailable", "error_type": "ValueError"}
+            errors_by_domain.setdefault(
+                domain, {"code": "dashboard_data_unavailable", "error_type": "ValueError"}
+            )
+            continue
+        if not isinstance(profile, str) or not profile:
+            errors_by_domain.setdefault(
+                domain, {"code": "dashboard_data_unavailable", "error_type": "ValueError"}
+            )
+            continue
         key = (domain, profile)
         # Keep the same seven-natural-day window as the existing AI summary consumer.
         if (
-            not isinstance(domain, str)
-            or not domain
-            or not isinstance(profile, str)
-            or not profile
+            not isinstance(status, str)
             or status not in _ALLOWED_HEALTH_STATUSES
             or observed.isoformat() != observed_raw
             or not 0 <= observation_age_days <= 7
             or key in seen
         ):
-            return [], {"code": "dashboard_data_unavailable", "error_type": "ValueError"}
+            errors_by_domain.setdefault(
+                domain, {"code": "dashboard_data_unavailable", "error_type": "ValueError"}
+            )
+            continue
         seen.add(key)
         rows.append(dict(row))
-    return rows, None
+    return rows, errors_by_domain, None
 
 
 def main() -> int:
     root = Path(os.environ.get("QUANT_MONITOR_ROOT") or Path(__file__).resolve().parents[1])
-    day = os.environ.get("DAY") or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    now_utc = datetime.now(timezone.utc)
+    day = os.environ.get("DAY") or now_utc.strftime("%Y-%m-%d")
     out_dir = root / "data" / "daily-reports" / day
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -162,16 +179,20 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory() as tmp:
         dashboard_error: dict[str, str] | None = None
+        dashboard_errors_by_domain: dict[str, dict[str, str]] = {}
         try:
             build_dashboard(output_dir=tmp, output_format="json", domains=ready_domains)
             dash_path = Path(tmp) / "strategy_health_dashboard.json"
             if not dash_path.is_file():
                 raise FileNotFoundError
             dashboard_payload = json.loads(dash_path.read_text(encoding="utf-8"))
-            strategies_raw, dashboard_error = _valid_dashboard_rows(dashboard_payload)
+            strategies_raw, dashboard_errors_by_domain, dashboard_error = _valid_dashboard_rows(
+                dashboard_payload, today=now_utc.date(),
+            )
         except Exception as exc:
             strategies_raw = []
             dashboard_error = {"code": "dashboard_data_unavailable", "error_type": type(exc).__name__}
+            dashboard_errors_by_domain = {}
 
     by_domain: dict[str, list[dict[str, Any]]] = defaultdict(list)
     observed_profiles: dict[str, set[str]] = defaultdict(set)
@@ -201,7 +222,7 @@ def main() -> int:
         by_domain[domain].append(enriched)
         observed_profiles[domain].add(profile)
 
-    generated_at = datetime.now(timezone.utc).isoformat()
+    generated_at = now_utc.isoformat()
     for domain in DOMAINS:
         strategies = by_domain.get(domain, [])
         domain_errors = []
@@ -209,6 +230,8 @@ def main() -> int:
             domain_errors.append({key: value for key, value in artifact_errors[domain].items() if key != "domain"})
         if dashboard_error and domain in expected_profiles:
             domain_errors.append(dashboard_error)
+        if domain in dashboard_errors_by_domain:
+            domain_errors.append(dashboard_errors_by_domain[domain])
         if domain in drift_errors:
             domain_errors.append(drift_errors[domain])
         expected = set(expected_profiles.get(domain, []))
