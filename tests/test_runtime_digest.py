@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import copy
+import json
+from pathlib import Path
+from unittest.mock import patch
 
+from scripts.consume_daily_briefing import main
 from service.runtime_digest import prepare_runtime_digest, runtime_digest_event_id
 
 
@@ -177,3 +181,119 @@ def test_event_id_uses_target_scope_not_order_or_observed_at() -> None:
     assert other_scope["event_id"] != forward["event_id"]
     changed = copy.deepcopy(forward)
     assert "observed_at" not in changed["event_id"]
+
+
+def _write_projection(tmp_path: Path, *records: dict) -> Path:
+    path = tmp_path / "projection.json"
+    path.write_text(json.dumps(_projection(*records)), encoding="utf-8")
+    return path
+
+
+def _runtime_argv(path: Path, *extra: str) -> list[str]:
+    return ["--runtime-projection", str(path), *extra]
+
+
+def test_runtime_dispatch_rejects_day_and_target_scope_before_send(tmp_path: Path, capsys) -> None:
+    path = _write_projection(tmp_path, _record("market_closed"))
+    key = "lb-svc|rot|*paper"
+    other = "lb-svc|rot|*live"
+    cases = [
+        (["--day", "2026-09-27", "--dispatch", "--expected-target-key", key], "business_date_mismatch"),
+        (["--day", "2026-01-02", "--dispatch", "--expected-target-key", key], "business_date_mismatch"),
+        (["--day", "2026-9-28", "--dispatch", "--expected-target-key", key], "invalid_business_day"),
+        (["--day", "28-09-2026", "--dispatch", "--expected-target-key", key], "invalid_business_day"),
+        (["--day", "2026-09-28", "--dispatch", "--expected-target-key", other], "expected_target_mismatch"),
+        (["--day", "2026-09-28", "--dispatch", "--expected-target-key", key, "--expected-target-key", other], "expected_target_mismatch"),
+        (["--day", "2026-09-28", "--dispatch", "--expected-target-key", key, "--expected-target-key", key], "duplicate_expected_target"),
+        (["--day", "2026-09-28", "--dispatch", "--expected-target-key", " "], "invalid_expected_target"),
+        (["--day", "2026-09-28", "--dispatch", "--expected-target-key", "lb-svc|rot|"], "invalid_expected_target"),
+        (["--day", "2026-09-28", "--dispatch", "--expected-target-key", "LB-SVC|rot|*paper"], "invalid_expected_target"),
+        (["--dispatch", "--expected-target-key", key], "missing_dispatch_day"),
+        (["--day", "2026-09-28", "--dispatch"], "missing_expected_target"),
+        (["--day", "2026-09-27", "--dispatch", "--dry-run", "--expected-target-key", key], "business_date_mismatch"),
+        (["--dispatch", "--dry-run"], "missing_dispatch_day"),
+    ]
+    for extra, reason in cases:
+        with patch("scripts.consume_daily_briefing.dispatch_runtime_digest", return_value={"errors": []}) as dispatch:
+            code = main(_runtime_argv(path, *extra))
+        captured = json.loads(capsys.readouterr().out)
+        assert code == 2
+        assert captured == {"ok": False, "error": "runtime_projection_rejected", "reason": reason}
+        assert str(path) not in json.dumps(captured)
+        dispatch.assert_not_called()
+
+    fewer = _write_projection(tmp_path, _record("market_closed", service="lb-a"), _record("no_submission", service="lb-b", scope="live"))
+    with patch("scripts.consume_daily_briefing.dispatch_runtime_digest", return_value={"errors": []}) as dispatch:
+        code = main(_runtime_argv(
+            fewer,
+            "--day", "2026-09-28",
+            "--dispatch",
+            "--expected-target-key", "lb-a|rot|*paper",
+        ))
+    captured = json.loads(capsys.readouterr().out)
+    assert code == 2
+    assert captured["reason"] == "expected_target_mismatch"
+    dispatch.assert_not_called()
+
+
+def test_runtime_dispatch_matching_scope_calls_dispatch_once(tmp_path: Path) -> None:
+    first = _record("market_closed", service="lb-a")
+    second = _record("no_submission", service="lb-b", scope="live")
+    path = _write_projection(tmp_path, first, second)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    with patch("scripts.consume_daily_briefing.dispatch_runtime_digest", return_value={"errors": []}) as dispatch:
+        code = main([
+            "--runtime-projection", str(path),
+            "--day", "2026-09-28",
+            "--dispatch",
+            "--dry-run",
+            "--expected-target-key", "lb-b|rot|*live",
+            "--expected-target-key", "lb-a|rot|*paper",
+        ])
+    assert code == 0
+    dispatch.assert_called_once_with(payload, dry_run=True, send_dry_run=False)
+    assert dispatch.call_args.args[0]["records"][0]["status"] == "market_closed"
+    with patch("scripts.consume_daily_briefing.dispatch_runtime_digest", return_value={"errors": []}) as send:
+        code = main([
+            "--runtime-projection", str(path),
+            "--day", "2026-09-28",
+            "--dispatch",
+            "--expected-target-key", "lb-a|rot|*paper",
+            "--expected-target-key", "lb-b|rot|*live",
+        ])
+    assert code == 0
+    send.assert_called_once_with(payload, dry_run=False, send_dry_run=False)
+
+
+def test_runtime_preview_can_omit_scope_but_checks_constraints(tmp_path: Path, capsys) -> None:
+    path = _write_projection(tmp_path, _record("market_closed"))
+    with patch("scripts.consume_daily_briefing.dispatch_runtime_digest") as dispatch:
+        code = main(["--runtime-projection", str(path)])
+    body = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert body["kind"] == "runtime_digest"
+    assert "dispatch" not in body
+    dispatch.assert_not_called()
+    with patch("scripts.consume_daily_briefing.dispatch_runtime_digest") as dispatch:
+        code = main(["--runtime-projection", str(path), "--day", "2026-09-27"])
+    rejected = json.loads(capsys.readouterr().out)
+    assert code == 2
+    assert rejected["reason"] == "business_date_mismatch"
+    dispatch.assert_not_called()
+
+
+def test_domain_briefing_path_ignores_runtime_scope_flags(tmp_path: Path, capsys) -> None:
+    (tmp_path / "us_equity.json").write_text(json.dumps({
+        "domain": "us_equity",
+        "ok": True,
+        "data_status": "ready",
+        "as_of": "2026-09-28T08:00:00+00:00",
+        "strategies": [{"strategy_profile": "rot", "status": "healthy", "overall_score": 80, "as_of": "2026-09-28"}],
+    }), encoding="utf-8")
+    with patch("scripts.consume_daily_briefing.dispatch_runtime_digest") as dispatch:
+        code = main(["--report-dir", str(tmp_path), "--day", "2026-09-28"])
+    captured = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert captured["action"] == "quiet"
+    assert "runtime_digest" not in captured
+    dispatch.assert_not_called()
