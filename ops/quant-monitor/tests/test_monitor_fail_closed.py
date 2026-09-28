@@ -8,7 +8,7 @@ import types
 import unittest
 from pathlib import Path
 from unittest import mock
-
+from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -46,6 +46,110 @@ DAILY_BRIEFING = _load_script("daily_briefing_builder")
 
 
 class MonitorFailClosedTests(unittest.TestCase):
+    def test_daily_briefing_uses_utc_calendar_date_with_a_fixed_cross_timezone_instant(self) -> None:
+        fixed_utc = HEALTH_CYCLE.datetime(2026, 9, 28, 16, 30, tzinfo=HEALTH_CYCLE.timezone.utc)
+        with mock.patch.dict(os.environ, {"TZ": "UTC"}):
+            # This fixed-time conversion matches date.today's local-calendar semantics.
+            producer_date = HEALTH_CYCLE.datetime.fromtimestamp(
+                fixed_utc.timestamp(), ZoneInfo(os.environ["TZ"]),
+            ).date()
+            self.assertEqual(producer_date, fixed_utc.date())
+            self.assertEqual(
+                fixed_utc.astimezone(HEALTH_CYCLE.timezone(HEALTH_CYCLE.timedelta(hours=8))).date(),
+                DAILY_BRIEFING.date(2026, 9, 29),
+            )
+            rows, errors_by_domain, global_error = DAILY_BRIEFING._valid_dashboard_rows(
+                {"strategies": [{
+                    "domain": "us_equity", "strategy_profile": "profile",
+                    "status": "healthy", "as_of": producer_date.isoformat(),
+                }]},
+                today=fixed_utc.date(),
+            )
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(errors_by_domain, {})
+            self.assertIsNone(global_error)
+            for unit in (
+                ROOT / "systemd/codex-quant.service.example",
+                ROOT / "systemd/codex-daily-briefing.service.example",
+            ):
+                self.assertIn("Environment=TZ=UTC", unit.read_text(encoding="utf-8"))
+
+    def test_daily_briefing_contains_trusted_row_errors_to_their_domain(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_fresh_lifecycle_status(root, profiles_by_domain={
+                "us_equity": ["us_profile"],
+                "crypto": ["crypto_profile"],
+            })
+            qpk = types.ModuleType("quant_platform_kit")
+            lifecycle = types.ModuleType("quant_platform_kit.strategy_lifecycle")
+            drift_detector = types.ModuleType("quant_platform_kit.strategy_lifecycle.drift_detector")
+            health_dashboard = types.ModuleType("quant_platform_kit.strategy_lifecycle.health_dashboard")
+            drift_detector.run_drift_detection = lambda domain: [types.SimpleNamespace(
+                strategy_profile=f"{domain}_profile", drift_score=0.0,
+            )]
+            def write_dashboard(**kwargs):
+                today = HEALTH_CYCLE.datetime.now(HEALTH_CYCLE.timezone.utc).date().isoformat()
+                rows = [
+                    {"domain": "us_equity", "strategy_profile": "us_profile", "status": "healthy", "as_of": today},
+                    {"domain": "us_equity", "strategy_profile": "us_profile", "status": "review", "as_of": today},
+                    {"domain": "crypto", "strategy_profile": "crypto_profile", "status": "healthy", "as_of": today},
+                ]
+                Path(kwargs["output_dir"], "strategy_health_dashboard.json").write_text(
+                    json.dumps({"strategies": rows}), encoding="utf-8",
+                )
+            health_dashboard.build_dashboard = write_dashboard
+            with (
+                mock.patch.dict(os.environ, {"QUANT_MONITOR_ROOT": str(root), "DAY": "2026-09-29"}),
+                mock.patch.dict(sys.modules, {
+                    "quant_platform_kit": qpk,
+                    "quant_platform_kit.strategy_lifecycle": lifecycle,
+                    "quant_platform_kit.strategy_lifecycle.drift_detector": drift_detector,
+                    "quant_platform_kit.strategy_lifecycle.health_dashboard": health_dashboard,
+                }),
+            ):
+                self.assertEqual(DAILY_BRIEFING.main(), 0)
+
+            us_report = json.loads((root / "data/daily-reports/2026-09-29/us_equity.json").read_text())
+            crypto_report = json.loads((root / "data/daily-reports/2026-09-29/crypto.json").read_text())
+            self.assertFalse(us_report["ok"])
+            self.assertEqual(us_report["data_status"], "unavailable")
+            self.assertIn("dashboard_data_unavailable", {error["code"] for error in us_report["errors"]})
+            self.assertTrue(crypto_report["ok"])
+            self.assertEqual(crypto_report["data_status"], "ready")
+            self.assertEqual(crypto_report["coverage"]["observed_profiles"], ["crypto_profile"])
+
+    def test_daily_briefing_unavailable_and_unknown_rows_remain_fail_closed(self) -> None:
+        today = DAILY_BRIEFING.date(2026, 9, 29)
+        cases = (
+            (
+                {"domain": "us_equity", "strategy_profile": "profile", "status": "unavailable", "as_of": None},
+                None,
+                "us_equity",
+            ),
+            (
+                {"domain": "us_equity", "strategy_profile": "profile", "status": "unknown", "as_of": today.isoformat()},
+                None,
+                "us_equity",
+            ),
+            (
+                {"domain": "unknown", "strategy_profile": "profile", "status": "healthy", "as_of": today.isoformat()},
+                {"code": "dashboard_data_unavailable", "error_type": "ValueError"},
+                None,
+            ),
+        )
+        for row, expected_global_error, expected_domain in cases:
+            with self.subTest(row=row):
+                rows, errors_by_domain, global_error = DAILY_BRIEFING._valid_dashboard_rows(
+                    {"strategies": [row]}, today=today,
+                )
+                self.assertEqual(rows, [])
+                self.assertEqual(global_error, expected_global_error)
+                if expected_domain:
+                    self.assertIn(expected_domain, errors_by_domain)
+                else:
+                    self.assertEqual(errors_by_domain, {})
+
     def test_historical_auth_guard_rehearsal_is_fixed_read_only_codex_only(self):
         calls: list[tuple[str, dict[str, object]]] = []
 

@@ -9,6 +9,7 @@ User=ubuntu
 Group=ubuntu
 WorkingDirectory=/home/ubuntu/quant-monitor-runtime/AIAuditBridge/ops/quant-monitor
 Environment=QUANT_MONITOR_ROOT=/home/ubuntu/quant-monitor-runtime/AIAuditBridge/ops/quant-monitor
+Environment=TZ=UTC
 Environment=AIAUDIT_BRIDGE_ROOT=/home/ubuntu/quant-monitor-runtime/AIAuditBridge
 Environment=QUANT_PLATFORM_KIT_ROOT=/home/ubuntu/quant-monitor-runtime/AIAuditBridge/ops/quant-monitor/data/lifecycle-projects/QuantPlatformKit
 Environment=QUANT_SENTINEL_TELEGRAM_SECRET_NAME=quant-sentinel-telegram-bot-token
