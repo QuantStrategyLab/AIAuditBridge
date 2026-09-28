@@ -400,10 +400,10 @@ def dispatch_briefing_result(
         else:
             text = (
                 f"🚨 量化哨兵 operational ({result.day})\n\n"
-                "• optimization-record delivery failure; manual review required"
+                "• optimization-record delivery failed; operational recovery is required"
             )
         if record_failed and result.action == BriefingAction.TELEGRAM:
-            text += "\n• optimization-record delivery failure; manual review required"
+            text += "\n• optimization-record delivery failed; operational recovery is required"
         if dry_run:
             summary["telegram_dry_run"] = text
         else:

@@ -128,7 +128,10 @@ class BriefingDispatchTests(unittest.TestCase):
             summary = dispatch_briefing_result(result)
             self.assertIn("optimization_record_failed", summary["errors"])
             self.assertTrue(summary["operational_fallback_sent"])
-            self.assertIn("optimization-record delivery failure", send_target.call_args.kwargs["text"])
+            message = send_target.call_args.kwargs["text"]
+            self.assertIn("optimization-record delivery failed", message)
+            self.assertIn("operational recovery is required", message)
+            self.assertNotIn("manual review required", message)
             state = (Path(tmp) / "data" / "alert-state" / "health_cycle.json").read_text(encoding="utf-8")
             self.assertNotIn("123", state)
             self.assertNotIn("token", state)

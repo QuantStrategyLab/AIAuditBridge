@@ -196,6 +196,8 @@ AIAuditBridge 是 QuantStrategyLab 的 AI 审计控制面，负责：
 
 合并仍必须同时满足源仓确定性 CI、未解决会话保护和 branch protection。任何自动化都不得用 label、admin 或自建 AI check 绕过这些控制。
 
+工程风险等级（包括 high、critical 和 unknown）只阻止自动修复/合并，并要求补齐路径、验证与恢复证据、完成独立 AI 审查；它本身不创建人工投资决策请求。只有控制策略明确升级或请求 manual 模式才进入人工决策状态。资金、账户、凭据、权限和 MFA 的既有授权门槛保持独立。
+
 ### P1：强烈建议补的缺口
 
 #### 3.4 缺少统一的任务状态机

@@ -22,17 +22,20 @@ class TaskStateTest(unittest.TestCase):
         self.assertEqual(change_task_state({"external_url": "https://example.test/pr/7"}), "pr_opened")
         self.assertEqual(
             change_task_state({"action": "auto_merge", "pr_number": 7, "risk": "high"}),
-            "human_review_auto_merge_requested",
+            "blocked",
         )
         self.assertEqual(
             change_task_state({"action": "auto_pr", "pr_number": 7, "risk": "critical"}),
-            "human_review_waiting_for_ci",
+            "blocked",
         )
+        self.assertEqual(change_task_state({"action": "auto_pr", "pr_number": 7, "risk": "high"}), "blocked")
         self.assertEqual(
             change_task_state({"external_url": "https://example.test/pr/7", "effect": "degraded"}),
-            "human_review_pr_opened",
+            "blocked",
         )
-        self.assertEqual(change_task_state({"rollback_issue_required": True}), "human_review_required")
-        self.assertEqual(change_task_state({"rollback_issue_url": "https://example.test/issue/1"}), "human_review_required")
-        self.assertEqual(change_task_state({"risk": "critical"}), "human_review_required")
+        self.assertEqual(change_task_state({"rollback_issue_required": True}), "blocked")
+        self.assertEqual(change_task_state({"rollback_issue_url": "https://example.test/issue/1"}), "blocked")
+        self.assertEqual(change_task_state({"risk": "critical"}), "blocked")
+        self.assertEqual(change_task_state({"action": "manual", "risk": "critical"}), "human_review_required")
+        self.assertEqual(change_task_state({"risk": "high"}), "blocked")
         self.assertEqual(change_task_state({"effect": "improved"}), "reviewed")

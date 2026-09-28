@@ -78,6 +78,7 @@ DEFAULT_CODEX_BACKEND = "service"
 SUPPORTED_CODEX_BACKENDS = frozenset({"service"})
 GUARDED_AUTO_MERGE_LABEL = "auto-merge-ok"
 HUMAN_REVIEW_LABEL = "human-review-required"
+ENGINEERING_EVIDENCE_BLOCKED_LABEL = "engineering-evidence-blocked"
 GUARDED_AUTO_MERGE_LOW_RISK_PREFIXES = (
     "docs/",
     "tests/",
@@ -123,7 +124,7 @@ DEFAULT_GUARDED_AUTO_MERGE_POLICY = {
             "exact": sorted(GUARDED_AUTO_MERGE_MEDIUM_RISK_EXACT),
             "reason": "monthly-review evidence/reporting helper changed",
         },
-        "high": {"reason": "blocked/high-risk files require human review"},
+        "high": {"reason": "high-risk or unknown engineering changes need evidence and independent AI review"},
     }
 }
 DEFAULT_SERVICE_AUDIENCE = "quant-codex-audit"
@@ -396,39 +397,39 @@ def guarded_auto_merge_control_plane_matches(payload: dict[str, Any]) -> list[st
 
 def guarded_auto_merge_policy_schema_error(payload: dict[str, Any]) -> str | None:
     if "version" not in payload:
-        return "invalid auto-merge policy schema requires human review"
+        return "invalid auto-merge policy schema fails closed"
     if payload.get("version") != 1:
-        return "unsupported auto-merge policy version requires human review"
+        return "unsupported auto-merge policy version fails closed"
     if not valid_policy_string(payload.get("auto_merge_label")):
-        return "invalid auto-merge policy schema requires human review"
+        return "invalid auto-merge policy schema fails closed"
     if not valid_policy_string(payload.get("human_review_label")):
-        return "invalid auto-merge policy schema requires human review"
+        return "invalid auto-merge policy schema fails closed"
     if payload["auto_merge_label"].strip() == payload["human_review_label"].strip():
-        return "auto-merge and human-review labels must be distinct requires human review"
+        return "auto-merge and human-review labels must be distinct"
     if not valid_policy_string(payload.get("monthly_marker_prefix")):
-        return "invalid auto-merge policy schema requires human review"
+        return "invalid auto-merge policy schema fails closed"
     if type(payload.get("max_changed_files")) is not int or payload["max_changed_files"] < 1:
-        return "invalid auto-merge policy schema requires human review"
+        return "invalid auto-merge policy schema fails closed"
     if type(payload.get("max_changed_lines")) is not int or payload["max_changed_lines"] < 1:
-        return "invalid auto-merge policy schema requires human review"
+        return "invalid auto-merge policy schema fails closed"
     if not valid_policy_string_list(payload.get("blocked_path_patterns"), allow_empty=False):
-        return "invalid auto-merge policy schema requires human review"
+        return "invalid auto-merge policy schema fails closed"
     risk_policy = payload.get("risk_policy")
     if not isinstance(risk_policy, dict):
-        return "invalid auto-merge policy schema requires human review"
+        return "invalid auto-merge policy schema fails closed"
     low_policy = risk_policy.get("low")
     medium_policy = risk_policy.get("medium")
     high_policy = risk_policy.get("high")
     if not isinstance(low_policy, dict) or not isinstance(medium_policy, dict) or not isinstance(high_policy, dict):
-        return "invalid auto-merge policy schema requires human review"
+        return "invalid auto-merge policy schema fails closed"
     if not valid_policy_string_list(low_policy.get("prefixes")):
-        return "invalid auto-merge policy schema requires human review"
+        return "invalid auto-merge policy schema fails closed"
     if not valid_policy_string_list(low_policy.get("exact")):
-        return "invalid auto-merge policy schema requires human review"
+        return "invalid auto-merge policy schema fails closed"
     if not valid_policy_string_list(medium_policy.get("exact")):
-        return "invalid auto-merge policy schema requires human review"
+        return "invalid auto-merge policy schema fails closed"
     if not valid_policy_string(high_policy.get("reason")):
-        return "invalid auto-merge policy schema requires human review"
+        return "invalid auto-merge policy schema fails closed"
     control_plane_matches = guarded_auto_merge_control_plane_matches(payload)
     if control_plane_matches:
         matches = ", ".join(control_plane_matches)
@@ -2283,7 +2284,8 @@ def publish_remediation(
         body_lines.extend(
             [
                 "",
-                "This PR is high-risk for unattended merge and requires human review.",
+                "Engineering is blocked from merging this change until validation and recovery evidence are complete and an independent AI review has passed.",
+                "This is an engineering evidence gate, not an investment decision request; existing funding, account, credential, permission, and MFA approvals still apply.",
                 "",
                 format_guarded_risk_details(guard_risk),
             ]
@@ -2306,18 +2308,17 @@ def publish_remediation(
         if workspace.feedback_retry_pr and workspace.stale_auto_merge_label_skip_reason:
             body_lines.extend(["", stale_auto_merge_label_skip_message(workspace.stale_auto_merge_label_skip_reason)])
         try:
-            review = request_human_review(
+            review = request_engineering_evidence_block(
                 token,
                 source_repo,
                 int(pr["number"]),
                 guard_risk,
             )
             body_lines.append("")
-            body_lines.append(f"Added `{review['label']}` to the PR so operators can review it before merge.")
+            body_lines.append(f"Added `{review['label']}` to keep this engineering change blocked pending evidence and independent AI review.")
         except (BridgeError, GitHubRequestError) as exc:
             body_lines.append("")
-            review_label = str(guard_risk.get("human_review_label") or HUMAN_REVIEW_LABEL)
-            body_lines.append(f"Could not add `{review_label}` to the PR: `{exc}`")
+            body_lines.append(f"Could not add `{ENGINEERING_EVIDENCE_BLOCKED_LABEL}` to the PR: `{exc}`")
         if auto_merge:
             body_lines.append("")
             body_lines.append(
@@ -2780,9 +2781,9 @@ def load_guarded_auto_merge_policy(policy_path: Path) -> dict[str, Any]:
     try:
         payload = json.loads(policy_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return fail_closed_guarded_auto_merge_policy("invalid auto-merge policy requires human review")
+        return fail_closed_guarded_auto_merge_policy("invalid auto-merge policy fails closed")
     if not isinstance(payload, dict):
-        return fail_closed_guarded_auto_merge_policy("invalid auto-merge policy requires human review")
+        return fail_closed_guarded_auto_merge_policy("invalid auto-merge policy fails closed")
     schema_error = guarded_auto_merge_policy_schema_error(payload)
     if schema_error:
         return fail_closed_guarded_auto_merge_policy(schema_error)
@@ -2804,12 +2805,12 @@ def guarded_blocked_patterns(policy: dict[str, Any]) -> tuple[list[re.Pattern[st
     if raw_patterns is None:
         raw_patterns = DEFAULT_GUARDED_AUTO_MERGE_POLICY["blocked_path_patterns"]
     elif not isinstance(raw_patterns, list):
-        errors.append("invalid blocked_path_patterns list requires human review")
+        errors.append("invalid blocked_path_patterns list fails closed")
         return [re.compile(r".*")], errors
     patterns: list[re.Pattern[str]] = []
     for raw_pattern in raw_patterns:
         if not isinstance(raw_pattern, str):
-            errors.append("invalid blocked_path_patterns list requires human review")
+            errors.append("invalid blocked_path_patterns list fails closed")
             return [re.compile(r".*")], errors
         pattern = str(raw_pattern)
         if not pattern.strip():
@@ -2817,7 +2818,7 @@ def guarded_blocked_patterns(policy: dict[str, Any]) -> tuple[list[re.Pattern[st
         try:
             patterns.append(re.compile(pattern, re.IGNORECASE))
         except re.error:
-            errors.append("invalid blocked_path_patterns regex requires human review")
+            errors.append("invalid blocked_path_patterns regex fails closed")
             return [re.compile(r".*")], errors
     return patterns, errors
 
@@ -2826,12 +2827,12 @@ def guarded_string_list(value: Any, field_name: str, errors: list[str]) -> list[
     if value is None:
         return []
     if not isinstance(value, list):
-        errors.append(f"invalid {field_name} list requires human review")
+        errors.append(f"invalid {field_name} list fails closed")
         return []
     items: list[str] = []
     for item in value:
         if not isinstance(item, str):
-            errors.append(f"invalid {field_name} list requires human review")
+            errors.append(f"invalid {field_name} list fails closed")
             return []
         if item.strip():
             items.append(item)
@@ -2841,7 +2842,7 @@ def guarded_string_list(value: Any, field_name: str, errors: list[str]) -> list[
 def guarded_policy_string(policy: dict[str, Any], field_name: str, fallback: str, errors: list[str]) -> str:
     value = policy.get(field_name, fallback)
     if not isinstance(value, str) or not value.strip() or "\n" in value or "\r" in value:
-        errors.append(f"invalid {field_name} string requires human review")
+        errors.append(f"invalid {field_name} string fails closed")
         return fallback
     return value.strip()
 
@@ -2849,7 +2850,7 @@ def guarded_policy_string(policy: dict[str, Any], field_name: str, fallback: str
 def guarded_policy_positive_int(policy: dict[str, Any], field_name: str, fallback: int, errors: list[str]) -> int:
     value = policy.get(field_name, fallback)
     if type(value) is not int or value < 1:
-        errors.append(f"invalid {field_name} integer requires human review")
+        errors.append(f"invalid {field_name} integer fails closed")
         return fallback
     return value
 
@@ -2858,7 +2859,7 @@ def guarded_optional_non_negative_int(value: Any, field_name: str, errors: list[
     if value is None:
         return None
     if type(value) is not int or value < 0:
-        errors.append(f"invalid {field_name} count requires human review")
+        errors.append(f"invalid {field_name} count fails closed")
         return None
     return value
 
@@ -2887,6 +2888,8 @@ def classify_guarded_auto_merge_risk(
         HUMAN_REVIEW_LABEL,
         policy_errors,
     )
+    if auto_merge_label == ENGINEERING_EVIDENCE_BLOCKED_LABEL:
+        policy_errors.append("auto-merge label collides with engineering evidence block label")
     monthly_marker_prefix = guarded_policy_string(
         policy,
         "monthly_marker_prefix",
@@ -2914,7 +2917,7 @@ def classify_guarded_auto_merge_risk(
     normalized_paths = [normalize_changed_path(path) for path in paths if normalize_changed_path(path)]
     if len(normalized_paths) > max_changed_files:
         policy_errors.append(
-            f"changed file count exceeds auto-merge limit requires human review: {len(normalized_paths)} > {max_changed_files}"
+            f"changed file count exceeds auto-merge limit: {len(normalized_paths)} > {max_changed_files}"
         )
     additions: int | None = None
     deletions: int | None = None
@@ -2934,16 +2937,16 @@ def classify_guarded_auto_merge_risk(
             changed_lines = additions + deletions
             if changed_lines > max_changed_lines:
                 policy_errors.append(
-                    f"changed line count exceeds auto-merge limit requires human review: {changed_lines} > {max_changed_lines}"
+                    f"changed line count exceeds auto-merge limit: {changed_lines} > {max_changed_lines}"
                 )
         if binary_files:
-            policy_errors.append("binary file changes require human review")
+            policy_errors.append("binary file changes block auto-merge")
         if deleted_files:
-            policy_errors.append("file deletions require human review")
+            policy_errors.append("file deletions block auto-merge")
         if renamed_files:
-            policy_errors.append("file renames require human review")
+            policy_errors.append("file renames block auto-merge")
         if copied_files:
-            policy_errors.append("file copies require human review")
+            policy_errors.append("file copies block auto-merge")
     for raw_path in paths:
         normalized = normalize_changed_path(raw_path)
         if not normalized:
@@ -3218,7 +3221,13 @@ def request_guarded_auto_merge(
         high_risk_files = ", ".join(risk["high_risk_files"])
         raise BridgeError(f"Guarded auto-merge label refused for {risk['risk_level']} risk files: {high_risk_files}")
     label = str(risk["auto_merge_label"])
+    if label == ENGINEERING_EVIDENCE_BLOCKED_LABEL:
+        raise BridgeError("Guarded auto-merge label collides with the engineering evidence block label")
     human_review_label = str(risk.get("human_review_label") or HUMAN_REVIEW_LABEL)
+    if issue_has_label(token, source_repo, pr_number, ENGINEERING_EVIDENCE_BLOCKED_LABEL):
+        raise BridgeError(
+            f"Guarded auto-merge label refused because `{ENGINEERING_EVIDENCE_BLOCKED_LABEL}` is present on the PR"
+        )
     if issue_has_label(token, source_repo, pr_number, human_review_label):
         raise BridgeError(
             f"Guarded auto-merge label refused because `{human_review_label}` is present on the PR"
@@ -3251,8 +3260,10 @@ def guarded_auto_merge_label_for_mutation(policy: dict[str, Any] | None = None) 
     errors: list[str] = []
     auto_merge_label = guarded_policy_string(policy, "auto_merge_label", GUARDED_AUTO_MERGE_LABEL, errors)
     human_review_label = guarded_policy_string(policy, "human_review_label", HUMAN_REVIEW_LABEL, errors)
+    if auto_merge_label == ENGINEERING_EVIDENCE_BLOCKED_LABEL:
+        errors.append("auto-merge and engineering evidence block labels must be distinct")
     if auto_merge_label == human_review_label:
-        errors.append("auto-merge and human-review labels must be distinct requires human review")
+        errors.append("auto-merge and human-review labels must be distinct")
     if errors:
         return "", "; ".join(errors)
     return auto_merge_label, ""
@@ -3330,6 +3341,30 @@ def request_human_review(
         label,
         color="B60205",
         description="Codex remediation PR requires human review before merge",
+    )
+    github_request(
+        token,
+        "POST",
+        f"/repos/{source_repo}/issues/{pr_number}/labels",
+        {"labels": [label]},
+    )
+    return {"label": label, **risk}
+
+
+def request_engineering_evidence_block(
+    token: str,
+    source_repo: str,
+    pr_number: int,
+    risk: dict[str, Any],
+) -> dict[str, Any]:
+    """Mark an engineering PR blocked pending evidence and independent AI review."""
+    label = ENGINEERING_EVIDENCE_BLOCKED_LABEL
+    ensure_repo_label(
+        token,
+        source_repo,
+        label,
+        color="FBCA04",
+        description="Engineering evidence and independent AI review required; auto-merge blocked",
     )
     github_request(
         token,
