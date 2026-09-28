@@ -2,6 +2,11 @@ from __future__ import annotations
 
 import copy
 import json
+import os
+import subprocess
+import sys
+import threading
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -297,3 +302,218 @@ def test_domain_briefing_path_ignores_runtime_scope_flags(tmp_path: Path, capsys
     assert captured["action"] == "quiet"
     assert "runtime_digest" not in captured
     dispatch.assert_not_called()
+
+
+def _paper_bytes(day: str = "2026-09-28", *, scope: str = "paper", status: str = "market_closed") -> bytes:
+    record = _record(status, scope=scope, day=day)
+    record["target_key"] = f"lb-svc|rot|{scope}"
+    record["target"]["account_scope"] = scope
+    payload = _projection(record)
+    payload["records"][0]["fills"]["count"] = None
+    return json.dumps(payload).encode("utf-8")
+
+
+def _gcs_uri(day: str = "2026-09-28") -> str:
+    return f"gs://bucket/runtime_daily/longbridge/paper/{day}.json"
+
+
+def test_gcs_preview_and_dispatch_keep_day_and_scope_guards(capsys) -> None:
+    uri = _gcs_uri()
+    key = "lb-svc|rot|paper"
+    raw = _paper_bytes()
+    with patch("scripts.consume_daily_briefing._read_gcs_object", return_value=(raw, None)) as reader, patch(
+        "scripts.consume_daily_briefing.dispatch_runtime_digest",
+        return_value={"errors": []},
+    ) as dispatch:
+        code = main(["--runtime-projection-gcs", uri, "--day", "2026-09-28", "--expected-target-key", key])
+    body = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert "休市" in body["text"]
+    assert "0 笔" not in body["text"]
+    assert "dispatch" not in body
+    reader.assert_called_once_with(uri)
+    dispatch.assert_not_called()
+
+    with patch("scripts.consume_daily_briefing._read_gcs_object", return_value=(raw, None)), patch(
+        "scripts.consume_daily_briefing.dispatch_runtime_digest",
+        return_value={"errors": []},
+    ) as dispatch:
+        code = main([
+            "--runtime-projection-gcs", uri,
+            "--day", "2026-09-28",
+            "--expected-target-key", key,
+            "--dispatch",
+        ])
+    assert code == 0
+    dispatch.assert_called_once()
+    sent = dispatch.call_args.args[0]
+    assert sent["records"][0]["status"] == "market_closed"
+    assert sent["records"][0]["fills"]["count"] is None
+    assert dispatch.call_args.kwargs == {"dry_run": False, "send_dry_run": False}
+
+
+def test_gcs_bad_input_times_out_or_rejects_before_send(capsys) -> None:
+    uri = _gcs_uri()
+    key = "lb-svc|rot|paper"
+    secret = "gs://private/secret-stderr"
+    cases = [
+        (["--runtime-projection-gcs", "gs://bucket/runtime_daily/longbridge/paper/*.json", "--day", "2026-09-28", "--expected-target-key", key], "invalid_runtime_object", False),
+        (["--runtime-projection-gcs", "gs://user:pass@bucket/runtime_daily/longbridge/paper/2026-09-28.json", "--day", "2026-09-28", "--expected-target-key", key], "invalid_runtime_object", False),
+        (["--runtime-projection-gcs", "gs://bucket/../runtime_daily/longbridge/paper/2026-09-28.json", "--day", "2026-09-28", "--expected-target-key", key], "invalid_runtime_object", False),
+        (["--runtime-projection-gcs", "gs://bucket/not_runtime_daily/longbridge/paper/2026-09-28.json", "--day", "2026-09-28", "--expected-target-key", key], "invalid_runtime_object", False),
+        (["--runtime-projection-gcs", _gcs_uri("2026-09-27"), "--day", "2026-09-28", "--expected-target-key", key], "runtime_object_day_mismatch", False),
+        (["--runtime-projection-gcs", uri, "--day", "2026-09-28", "--expected-target-key", "lb-svc|rot|live"], "expected_scope_not_paper", False),
+        (["--runtime-projection-gcs", uri, "--day", "2026-09-28", "--expected-target-key", "lb-svc|rot|*paper"], "expected_scope_not_paper", False),
+        (["--runtime-projection-gcs", uri, "--expected-target-key", key], "missing_dispatch_day", False),
+        (["--runtime-projection-gcs", uri, "--day", "2026-09-28", "--expected-target-key", key], "business_date_mismatch", True),
+        (["--runtime-projection-gcs", uri, "--day", "2026-09-28", "--expected-target-key", "other-svc|rot|paper", "--dispatch"], "expected_target_mismatch", True),
+    ]
+    for argv, reason, reads in cases:
+        payload = _paper_bytes("2026-09-27" if reason == "business_date_mismatch" else "2026-09-28")
+        with patch("scripts.consume_daily_briefing._read_gcs_object", return_value=(payload, None)) as reader, patch(
+            "scripts.consume_daily_briefing.dispatch_runtime_digest",
+            return_value={"errors": []},
+        ) as dispatch:
+            code = main(argv)
+        captured = json.loads(capsys.readouterr().out)
+        assert code == 2
+        assert captured["reason"] == reason
+        assert secret not in json.dumps(captured)
+        assert "gs://" not in json.dumps(captured)
+        dispatch.assert_not_called()
+        if reads:
+            reader.assert_called_once()
+        else:
+            reader.assert_not_called()
+
+    for reason in ("runtime_projection_too_large", "runtime_projection_unreadable", "runtime_projection_timeout"):
+        with patch("scripts.consume_daily_briefing._read_gcs_object", return_value=(None, reason)) as reader, patch(
+            "scripts.consume_daily_briefing.dispatch_runtime_digest",
+        ) as dispatch:
+            code = main(["--runtime-projection-gcs", uri, "--day", "2026-09-28", "--expected-target-key", key, "--dispatch"])
+        captured = json.loads(capsys.readouterr().out)
+        assert code == 2
+        assert captured == {"ok": False, "error": "runtime_projection_rejected", "reason": reason}
+        assert secret not in json.dumps(captured)
+        dispatch.assert_not_called()
+        reader.assert_called_once()
+
+
+def test_gcs_reader_is_bounded_argv_and_discards_stderr(monkeypatch) -> None:
+    from scripts.consume_daily_briefing import _GCS_OBJECT_LIMIT, _read_gcs_object
+
+    secret = b"gs://private/do-not-print"
+
+    def fake_popen(argv, stdout=None, stderr=None, bufsize=-1):
+        assert isinstance(argv, list)
+        assert stdout == subprocess.PIPE
+        assert stderr == subprocess.PIPE
+        read_fd, write_fd = os.pipe()
+        err_read, err_write = os.pipe()
+        os.write(err_write, secret)
+        os.close(err_write)
+
+        def _writer() -> None:
+            remaining = _GCS_OBJECT_LIMIT + 1
+            while remaining:
+                size = min(65536, remaining)
+                os.write(write_fd, b"x" * size)
+                remaining -= size
+            os.close(write_fd)
+
+        threading.Thread(target=_writer, daemon=True).start()
+
+        class Proc:
+            def __init__(self) -> None:
+                self.stdout = os.fdopen(read_fd, "rb")
+                self.stderr = os.fdopen(err_read, "rb")
+                self.killed = False
+                self.returncode = None
+
+            def kill(self) -> None:
+                self.killed = True
+                self.returncode = -9
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                return self.returncode if self.returncode is not None else 0
+
+        seen["argv"] = argv
+        seen["proc"] = Proc()
+        return seen["proc"]
+
+    seen: dict[str, object] = {}
+    monkeypatch.setattr("scripts.consume_daily_briefing.subprocess.Popen", fake_popen)
+    data, reason = _read_gcs_object("gs://bucket/runtime_daily/longbridge/paper/2026-09-28.json")
+    assert data is None
+    assert reason == "runtime_projection_too_large"
+    assert seen["argv"] == [
+        "gcloud", "storage", "cat", "--",
+        "gs://bucket/runtime_daily/longbridge/paper/2026-09-28.json",
+    ]
+    assert seen["proc"].killed is True
+
+    def hang_popen(argv, stdout=None, stderr=None, bufsize=-1):
+        read_fd, write_fd = os.pipe()
+        err_read, err_write = os.pipe()
+        os.write(err_write, secret)
+        os.close(err_write)
+
+        class Proc:
+            def __init__(self) -> None:
+                self.stdout = os.fdopen(read_fd, "rb")
+                self.stderr = os.fdopen(err_read, "rb")
+                self._write = write_fd
+                self.killed = False
+                self.returncode = None
+
+            def kill(self) -> None:
+                self.killed = True
+                self.returncode = -9
+                os.close(self._write)
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                return -9
+
+        return Proc()
+
+    monkeypatch.setattr("scripts.consume_daily_briefing.subprocess.Popen", hang_popen)
+    monkeypatch.setattr("scripts.consume_daily_briefing._GCS_TIMEOUT_SECONDS", 0.05)
+    data, reason = _read_gcs_object("gs://bucket/runtime_daily/longbridge/paper/2026-09-28.json")
+    assert data is None
+    assert reason == "runtime_projection_timeout"
+
+
+def test_gcs_read_times_out_when_child_writes_one_byte_then_sleeps(monkeypatch) -> None:
+    from scripts.consume_daily_briefing import _read_gcs_object
+
+    real_popen = subprocess.Popen
+    script = (
+        "import sys, time\n"
+        "sys.stdout.buffer.write(b'x'); sys.stdout.buffer.flush()\n"
+        "sys.stderr.buffer.write(b'y'); sys.stderr.buffer.flush()\n"
+        "time.sleep(0.6)\n"
+    )
+
+    def launching(argv, stdout=None, stderr=None, bufsize=-1):
+        assert isinstance(argv, list) and argv[0] == "gcloud"
+        return real_popen(
+            [sys.executable, "-c", script],
+            stdout=stdout,
+            stderr=stderr,
+            bufsize=bufsize,
+        )
+
+    monkeypatch.setattr("scripts.consume_daily_briefing.subprocess.Popen", launching)
+    monkeypatch.setattr("scripts.consume_daily_briefing._GCS_TIMEOUT_SECONDS", 0.08)
+    started = time.monotonic()
+    data, reason = _read_gcs_object("gs://bucket/runtime_daily/longbridge/paper/2026-09-28.json")
+    elapsed = time.monotonic() - started
+    assert data is None
+    assert reason == "runtime_projection_timeout"
+    assert elapsed < 0.45
