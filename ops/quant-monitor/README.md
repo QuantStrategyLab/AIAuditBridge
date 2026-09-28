@@ -86,6 +86,15 @@ sudo systemctl daemon-reload && sudo systemctl enable --now codex-quant.service
 
 收盘简报 + AIAuditBridge 分发：`bash scripts/daily_briefing_pipeline.sh`
 
+策略健康 domain 报告仍走原来的 quiet / issue / Telegram 分流。LongBridge 日运行投影是另一份离线输入，不并进策略健康。在 AIAuditBridge 仓库根目录：
+
+```bash
+python3 scripts/consume_daily_briefing.py --runtime-projection projection.json
+python3 scripts/consume_daily_briefing.py --runtime-projection projection.json --dispatch
+```
+
+默认只预览。`--dispatch` 才发送，并按平台、业务日和投影中的目标集合复用既有逐目标送达；同一目标集合换顺序、改观察时间或改正文不会另发。这个目标集合是否等于生产固定配置，还要云端接线验收。`--dry-run` / `--send-dry-run` 不联网、不写送达状态。投影里的成交笔数尚未接通，不能读成零成交。这不是云端真实日报，也不关闭各平台原来的通知。
+
 ## Immutable release 安装（仅安装）
 
 生产 oneshot 服务从 `/opt/quant-monitor/releases/<40-hex-SHA>` 读代码。用本地已有仓库中的**精确

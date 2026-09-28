@@ -8,10 +8,54 @@ import json
 from pathlib import Path
 
 from service.briefing_consumer import consume_briefing_dir, summarize_briefing
-from service.briefing_dispatch import dispatch_briefing_result
+from service.briefing_dispatch import dispatch_briefing_result, dispatch_runtime_digest
+from service.runtime_digest import prepare_runtime_digest
 from service.dual_review_briefing import collect_dual_review_payloads, summarize_dual_review_runs
 from service.dual_review_dispatch import dispatch_dual_review_result
 from service.dual_review_orchestrator import orchestrate_from_payload
+
+
+def _consume_runtime_projection(args: argparse.Namespace) -> int:
+    path = Path(args.runtime_projection)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        print(json.dumps({"ok": False, "error": "runtime_projection_unreadable"}, ensure_ascii=False))
+        return 2
+    if not isinstance(payload, dict):
+        print(json.dumps({"ok": False, "error": "runtime_projection_rejected", "reason": "malformed"}, ensure_ascii=False))
+        return 2
+    prepared = prepare_runtime_digest(payload)
+    if not prepared.get("ok"):
+        print(json.dumps({
+            "ok": False,
+            "error": "runtime_projection_rejected",
+            "reason": prepared.get("reason"),
+        }, ensure_ascii=False))
+        return 2
+    body = {
+        "ok": True,
+        "kind": "runtime_digest",
+        "platform": prepared["platform"],
+        "business_date": prepared["business_date"],
+        "timezone": prepared["timezone"],
+        "completeness": prepared["completeness"],
+        "event_id": prepared["event_id"],
+        "text": prepared["text"],
+        "sendable": prepared["sendable"],
+        "accounts": prepared["accounts"],
+    }
+    if args.dispatch or args.send_dry_run or args.dry_run:
+        body["dispatch"] = dispatch_runtime_digest(
+            payload,
+            dry_run=bool(args.dry_run or args.send_dry_run or not args.dispatch),
+            send_dry_run=bool(args.send_dry_run),
+        )
+    print(json.dumps(body, ensure_ascii=False, indent=2))
+    dispatch = body.get("dispatch")
+    if dispatch is None:
+        return 0
+    return 0 if not _dispatch_failed(dispatch) else 2
 
 
 def _dispatch_failed(summary: object) -> bool:
@@ -27,10 +71,14 @@ def _dispatch_failed(summary: object) -> bool:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Consume quant-monitor daily briefing reports.")
-    parser.add_argument(
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument(
         "--report-dir",
-        required=True,
         help="Directory containing domain JSON files (e.g. data/daily-reports/2026-07-08)",
+    )
+    source.add_argument(
+        "--runtime-projection",
+        help="Offline LongBridge daily runtime projection JSON. Default is preview only.",
     )
     parser.add_argument("--day", default="", help="Report day label (defaults to directory name)")
     parser.add_argument(
@@ -59,6 +107,11 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--summary-only cannot dispatch alerts or run dual review")
     if args.send_dry_run and (args.ai_summary or args.dual_review):
         parser.error("--send-dry-run cannot run AI summary or dual review")
+    if args.runtime_projection and (args.ai_summary or args.dual_review or args.summary_only):
+        parser.error("--runtime-projection cannot run AI summary or dual review")
+
+    if args.runtime_projection:
+        return _consume_runtime_projection(args)
 
     report_dir = Path(args.report_dir)
     if not report_dir.is_dir():
