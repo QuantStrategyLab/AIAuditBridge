@@ -142,13 +142,44 @@ def run_codex_primary_review(
     return parse_primary_review_output(result.output)
 
 
+_SAFE_FAILURE_CATEGORIES = frozenset({
+    "auth_or_config_failure",
+    "quota_or_capacity_failure",
+    "service_restart",
+    "stale_job_timeout",
+    "transient_service_failure",
+    "patch_contract_failure",
+    "unknown_failure",
+})
+_SAFE_REQUEST_PHASES = frozenset({"oidc", "health", "submit", "poll"})
+
+
+def _safe_execution_diagnostics(raw: Any) -> dict[str, Any]:
+    """Copy only allowlisted diagnostics. Drop bodies, tokens, and forged types."""
+    if not isinstance(raw, dict):
+        return {}
+    diagnostics: dict[str, Any] = {}
+    category = raw.get("failure_category")
+    if isinstance(category, str) and category in _SAFE_FAILURE_CATEGORIES:
+        diagnostics["failure_category"] = category
+    phase = raw.get("request_phase")
+    if isinstance(phase, str) and phase in _SAFE_REQUEST_PHASES:
+        diagnostics["request_phase"] = phase
+    status = raw.get("http_status")
+    if type(status) is int and 100 <= status <= 599:
+        diagnostics["http_status"] = status
+    return diagnostics
+
+
 def _run_codex_research_primary_review(
     *, prompt: str, research_stage: str, timeout_minutes: int | None,
 ) -> dict[str, Any]:
     """Research-only Codex path; legacy recovery/API review paths stay separate."""
-    def unavailable(reason: str, *, verdict: str = VERDICT_UNAVAILABLE) -> dict[str, Any]:
-        return {"source": "codex_primary", "provider": "codex", "research_stage": "promotion_review",
-                "verdict": verdict, "confidence": 0.0, "error": reason}
+    def unavailable(reason: str, *, verdict: str = VERDICT_UNAVAILABLE, raw: Any = None) -> dict[str, Any]:
+        review = {"source": "codex_primary", "provider": "codex", "research_stage": "promotion_review",
+                  "verdict": verdict, "confidence": 0.0, "error": reason}
+        review.update(_safe_execution_diagnostics(raw))
+        return review
 
     if research_stage != "promotion_review":
         return unavailable("invalid_research_stage", verdict=VERDICT_INVALID)
@@ -179,7 +210,7 @@ def _run_codex_research_primary_review(
         retry = raw.get("retry_at")
         if type(retry) not in (int, float) or not math.isfinite(retry) or retry <= 0:
             retry = None
-        return {**unavailable("research_primary_deferred"), "status": "deferred", "retry_at": retry}
+        return {**unavailable("research_primary_deferred", raw=raw), "status": "deferred", "retry_at": retry}
     if not (
         result.provider == "codex" and result.success is True and not result.error and not result.note
         and isinstance(result.output, str) and result.output.strip()
@@ -188,7 +219,7 @@ def _run_codex_research_primary_review(
         and isinstance(result.model, str) and result.model.strip() and raw.get("model") == result.model
         and raw.get("output") == result.output
     ):
-        return unavailable("research_primary_result_unavailable")
+        return unavailable("research_primary_result_unavailable", raw=raw)
     review = parse_llm_review_output(result.output, provider="codex", model=result.model)
     if extract_verdict(review) not in {VERDICT_PASS, VERDICT_FAIL}:
         return unavailable("research_primary_invalid_response", verdict=VERDICT_INVALID)
