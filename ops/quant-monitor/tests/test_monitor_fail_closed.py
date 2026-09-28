@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import types
 import unittest
 from pathlib import Path
@@ -687,6 +688,435 @@ class MonitorFailClosedTests(unittest.TestCase):
                     {"code": "dashboard_data_unavailable", "error_type": "FileNotFoundError"},
                     report["errors"],
                 )
+
+    def test_delivery_retries_only_failed_target_and_hides_chat_id(self) -> None:
+        event = "a" * 64
+        calls: list[str] = []
+
+        def send_one(chat_id: str) -> str:
+            calls.append(chat_id)
+            return "sent" if chat_id == "ok-chat" else "failed"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = HEALTH_CYCLE.deliver_telegram_targets(
+                root, event, ("ok-chat", "bad-chat"), send_one,
+            )
+            self.assertFalse(first["all_sent"])
+            self.assertEqual(calls, ["ok-chat", "bad-chat"])
+            self.assertIn("telegram_delivery_failed", first["errors"])
+            retry: list[str] = []
+
+            def send_retry(chat_id: str) -> str:
+                retry.append(chat_id)
+                return "sent"
+
+            second = HEALTH_CYCLE.deliver_telegram_targets(
+                root, event, ("ok-chat", "bad-chat"), send_retry,
+            )
+            self.assertEqual(retry, ["bad-chat"])
+            self.assertTrue(second["all_sent"])
+            raw = (root / "data" / "alert-state" / "health_cycle.json").read_text(encoding="utf-8")
+            self.assertNotIn("ok-chat", raw)
+            self.assertNotIn("bad-chat", raw)
+            state = json.loads(raw)
+            self.assertEqual(
+                state["operational_diagnosis_attempts"] if "operational_diagnosis_attempts" in state else [],
+                [],
+            )
+
+    def test_pending_or_timeout_reentry_does_not_send_and_is_not_success(self) -> None:
+        event = "b" * 64
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            calls: list[str] = []
+
+            def explode(chat_id: str) -> str:
+                calls.append(chat_id)
+                raise TimeoutError("timed out")
+
+            first = HEALTH_CYCLE.deliver_telegram_targets(root, event, ("chat-1",), explode)
+            self.assertFalse(first["all_sent"])
+            self.assertIn("telegram_delivery_unknown", first["errors"])
+            self.assertEqual(calls, ["chat-1"])
+            second = HEALTH_CYCLE.deliver_telegram_targets(
+                root, event, ("chat-1",), lambda chat_id: (_ for _ in ()).throw(AssertionError("resent")),
+            )
+            self.assertFalse(second["all_sent"])
+            self.assertTrue(second["suppressed"] is False)
+            self.assertIn("telegram_delivery_unknown", second["errors"])
+            target = HEALTH_CYCLE._delivery_target_hash("chat-1")
+            state = json.loads((root / "data" / "alert-state" / "health_cycle.json").read_text())
+            self.assertEqual(state["deliveries"][event][target]["status"], "unknown")
+
+    def test_concurrent_same_event_sends_once(self) -> None:
+        event = "c" * 64
+        calls: list[str] = []
+        gate = threading.Barrier(2)
+
+        def send_one(chat_id: str) -> str:
+            calls.append(chat_id)
+            return "sent"
+
+        def run(root: str) -> None:
+            gate.wait()
+            HEALTH_CYCLE.deliver_telegram_targets(Path(root), event, ("same-chat",), send_one)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            threads = [threading.Thread(target=run, args=(tmp,)) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            self.assertEqual(calls, ["same-chat"])
+
+    def test_state_write_failure_sends_nothing(self) -> None:
+        event = "d" * 64
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            HEALTH_CYCLE, "_write_alert_state", side_effect=OSError("disk"),
+        ):
+            result = HEALTH_CYCLE.deliver_telegram_targets(
+                Path(tmp), event, ("chat",), lambda chat_id: (_ for _ in ()).throw(AssertionError("sent")),
+            )
+        self.assertEqual(result["errors"], ["alert_state_write_failed"])
+        self.assertFalse(result["all_sent"])
+
+    def test_malformed_or_missing_root_does_not_count_as_delivered(self) -> None:
+        event = "e" * 64
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = HEALTH_CYCLE._alert_state_path(root)
+            state.parent.mkdir(parents=True)
+            state.write_text("not-json", encoding="utf-8")
+            bad = HEALTH_CYCLE.deliver_telegram_targets(
+                root, event, ("chat",), lambda chat_id: (_ for _ in ()).throw(AssertionError("sent")),
+            )
+            self.assertEqual(bad["errors"], ["alert_state_unreadable"])
+            self.assertFalse(bad["all_sent"])
+            missing = HEALTH_CYCLE.deliver_telegram_targets(
+                root / "missing", event, ("chat",), lambda chat_id: "sent",
+            )
+            self.assertEqual(missing["errors"], ["alert_state_root_unavailable"])
+            self.assertFalse(missing["all_sent"])
+
+    def test_recovery_keeps_unknown_and_diagnosis_but_drops_sent_fingerprint(self) -> None:
+        event = "f" * 64
+        other = "9" * 64
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            HEALTH_CYCLE._record_operational_diagnosis_attempt(
+                root, other, attempt_date="2026-09-28",
+            )
+            kept = "1" * 64
+            HEALTH_CYCLE.deliver_telegram_targets(
+                root, kept, ("other-chat",), lambda chat_id: "sent",
+            )
+            HEALTH_CYCLE.deliver_telegram_targets(
+                root, event, ("chat",), lambda chat_id: (_ for _ in ()).throw(TimeoutError("lost")),
+            )
+            target = HEALTH_CYCLE._delivery_target_hash("chat")
+            kept_target = HEALTH_CYCLE._delivery_target_hash("other-chat")
+            HEALTH_CYCLE._record_alert(root, event)
+            HEALTH_CYCLE._clear_alert(root)
+            state = json.loads(HEALTH_CYCLE._alert_state_path(root).read_text(encoding="utf-8"))
+            self.assertNotIn("fingerprint", state)
+            self.assertEqual(state["deliveries"][event][target]["status"], "unknown")
+            self.assertEqual(state["deliveries"][kept][kept_target]["status"], "sent")
+            self.assertEqual(state["operational_diagnosis_attempts"], [other])
+
+    def test_legacy_fingerprint_suppresses_without_inventing_target_delivery(self) -> None:
+        event = HEALTH_CYCLE._alert_fingerprint(["same failure"])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            HEALTH_CYCLE._record_alert(root, event)
+            result = HEALTH_CYCLE.deliver_telegram_targets(
+                root, event, ("new-chat",), lambda chat_id: (_ for _ in ()).throw(AssertionError("sent")),
+            )
+            self.assertTrue(result["suppressed"])
+            self.assertFalse(result["all_sent"])
+            state = json.loads(HEALTH_CYCLE._alert_state_path(root).read_text(encoding="utf-8"))
+            self.assertNotIn("deliveries", state)
+            self.assertEqual(state["fingerprint"], event)
+
+    def _state(self, root: Path) -> dict:
+        return json.loads(HEALTH_CYCLE._alert_state_path(root).read_text(encoding="utf-8"))
+
+    def test_diagnosis_and_clear_keep_delivery_written_during_their_read(self) -> None:
+        unknown_event = "a" * 64
+        failed_event = "b" * 64
+        sent_event = "c" * 64
+        cleared_event = "d" * 64
+        diagnosis = "e" * 64
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            HEALTH_CYCLE.deliver_telegram_targets(
+                root, unknown_event, ("unknown-chat",),
+                lambda chat_id: (_ for _ in ()).throw(TimeoutError("lost")),
+            )
+            HEALTH_CYCLE.deliver_telegram_targets(
+                root, failed_event, ("failed-chat",), lambda chat_id: "failed",
+            )
+            unknown_target = HEALTH_CYCLE._delivery_target_hash("unknown-chat")
+            failed_target = HEALTH_CYCLE._delivery_target_hash("failed-chat")
+            sent_target = HEALTH_CYCLE._delivery_target_hash("sent-chat")
+            cleared_target = HEALTH_CYCLE._delivery_target_hash("clear-chat")
+            original = HEALTH_CYCLE._load_operational_diagnosis_state
+
+            def race(mutator, event_id: str, chat_id: str) -> list[str]:
+                loaded = threading.Event()
+                release_load = threading.Event()
+                saw_pending: list[str] = []
+                errors: list[BaseException] = []
+
+                def slow_load(root_path: Path) -> dict:
+                    payload = original(root_path)
+                    loaded.set()
+                    if not release_load.wait(5):
+                        raise TimeoutError("load was not released")
+                    return payload
+
+                def mutate() -> None:
+                    try:
+                        with mock.patch.object(
+                            HEALTH_CYCLE, "_load_operational_diagnosis_state", slow_load,
+                        ):
+                            mutator()
+                    except BaseException as exc:
+                        errors.append(exc)
+
+                def deliver() -> None:
+                    try:
+                        if not loaded.wait(5):
+                            raise TimeoutError("mutation did not load state")
+
+                        def send_one(target: str) -> str:
+                            state = self._state(root)
+                            status = state["deliveries"][event_id][HEALTH_CYCLE._delivery_target_hash(target)]["status"]
+                            saw_pending.append(status)
+                            return "sent"
+
+                        HEALTH_CYCLE.deliver_telegram_targets(root, event_id, (chat_id,), send_one)
+                    except BaseException as exc:
+                        errors.append(exc)
+
+                mutator_thread = threading.Thread(target=mutate)
+                delivery_thread = threading.Thread(target=deliver)
+                mutator_thread.start()
+                self.assertTrue(loaded.wait(5))
+                delivery_thread.start()
+                delivery_thread.join(1)
+                release_load.set()
+                mutator_thread.join(5)
+                delivery_thread.join(5)
+                self.assertFalse(mutator_thread.is_alive())
+                self.assertFalse(delivery_thread.is_alive())
+                self.assertEqual(errors, [])
+                return saw_pending
+
+            pending_during_diagnosis = race(
+                lambda: HEALTH_CYCLE._record_operational_diagnosis_attempt(
+                    root, diagnosis, attempt_date="2026-09-28",
+                ),
+                sent_event,
+                "sent-chat",
+            )
+            state = self._state(root)
+            self.assertEqual(pending_during_diagnosis, ["pending"])
+            self.assertEqual(state["deliveries"][unknown_event][unknown_target]["status"], "unknown")
+            self.assertEqual(state["deliveries"][failed_event][failed_target]["status"], "failed")
+            self.assertEqual(state["deliveries"][sent_event][sent_target]["status"], "sent")
+            self.assertEqual(state["operational_diagnosis_attempts"], [diagnosis])
+
+            pending_during_clear = race(
+                lambda: HEALTH_CYCLE._clear_alert(root),
+                cleared_event,
+                "clear-chat",
+            )
+            state = self._state(root)
+            self.assertEqual(pending_during_clear, ["pending"])
+            self.assertEqual(state["deliveries"][unknown_event][unknown_target]["status"], "unknown")
+            self.assertEqual(state["deliveries"][failed_event][failed_target]["status"], "failed")
+            self.assertEqual(state["deliveries"][sent_event][sent_target]["status"], "sent")
+            self.assertEqual(state["deliveries"][cleared_event][cleared_target]["status"], "sent")
+            self.assertEqual(state["operational_diagnosis_attempts"], [diagnosis])
+            self.assertEqual(state["operational_diagnosis_last_attempt_date"], "2026-09-28")
+
+    def test_recovery_clears_sent_health_events_and_lets_both_recur(self) -> None:
+        event_a = "a" * 64
+        event_b = "b" * 64
+        daily = "c" * 64
+        unknown = "d" * 64
+        failed = "e" * 64
+        diagnosis = "f" * 64
+        calls: list[str] = []
+
+        def send(chat_id: str) -> str:
+            calls.append(chat_id)
+            return "sent"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            HEALTH_CYCLE._record_operational_diagnosis_attempt(
+                root, diagnosis, attempt_date="2026-09-28",
+            )
+            first_a = HEALTH_CYCLE.deliver_telegram_targets(
+                root, event_a, ("chat-a",), send, confirm_legacy=True,
+            )
+            first_b = HEALTH_CYCLE.deliver_telegram_targets(
+                root, event_b, ("chat-b",), send, confirm_legacy=True,
+            )
+            daily_sent = HEALTH_CYCLE.deliver_telegram_targets(
+                root, daily, ("chat-daily",), send,
+            )
+            unknown_result = HEALTH_CYCLE.deliver_telegram_targets(
+                root, unknown, ("chat-unknown",),
+                lambda chat_id: (_ for _ in ()).throw(TimeoutError("lost")),
+                confirm_legacy=True,
+            )
+            failed_result = HEALTH_CYCLE.deliver_telegram_targets(
+                root, failed, ("chat-failed",), lambda chat_id: "failed", confirm_legacy=True,
+            )
+            self.assertTrue(first_a["all_sent"])
+            self.assertTrue(first_b["all_sent"])
+            self.assertTrue(daily_sent["all_sent"])
+            self.assertIn("telegram_delivery_unknown", unknown_result["errors"])
+            self.assertIn("telegram_delivery_failed", failed_result["errors"])
+            before = self._state(root)
+            self.assertEqual(before["fingerprint"], event_a)
+            self.assertEqual(before["health_sent_events"], [event_a, event_b, unknown, failed])
+
+            HEALTH_CYCLE._clear_alert(root)
+            cleared = self._state(root)
+            self.assertNotIn("fingerprint", cleared)
+            self.assertNotIn("health_sent_events", cleared)
+            self.assertNotIn(event_a, cleared["deliveries"])
+            self.assertNotIn(event_b, cleared["deliveries"])
+            self.assertEqual(
+                cleared["deliveries"][daily][HEALTH_CYCLE._delivery_target_hash("chat-daily")]["status"],
+                "sent",
+            )
+            self.assertEqual(
+                cleared["deliveries"][unknown][HEALTH_CYCLE._delivery_target_hash("chat-unknown")]["status"],
+                "unknown",
+            )
+            self.assertEqual(
+                cleared["deliveries"][failed][HEALTH_CYCLE._delivery_target_hash("chat-failed")]["status"],
+                "failed",
+            )
+            self.assertEqual(cleared["operational_diagnosis_attempts"], [diagnosis])
+
+            calls.clear()
+            again_a = HEALTH_CYCLE.deliver_telegram_targets(
+                root, event_a, ("chat-a",), send, confirm_legacy=True,
+            )
+            again_b = HEALTH_CYCLE.deliver_telegram_targets(
+                root, event_b, ("chat-b",), send, confirm_legacy=True,
+            )
+            self.assertTrue(again_a["all_sent"])
+            self.assertTrue(again_b["all_sent"])
+            self.assertEqual(calls, ["chat-a", "chat-b"])
+            daily_again = HEALTH_CYCLE.deliver_telegram_targets(
+                root, daily, ("chat-daily",),
+                lambda chat_id: (_ for _ in ()).throw(AssertionError("daily resent")),
+            )
+            unknown_again = HEALTH_CYCLE.deliver_telegram_targets(
+                root, unknown, ("chat-unknown",),
+                lambda chat_id: (_ for _ in ()).throw(AssertionError("unknown resent")),
+                confirm_legacy=True,
+            )
+            self.assertTrue(daily_again["suppressed"])
+            self.assertFalse(unknown_again["all_sent"])
+            self.assertIn("telegram_delivery_unknown", unknown_again["errors"])
+
+    def test_interrupt_after_sent_keeps_health_ownership_for_later_recurrence(self) -> None:
+        event = "a" * 64
+        changed = "b" * 64
+        daily = "c" * 64
+        unknown = "d" * 64
+        diagnosis = "e" * 64
+
+        class _Interrupted(BaseException):
+            pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            HEALTH_CYCLE._record_operational_diagnosis_attempt(
+                root, diagnosis, attempt_date="2026-09-28",
+            )
+            HEALTH_CYCLE.deliver_telegram_targets(root, daily, ("chat-daily",), lambda chat_id: "sent")
+            HEALTH_CYCLE.deliver_telegram_targets(
+                root, unknown, ("chat-unknown",),
+                lambda chat_id: (_ for _ in ()).throw(TimeoutError("lost")),
+            )
+            sent_hash = HEALTH_CYCLE._delivery_target_hash("chat-sent")
+            pending_hash = HEALTH_CYCLE._delivery_target_hash("chat-pending")
+            observed: dict[str, dict] = {}
+
+            def send_one(chat_id: str) -> str:
+                if chat_id == "chat-sent":
+                    observed["pending"] = self._state(root)
+                    return "sent"
+                raise _Interrupted()
+
+            with self.assertRaises(_Interrupted):
+                HEALTH_CYCLE.deliver_telegram_targets(
+                    root, event, ("chat-sent", "chat-pending"), send_one, confirm_legacy=True,
+                )
+
+            self.assertEqual(observed["pending"]["deliveries"][event][sent_hash]["status"], "pending")
+            self.assertEqual(observed["pending"]["health_sent_events"], [event])
+            self.assertNotIn("fingerprint", observed["pending"])
+            interrupted = self._state(root)
+            self.assertEqual(interrupted["deliveries"][event][sent_hash]["status"], "sent")
+            self.assertEqual(interrupted["deliveries"][event][pending_hash]["status"], "pending")
+            self.assertEqual(interrupted["health_sent_events"], [event])
+            self.assertNotIn("fingerprint", interrupted)
+
+            HEALTH_CYCLE._clear_alert(root)
+            recovered = self._state(root)
+            self.assertNotIn(sent_hash, recovered["deliveries"][event])
+            self.assertEqual(recovered["deliveries"][event][pending_hash]["status"], "pending")
+            self.assertEqual(
+                recovered["deliveries"][unknown][HEALTH_CYCLE._delivery_target_hash("chat-unknown")]["status"],
+                "unknown",
+            )
+            self.assertEqual(
+                recovered["deliveries"][daily][HEALTH_CYCLE._delivery_target_hash("chat-daily")]["status"],
+                "sent",
+            )
+            self.assertEqual(recovered["operational_diagnosis_attempts"], [diagnosis])
+            self.assertNotIn("health_sent_events", recovered)
+            self.assertNotIn("fingerprint", recovered)
+
+            calls: list[str] = []
+
+            def send(chat_id: str) -> str:
+                calls.append(chat_id)
+                return "sent"
+
+            recurred = HEALTH_CYCLE.deliver_telegram_targets(
+                root, event, ("chat-sent", "chat-pending"), send, confirm_legacy=True,
+            )
+            self.assertEqual(calls, ["chat-sent"])
+            self.assertFalse(recurred["all_sent"])
+            self.assertIn("telegram_delivery_unknown", recurred["errors"])
+            held = self._state(root)
+            self.assertEqual(held["deliveries"][event][pending_hash]["status"], "unknown")
+
+            calls.clear()
+            changed_result = HEALTH_CYCLE.deliver_telegram_targets(
+                root, changed, ("chat-changed",), send, confirm_legacy=True,
+            )
+            self.assertTrue(changed_result["all_sent"])
+            self.assertEqual(calls, ["chat-changed"])
+            HEALTH_CYCLE.deliver_telegram_targets(
+                root, daily, ("chat-daily",),
+                lambda chat_id: (_ for _ in ()).throw(AssertionError("daily resent")),
+            )
+            HEALTH_CYCLE.deliver_telegram_targets(
+                root, unknown, ("chat-unknown",),
+                lambda chat_id: (_ for _ in ()).throw(AssertionError("unknown resent")),
+            )
 
 
 if __name__ == "__main__":

@@ -3,12 +3,16 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
 import re
 import sys
 import tempfile
+import threading
+from collections.abc import Callable
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -18,6 +22,11 @@ SCORE_ALERT = 60.0
 DRIFT_REVIEW = 0.50
 DRIFT_CRITICAL = 0.75
 _ALERT_STATE_RELATIVE_PATH = Path("data/alert-state/health_cycle.json")
+_DELIVERY_STATUSES = frozenset({"pending", "sent", "failed", "unknown"})
+_DELIVERY_ATTEMPT_LIMIT = 2
+_EVENT_ID_RE = re.compile(r"^[0-9a-f]{64}$")
+_ALERT_STATE_THREAD_LOCK = threading.RLock()
+_ALERT_STATE_LOCK_DEPTH = threading.local()
 _ARTIFACT_STATUS_RELATIVE_PATH = Path("data/lifecycle-artifacts/status.json")
 _ARTIFACT_STATUS_SCHEMA = "quant_monitor_lifecycle_artifact_status.v1"
 _SAFE_TOKEN = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,99}$")
@@ -324,37 +333,376 @@ def _load_alert_state(root: Path) -> dict[str, Any]:
 def _write_alert_state(root: Path, payload: dict[str, Any]) -> None:
     path = _alert_state_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_suffix(".tmp")
-    temp_path.write_text(
-        json.dumps(payload, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    temp_path.replace(path)
+    fd, temp_name = tempfile.mkstemp(prefix=".health_cycle.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, path)
+    except Exception:
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
+        raise
 
 
 def _is_duplicate_alert(root: Path, fingerprint: str) -> bool:
     return str(_load_alert_state(root).get("fingerprint") or "") == fingerprint
 
 
-def _record_alert(root: Path, fingerprint: str) -> None:
+def _delivery_target_hash(chat_id: str) -> str:
+    return hashlib.sha256(chat_id.encode("utf-8")).hexdigest()
+
+
+def _empty_delivery_result() -> dict[str, Any]:
+    return {
+        "all_sent": False,
+        "suppressed": False,
+        "errors": [],
+        "counts": {"pending": 0, "sent": 0, "failed": 0, "unknown": 0},
+    }
+
+
+def _delivery_record(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict) or set(value) != {"status", "attempts"}:
+        return None
+    status = value.get("status")
+    attempts = value.get("attempts")
+    if status not in _DELIVERY_STATUSES or type(attempts) is not int or attempts < 0:
+        return None
+    return {"status": status, "attempts": attempts}
+
+
+def _load_delivery_payload(root: Path) -> dict[str, Any]:
+    path = _alert_state_path(root)
+    if not path.exists():
+        return {}
     try:
-        payload = _load_operational_diagnosis_state(root)
-    except OSError:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise OSError("alert_state_unreadable") from exc
+    if not isinstance(payload, dict):
+        raise OSError("alert_state_malformed")
+    deliveries = payload.get("deliveries", {})
+    if deliveries is None:
+        deliveries = {}
+    if not isinstance(deliveries, dict):
+        raise OSError("alert_state_malformed")
+    normalized: dict[str, dict[str, dict[str, Any]]] = {}
+    for event_id, targets in deliveries.items():
+        if not isinstance(event_id, str) or _EVENT_ID_RE.fullmatch(event_id) is None:
+            raise OSError("alert_state_malformed")
+        if not isinstance(targets, dict):
+            raise OSError("alert_state_malformed")
+        event_targets: dict[str, dict[str, Any]] = {}
+        for target_hash, record in targets.items():
+            parsed = _delivery_record(record)
+            if not isinstance(target_hash, str) or _EVENT_ID_RE.fullmatch(target_hash) is None or parsed is None:
+                raise OSError("alert_state_malformed")
+            event_targets[target_hash] = parsed
+        normalized[event_id] = event_targets
+    payload["deliveries"] = normalized
+    return payload
+
+
+@contextmanager
+def _alert_state_exclusive(root: Path):
+    """Serialize every read-modify-write of health_cycle.json.
+
+    Same-thread reentry skips a second flock so a nested diagnosis update
+    cannot deadlock on the lock held by delivery. The nested writer must
+    reload before its own write; callers that already hold the payload reload
+    again after the nested call.
+    """
+    if not isinstance(root, Path) or not root.is_dir():
+        raise OSError("alert_state_root_unavailable")
+    depth = int(getattr(_ALERT_STATE_LOCK_DEPTH, "depth", 0) or 0)
+    if depth:
+        _ALERT_STATE_LOCK_DEPTH.depth = depth + 1
+        try:
+            yield
+        finally:
+            _ALERT_STATE_LOCK_DEPTH.depth = depth
         return
-    payload.update(
-        schema_version="quant_monitor_alert_state.v1",
-        fingerprint=fingerprint,
-    )
+    state_path = _alert_state_path(root)
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = state_path.with_name(state_path.name + ".lock")
+    with _ALERT_STATE_THREAD_LOCK, lock_path.open("a+") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        _ALERT_STATE_LOCK_DEPTH.depth = 1
+        try:
+            yield
+        finally:
+            _ALERT_STATE_LOCK_DEPTH.depth = 0
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _health_event_ids(payload: dict[str, Any]) -> list[str]:
+    raw = payload.get("health_sent_events")
+    if not isinstance(raw, list):
+        return []
+    event_ids: list[str] = []
+    for item in raw:
+        if isinstance(item, str) and _EVENT_ID_RE.fullmatch(item) and item not in event_ids:
+            event_ids.append(item)
+    return event_ids
+
+
+def _remember_health_event(payload: dict[str, Any], event_id: str) -> None:
+    event_ids = _health_event_ids(payload)
+    if event_id not in event_ids:
+        event_ids.append(event_id)
+    payload["health_sent_events"] = event_ids
+
+
+def _persist_delivery_payload(root: Path, payload: dict[str, Any]) -> None:
+    payload["schema_version"] = "quant_monitor_alert_state.v1"
     _write_alert_state(root, payload)
+
+
+def _target_plan(record: dict[str, Any] | None) -> str:
+    if record is None:
+        return "claim"
+    status = record["status"]
+    if status == "sent":
+        return "skip"
+    if status in {"pending", "unknown"}:
+        return "hold"
+    if status == "failed" and record["attempts"] < _DELIVERY_ATTEMPT_LIMIT:
+        return "claim"
+    return "hold"
+
+
+def _count_delivery(counts: dict[str, int], status: str) -> None:
+    if status in counts:
+        counts[status] += 1
+
+
+def _deliver_telegram_targets_locked(
+    root: Path,
+    event_id: str,
+    chat_ids: list[str],
+    send_one: Callable[[str], str],
+    *,
+    confirm_legacy: bool,
+) -> dict[str, Any]:
+    result = _empty_delivery_result()
+    payload = _load_delivery_payload(root)
+    deliveries = payload.get("deliveries") or {}
+    event_targets = deliveries.get(event_id) or {}
+    if payload.get("fingerprint") == event_id and not event_targets:
+        result["suppressed"] = True
+        return result
+    changed = False
+    for target_hash, record in list(event_targets.items()):
+        if record["status"] == "pending":
+            event_targets[target_hash] = {"status": "unknown", "attempts": record["attempts"]}
+            changed = True
+    if changed:
+        deliveries[event_id] = event_targets
+        payload["deliveries"] = deliveries
+        _persist_delivery_payload(root, payload)
+    claimed = False
+    for chat_id in chat_ids:
+        target_hash = _delivery_target_hash(chat_id)
+        record = event_targets.get(target_hash)
+        plan = _target_plan(record)
+        if plan == "skip":
+            _count_delivery(result["counts"], "sent")
+            continue
+        if plan == "hold":
+            status = "unknown" if record is None else record["status"]
+            if status == "pending":
+                status = "unknown"
+            _count_delivery(result["counts"], status)
+            if status == "unknown":
+                if "telegram_delivery_unknown" not in result["errors"]:
+                    result["errors"].append("telegram_delivery_unknown")
+            elif "telegram_delivery_failed" not in result["errors"]:
+                result["errors"].append("telegram_delivery_failed")
+            continue
+        attempts = 1 if record is None else record["attempts"] + 1
+        event_targets[target_hash] = {"status": "pending", "attempts": attempts}
+        deliveries[event_id] = event_targets
+        payload["deliveries"] = deliveries
+        if confirm_legacy:
+            _remember_health_event(payload, event_id)
+        _persist_delivery_payload(root, payload)
+        claimed = True
+        try:
+            outcome = send_one(chat_id)
+        except Exception:
+            outcome = "unknown"
+        if outcome not in {"sent", "failed", "unknown"}:
+            outcome = "unknown"
+        try:
+            payload = _load_delivery_payload(root)
+        except OSError:
+            result["errors"].append("alert_state_write_failed")
+            _count_delivery(result["counts"], "unknown")
+            break
+        deliveries = payload.get("deliveries") or {}
+        event_targets = deliveries.get(event_id) or {}
+        event_targets[target_hash] = {"status": outcome, "attempts": attempts}
+        deliveries[event_id] = event_targets
+        payload["deliveries"] = deliveries
+        try:
+            _persist_delivery_payload(root, payload)
+        except OSError:
+            result["errors"].append("alert_state_write_failed")
+            _count_delivery(result["counts"], "unknown")
+            break
+        _count_delivery(result["counts"], outcome)
+        if outcome == "unknown" and "telegram_delivery_unknown" not in result["errors"]:
+            result["errors"].append("telegram_delivery_unknown")
+        elif outcome == "failed" and "telegram_delivery_failed" not in result["errors"]:
+            result["errors"].append("telegram_delivery_failed")
+    requested = [_delivery_target_hash(chat_id) for chat_id in chat_ids]
+    all_sent = not result["errors"] and all(
+        event_targets.get(target_hash, {}).get("status") == "sent" for target_hash in requested
+    )
+    if confirm_legacy and event_id in (payload.get("deliveries") or {}):
+        owned = event_id in _health_event_ids(payload)
+        current = payload.get("fingerprint")
+        _remember_health_event(payload, event_id)
+        fingerprint_changed = all_sent and current in (None, "", event_id) and current != event_id
+        if fingerprint_changed:
+            payload["fingerprint"] = event_id
+        if claimed or not owned or fingerprint_changed:
+            _persist_delivery_payload(root, payload)
+    if result["errors"]:
+        return result
+    if all_sent:
+        if claimed:
+            result["all_sent"] = True
+        else:
+            result["suppressed"] = True
+    return result
+
+
+def deliver_telegram_targets(
+    root: Path,
+    event_id: str,
+    chat_ids: tuple[str, ...] | list[str],
+    send_one: Callable[[str], str],
+    *,
+    confirm_legacy: bool = False,
+) -> dict[str, Any]:
+    """Persist per-target delivery, then send only targets that are still eligible.
+
+    Missing or unreadable state refuses the send. Pending left by a crash is
+    unknown and is not sent again. A legacy fingerprint with no target records
+    suppresses that event without inventing sent targets.
+    """
+    result = _empty_delivery_result()
+    if not isinstance(root, Path) or not root.is_dir():
+        result["errors"].append("alert_state_root_unavailable")
+        return result
+    if not isinstance(event_id, str) or _EVENT_ID_RE.fullmatch(event_id) is None:
+        result["errors"].append("alert_state_malformed")
+        return result
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for raw in chat_ids:
+        chat_id = str(raw or "").strip()
+        if not chat_id or chat_id in seen:
+            continue
+        seen.add(chat_id)
+        ordered.append(chat_id)
+    if not ordered:
+        result["errors"].append("telegram_missing_env")
+        return result
+    try:
+        with _alert_state_exclusive(root):
+            return _deliver_telegram_targets_locked(
+                root, event_id, ordered, send_one, confirm_legacy=confirm_legacy,
+            )
+    except OSError as exc:
+        code = str(exc)
+        if code not in {
+            "alert_state_unreadable",
+            "alert_state_malformed",
+            "alert_state_root_unavailable",
+            "alert_state_write_failed",
+        }:
+            code = "alert_state_write_failed"
+        result["errors"].append(code)
+        return result
+
+
+def _record_alert(root: Path, fingerprint: str) -> None:
+    with _alert_state_exclusive(root):
+        try:
+            payload = _load_operational_diagnosis_state(root)
+        except OSError:
+            return
+        payload.update(
+            schema_version="quant_monitor_alert_state.v1",
+            fingerprint=fingerprint,
+        )
+        _write_alert_state(root, payload)
+
+
+def _health_telegram_chat_ids() -> tuple[str, ...]:
+    raw = os.environ.get("GLOBAL_TELEGRAM_CHAT_ID") or ""
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for part in str(raw).replace(";", ",").replace("\n", ",").split(","):
+        chat_id = part.strip()
+        if not chat_id or chat_id in seen:
+            continue
+        seen.add(chat_id)
+        ordered.append(chat_id)
+    return tuple(ordered)
+
+
+def _drop_sent_targets(deliveries: dict[str, Any], event_id: str) -> None:
+    targets = deliveries.get(event_id)
+    if not isinstance(targets, dict):
+        return
+    kept = {
+        target_hash: record
+        for target_hash, record in targets.items()
+        if not (isinstance(record, dict) and record.get("status") == "sent")
+    }
+    if kept:
+        deliveries[event_id] = kept
+    else:
+        deliveries.pop(event_id, None)
 
 
 def _clear_alert(root: Path) -> None:
     try:
+        with _alert_state_exclusive(root):
+            _clear_alert_locked(root)
+    except OSError:
+        return
+
+
+def _clear_alert_locked(root: Path) -> None:
+    try:
         payload = _load_operational_diagnosis_state(root)
     except OSError:
         return
-    payload.pop("fingerprint", None)
-    if payload.get("operational_diagnosis_attempts"):
+    event_ids = _health_event_ids(payload)
+    confirmed = payload.pop("fingerprint", None)
+    if isinstance(confirmed, str) and confirmed not in event_ids:
+        event_ids.append(confirmed)
+    payload.pop("health_sent_events", None)
+    deliveries = payload.get("deliveries")
+    if isinstance(deliveries, dict):
+        for event_id in event_ids:
+            _drop_sent_targets(deliveries, event_id)
+        if not deliveries:
+            payload.pop("deliveries", None)
+        else:
+            payload["deliveries"] = deliveries
+    keep = bool(payload.get("operational_diagnosis_attempts")) or bool(payload.get("deliveries"))
+    if payload.get("operational_diagnosis_last_attempt_date"):
+        keep = True
+    if keep:
         payload["schema_version"] = "quant_monitor_alert_state.v1"
         _write_alert_state(root, payload)
         return
@@ -395,28 +743,30 @@ def _load_operational_diagnosis_state(root: Path) -> dict[str, Any]:
 
 
 def _record_operational_diagnosis_attempt(root: Path, fingerprint: str, *, attempt_date: str | None = None) -> None:
-    payload = _load_operational_diagnosis_state(root)
-    attempts = payload.get("operational_diagnosis_attempts")
-    if not isinstance(attempts, list):
-        attempts = []
-    if fingerprint not in attempts:
-        attempts.append(fingerprint)
-    payload.update(
-        schema_version="quant_monitor_alert_state.v1",
-        operational_diagnosis_attempts=attempts,
-    )
-    if attempt_date is not None:
-        payload["operational_diagnosis_last_attempt_date"] = attempt_date
-    _write_alert_state(root, payload)
+    with _alert_state_exclusive(root):
+        payload = _load_operational_diagnosis_state(root)
+        attempts = payload.get("operational_diagnosis_attempts")
+        if not isinstance(attempts, list):
+            attempts = []
+        if fingerprint not in attempts:
+            attempts.append(fingerprint)
+        payload.update(
+            schema_version="quant_monitor_alert_state.v1",
+            operational_diagnosis_attempts=attempts,
+        )
+        if attempt_date is not None:
+            payload["operational_diagnosis_last_attempt_date"] = attempt_date
+        _write_alert_state(root, payload)
 
 
 def _forget_operational_diagnosis_attempt(root: Path, fingerprint: str) -> None:
-    payload = _load_operational_diagnosis_state(root)
-    attempts = payload.get("operational_diagnosis_attempts")
-    if not isinstance(attempts, list):
-        return
-    payload["operational_diagnosis_attempts"] = [item for item in attempts if item != fingerprint]
-    _write_alert_state(root, payload)
+    with _alert_state_exclusive(root):
+        payload = _load_operational_diagnosis_state(root)
+        attempts = payload.get("operational_diagnosis_attempts")
+        if not isinstance(attempts, list):
+            return
+        payload["operational_diagnosis_attempts"] = [item for item in attempts if item != fingerprint]
+        _write_alert_state(root, payload)
 
 
 def _operational_diagnosis_prompt(data_errors: list[dict[str, str]], *, observation: dict[str, str] | None = None) -> str:
@@ -778,17 +1128,10 @@ def _build_monitoring_findings(
     ]
 
 
-def _send_telegram(text: str) -> bool:
-    token = (os.environ.get("TELEGRAM_TOKEN") or os.environ.get("TG_TOKEN") or "").strip()
-    chat = (os.environ.get("GLOBAL_TELEGRAM_CHAT_ID") or "").strip()
-    if not token or not chat:
-        return False
-    try:
-        from quant_platform_kit.notifications.telegram import send_telegram_message
+def _send_health_telegram_target(text: str, token: str, chat_id: str) -> str:
+    from service.briefing_dispatch import telegram_target_outcome
 
-        return bool(send_telegram_message(bot_token=token, chat_ids=chat, text=text))
-    except Exception:
-        return False
+    return telegram_target_outcome(text=text, token=token, chat_id=chat_id)
 
 
 def main() -> int:
@@ -889,14 +1232,25 @@ def main() -> int:
     notify_lines = data_error_lines + optimization_error_lines
     telegram_sent = False
     duplicate_alert_suppressed = False
+    telegram_delivery_errors: list[str] = []
     if notify_lines:
         body = _build_alert_body(notify_lines)
         fingerprint = _alert_fingerprint(alert_identities)
-        duplicate_alert_suppressed = _is_duplicate_alert(root, fingerprint)
-        if not duplicate_alert_suppressed:
-            telegram_sent = _send_telegram(body)
-            if telegram_sent:
-                _record_alert(root, fingerprint)
+        token = (os.environ.get("TELEGRAM_TOKEN") or os.environ.get("TG_TOKEN") or "").strip()
+        chat_ids = _health_telegram_chat_ids()
+        if token and chat_ids:
+            delivery = deliver_telegram_targets(
+                root,
+                fingerprint,
+                chat_ids,
+                lambda chat_id: _send_health_telegram_target(body, token, chat_id),
+                confirm_legacy=True,
+            )
+            telegram_sent = bool(delivery["all_sent"])
+            duplicate_alert_suppressed = bool(delivery["suppressed"])
+            telegram_delivery_errors = list(delivery["errors"])
+        else:
+            telegram_delivery_errors = ["telegram_missing_env"]
     else:
         _clear_alert(root)
 
@@ -913,6 +1267,7 @@ def main() -> int:
         "telegram_alerts": notify_lines,
         "telegram_sent": telegram_sent,
         "duplicate_alert_suppressed": duplicate_alert_suppressed,
+        "telegram_delivery_errors": telegram_delivery_errors,
         "data_errors": data_errors,
         "operational_diagnosis": operational_diagnosis,
         "snapshot_count": sum(len(rows) for rows in snapshot_results.values()),

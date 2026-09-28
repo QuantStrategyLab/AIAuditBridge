@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import os
 import subprocess
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from service.briefing_consumer import (
@@ -39,10 +41,18 @@ class BriefingDispatchTests(unittest.TestCase):
                 )
             ],
         )
-        with patch.dict(os.environ, {"TELEGRAM_TOKEN": "token", "GLOBAL_TELEGRAM_CHAT_ID": "123"}):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ,
+            {
+                "TELEGRAM_TOKEN": "token",
+                "GLOBAL_TELEGRAM_CHAT_ID": "123",
+                "QUANT_MONITOR_ROOT": tmp,
+            },
+        ):
             summary = dispatch_briefing_result(result, dry_run=True)
-        self.assertIn("telegram_dry_run", summary)
-        self.assertIn("demo", summary["telegram_dry_run"])
+            self.assertIn("telegram_dry_run", summary)
+            self.assertIn("demo", summary["telegram_dry_run"])
+            self.assertFalse((Path(tmp) / "data" / "alert-state" / "health_cycle.json").exists())
 
     @patch("service.briefing_dispatch.dispatch_strategy_watch_findings")
     def test_strategy_health_dispatches_to_issue_only_watcher(self, dispatch_findings) -> None:
@@ -77,12 +87,10 @@ class BriefingDispatchTests(unittest.TestCase):
         self.assertEqual(dispatched[0].finding_type, "monitoring_trigger")
         self.assertEqual(summary["errors"], [])
 
-    @patch("service.briefing_dispatch.send_telegram_alert", return_value=True)
     @patch("service.briefing_dispatch.dispatch_strategy_watch_findings")
     def test_strategy_record_failure_falls_back_to_operational_telegram(
         self,
         dispatch_findings,
-        send_telegram,
     ) -> None:
         dispatch_findings.return_value = {
             "status": "partial_error",
@@ -104,16 +112,25 @@ class BriefingDispatchTests(unittest.TestCase):
         )
         result = BriefingConsumptionResult(day="2026-07-30", report_dir="/tmp", findings=findings)
 
-        with patch.dict(
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
             os.environ,
-            {"TELEGRAM_TOKEN": "token", "GLOBAL_TELEGRAM_CHAT_ID": "123"},
+            {
+                "TELEGRAM_TOKEN": "token",
+                "GLOBAL_TELEGRAM_CHAT_ID": "123",
+                "QUANT_MONITOR_ROOT": tmp,
+            },
             clear=True,
-        ):
+        ), patch(
+            "service.briefing_dispatch.telegram_target_outcome",
+            return_value="sent",
+        ) as send_target:
             summary = dispatch_briefing_result(result)
-
-        self.assertIn("optimization_record_failed", summary["errors"])
-        self.assertTrue(summary["operational_fallback_sent"])
-        self.assertIn("optimization-record delivery failure", send_telegram.call_args.kwargs["text"])
+            self.assertIn("optimization_record_failed", summary["errors"])
+            self.assertTrue(summary["operational_fallback_sent"])
+            self.assertIn("optimization-record delivery failure", send_target.call_args.kwargs["text"])
+            state = (Path(tmp) / "data" / "alert-state" / "health_cycle.json").read_text(encoding="utf-8")
+            self.assertNotIn("123", state)
+            self.assertNotIn("token", state)
 
     @patch("service.briefing_dispatch.urllib.request.urlopen")
     def test_send_telegram_alert_success(self, mock_urlopen) -> None:
@@ -130,6 +147,19 @@ class BriefingDispatchTests(unittest.TestCase):
         mock_urlopen.return_value = _Resp()
         ok = send_telegram_alert(text="hello", token="tok", chat_ids=("123",))
         self.assertTrue(ok)
+
+    def test_send_telegram_alert_still_attempts_later_targets_after_failure(self) -> None:
+        calls: list[str] = []
+
+        def outcome(*, text: str, token: str, chat_id: str) -> str:
+            calls.append(chat_id)
+            return "failed" if chat_id == "first" else "sent"
+
+        with patch("service.briefing_dispatch.telegram_target_outcome", side_effect=outcome):
+            ok = send_telegram_alert(text="hello", token="tok", chat_ids=("first", "second"))
+
+        self.assertFalse(ok)
+        self.assertEqual(calls, ["first", "second"])
 
     @patch("service.briefing_dispatch.subprocess.check_output", return_value="https://example.test/issues/1\n")
     @patch("service.briefing_dispatch.shutil_which", return_value="/usr/bin/gh")
@@ -391,6 +421,71 @@ class BriefingDispatchTests(unittest.TestCase):
         self.assertIsInstance(summary["telegram_dry_run"], str)
         self.assertIn("demo", summary["telegram_dry_run"])
         self.assertEqual(summary["errors"], [])
+
+    def test_missing_monitor_root_does_not_send_or_count_delivered(self) -> None:
+        result = BriefingConsumptionResult(
+            day="2026-07-08",
+            report_dir="/tmp",
+            findings=[
+                BriefingFinding(
+                    source="us.json",
+                    level=BriefingAction.TELEGRAM,
+                    reason="circuit_open",
+                )
+            ],
+        )
+        with patch.dict(
+            os.environ,
+            {"TELEGRAM_TOKEN": "token", "GLOBAL_TELEGRAM_CHAT_ID": "123"},
+            clear=True,
+        ), patch("service.briefing_dispatch.telegram_target_outcome") as send_target:
+            summary = dispatch_briefing_result(result)
+        self.assertFalse(summary["telegram_sent"])
+        self.assertIn("alert_state_root_unavailable", summary["errors"])
+        send_target.assert_not_called()
+
+    def test_reentry_sends_only_the_failed_target(self) -> None:
+        result = BriefingConsumptionResult(
+            day="2026-07-08",
+            report_dir="/tmp",
+            findings=[
+                BriefingFinding(
+                    source="us.json",
+                    level=BriefingAction.TELEGRAM,
+                    reason="circuit_open",
+                )
+            ],
+        )
+        calls: list[str] = []
+
+        def send_target(*, text: str, token: str, chat_id: str) -> str:
+            calls.append(chat_id)
+            return "sent" if chat_id == "ok-chat" else "failed"
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ,
+            {
+                "TELEGRAM_TOKEN": "token",
+                "GLOBAL_TELEGRAM_CHAT_ID": "ok-chat,bad-chat",
+                "QUANT_MONITOR_ROOT": tmp,
+            },
+            clear=True,
+        ), patch("service.briefing_dispatch.telegram_target_outcome", side_effect=send_target):
+            first = dispatch_briefing_result(result)
+            second_calls: list[str] = []
+
+            def retry(*, text: str, token: str, chat_id: str) -> str:
+                second_calls.append(chat_id)
+                return "sent"
+
+            with patch("service.briefing_dispatch.telegram_target_outcome", side_effect=retry):
+                second = dispatch_briefing_result(result)
+        self.assertFalse(first["telegram_sent"])
+        self.assertEqual(calls, ["ok-chat", "bad-chat"])
+        self.assertIn("telegram_delivery_failed", first["errors"])
+        self.assertEqual(second_calls, ["bad-chat"])
+        self.assertTrue(second["telegram_sent"])
+        self.assertNotIn("telegram_delivery_unknown", second["errors"])
 
 
 if __name__ == "__main__":
