@@ -125,6 +125,7 @@ def test_send_dry_run_cli_configured_still_skips_send(capsys) -> None:
                     "TELEGRAM_TOKEN": "secret-token-value",
                     "GLOBAL_TELEGRAM_CHAT_ID": "123",
                     "QSL_GITHUB_REPO": "QuantStrategyLab/AIAuditBridge",
+                    "QUANT_MONITOR_ROOT": str(report_dir),
                 },
                 clear=True,
             ),
@@ -143,6 +144,7 @@ def test_send_dry_run_cli_configured_still_skips_send(capsys) -> None:
         assert "123" not in json.dumps(dispatch)
         urlopen.assert_not_called()
         send_tg.assert_not_called()
+        assert not (report_dir / "data" / "alert-state" / "health_cycle.json").exists()
 
 
 def _write_summary_report(report_dir, *, as_of='2026-09-09T22:00:00+00:00'):
