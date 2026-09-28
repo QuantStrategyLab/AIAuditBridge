@@ -252,6 +252,9 @@ class SyncStrategyReposTests(unittest.TestCase):
             qpk = mirrors / "QuantPlatformKit"
             aab = root / "AIAuditBridge"
             self._git(root, "clone", str(upstream), str(aab))
+            pinned_sha = self._git(aab, "rev-parse", "HEAD^")
+            self._git(aab, "reset", "--hard", pinned_sha)
+            self._git(aab, "fetch", "origin", "main")
             monitor = root / "monitor"
             (monitor / "scripts").mkdir(parents=True)
             scripts = Path(__file__).resolve().parents[1] / "ops/quant-monitor/scripts"
@@ -280,15 +283,32 @@ class SyncStrategyReposTests(unittest.TestCase):
                 (bin_dir / name).write_text("#!/bin/sh\nexit 0\n")
                 (bin_dir / name).chmod(0o755)
             result = subprocess.run(
-                ["bash", str(scripts / "setup_vps_runtime.sh")], text=True, capture_output=True,
+                ["bash", str(scripts / "setup_vps_runtime.sh"),
+                 pinned_sha, str(aab)], text=True, capture_output=True,
                 env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
                      "QUANT_MONITOR_ROOT": str(monitor), "QUANT_PLATFORM_KIT_ROOT": str(qpk),
                      "AIAUDIT_BRIDGE_ROOT": str(aab), "QUANT_PROJECTS_ROOT": str(mirrors),
                      "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"},
             )
             self.assertEqual(result.returncode, 0, result.stderr)
+            # origin/main is newer, but setup preserves the reviewed checkout.
+            self.assertEqual(self._git(aab, "rev-parse", "HEAD"), pinned_sha)
             self.assertEqual(self._git(qpk, "status", "--porcelain"), "")
             self.assertEqual((qpk / "src/quant_platform_kit.egg-info/PKG-INFO").read_text(), "new metadata\n")
+
+            dirty_runtime = aab / "service" / "briefing_consumer.py"
+            dirty_runtime.parent.mkdir(exist_ok=True)
+            dirty_runtime.write_text("# local runtime drift\n")
+            blocked = subprocess.run(
+                ["bash", str(scripts / "setup_vps_runtime.sh"), pinned_sha, str(aab)],
+                text=True, capture_output=True,
+                env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                     "QUANT_MONITOR_ROOT": str(monitor), "QUANT_PLATFORM_KIT_ROOT": str(qpk),
+                     "AIAUDIT_BRIDGE_ROOT": str(aab), "QUANT_PROJECTS_ROOT": str(mirrors),
+                     "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"},
+            )
+            self.assertNotEqual(blocked.returncode, 0)
+            self.assertIn("refusing dirty AIAuditBridge runtime source", blocked.stderr)
 
 
 if __name__ == "__main__":

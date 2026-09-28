@@ -21,6 +21,26 @@ def _load_script(name: str):
     return module
 
 
+def _write_fresh_lifecycle_status(root: Path, *, profiles_by_domain=None):
+    domains = profiles_by_domain or {domain: [f"{domain}_profile"] for domain in DAILY_BRIEFING.DOMAINS}
+    now = HEALTH_CYCLE.datetime.now(HEALTH_CYCLE.timezone.utc).isoformat()
+    payload = {
+        "schema_version": "quant_monitor_lifecycle_artifact_status.v1",
+        "as_of": now,
+        "domains": {
+            domain: {
+                "status": "ready", "artifact_id": index + 1, "run_id": index + 11,
+                "head_sha": f"{index + 1:040x}", "profiles": profiles,
+            }
+            for index, (domain, profiles) in enumerate(domains.items())
+        },
+    }
+    status_path = root / "data/lifecycle-artifacts/status.json"
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    status_path.write_text(json.dumps(payload), encoding="utf-8")
+    return now
+
+
 HEALTH_CYCLE = _load_script("health_cycle")
 DAILY_BRIEFING = _load_script("daily_briefing_builder")
 
@@ -653,6 +673,7 @@ class MonitorFailClosedTests(unittest.TestCase):
     def test_daily_briefing_marks_missing_dashboard_unavailable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            _write_fresh_lifecycle_status(root)
             qpk = types.ModuleType("quant_platform_kit")
             lifecycle = types.ModuleType("quant_platform_kit.strategy_lifecycle")
             drift_detector = types.ModuleType("quant_platform_kit.strategy_lifecycle.drift_detector")
@@ -688,6 +709,219 @@ class MonitorFailClosedTests(unittest.TestCase):
                     {"code": "dashboard_data_unavailable", "error_type": "FileNotFoundError"},
                     report["errors"],
                 )
+
+    def test_daily_briefing_marks_missing_profile_and_drift_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_as_of = _write_fresh_lifecycle_status(root, profiles_by_domain={
+                "us_equity": ["expected_profile"],
+            })
+            qpk = types.ModuleType("quant_platform_kit")
+            lifecycle = types.ModuleType("quant_platform_kit.strategy_lifecycle")
+            drift_detector = types.ModuleType("quant_platform_kit.strategy_lifecycle.drift_detector")
+            health_dashboard = types.ModuleType("quant_platform_kit.strategy_lifecycle.health_dashboard")
+            drift_detector.run_drift_detection = lambda _domain: []
+            health_dashboard.build_dashboard = lambda **kwargs: Path(kwargs["output_dir"], "strategy_health_dashboard.json").write_text(
+                json.dumps({"strategies": [{
+                    "domain": "us_equity", "strategy_profile": "expected_profile", "status": "healthy",
+                    "as_of": HEALTH_CYCLE.datetime.now(HEALTH_CYCLE.timezone.utc).date().isoformat(),
+                }]}), encoding="utf-8"
+            )
+            with (
+                mock.patch.dict(os.environ, {"QUANT_MONITOR_ROOT": str(root), "DAY": "2026-09-29"}),
+                mock.patch.dict(sys.modules, {
+                    "quant_platform_kit": qpk,
+                    "quant_platform_kit.strategy_lifecycle": lifecycle,
+                    "quant_platform_kit.strategy_lifecycle.drift_detector": drift_detector,
+                    "quant_platform_kit.strategy_lifecycle.health_dashboard": health_dashboard,
+                }),
+            ):
+                self.assertEqual(DAILY_BRIEFING.main(), 0)
+
+            report = json.loads((root / "data/daily-reports/2026-09-29/us_equity.json").read_text())
+            self.assertFalse(report["ok"])
+            self.assertEqual(report["data_status"], "unavailable")
+            self.assertEqual(report["as_of"], source_as_of)
+            self.assertEqual(report["coverage"]["expected_profiles"], ["expected_profile"])
+            self.assertIn("drift_data_unavailable", {error["code"] for error in report["errors"]})
+
+    def test_daily_briefing_does_not_call_empty_ready_domain_healthy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_fresh_lifecycle_status(root, profiles_by_domain={"us_equity": ["expected_profile"]})
+            qpk = types.ModuleType("quant_platform_kit")
+            lifecycle = types.ModuleType("quant_platform_kit.strategy_lifecycle")
+            drift_detector = types.ModuleType("quant_platform_kit.strategy_lifecycle.drift_detector")
+            health_dashboard = types.ModuleType("quant_platform_kit.strategy_lifecycle.health_dashboard")
+            drift_detector.run_drift_detection = lambda _domain: [types.SimpleNamespace(strategy_profile="expected_profile", drift_score=0.0)]
+            health_dashboard.build_dashboard = lambda **kwargs: Path(kwargs["output_dir"], "strategy_health_dashboard.json").write_text(
+                json.dumps({"strategies": []}), encoding="utf-8"
+            )
+            with (
+                mock.patch.dict(os.environ, {"QUANT_MONITOR_ROOT": str(root), "DAY": "2026-09-29"}),
+                mock.patch.dict(sys.modules, {
+                    "quant_platform_kit": qpk,
+                    "quant_platform_kit.strategy_lifecycle": lifecycle,
+                    "quant_platform_kit.strategy_lifecycle.drift_detector": drift_detector,
+                    "quant_platform_kit.strategy_lifecycle.health_dashboard": health_dashboard,
+                }),
+            ):
+                self.assertEqual(DAILY_BRIEFING.main(), 0)
+
+            report = json.loads((root / "data/daily-reports/2026-09-29/us_equity.json").read_text())
+            self.assertFalse(report["ok"])
+            self.assertEqual(report["data_status"], "unavailable")
+            self.assertIn("dashboard_coverage_incomplete", {error["code"] for error in report["errors"]})
+
+    def test_daily_briefing_distinguishes_explicit_unconfigured_domain(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            now = HEALTH_CYCLE.datetime.now(HEALTH_CYCLE.timezone.utc).isoformat()
+            status_path = root / "data/lifecycle-artifacts/status.json"
+            status_path.parent.mkdir(parents=True)
+            domains = {
+                domain: {
+                    "status": "ready", "artifact_id": index + 1, "run_id": index + 11,
+                    "head_sha": f"{index + 1:040x}", "profiles": [f"{domain}_profile"],
+                }
+                for index, domain in enumerate(DAILY_BRIEFING.DOMAINS)
+                if domain != "crypto"
+            }
+            domains["crypto"] = {"status": "not_configured", "profiles": []}
+            status_path.write_text(json.dumps({
+                "schema_version": "quant_monitor_lifecycle_artifact_status.v1",
+                "as_of": now,
+                "domains": domains,
+            }), encoding="utf-8")
+            qpk = types.ModuleType("quant_platform_kit")
+            lifecycle = types.ModuleType("quant_platform_kit.strategy_lifecycle")
+            drift_detector = types.ModuleType("quant_platform_kit.strategy_lifecycle.drift_detector")
+            health_dashboard = types.ModuleType("quant_platform_kit.strategy_lifecycle.health_dashboard")
+            drift_detector.run_drift_detection = lambda domain: [types.SimpleNamespace(
+                strategy_profile=f"{domain}_profile", drift_score=0.0,
+            )]
+            def write_dashboard(**kwargs):
+                rows = [{"domain": domain, "strategy_profile": f"{domain}_profile", "status": "healthy",
+                         "as_of": HEALTH_CYCLE.datetime.now(HEALTH_CYCLE.timezone.utc).date().isoformat()}
+                        for domain in DAILY_BRIEFING.DOMAINS if domain != "crypto"]
+                Path(kwargs["output_dir"], "strategy_health_dashboard.json").write_text(
+                    json.dumps({"strategies": rows}), encoding="utf-8",
+                )
+            health_dashboard.build_dashboard = write_dashboard
+            with (
+                mock.patch.dict(os.environ, {"QUANT_MONITOR_ROOT": str(root), "DAY": "2026-09-29"}),
+                mock.patch.dict(sys.modules, {
+                    "quant_platform_kit": qpk,
+                    "quant_platform_kit.strategy_lifecycle": lifecycle,
+                    "quant_platform_kit.strategy_lifecycle.drift_detector": drift_detector,
+                    "quant_platform_kit.strategy_lifecycle.health_dashboard": health_dashboard,
+                }),
+            ):
+                self.assertEqual(DAILY_BRIEFING.main(), 0)
+
+            report = json.loads((root / "data/daily-reports/2026-09-29/crypto.json").read_text())
+            self.assertTrue(report["ok"])
+            self.assertEqual(report["data_status"], "not_configured")
+            self.assertEqual(report["coverage"]["expected_profiles"], [])
+            self.assertEqual(report["errors"], [])
+
+    def test_daily_briefing_preserves_complete_profile_coverage_and_zero_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_as_of = _write_fresh_lifecycle_status(root, profiles_by_domain={
+                "us_equity": ["expected_profile"],
+            })
+            qpk = types.ModuleType("quant_platform_kit")
+            lifecycle = types.ModuleType("quant_platform_kit.strategy_lifecycle")
+            drift_detector = types.ModuleType("quant_platform_kit.strategy_lifecycle.drift_detector")
+            health_dashboard = types.ModuleType("quant_platform_kit.strategy_lifecycle.health_dashboard")
+            drift_detector.run_drift_detection = lambda domain: (
+                [types.SimpleNamespace(strategy_profile="expected_profile", drift_score=0.0)]
+                if domain == "us_equity" else []
+            )
+            def write_dashboard(**kwargs):
+                Path(kwargs["output_dir"], "strategy_health_dashboard.json").write_text(json.dumps({
+                    "strategies": [{
+                        "domain": "us_equity", "strategy_profile": "expected_profile", "status": "healthy",
+                        "as_of": HEALTH_CYCLE.datetime.now(HEALTH_CYCLE.timezone.utc).date().isoformat(),
+                    }],
+                }), encoding="utf-8")
+            health_dashboard.build_dashboard = write_dashboard
+            with (
+                mock.patch.dict(os.environ, {"QUANT_MONITOR_ROOT": str(root), "DAY": "2026-09-29"}),
+                mock.patch.dict(sys.modules, {
+                    "quant_platform_kit": qpk,
+                    "quant_platform_kit.strategy_lifecycle": lifecycle,
+                    "quant_platform_kit.strategy_lifecycle.drift_detector": drift_detector,
+                    "quant_platform_kit.strategy_lifecycle.health_dashboard": health_dashboard,
+                }),
+            ):
+                self.assertEqual(DAILY_BRIEFING.main(), 0)
+
+            report = json.loads((root / "data/daily-reports/2026-09-29/us_equity.json").read_text())
+            self.assertTrue(report["ok"])
+            self.assertEqual(report["data_status"], "ready")
+            self.assertEqual(report["as_of"], source_as_of)
+            self.assertEqual(report["coverage"]["expected_profiles"], ["expected_profile"])
+            self.assertEqual(report["coverage"]["observed_profiles"], ["expected_profile"])
+            self.assertEqual(report["strategies"][0]["drift_score"], 0.0)
+
+    def test_daily_briefing_rejects_stale_observation_before_consumer_classification(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_fresh_lifecycle_status(root, profiles_by_domain={"us_equity": ["expected_profile"]})
+            qpk = types.ModuleType("quant_platform_kit")
+            lifecycle = types.ModuleType("quant_platform_kit.strategy_lifecycle")
+            drift_detector = types.ModuleType("quant_platform_kit.strategy_lifecycle.drift_detector")
+            health_dashboard = types.ModuleType("quant_platform_kit.strategy_lifecycle.health_dashboard")
+            drift_detector.run_drift_detection = lambda _domain: [types.SimpleNamespace(
+                strategy_profile="expected_profile", drift_score=0.0,
+            )]
+            health_dashboard.build_dashboard = lambda **kwargs: Path(
+                kwargs["output_dir"], "strategy_health_dashboard.json",
+            ).write_text(json.dumps({"strategies": [{
+                "domain": "us_equity", "strategy_profile": "expected_profile",
+                "status": "healthy", "as_of": "2000-01-01",
+            }]}), encoding="utf-8")
+            with (
+                mock.patch.dict(os.environ, {"QUANT_MONITOR_ROOT": str(root), "DAY": "2026-09-29"}),
+                mock.patch.dict(sys.modules, {
+                    "quant_platform_kit": qpk,
+                    "quant_platform_kit.strategy_lifecycle": lifecycle,
+                    "quant_platform_kit.strategy_lifecycle.drift_detector": drift_detector,
+                    "quant_platform_kit.strategy_lifecycle.health_dashboard": health_dashboard,
+                }),
+            ):
+                self.assertEqual(DAILY_BRIEFING.main(), 0)
+
+            report = json.loads((root / "data/daily-reports/2026-09-29/us_equity.json").read_text())
+            self.assertFalse(report["ok"])
+            self.assertEqual(report["data_status"], "unavailable")
+            from service.briefing_consumer import BriefingAction, consume_briefing_report
+            findings = consume_briefing_report(report)
+            self.assertTrue(findings)
+            self.assertEqual(findings[0].level, BriefingAction.TELEGRAM)
+
+    def test_daily_briefing_rejects_stale_and_bad_lifecycle_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            status_path = root / "data/lifecycle-artifacts/status.json"
+            status_path.parent.mkdir(parents=True)
+            valid = {
+                "schema_version": "quant_monitor_lifecycle_artifact_status.v1",
+                "as_of": "2000-01-01T00:00:00+00:00",
+                "domains": {"us_equity": {
+                    "status": "ready", "artifact_id": 1, "run_id": 2,
+                    "head_sha": "a" * 40, "profiles": ["expected_profile"],
+                }},
+            }
+            for payload in (valid, {**valid, "schema_version": "unknown"}):
+                status_path.write_text(json.dumps(payload), encoding="utf-8")
+                expected, revisions, _as_of, errors, not_configured = DAILY_BRIEFING._load_expected_coverage(root)
+                self.assertEqual(expected, {})
+                self.assertEqual(revisions, {})
+                self.assertEqual(not_configured, set())
+                self.assertTrue(errors)
 
     def test_delivery_retries_only_failed_target_and_hides_chat_id(self) -> None:
         event = "a" * 64

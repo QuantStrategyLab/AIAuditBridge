@@ -4,39 +4,45 @@ set -euo pipefail
 
 VPS_HOST="${VPS_HOST:-qvps}"
 VPS_PORT="${VPS_PORT:-8822}"
-AAB_ROOT="${AIAUDIT_BRIDGE_ROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
-# Keep the production monitor separate from developers' worktrees.  The
-# service is allowed to fast-forward this checkout, while developer checkouts
-# must remain untouched.
+SOURCE_SHA="${AIAUDIT_BRIDGE_SOURCE_SHA:-}"
+if [[ ! "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "[deploy] AIAUDIT_BRIDGE_SOURCE_SHA must be the reviewed 40-character main SHA" >&2
+  exit 2
+fi
+# Deploy only the exact production checkout fetched below; never overlay a
+# developer worktree or an uncommitted local ops/quant-monitor directory.
 REMOTE_AAB="/home/ubuntu/quant-monitor-runtime/AIAuditBridge"
 REMOTE_MONITOR="$REMOTE_AAB/ops/quant-monitor"
 
 echo "[deploy] updating AIAuditBridge on ${VPS_HOST}"
-ssh -p "${VPS_PORT}" "${VPS_HOST}" bash -s <<REMOTE
+ssh -p "${VPS_PORT}" "${VPS_HOST}" bash -s -- "$SOURCE_SHA" "$REMOTE_AAB" <<'REMOTE'
 set -euo pipefail
+SOURCE_SHA="$1"
+REMOTE_AAB="$2"
 mkdir -p "$REMOTE_AAB"
 if [[ -d "$REMOTE_AAB/.git" ]]; then
+  if [[ -n "$(git -C "$REMOTE_AAB" status --porcelain --untracked-files=all -- client scripts service ops/quant-monitor/scripts ops/quant-monitor/systemd)" ]]; then
+    echo "[deploy] refusing dirty production runtime source" >&2
+    exit 1
+  fi
   git -C "$REMOTE_AAB" fetch origin main --quiet
-  git -C "$REMOTE_AAB" checkout main --quiet
-  git -C "$REMOTE_AAB" pull --ff-only origin main --quiet
 else
   git clone --depth 1 https://github.com/QuantStrategyLab/AIAuditBridge.git "$REMOTE_AAB"
 fi
+REMOTE_MAIN_SHA="$(git -C "$REMOTE_AAB" rev-parse origin/main)"
+if [[ "$REMOTE_MAIN_SHA" != "$SOURCE_SHA" ]]; then
+  echo "[deploy] requested SHA does not match fetched main" >&2
+  exit 1
+fi
+git -C "$REMOTE_AAB" checkout --detach "$SOURCE_SHA" --quiet
+echo "[deploy] fixed source SHA ${SOURCE_SHA}"
 REMOTE
 
-echo "[deploy] syncing local ops changes (if any)"
-rsync -avz -e "ssh -p ${VPS_PORT}" \
-  --exclude '.git' \
-  --exclude 'data/' \
-  --exclude '.venv/' \
-  --exclude '__pycache__/' \
-  --exclude '*.py[co]' \
-  "$AAB_ROOT/ops/quant-monitor/" "${VPS_HOST}:${REMOTE_MONITOR}/"
-
 echo "[deploy] bootstrap runtime + systemd"
-ssh -p "${VPS_PORT}" "${VPS_HOST}" bash -s <<'REMOTE'
+ssh -p "${VPS_PORT}" "${VPS_HOST}" bash -s -- "$SOURCE_SHA" "$REMOTE_AAB" <<'REMOTE'
 set -euo pipefail
-REMOTE_AAB="/home/ubuntu/quant-monitor-runtime/AIAuditBridge"
+SOURCE_SHA="$1"
+REMOTE_AAB="$2"
 REMOTE_MONITOR="$REMOTE_AAB/ops/quant-monitor"
 OLD_UNIT="/etc/systemd/system/codex-quant.service"
 CHAT_ID=""
@@ -49,7 +55,9 @@ if [[ -f "$OLD_UNIT" ]]; then
   )"
 fi
 
-bash "$REMOTE_MONITOR/scripts/setup_vps_runtime.sh"
+AIAUDIT_BRIDGE_ROOT="$REMOTE_AAB" \
+  QUANT_MONITOR_ROOT="$REMOTE_MONITOR" \
+  bash "$REMOTE_MONITOR/scripts/setup_vps_runtime.sh" "$SOURCE_SHA" "$REMOTE_AAB"
 
 sudo systemctl stop codex-quant.service 2>/dev/null || true
 sudo systemctl disable codex-quant.service 2>/dev/null || true

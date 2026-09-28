@@ -55,7 +55,17 @@ def report(tmp_path):
     payload = {
         "domain": "us_equity", "ok": True, "data_status": "ready",
         "as_of": "2026-09-09T22:00:00+00:00",
-        "strategies": [{"status": "critical", "as_of": "2026-09-08"}],
+        "generated_at": NOW.isoformat(),
+        "coverage": {
+            "expected_profiles": ["synthetic-profile"],
+            "observed_profiles": ["synthetic-profile"],
+            "missing_profiles": [],
+        },
+        "strategies": [{
+            "strategy_profile": "synthetic-profile",
+            "status": "critical",
+            "as_of": "2026-09-08",
+        }],
     }
     (tmp_path / "us_equity.json").write_text(json.dumps(payload))
     return tmp_path, payload
@@ -124,6 +134,9 @@ def test_summary_requires_source_repository_before_submit(report):
 def test_summary_only_real_sdk_exports_whitelist_without_repeating_alerts(report, capsys):
     path, payload = report
     payload["strategies"][0].update(strategy_profile="private-profile", error="private-marker")
+    payload["coverage"].update(
+        expected_profiles=["private-profile"], observed_profiles=["private-profile"],
+    )
     (path / "us_equity.json").write_text(json.dumps(payload))
     route = {"provider": "codex", "research_stage": "research_summary", "model": "gpt-5.6-luna",
              "reasoning_effort": "low", "job_id": "daily-summary-job"}

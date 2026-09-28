@@ -6,6 +6,30 @@ ROOT="${QUANT_MONITOR_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 # shellcheck source=scripts/common_env.sh
 source "$ROOT/scripts/common_env.sh"
 
+SOURCE_SHA="${1:-}"
+EXPECTED_AAB_ROOT="${2:-}"
+if [[ ! "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ || -z "$EXPECTED_AAB_ROOT" ]]; then
+  echo "[setup] reviewed AIAuditBridge SHA and source root are required" >&2
+  exit 2
+fi
+if [[ "$AAB_ROOT" != "$EXPECTED_AAB_ROOT" ]]; then
+  echo "[setup] AIAuditBridge source root does not match deployment checkout" >&2
+  exit 1
+fi
+if [[ ! -d "$AAB_ROOT/.git" ]]; then
+  echo "[setup] AIAuditBridge missing at $AAB_ROOT" >&2
+  exit 1
+fi
+if [[ -n "$(git -C "$AAB_ROOT" status --porcelain --untracked-files=all -- client scripts service ops/quant-monitor/scripts ops/quant-monitor/systemd)" ]]; then
+  echo "[setup] refusing dirty AIAuditBridge runtime source" >&2
+  exit 1
+fi
+ACTUAL_AAB_SHA="$(git -C "$AAB_ROOT" rev-parse HEAD)"
+if [[ "$ACTUAL_AAB_SHA" != "$SOURCE_SHA" ]]; then
+  echo "[setup] AIAuditBridge checkout does not match reviewed SHA" >&2
+  exit 1
+fi
+
 VENV="$ROOT/.venv"
 QPK_ROOT="${QUANT_PLATFORM_KIT_ROOT:?QuantPlatformKit not found}"
 
@@ -21,14 +45,6 @@ if [[ -n "$(git -C "$QPK_ROOT" status --porcelain --untracked-files=no)" ]]; the
   exit 1
 fi
 git -C "$QPK_ROOT" checkout --detach --quiet origin/main
-
-if [[ ! -d "$AAB_ROOT/.git" ]]; then
-  echo "[setup] AIAuditBridge missing at $AAB_ROOT" >&2
-  exit 1
-fi
-git -C "$AAB_ROOT" fetch origin main --quiet || true
-git -C "$AAB_ROOT" checkout main --quiet || true
-git -C "$AAB_ROOT" pull --ff-only origin main --quiet || true
 
 python3 -m venv "$VENV"
 "$VENV/bin/pip" install -U pip wheel
