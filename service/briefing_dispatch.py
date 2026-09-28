@@ -16,6 +16,7 @@ from typing import Any
 
 from scripts.run_strategy_optimization_watcher import dispatch_strategy_watch_findings
 from service.briefing_consumer import BriefingAction, BriefingConsumptionResult, BriefingFinding
+from service.runtime_digest import prepare_runtime_digest
 from service.strategy_watch import StrategyWatchFinding, build_strategy_monitoring_finding
 
 _REPOSITORY_RE = re.compile(
@@ -452,4 +453,67 @@ def dispatch_briefing_result(
                     summary["errors"].append("gh_executable_missing")
         return _redact_send_dry_run_summary(summary)
 
+    return summary
+
+
+def dispatch_runtime_digest(
+    projection: dict[str, Any],
+    *,
+    dry_run: bool = False,
+    send_dry_run: bool = False,
+) -> dict[str, Any]:
+    """Send one daily runtime projection, or preview it without persistence.
+
+    Health-cycle delivery state is reused. This does not confirm a health
+    fingerprint, open a GitHub issue, or call a model.
+    """
+    if send_dry_run:
+        dry_run = True
+    prepared = prepare_runtime_digest(projection)
+    summary: dict[str, Any] = {
+        "action": "runtime_digest",
+        "telegram_sent": False,
+        "github_issue": None,
+        "errors": [],
+        "skipped": [],
+        "business_date": prepared.get("business_date"),
+        "event_id": prepared.get("event_id"),
+    }
+    if not prepared.get("ok"):
+        summary["errors"].append(str(prepared.get("reason") or "runtime_projection_rejected"))
+        return summary
+    summary["telegram_preview"] = prepared["text"]
+    if not prepared.get("sendable"):
+        summary["errors"].append(str(prepared.get("reason") or "runtime_digest_too_long"))
+        return summary
+    if dry_run:
+        summary["skipped"].append("dry_run")
+        summary["telegram_dry_run"] = prepared["text"]
+        return summary
+    token = _telegram_token()
+    chat_ids = _telegram_chat_ids()
+    if not token or not chat_ids:
+        summary["skipped"].append("telegram_missing_env")
+        summary["errors"].append("telegram_missing_env")
+        return summary
+    root = _monitor_state_root()
+    if root is None:
+        summary["errors"].append("alert_state_root_unavailable")
+        return summary
+
+    def send_one(chat_id: str) -> str:
+        return telegram_target_outcome(text=prepared["text"], token=token, chat_id=chat_id)
+
+    delivery = _health_cycle_module().deliver_telegram_targets(
+        root,
+        str(prepared["event_id"]),
+        chat_ids,
+        send_one,
+    )
+    summary["telegram_sent"] = bool(delivery["all_sent"])
+    for code in delivery["errors"]:
+        if code not in summary["errors"]:
+            summary["errors"].append(code)
+    if delivery["suppressed"]:
+        summary["skipped"].append("duplicate_delivered")
     return summary
