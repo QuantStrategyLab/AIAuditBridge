@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import date
 from pathlib import Path
 
 from service.briefing_consumer import consume_briefing_dir, summarize_briefing
@@ -13,6 +14,75 @@ from service.runtime_digest import prepare_runtime_digest
 from service.dual_review_briefing import collect_dual_review_payloads, summarize_dual_review_runs
 from service.dual_review_dispatch import dispatch_dual_review_result
 from service.dual_review_orchestrator import orchestrate_from_payload
+
+
+def _canonical_iso_day(value: str) -> str | None:
+    if len(value) != 10:
+        return None
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError:
+        return None
+    rendered = parsed.isoformat()
+    if rendered != value:
+        return None
+    return rendered
+
+
+def _producer_target_key(key: object) -> bool:
+    """Accept only the identity string the producer already emits.
+
+    That string is ``service|strategy|scope`` after strip and lowercase.
+    Empty strategy or scope is ``*``. This does not rewrite the caller's key.
+    """
+    if not isinstance(key, str) or not key or any(char.isspace() for char in key):
+        return False
+    parts = key.split("|")
+    if len(parts) != 3:
+        return False
+    service, strategy, scope = parts
+    if not service or not strategy or not scope:
+        return False
+    return (
+        service == service.strip().lower()
+        and strategy == strategy.strip().lower()
+        and scope == scope.strip().lower()
+    )
+
+
+def _runtime_day_problem(day: str, business_date: object, *, required: bool) -> str | None:
+    if not day:
+        return "missing_dispatch_day" if required else None
+    if _canonical_iso_day(day) is None:
+        return "invalid_business_day"
+    if day != business_date:
+        return "business_date_mismatch"
+    return None
+
+
+def _runtime_target_problem(keys: list[str] | None, target_scope: object, *, required: bool) -> str | None:
+    if not keys:
+        return "missing_expected_target" if required else None
+    seen: set[str] = set()
+    for key in keys:
+        if not _producer_target_key(key):
+            return "invalid_expected_target"
+        if key in seen:
+            return "duplicate_expected_target"
+        seen.add(key)
+    expected = set(target_scope) if isinstance(target_scope, list) else set()
+    if seen != expected:
+        return "expected_target_mismatch"
+    return None
+
+
+def _reject_runtime(reason: str) -> int:
+    print(json.dumps({
+        "ok": False,
+        "error": "runtime_projection_rejected",
+        "reason": reason,
+    }, ensure_ascii=False))
+    return 2
 
 
 def _consume_runtime_projection(args: argparse.Namespace) -> int:
@@ -33,6 +103,21 @@ def _consume_runtime_projection(args: argparse.Namespace) -> int:
             "reason": prepared.get("reason"),
         }, ensure_ascii=False))
         return 2
+    dispatching = bool(args.dispatch)
+    day_problem = _runtime_day_problem(
+        str(args.day or ""),
+        prepared.get("business_date"),
+        required=dispatching,
+    )
+    if day_problem is not None:
+        return _reject_runtime(day_problem)
+    target_problem = _runtime_target_problem(
+        args.expected_target_key,
+        prepared.get("target_scope"),
+        required=dispatching,
+    )
+    if target_problem is not None:
+        return _reject_runtime(target_problem)
     body = {
         "ok": True,
         "kind": "runtime_digest",
@@ -81,6 +166,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Offline LongBridge daily runtime projection JSON. Default is preview only.",
     )
     parser.add_argument("--day", default="", help="Report day label (defaults to directory name)")
+    parser.add_argument(
+        "--expected-target-key",
+        action="append",
+        default=None,
+        help="Exact deployed runtime target key. Repeat once per target. Required with --dispatch.",
+    )
     parser.add_argument(
         "--dispatch",
         action="store_true",
