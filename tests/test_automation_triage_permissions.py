@@ -26,15 +26,18 @@ class TriagePermissionsTest(unittest.TestCase):
         ):
             self.enterContext(patch(f"service.ai_gateway_service.{target}", return_value=value))
 
-    def test_missing_write_set_requires_review(self) -> None:
+    def test_missing_write_set_blocks_for_independent_ai_review(self) -> None:
         for paths in (None, []):
             with self.subTest(paths=paths):
                 triage = _automation_triage_snapshot("local/repo", changed_paths=paths)
                 self.assertFalse(triage["auto_fix_allowed"])
                 self.assertFalse(triage["deploy_allowed"])
-                self.assertTrue(triage["human_review_required"])
+                self.assertFalse(triage["human_review_required"])
+                self.assertTrue(triage["engineering_blocked"])
+                self.assertTrue(triage["engineering_review_required"])
                 self.assertEqual(triage["file_risk"], "unknown")
-                self.assertEqual(triage["recommended_action"], "open_issue")
+                self.assertEqual(triage["recommended_action"], "independent_ai_review")
+                self.assertEqual(triage["next_step"], "provide_changed_paths")
 
     def test_fix_pr_permission_never_implies_deployment(self) -> None:
         for paths in (["docs/runbook.md"], ["service/worker.py"]):

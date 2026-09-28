@@ -1153,7 +1153,13 @@ def _automation_triage_snapshot(
     execution_auto_fix_allowed = bool(control.get("auto_fix_allowed")) and bool(execution.get("auto_fix_allowed"))
     retry_allowed = False
     auto_fix_allowed = False
-    human_review_required = bool(control.get("requires_human_review")) or not normalized_paths
+    human_review_required = (
+        bool(execution.get("human_review_required"))
+        or control_action == CONTROL_ESCALATE
+        or requested_mode == "manual"
+    )
+    engineering_blocked = not normalized_paths or path_risk in {RISK_HIGH, RISK_CRITICAL}
+    engineering_review_required = engineering_blocked
     incident_class = "investigate"
     recommended_action = "open_issue"
     next_step = "open_issue"
@@ -1162,6 +1168,8 @@ def _automation_triage_snapshot(
         incident_class = "blocked"
         recommended_action = "open_issue"
         next_step = "fix_config_or_contract"
+        engineering_blocked = True
+        engineering_review_required = True
     elif category == "quota_or_capacity_failure":
         incident_class = "retryable"
         retry_allowed = True
@@ -1173,10 +1181,23 @@ def _automation_triage_snapshot(
         recommended_action = "retry"
         next_step = "retry"
     else:
-        if path_risk in {RISK_CRITICAL, RISK_HIGH} or control_action == CONTROL_ESCALATE:
+        if control_action == CONTROL_ESCALATE:
             incident_class = "blocked"
             recommended_action = "escalate"
             next_step = "escalate"
+            human_review_required = True
+        elif path_risk == RISK_CRITICAL:
+            incident_class = "blocked"
+            recommended_action = "independent_ai_review"
+            next_step = "collect_validation_and_recovery_evidence"
+        elif path_risk == RISK_HIGH:
+            incident_class = "blocked"
+            recommended_action = "independent_ai_review"
+            next_step = "collect_validation_and_recovery_evidence"
+        elif not normalized_paths:
+            incident_class = "blocked"
+            recommended_action = "independent_ai_review"
+            next_step = "provide_changed_paths"
         elif control_action == CONTROL_PAUSE_AUTO_FIX:
             incident_class = "degraded"
             recommended_action = "open_issue"
@@ -1193,11 +1214,9 @@ def _automation_triage_snapshot(
     if execution_auto_fix_allowed and category == "" and path_risk in {RISK_LOW, RISK_MEDIUM}:
         auto_fix_allowed = True
     if path_risk in {RISK_HIGH, RISK_CRITICAL}:
-        human_review_required = True
         auto_fix_allowed = False
     if category:
         auto_fix_allowed = False
-        human_review_required = True
 
     summary_bits = [
         f"repo={repo or 'unknown'}",
@@ -1222,6 +1241,8 @@ def _automation_triage_snapshot(
         "control": control,
         "auto_fix_allowed": auto_fix_allowed,
         "retry_allowed": retry_allowed,
+        "engineering_blocked": engineering_blocked,
+        "engineering_review_required": engineering_review_required,
         # Triage has no deployment target, release evidence, or deployment authority.
         "deploy_allowed": False,
         "human_review_required": human_review_required,

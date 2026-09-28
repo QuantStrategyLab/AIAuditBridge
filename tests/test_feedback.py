@@ -46,6 +46,38 @@ class FeedbackStateReportTest(unittest.TestCase):
         self.assertEqual(payload["state"], "auto_merge_requested")
         self.assertFalse(payload["human_review_required"])
 
+    def test_high_risk_engineering_change_is_blocked_without_human_investment_review(self) -> None:
+        record = ChangeRecord(
+            "abc123abc123abc123abc998",
+            "local/repo",
+            "monthly_snapshot_audit",
+            "auto_pr",
+            0.95,
+            "high",
+            pr_number=13,
+            external_url="https://example.test/pr/13",
+        )
+
+        payload = record.to_dict()
+
+        self.assertEqual(payload["state"], "blocked")
+        self.assertFalse(payload["human_review_required"])
+
+    def test_explicit_escalation_still_requires_human_review_for_high_risk_change(self) -> None:
+        record = ChangeRecord(
+            "abc123abc123abc123abc997",
+            "local/repo",
+            "platform_bugfix",
+            "escalate",
+            0.4,
+            "high",
+        )
+
+        payload = record.to_dict()
+
+        self.assertEqual(payload["state"], "human_review_required")
+        self.assertTrue(payload["human_review_required"])
+
     def test_effectiveness_report_persists_operational_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"CODEX_AUDIT_SERVICE_JOB_DIR": tmp}, clear=False):
             improved = ChangeRecord(
@@ -74,7 +106,7 @@ class FeedbackStateReportTest(unittest.TestCase):
 
         self.assertEqual(report["evaluated"], 2)
         self.assertEqual(report["auto_actions"], 2)
-        self.assertEqual(report["human_review_required"], 1)
+        self.assertEqual(report["human_review_required"], 0)
         self.assertEqual(report["rollback_required"], 1)
         self.assertEqual(report["by_risk"]["medium"]["degraded"], 1)
-        self.assertEqual(report["by_state"]["human_review_required"], 1)
+        self.assertEqual(report["by_state"]["blocked"], 1)
