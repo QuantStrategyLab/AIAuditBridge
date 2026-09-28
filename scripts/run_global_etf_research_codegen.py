@@ -454,6 +454,32 @@ def _recover_existing(root: Path) -> dict[str, Any] | None:
     return None
 
 
+def _publish_new_claim(root: Path, claim_path: Path, claim: dict[str, Any]) -> None:
+    """Publish one complete claim without exposing a partial public file."""
+    tmp_path: Path | None = None
+    try:
+        fd, tmp_name = tempfile.mkstemp(prefix=".claim-", suffix=".tmp", dir=root)
+        tmp_path = Path(tmp_name)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(claim, handle, ensure_ascii=False, sort_keys=True, allow_nan=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(tmp_path, claim_path)
+        except FileExistsError:
+            raise GlobalResearchCodegenError("global_codegen_claim_unknown") from None
+    except GlobalResearchCodegenError:
+        raise
+    except (OSError, TypeError, ValueError):
+        raise GlobalResearchCodegenError("global_codegen_claim_failed") from None
+    finally:
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
 def _claim_or_recover(
     root: Path,
     identity: dict[str, Any],
@@ -493,14 +519,7 @@ def _claim_or_recover(
         "source": dict(source),
         "actions": binding,
     }
-    try:
-        fd = os.open(claim_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(claim, handle, ensure_ascii=False, sort_keys=True, allow_nan=False)
-    except FileExistsError:
-        raise GlobalResearchCodegenError("global_codegen_claim_unknown") from None
-    except OSError:
-        raise GlobalResearchCodegenError("global_codegen_claim_failed") from None
+    _publish_new_claim(root, claim_path, claim)
     return None
 
 

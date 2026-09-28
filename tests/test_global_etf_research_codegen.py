@@ -890,6 +890,7 @@ class GlobalResearchCodegenTests(TestCase):
                 sys.modules, {"scripts.run_new_research": SimpleNamespace(_archive_codegen_base=lambda *a, **k: None)}):
             root = Path(tmp)
             barrier = threading.Barrier(2)
+            peer_finished = threading.Event()
             original_claim = codegen._claim_or_recover
             calls, outcomes = [], []
 
@@ -897,16 +898,22 @@ class GlobalResearchCodegenTests(TestCase):
                 barrier.wait(timeout=5)
                 return original_claim(*args, **kwargs)
 
+            def execute(_prompt):
+                calls.append("model")
+                self.assertTrue(peer_finished.wait(timeout=5))
+                return _response()
+
             def run_once():
                 try:
                     outcomes.append(codegen.run_global_etf_research_codegen_case(
                         ues_repo_root=root, run_root=root, source_ref="a" * 40, fetch_source=_source,
                         candidate_test_runner=lambda *args, **kwargs: {"status": "passed"},
-                        execute=lambda _: calls.append("model") or _response(),
+                        execute=execute,
                         actions={"run_id": "42", "job_id": "codegen"},
                     ))
                 except codegen.GlobalResearchCodegenError as exc:
                     outcomes.append(str(exc))
+                    peer_finished.set()
 
             with patch.object(codegen, "_claim_or_recover", side_effect=synchronized_claim):
                 threads = [threading.Thread(target=run_once), threading.Thread(target=run_once)]
@@ -920,6 +927,106 @@ class GlobalResearchCodegenTests(TestCase):
             self.assertIn("global_codegen_claim_unknown", outcomes)
             winner = next(item for item in outcomes if isinstance(item, dict))
             _assert_fresh_projection(winner, run_id="42", job_id="codegen")
+            self.assertFalse(any(path.name.startswith(".claim-") for path in root.iterdir()))
+
+    def test_paused_publish_does_not_expose_partial_claim(self):
+        source = _source()
+        identity = codegen._identity(source=source, source_commit=codegen.GLOBAL_ETF_RESEARCH_CODEGEN_UES_COMMIT)
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            entered = threading.Event()
+            release = threading.Event()
+            holder: dict[str, object] = {}
+            real_link = os.link
+
+            def pausing_link(src, dst, *args, **kwargs):
+                if Path(dst).name == "claim.json":
+                    self.assertFalse(Path(dst).exists())
+                    json.loads(Path(src).read_text(encoding="utf-8"))
+                    entered.set()
+                    self.assertTrue(release.wait(timeout=5))
+                return real_link(src, dst, *args, **kwargs)
+
+            def claim():
+                try:
+                    holder["result"] = codegen._claim_or_recover(
+                        root, identity, source, actions=_OFFLINE_ACTIONS)
+                except codegen.GlobalResearchCodegenError as exc:
+                    holder["error"] = str(exc)
+
+            with patch.object(codegen.os, "link", side_effect=pausing_link):
+                thread = threading.Thread(target=claim)
+                thread.start()
+                self.assertTrue(entered.wait(timeout=5))
+                self.assertFalse((root / "claim.json").exists())
+                release.set()
+                thread.join(timeout=5)
+            self.assertFalse(thread.is_alive())
+            self.assertIsNone(holder.get("result"))
+            self.assertNotIn("error", holder)
+            claim_text = (root / "claim.json").read_text(encoding="utf-8")
+            self.assertEqual(json.loads(claim_text)["execution_id"], codegen.GLOBAL_ETF_EXECUTION_ID)
+            with self.assertRaisesRegex(codegen.GlobalResearchCodegenError, "^global_codegen_claim_unknown$"):
+                codegen.run_global_etf_research_codegen_case(
+                    ues_repo_root=root, run_root=root, source_ref="a" * 40,
+                    fetch_source=lambda: self.fail("partial claim must not fetch"),
+                    execute=lambda _: self.fail("partial claim must not call"),
+                )
+            self.assertFalse(any(path.name.startswith(".claim-") for path in root.iterdir()))
+
+    def test_corrupt_claim_stays_invalid_and_identity_mismatch_stays_rejected(self):
+        source = _source()
+        identity = codegen._identity(source=source, source_commit=codegen.GLOBAL_ETF_RESEARCH_CODEGEN_UES_COMMIT)
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "claim.json").write_text("{", encoding="utf-8")
+            with self.assertRaisesRegex(codegen.GlobalResearchCodegenError, "^global_codegen_claim_invalid$"):
+                codegen._claim_or_recover(root, identity, source, actions=_OFFLINE_ACTIONS)
+            (root / "claim.json").unlink()
+            codegen._claim_or_recover(root, identity, source, actions=_OFFLINE_ACTIONS)
+            claim = json.loads((root / "claim.json").read_text(encoding="utf-8"))
+            claim["execution_id"] = "foreign-execution-id"
+            (root / "claim.json").write_text(json.dumps(claim), encoding="utf-8")
+            with self.assertRaisesRegex(
+                codegen.GlobalResearchCodegenError, "^global_codegen_claim_identity_mismatch$",
+            ):
+                codegen._claim_or_recover(root, identity, source, actions=_OFFLINE_ACTIONS)
+
+    def test_publish_failure_makes_zero_model_calls_and_does_not_overwrite(self):
+        source = _source()
+        identity = codegen._identity(source=source, source_commit=codegen.GLOBAL_ETF_RESEARCH_CODEGEN_UES_COMMIT)
+        with TemporaryDirectory() as tmp, patch.object(codegen, "_docker_preflight"), patch.object(
+            codegen, "_read_global_base", return_value=(codegen.GLOBAL_ETF_RESEARCH_CODEGEN_UES_COMMIT, {})), patch.dict(
+                sys.modules, {"scripts.run_new_research": SimpleNamespace(_archive_codegen_base=lambda *a, **k: None)}):
+            root = Path(tmp)
+            calls = []
+            with patch.object(codegen.os, "link", side_effect=OSError("publish failed")):
+                with self.assertRaisesRegex(codegen.GlobalResearchCodegenError, "^global_codegen_claim_failed$"):
+                    codegen.run_global_etf_research_codegen_case(
+                        ues_repo_root=root, run_root=root, source_ref="a" * 40, fetch_source=_source,
+                        candidate_test_runner=lambda *args, **kwargs: {"status": "passed"},
+                        execute=lambda _: calls.append("model") or _response(),
+                        actions={"run_id": "42", "job_id": "codegen"},
+                    )
+            self.assertEqual(calls, [])
+            self.assertFalse((root / "claim.json").exists())
+            self.assertFalse(any(path.name.startswith(".claim-") for path in root.iterdir()))
+
+            codegen._claim_or_recover(root, identity, source, actions=_OFFLINE_ACTIONS)
+            original = (root / "claim.json").read_bytes()
+            real_exists = Path.exists
+
+            def hide_public_claim(self):
+                if self.name == "claim.json":
+                    return False
+                return real_exists(self)
+
+            with patch.object(Path, "exists", hide_public_claim):
+                with self.assertRaisesRegex(codegen.GlobalResearchCodegenError, "^global_codegen_claim_unknown$"):
+                    codegen._claim_or_recover(root, identity, source, actions=_OFFLINE_ACTIONS)
+            self.assertEqual(calls, [])
+            self.assertEqual((root / "claim.json").read_bytes(), original)
+            self.assertFalse(any(path.name.startswith(".claim-") for path in root.iterdir()))
 
     def test_unknown_claim_without_result_parks_and_does_not_retry(self):
         source = _source()
