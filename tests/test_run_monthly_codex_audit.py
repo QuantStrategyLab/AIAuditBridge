@@ -3050,6 +3050,8 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
             "GITHUB_REPOSITORY": "QuantStrategyLab/AIAuditBridge",
             "GITHUB_RUN_ID": "555",
             "GITHUB_RUN_ATTEMPT": "1",
+            "GITHUB_WORKFLOW_SHA": "a" * 40,
+            "GITHUB_EVENT_NAME": "workflow_dispatch",
         }
         with patch.dict(os.environ, {"CODEX_AUDIT_ENGINEERING_REVIEW_ENABLED": ""}, clear=False):
             disabled = resume_engineering_evidence_review(
@@ -3079,6 +3081,8 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
                 "repository": producer_env["GITHUB_REPOSITORY"],
                 "run_id": producer_env["GITHUB_RUN_ID"],
                 "run_attempt": producer_env["GITHUB_RUN_ATTEMPT"],
+                "workflow_sha": producer_env["GITHUB_WORKFLOW_SHA"],
+                "event_name": producer_env["GITHUB_EVENT_NAME"],
             },
         }
         with (
@@ -3230,6 +3234,8 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
             "GITHUB_REPOSITORY": "QuantStrategyLab/AIAuditBridge",
             "GITHUB_RUN_ID": "555",
             "GITHUB_RUN_ATTEMPT": "1",
+            "GITHUB_WORKFLOW_SHA": "a" * 40,
+            "GITHUB_EVENT_NAME": "workflow_dispatch",
             "CODEX_AUDIT_ENGINEERING_REVIEW_ENABLED": "true",
         }
         digest = materials_input_digest(materials)
@@ -3248,6 +3254,8 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
                 "repository": producer_env["GITHUB_REPOSITORY"],
                 "run_id": producer_env["GITHUB_RUN_ID"],
                 "run_attempt": producer_env["GITHUB_RUN_ATTEMPT"],
+                "workflow_sha": producer_env["GITHUB_WORKFLOW_SHA"],
+                "event_name": producer_env["GITHUB_EVENT_NAME"],
             },
         }
         # base changes while head/paths stay the same must still refuse labels.
@@ -3432,6 +3440,8 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
             "GITHUB_REPOSITORY": "QuantStrategyLab/AIAuditBridge",
             "GITHUB_RUN_ID": "555",
             "GITHUB_RUN_ATTEMPT": "1",
+            "GITHUB_WORKFLOW_SHA": "a" * 40,
+            "GITHUB_EVENT_NAME": "workflow_dispatch",
             "CODEX_AUDIT_ENGINEERING_REVIEW_ENABLED": "true",
         }
         digest = materials_input_digest(materials)
@@ -3450,6 +3460,8 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
                 "repository": producer_env["GITHUB_REPOSITORY"],
                 "run_id": producer_env["GITHUB_RUN_ID"],
                 "run_attempt": producer_env["GITHUB_RUN_ATTEMPT"],
+                "workflow_sha": producer_env["GITHUB_WORKFLOW_SHA"],
+                "event_name": producer_env["GITHUB_EVENT_NAME"],
             },
         }
         with (
@@ -3599,6 +3611,8 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
             "GITHUB_REPOSITORY": "QuantStrategyLab/AIAuditBridge",
             "GITHUB_RUN_ID": "555",
             "GITHUB_RUN_ATTEMPT": "1",
+            "GITHUB_WORKFLOW_SHA": "a" * 40,
+            "GITHUB_EVENT_NAME": "workflow_dispatch",
             "CODEX_AUDIT_ENGINEERING_REVIEW_ENABLED": "true",
             "CODEX_AUDIT_SERVICE_URL": "https://codex.example.invalid",
             "CODEX_AUDIT_SERVICE_AUDIENCE": "quant-codex-audit",
@@ -3624,6 +3638,8 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
                 "repository": producer_env["GITHUB_REPOSITORY"],
                 "run_id": producer_env["GITHUB_RUN_ID"],
                 "run_attempt": producer_env["GITHUB_RUN_ATTEMPT"],
+                "workflow_sha": producer_env["GITHUB_WORKFLOW_SHA"],
+                "event_name": producer_env["GITHUB_EVENT_NAME"],
             },
         }
 
@@ -4351,7 +4367,11 @@ class EngineeringPrReviewProducerTests(unittest.TestCase):
             return Response(json.dumps({"status": "succeeded", "job_id": "synthetic-engineering-review-1", "engineering_review": binding}).encode())
 
         with (
-            patch.dict(os.environ, self._producer_env(), clear=False),
+            patch.dict(
+                os.environ,
+                {**self._producer_env(), "CODEX_AUDIT_ENGINEERING_REVIEW_ENABLED": "true"},
+                clear=False,
+            ),
             patch.object(audit, "github_request", side_effect=github_request),
             patch("scripts.run_monthly_codex_audit.urllib.request.urlopen", side_effect=urlopen),
             patch.object(audit, "request_github_oidc_token", return_value="synthetic-oidc-token") as oidc,
@@ -4447,10 +4467,16 @@ class EngineeringPrReviewProducerTests(unittest.TestCase):
             "repository": self.repository,
             "run_id": "800",
             "run_attempt": "1",
+            "workflow_sha": "a" * 40,
+            "event_name": "workflow_dispatch",
             "review_scope": "source_only",
         }
         with (
-            patch.dict(os.environ, {"CODEX_AUDIT_ENGINEERING_REVIEW_ENABLED": "true"}, clear=False),
+            patch.dict(
+                os.environ,
+                {**self._producer_env(), "CODEX_AUDIT_ENGINEERING_REVIEW_ENABLED": "true"},
+                clear=False,
+            ),
             patch.object(audit, "issue_has_label", return_value=False),
             patch.object(audit, "collect_pull_request_engineering_materials", return_value=materials),
             patch.object(audit, "submit_engineering_review_job", return_value={

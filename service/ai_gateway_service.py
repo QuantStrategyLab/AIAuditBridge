@@ -160,9 +160,8 @@ REQUEST_AUTHORITY_FIELDS = (
     "ref",
     "workflow_ref",
     "job_workflow_ref",
-    "workflow_sha",
-    "event_name",
 )
+ENGINEERING_REVIEW_AUTHORITY_FIELDS = ("workflow_sha", "event_name")
 WRITE_AUTH_METHODS = frozenset({"github_oidc", "none"})
 TRUSTED_AUTOMATION_PROOF_PATH_ENV = "CODEX_AUDIT_SERVICE_TRUSTED_AUTOMATION_PROOF_PATH"
 DASHBOARD_REPOSITORIES_ENV = "CODEX_AUDIT_SERVICE_DASHBOARD_REPOSITORIES"
@@ -1892,6 +1891,10 @@ def _request_job_dedupe_key(claims: dict[str, Any], payload: dict[str, Any]) -> 
                     "changed_paths",
                 )
             }
+        identity["engineering_review_authority"] = {
+            key: str(claims.get(key) or "")
+            for key in ENGINEERING_REVIEW_AUTHORITY_FIELDS
+        }
     return hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
