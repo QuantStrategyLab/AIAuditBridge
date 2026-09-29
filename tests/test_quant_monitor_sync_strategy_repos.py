@@ -13,12 +13,16 @@ class SyncStrategyReposTests(unittest.TestCase):
     def test_exits_nonzero_when_a_repo_fetch_fails(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         script = repo_root / "ops" / "quant-monitor" / "scripts" / "sync_strategy_repos.sh"
+        pin = "a" * 40
 
         with tempfile.TemporaryDirectory() as tmp:
             mirror_root = Path(tmp) / "lifecycle-projects"
+            monitor = Path(tmp) / "monitor"
             bin_dir = Path(tmp) / "bin"
             mirror_root.mkdir()
+            monitor.mkdir()
             bin_dir.mkdir()
+            (monitor / "qpk-runtime.sha").write_text(pin + "\n", encoding="utf-8")
 
             for name in [
                 "QuantPlatformKit",
@@ -58,6 +62,7 @@ class SyncStrategyReposTests(unittest.TestCase):
 
             env = {
                 **os.environ,
+                "QUANT_MONITOR_ROOT": str(monitor),
                 "QUANT_PROJECTS_ROOT": str(mirror_root),
                 "PATH": f"{bin_dir}:{os.environ.get('PATH', '')}",
             }
@@ -75,7 +80,6 @@ class SyncStrategyReposTests(unittest.TestCase):
         self.assertIn("[sync] CnEquityStrategies ok", completed.stdout)
         self.assertNotIn("[sync] QuantPlatformKit ok", completed.stdout)
 
-
     def _git(self, cwd: Path, *args: str) -> str:
         result = subprocess.run(
             ["git", "-C", str(cwd), *args], text=True, capture_output=True, check=True,
@@ -83,7 +87,7 @@ class SyncStrategyReposTests(unittest.TestCase):
         )
         return result.stdout.strip()
 
-    def _local_mirrors(self, root: Path, *, depth: int | None = None) -> tuple[Path, Path, str]:
+    def _local_mirrors(self, root: Path, *, depth: int | None = None) -> tuple[Path, Path, str, str]:
         upstream = root / "upstream"
         upstream.mkdir()
         self._git(upstream, "init", "--initial-branch=main")
@@ -104,6 +108,7 @@ class SyncStrategyReposTests(unittest.TestCase):
                 (upstream / "history.txt").write_text(str(version))
                 self._git(upstream, "add", "history.txt")
                 self._git(upstream, "commit", "-m", f"history {version}")
+        base = self._git(upstream, "rev-parse", "HEAD")
         mirrors = root / "mirrors"
         mirrors.mkdir()
         for repo in ("QuantPlatformKit", "CnEquityStrategies", "HkEquityStrategies", "UsEquityStrategies", "CryptoStrategies"):
@@ -116,44 +121,80 @@ class SyncStrategyReposTests(unittest.TestCase):
         (metadata / "SOURCES.txt").write_text("new sources\n")
         (upstream / "module.py").write_text("VERSION = 2\n")
         self._git(upstream, "commit", "-am", "updated")
-        return mirrors, upstream, self._git(upstream, "rev-parse", "HEAD")
+        latest = self._git(upstream, "rev-parse", "HEAD")
+        return mirrors, upstream, latest, base
 
-    def _sync(self, mirrors: Path, extra_env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    def _sync(
+        self,
+        mirrors: Path,
+        qpk_pin: str,
+        extra_env: dict[str, str] | None = None,
+        *,
+        monitor: Path | None = None,
+    ) -> subprocess.CompletedProcess[str]:
         script = Path(__file__).resolve().parents[1] / "ops/quant-monitor/scripts/sync_strategy_repos.sh"
+        monitor_root = monitor or (mirrors.parent / "monitor")
+        monitor_root.mkdir(exist_ok=True)
+        (monitor_root / "qpk-runtime.sha").write_text(qpk_pin + "\n", encoding="utf-8")
         return subprocess.run(
             ["bash", str(script)], capture_output=True, text=True, check=False,
-            env={**os.environ, "QUANT_PROJECTS_ROOT": str(mirrors), "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1", **(extra_env or {})},
+            env={
+                **os.environ,
+                "QUANT_MONITOR_ROOT": str(monitor_root),
+                "QUANT_PROJECTS_ROOT": str(mirrors),
+                "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_CONFIG_NOSYSTEM": "1",
+                **(extra_env or {}),
+            },
         )
+
+    def test_qpk_stays_pinned_when_main_advances_other_repos_follow_main(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            mirrors, _, latest, base = self._local_mirrors(Path(tmp))
+            result = self._sync(mirrors, base)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self._git(mirrors / "QuantPlatformKit", "rev-parse", "HEAD"), base)
+            self.assertEqual((mirrors / "QuantPlatformKit" / "module.py").read_text(), "VERSION = 1\n")
+            for name in ("CnEquityStrategies", "HkEquityStrategies", "UsEquityStrategies", "CryptoStrategies"):
+                self.assertEqual(self._git(mirrors / name, "rev-parse", "HEAD"), latest)
+                self.assertEqual((mirrors / name / "module.py").read_text(), "VERSION = 2\n")
+            self.assertIn("[sync] QuantPlatformKit ok", result.stdout)
+            self.assertIn("[sync] CryptoStrategies ok", result.stdout)
 
     def test_packaging_metadata_is_preserved_while_clean_mirror_updates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            mirrors, _, latest = self._local_mirrors(Path(tmp))
+            mirrors, _, latest, base = self._local_mirrors(Path(tmp))
             qpk = mirrors / "QuantPlatformKit"
             relative = "src/quant_platform_kit.egg-info/PKG-INFO"
             (qpk / relative).write_text("generated installation metadata\n")
             (qpk / "private-local-state").write_text("preserve me\n")
             before = self._git(qpk, "rev-parse", "HEAD")
-            result = self._sync(mirrors)
+            result = self._sync(mirrors, base)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(self._git(qpk, "rev-parse", "HEAD"), latest)
+            self.assertEqual(self._git(qpk, "rev-parse", "HEAD"), base)
+            self.assertNotEqual(base, latest)
             self.assertEqual(self._git(qpk, "status", "--porcelain"), "")
+            self.assertEqual((qpk / "module.py").read_text(), "VERSION = 1\n")
+            self.assertEqual(self._git(mirrors / "CryptoStrategies", "rev-parse", "HEAD"), latest)
             backup = mirrors / "QuantPlatformKit.preserved-before-metadata-refresh"
             self.assertEqual(self._git(backup, "rev-parse", "HEAD"), before)
             self.assertEqual((backup / relative).read_text(), "generated installation metadata\n")
             self.assertEqual((backup / "private-local-state").read_text(), "preserve me\n")
-            again = self._sync(mirrors)
+            again = self._sync(mirrors, base)
             self.assertEqual(again.returncode, 0, again.stderr)
+            self.assertEqual(self._git(qpk, "rev-parse", "HEAD"), base)
             self.assertEqual(len(list(mirrors.glob("*.preserved-before-metadata-refresh"))), 1)
             (qpk / relative).write_text("unexpected repeated dirty metadata\n")
-            blocked = self._sync(mirrors)
+            blocked = self._sync(mirrors, base)
             self.assertNotEqual(blocked.returncode, 0)
             self.assertEqual((qpk / relative).read_text(), "unexpected repeated dirty metadata\n")
             self.assertEqual((backup / relative).read_text(), "generated installation metadata\n")
+            self.assertNotIn("[sync] QuantPlatformKit ok", blocked.stdout)
 
     def test_shallow_detached_dirty_mirror_fetches_the_frozen_target_before_swap(self) -> None:
         for depth in (1, 2):
             with self.subTest(depth=depth), tempfile.TemporaryDirectory() as tmp:
-                mirrors, _, latest = self._local_mirrors(Path(tmp), depth=depth)
+                mirrors, _, latest, base = self._local_mirrors(Path(tmp), depth=depth)
                 qpk = mirrors / "QuantPlatformKit"
                 self.assertEqual(self._git(qpk, "rev-parse", "--is-shallow-repository"), "true")
                 self.assertEqual(self._git(qpk, "rev-parse", "--abbrev-ref", "HEAD"), "HEAD")
@@ -162,9 +203,10 @@ class SyncStrategyReposTests(unittest.TestCase):
                 for name in ("PKG-INFO", "SOURCES.txt"):
                     (metadata / name).write_text(f"generated {name}\n")
                 (qpk / "private-local-state").write_text("preserve me\n")
-                result = self._sync(mirrors)
+                result = self._sync(mirrors, base)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(self._git(qpk, "rev-parse", "HEAD"), latest)
+                self.assertEqual(self._git(qpk, "rev-parse", "HEAD"), base)
+                self.assertEqual(self._git(mirrors / "CryptoStrategies", "rev-parse", "HEAD"), latest)
                 self.assertEqual(self._git(qpk, "status", "--porcelain"), "")
                 backup = mirrors / "QuantPlatformKit.preserved-before-metadata-refresh"
                 self.assertEqual(self._git(backup, "rev-parse", "HEAD"), before)
@@ -178,7 +220,7 @@ class SyncStrategyReposTests(unittest.TestCase):
     def test_shallow_target_fetch_failure_preserves_original_and_releases_lock(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            mirrors, _, _ = self._local_mirrors(root, depth=1)
+            mirrors, _, _, base = self._local_mirrors(root, depth=1)
             qpk = mirrors / "QuantPlatformKit"
             metadata = qpk / "src/quant_platform_kit.egg-info/PKG-INFO"
             metadata.write_text("generated metadata\n")
@@ -196,7 +238,7 @@ class SyncStrategyReposTests(unittest.TestCase):
                 f"os.execv({shutil.which('git')!r}, ['git', *args])\n"
             )
             stub.chmod(0o755)
-            result = self._sync(mirrors, {"PATH": f"{bin_dir}:{os.environ['PATH']}"})
+            result = self._sync(mirrors, base, {"PATH": f"{bin_dir}:{os.environ['PATH']}"})
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("synthetic target fetch failure", result.stderr)
             self.assertEqual(self._git(qpk, "rev-parse", "HEAD"), before)
@@ -206,25 +248,27 @@ class SyncStrategyReposTests(unittest.TestCase):
             self.assertEqual(list(mirrors.glob(".QuantPlatformKit.refresh.*")), [])
             self.assertFalse((mirrors / ".sync-strategy-repos.lock").exists())
             self.assertIn("[sync] CryptoStrategies ok", result.stdout)
+            self.assertNotIn("[sync] QuantPlatformKit ok", result.stdout)
 
     def test_unknown_source_edits_are_not_carried_into_updated_mirror(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            mirrors, _, _ = self._local_mirrors(Path(tmp))
+            mirrors, _, _, base = self._local_mirrors(Path(tmp))
             qpk = mirrors / "QuantPlatformKit"
             # This file does not conflict with the incoming commit. Plain checkout
             # carries it across and falsely declares a clean monitor source.
             (qpk / "README.md").write_text("unknown local change\n")
             before = self._git(qpk, "rev-parse", "HEAD")
-            result = self._sync(mirrors)
+            result = self._sync(mirrors, base)
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(self._git(qpk, "rev-parse", "HEAD"), before)
             self.assertEqual((qpk / "README.md").read_text(), "unknown local change\n")
             self.assertFalse((mirrors / "QuantPlatformKit.preserved-before-metadata-refresh").exists())
+            self.assertNotIn("[sync] QuantPlatformKit ok", result.stdout)
 
     def test_replacement_failure_restores_original_mirror(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            mirrors, _, _ = self._local_mirrors(root)
+            mirrors, _, _, base = self._local_mirrors(root)
             qpk = mirrors / "QuantPlatformKit"
             metadata = qpk / "src/quant_platform_kit.egg-info/PKG-INFO"
             metadata.write_text("local metadata\n")
@@ -238,27 +282,97 @@ class SyncStrategyReposTests(unittest.TestCase):
                 f"os.execv({shutil.which('mv')!r}, ['mv', *sys.argv[1:]])\n"
             )
             stub.chmod(0o755)
-            result = self._sync(mirrors, {"PATH": f"{bin_dir}:{os.environ['PATH']}"})
+            result = self._sync(mirrors, base, {"PATH": f"{bin_dir}:{os.environ['PATH']}"})
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(self._git(qpk, "rev-parse", "HEAD"), before)
             self.assertEqual(metadata.read_text(), "local metadata\n")
             self.assertFalse((mirrors / "QuantPlatformKit.preserved-before-metadata-refresh").exists())
             self.assertEqual(list(mirrors.glob(".QuantPlatformKit.refresh.*")), [])
 
+    def test_missing_or_illegal_pin_is_rejected(self) -> None:
+        script = Path(__file__).resolve().parents[1] / "ops/quant-monitor/scripts/sync_strategy_repos.sh"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mirrors, _, _, base = self._local_mirrors(root)
+            monitor = root / "monitor"
+            monitor.mkdir()
+            env = {
+                **os.environ,
+                "QUANT_MONITOR_ROOT": str(monitor),
+                "QUANT_PROJECTS_ROOT": str(mirrors),
+                "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_CONFIG_NOSYSTEM": "1",
+            }
+            missing = subprocess.run(["bash", str(script)], capture_output=True, text=True, env=env, check=False)
+            self.assertNotEqual(missing.returncode, 0)
+            self.assertIn("missing qpk-runtime.sha", missing.stderr)
+            self.assertNotIn("[sync] CryptoStrategies ok", missing.stdout)
+
+            (monitor / "qpk-runtime.sha").write_text("not-a-sha\n", encoding="utf-8")
+            illegal = subprocess.run(["bash", str(script)], capture_output=True, text=True, env=env, check=False)
+            self.assertNotEqual(illegal.returncode, 0)
+            self.assertIn("40-character SHA", illegal.stderr)
+            self.assertNotIn("[sync] CryptoStrategies ok", illegal.stdout)
+
+            (monitor / "qpk-runtime.sha").write_text(base + "\n", encoding="utf-8")
+            ok = subprocess.run(["bash", str(script)], capture_output=True, text=True, env=env, check=False)
+            self.assertEqual(ok.returncode, 0, ok.stderr)
+
+    def test_missing_pin_object_is_rejected_without_falling_back_to_main(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            mirrors, _, latest, _ = self._local_mirrors(Path(tmp))
+            missing_sha = "b" * 40
+            before = self._git(mirrors / "QuantPlatformKit", "rev-parse", "HEAD")
+            result = self._sync(mirrors, missing_sha)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("[sync] QuantPlatformKit fetch failed", result.stderr)
+            self.assertEqual(self._git(mirrors / "QuantPlatformKit", "rev-parse", "HEAD"), before)
+            self.assertNotEqual(before, latest)
+            self.assertNotIn("[sync] QuantPlatformKit ok", result.stdout)
+            self.assertIn("[sync] CryptoStrategies ok", result.stdout)
+
+    def test_new_qpk_clone_checks_out_pinned_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mirrors, upstream, latest, base = self._local_mirrors(root)
+            shutil.rmtree(mirrors / "QuantPlatformKit")
+            # Script clones "$REPOSITORY_BASE_URL/QuantPlatformKit.git".
+            remote_parent = root / "remotes"
+            remote_parent.mkdir()
+            self._git(root, "clone", "--bare", str(upstream), str(remote_parent / "QuantPlatformKit.git"))
+            result = self._sync(
+                mirrors,
+                base,
+                {"QUANT_MONITOR_REPOSITORY_BASE_URL": remote_parent.as_uri()},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            qpk = mirrors / "QuantPlatformKit"
+            self.assertEqual(self._git(qpk, "rev-parse", "HEAD"), base)
+            self.assertEqual((qpk / "module.py").read_text(), "VERSION = 1\n")
+            self.assertEqual(self._git(mirrors / "CryptoStrategies", "rev-parse", "HEAD"), latest)
+            self.assertIn("[sync] QuantPlatformKit cloned", result.stdout)
+
     def test_bootstrap_build_metadata_is_written_outside_source_mirror(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            mirrors, upstream, _ = self._local_mirrors(root)
+            mirrors, upstream, latest, base = self._local_mirrors(root)
             qpk = mirrors / "QuantPlatformKit"
             aab = root / "AIAuditBridge"
             self._git(root, "clone", str(upstream), str(aab))
-            pinned_sha = self._git(aab, "rev-parse", "HEAD^")
-            self._git(aab, "reset", "--hard", pinned_sha)
+            self._git(aab, "config", "user.name", "Test")
+            self._git(aab, "config", "user.email", "test@example.invalid")
+            pinned_aab_sha = self._git(aab, "rev-parse", "HEAD^")
+            self._git(aab, "reset", "--hard", pinned_aab_sha)
             self._git(aab, "fetch", "origin", "main")
-            monitor = root / "monitor"
+            # Production layout: monitor lives inside the reviewed AAB tree.
+            monitor = aab / "ops" / "quant-monitor"
             (monitor / "scripts").mkdir(parents=True)
             scripts = Path(__file__).resolve().parents[1] / "ops/quant-monitor/scripts"
             shutil.copyfile(scripts / "common_env.sh", monitor / "scripts/common_env.sh")
+            (monitor / "qpk-runtime.sha").write_text(base + "\n", encoding="utf-8")
+            self._git(aab, "add", "ops/quant-monitor/qpk-runtime.sha", "ops/quant-monitor/scripts/common_env.sh")
+            self._git(aab, "commit", "-m", "pin qpk")
+            pinned_aab_sha = self._git(aab, "rev-parse", "HEAD")
             bin_dir = root / "bin"
             bin_dir.mkdir()
             python_stub = bin_dir / "python3"
@@ -284,23 +398,26 @@ class SyncStrategyReposTests(unittest.TestCase):
                 (bin_dir / name).chmod(0o755)
             result = subprocess.run(
                 ["bash", str(scripts / "setup_vps_runtime.sh"),
-                 pinned_sha, str(aab)], text=True, capture_output=True,
+                 pinned_aab_sha, str(aab)], text=True, capture_output=True,
                 env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
                      "QUANT_MONITOR_ROOT": str(monitor), "QUANT_PLATFORM_KIT_ROOT": str(qpk),
                      "AIAUDIT_BRIDGE_ROOT": str(aab), "QUANT_PROJECTS_ROOT": str(mirrors),
                      "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"},
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            # origin/main is newer, but setup preserves the reviewed checkout.
-            self.assertEqual(self._git(aab, "rev-parse", "HEAD"), pinned_sha)
+            # origin/main is newer, but setup preserves the reviewed AAB checkout
+            # and the pinned QPK commit (not floating main).
+            self.assertEqual(self._git(aab, "rev-parse", "HEAD"), pinned_aab_sha)
+            self.assertEqual(self._git(qpk, "rev-parse", "HEAD"), base)
+            self.assertNotEqual(base, latest)
             self.assertEqual(self._git(qpk, "status", "--porcelain"), "")
-            self.assertEqual((qpk / "src/quant_platform_kit.egg-info/PKG-INFO").read_text(), "new metadata\n")
+            self.assertEqual((qpk / "src/quant_platform_kit.egg-info/PKG-INFO").read_text(), "old metadata\n")
 
             dirty_runtime = aab / "service" / "briefing_consumer.py"
             dirty_runtime.parent.mkdir(exist_ok=True)
             dirty_runtime.write_text("# local runtime drift\n")
             blocked = subprocess.run(
-                ["bash", str(scripts / "setup_vps_runtime.sh"), pinned_sha, str(aab)],
+                ["bash", str(scripts / "setup_vps_runtime.sh"), pinned_aab_sha, str(aab)],
                 text=True, capture_output=True,
                 env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
                      "QUANT_MONITOR_ROOT": str(monitor), "QUANT_PLATFORM_KIT_ROOT": str(qpk),
@@ -309,6 +426,20 @@ class SyncStrategyReposTests(unittest.TestCase):
             )
             self.assertNotEqual(blocked.returncode, 0)
             self.assertIn("refusing dirty AIAuditBridge runtime source", blocked.stderr)
+
+            dirty_runtime.unlink()
+            (monitor / "qpk-runtime.sha").write_text(latest + "\n", encoding="utf-8")
+            tampered = subprocess.run(
+                ["bash", str(scripts / "setup_vps_runtime.sh"), pinned_aab_sha, str(aab)],
+                text=True, capture_output=True, check=False,
+                env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                     "QUANT_MONITOR_ROOT": str(monitor), "QUANT_PLATFORM_KIT_ROOT": str(qpk),
+                     "AIAUDIT_BRIDGE_ROOT": str(aab), "QUANT_PROJECTS_ROOT": str(mirrors),
+                     "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"},
+            )
+            self.assertNotEqual(tampered.returncode, 0)
+            self.assertIn("refusing dirty AIAuditBridge runtime source", tampered.stderr)
+            self.assertEqual(self._git(qpk, "rev-parse", "HEAD"), base)
 
 
 if __name__ == "__main__":
