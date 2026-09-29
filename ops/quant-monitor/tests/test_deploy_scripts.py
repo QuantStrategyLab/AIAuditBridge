@@ -138,6 +138,8 @@ class DeployScriptTests(unittest.TestCase):
         self.assertIn('checkout --detach --quiet "$QPK_RUNTIME_SHA"', script)
         self.assertIn('"$ACTUAL_QPK_SHA" != "$QPK_RUNTIME_SHA"', script)
         self.assertIn('requirements-linux-py312.lock', script)
+        self.assertIn('platform.python_implementation()', script)
+        self.assertIn('unsupported Python implementation', script)
         self.assertIn("--require-hashes", script)
         self.assertIn("--only-binary=:all:", script)
         self.assertIn("--no-deps", script)
@@ -430,6 +432,13 @@ class DeployScriptTests(unittest.TestCase):
                 "if args == ['-']:\n"
                 "    code = sys.stdin.read()\n"
                 "    if 'glibc' in code and 'need 3.12' in code:\n"
+                "        import os, platform\n"
+                "        sys.version_info = (3, 12, 0, 'final', 0)\n"
+                "        platform.system = lambda: 'Linux'\n"
+                "        platform.machine = lambda: 'x86_64'\n"
+                "        platform.python_implementation = lambda: 'CPython'\n"
+                "        os.confstr = lambda key: 'glibc 2.35'\n"
+                "        exec(compile(code, '<runtime-preflight>', 'exec'), {'__name__': '__main__'})\n"
                 "        raise SystemExit(0)\n"
                 "    raise SystemExit(f'unexpected python stdin: {code[:80]!r}')\n"
                 "if len(args) >= 3 and args[0] == '-m' and args[1] == 'venv':\n"
@@ -527,7 +536,7 @@ class DeployScriptTests(unittest.TestCase):
             self.assertNotEqual(tampered_lock.returncode, 0)
             self.assertIn("refusing dirty AIAuditBridge runtime source", tampered_lock.stderr)
 
-    def test_setup_rejects_unsupported_platform_before_mirror_or_venv_mutation(self) -> None:
+    def test_setup_rejects_pypy_before_mirror_or_venv_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             upstream = root / "upstream"
@@ -569,24 +578,46 @@ class DeployScriptTests(unittest.TestCase):
             python_stub = bin_dir / "python3"
             python_stub.write_text(
                 f"#!{sys.executable}\n"
-                "import sys\n"
+                "import os, sys\n"
                 "args = sys.argv[1:]\n"
                 "if args == ['-']:\n"
                 "    code = sys.stdin.read()\n"
-                "    if 'glibc' in code and 'need 3.12' in code:\n"
-                "        print('[setup] unsupported OS Darwin; need Linux', file=sys.stderr)\n"
-                "        print(\n"
-                "            '[setup] requirements-linux-py312.lock only covers CPython 3.12 on '\n"
-                "            'Linux x86_64 with glibc >= 2.34; refusing unsupported environment '\n"
-                "            '(no silent fallback)',\n"
-                "            file=sys.stderr,\n"
-                "        )\n"
-                "        raise SystemExit(1)\n"
-                "    raise SystemExit(f'unexpected python stdin: {code[:80]!r}')\n"
+                "    import platform\n"
+                "    sys.version_info = (3, 12, 0, 'final', 0)\n"
+                "    platform.system = lambda: 'Linux'\n"
+                "    platform.machine = lambda: 'x86_64'\n"
+                "    platform.python_implementation = lambda: 'PyPy'\n"
+                "    os.confstr = lambda key: 'glibc 2.35'\n"
+                "    exec(compile(code, '<runtime-preflight>', 'exec'), {'__name__': '__main__'})\n"
+                "    raise SystemExit(0)\n"
+                "if len(args) >= 3 and args[:2] == ['-m', 'venv']:\n"
+                "    print('MUTATION: venv', file=sys.stderr)\n"
+                "    raise SystemExit(70)\n"
                 "raise SystemExit(f'unexpected python3 invocation: {args!r}')\n",
                 encoding="utf-8",
             )
             python_stub.chmod(0o755)
+            real_git = shutil.which("git")
+            self.assertIsNotNone(real_git)
+            git_stub = bin_dir / "git"
+            git_stub.write_text(
+                f"#!{sys.executable}\n"
+                "import os, sys\n"
+                f"real = {real_git!r}\n"
+                "args = sys.argv[1:]\n"
+                "if 'https://github.com/QuantStrategyLab/QuantPlatformKit.git' in args:\n"
+                "    print('MUTATION: qpk clone', file=sys.stderr)\n"
+                "    raise SystemExit(71)\n"
+                "if args[:3] == ['-C', os.environ['QUANT_PLATFORM_KIT_ROOT'], 'fetch']:\n"
+                "    print('MUTATION: qpk fetch', file=sys.stderr)\n"
+                "    raise SystemExit(72)\n"
+                "if args[:3] == ['-C', os.environ['QUANT_PLATFORM_KIT_ROOT'], 'checkout']:\n"
+                "    print('MUTATION: qpk checkout', file=sys.stderr)\n"
+                "    raise SystemExit(73)\n"
+                "os.execv(real, ['git', *args])\n",
+                encoding="utf-8",
+            )
+            git_stub.chmod(0o755)
             for name in ("gh", "gcloud"):
                 stub = bin_dir / name
                 stub.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
@@ -612,6 +643,8 @@ class DeployScriptTests(unittest.TestCase):
             )
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("only covers", result.stderr)
+            self.assertIn("unsupported Python implementation 'PyPy'", result.stderr)
+            self.assertNotIn("MUTATION:", result.stderr)
             self.assertFalse(qpk.exists())
             self.assertFalse((monitor / ".venv").exists())
 

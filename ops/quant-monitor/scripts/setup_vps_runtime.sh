@@ -88,6 +88,9 @@ if sys.version_info[:2] != (3, 12):
         f"unsupported Python {sys.version_info.major}.{sys.version_info.minor}; "
         "need 3.12"
     )
+implementation = platform.python_implementation()
+if implementation != "CPython":
+    fail(f"unsupported Python implementation {implementation!r}; need CPython")
 if platform.system() != "Linux":
     fail(f"unsupported OS {platform.system()!r}; need Linux")
 machine = platform.machine().lower()
