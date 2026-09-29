@@ -1,5 +1,7 @@
 import os
+import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -52,10 +54,16 @@ class DeployScriptTests(unittest.TestCase):
 
     def test_strategy_sync_uses_dedicated_mirrors(self) -> None:
         script = (ROOT / "scripts" / "sync_strategy_repos.sh").read_text(encoding="utf-8")
+        pin = (ROOT / "qpk-runtime.sha").read_text(encoding="utf-8").strip()
 
+        self.assertRegex(pin, r"^[0-9a-f]{40}$")
         self.assertIn('MIRROR_ROOT="${QUANT_PROJECTS_ROOT:-$ROOT/data/lifecycle-projects}"', script)
         self.assertIn('dir="$MIRROR_ROOT/$repo"', script)
+        self.assertIn('QPK_RUNTIME_SHA="$(<"$ROOT/qpk-runtime.sha")"', script)
+        self.assertIn('fetch origin "$QPK_RUNTIME_SHA"', script)
+        self.assertIn('checkout --detach --quiet "$QPK_RUNTIME_SHA"', script)
         self.assertIn("checkout --detach --quiet origin/main", script)
+        self.assertIn('[[ "$repo" == "QuantPlatformKit" ]]', script)
         self.assertNotIn("pull --ff-only", script)
 
     def test_health_check_sources_telegram_env_after_common_env(self) -> None:
@@ -111,14 +119,32 @@ class DeployScriptTests(unittest.TestCase):
 
     def test_runtime_setup_requires_exact_checkout_and_never_resyncs_aab_main(self) -> None:
         script = (ROOT / "scripts" / "setup_vps_runtime.sh").read_text(encoding="utf-8")
+        pin = (ROOT / "qpk-runtime.sha").read_text(encoding="utf-8").strip()
         aab_sync = script[script.index('if [[ ! -d "$AAB_ROOT/.git" ]]'):script.index('VENV=')]
+        self.assertRegex(pin, r"^[0-9a-f]{40}$")
         self.assertIn('SOURCE_SHA="${1:-}"', script)
         self.assertIn('EXPECTED_AAB_ROOT="${2:-}"', script)
         self.assertIn('[[ "$AAB_ROOT" != "$EXPECTED_AAB_ROOT" ]]', script)
         self.assertIn('rev-parse HEAD', aab_sync)
         self.assertIn('"$ACTUAL_AAB_SHA" != "$SOURCE_SHA"', aab_sync)
-        self.assertIn('status --porcelain --untracked-files=all -- client scripts service ops/quant-monitor/scripts ops/quant-monitor/systemd', aab_sync)
-        self.assertLess(script.index('rev-parse HEAD'), script.index('git -C "$QPK_ROOT" fetch origin main'))
+        self.assertIn(
+            'status --porcelain --untracked-files=all -- client scripts service '
+            'ops/quant-monitor/scripts ops/quant-monitor/systemd ops/quant-monitor/qpk-runtime.sha',
+            aab_sync,
+        )
+        self.assertIn('QPK_RUNTIME_SHA="$(<"$ROOT/qpk-runtime.sha")"', script)
+        self.assertIn("qpk_created=0", script)
+        self.assertIn("qpk_created=1", script)
+        self.assertIn('[[ "$qpk_created" -eq 0 ]]', script)
+        self.assertIn('fetch origin "$QPK_RUNTIME_SHA"', script)
+        self.assertIn('checkout --detach --quiet "$QPK_RUNTIME_SHA"', script)
+        self.assertIn('"$ACTUAL_QPK_SHA" != "$QPK_RUNTIME_SHA"', script)
+        self.assertLess(
+            script.index('[[ "$qpk_created" -eq 0 ]]'),
+            script.index('checkout --detach --quiet "$QPK_RUNTIME_SHA"'),
+        )
+        self.assertNotIn('fetch origin main', script)
+        self.assertNotIn('checkout --detach --quiet origin/main', script)
         self.assertNotIn('fetch origin main', aab_sync)
         self.assertNotIn('checkout main', aab_sync)
         self.assertNotIn('pull --ff-only', aab_sync)
@@ -272,6 +298,141 @@ class DeployScriptTests(unittest.TestCase):
         )
         self.assertIn("STRATEGY_HEALTH_SYNC_TOKEN_FILE=%d/strategy-health-sync.token", drop_in)
         self.assertNotIn("STRATEGY_HEALTH_SYNC_TOKEN=", drop_in)
+
+    def _git(self, cwd: Path, *args: str) -> str:
+        result = subprocess.run(
+            ["git", "-C", str(cwd), *args],
+            text=True,
+            capture_output=True,
+            check=True,
+            env={**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"},
+        )
+        return result.stdout.strip()
+
+    def test_setup_fresh_qpk_clone_checks_out_pin_and_existing_dirty_mirror_still_refuses(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            upstream = root / "upstream"
+            upstream.mkdir()
+            self._git(upstream, "init", "--initial-branch=main")
+            self._git(upstream, "config", "user.name", "Test")
+            self._git(upstream, "config", "user.email", "test@example.invalid")
+            (upstream / "module.py").write_text("VERSION = 1\n", encoding="utf-8")
+            self._git(upstream, "add", "module.py")
+            self._git(upstream, "commit", "-m", "base")
+            pin = self._git(upstream, "rev-parse", "HEAD")
+            (upstream / "module.py").write_text("VERSION = 2\n", encoding="utf-8")
+            self._git(upstream, "commit", "-am", "advance main")
+            bare = root / "QuantPlatformKit.git"
+            self._git(root, "clone", "--bare", str(upstream), str(bare))
+
+            aab = root / "AIAuditBridge"
+            self._git(root, "clone", str(upstream), str(aab))
+            self._git(aab, "config", "user.name", "Test")
+            self._git(aab, "config", "user.email", "test@example.invalid")
+            aab_sha = self._git(aab, "rev-parse", "HEAD^")
+            self._git(aab, "reset", "--hard", aab_sha)
+            monitor = aab / "ops" / "quant-monitor"
+            (monitor / "scripts").mkdir(parents=True)
+            shutil.copyfile(ROOT / "scripts" / "common_env.sh", monitor / "scripts" / "common_env.sh")
+            (monitor / "qpk-runtime.sha").write_text(pin + "\n", encoding="utf-8")
+            self._git(
+                aab,
+                "add",
+                "ops/quant-monitor/qpk-runtime.sha",
+                "ops/quant-monitor/scripts/common_env.sh",
+            )
+            self._git(aab, "commit", "-m", "pin qpk")
+            aab_sha = self._git(aab, "rev-parse", "HEAD")
+
+            qpk_parent = root / "mirrors"
+            qpk_parent.mkdir()
+            qpk = qpk_parent / "QuantPlatformKit"
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            real_git = shutil.which("git")
+            self.assertIsNotNone(real_git)
+            git_stub = bin_dir / "git"
+            git_stub.write_text(
+                f"#!{sys.executable}\n"
+                "import os, sys\n"
+                f"real={real_git!r}\n"
+                f"bare={bare.as_uri()!r}\n"
+                "args=sys.argv[1:]\n"
+                "for i, arg in enumerate(args):\n"
+                "    if 'QuantStrategyLab/QuantPlatformKit.git' in arg:\n"
+                "        args[i]=bare\n"
+                "os.execv(real, ['git', *args])\n",
+                encoding="utf-8",
+            )
+            git_stub.chmod(0o755)
+            pip_code = (
+                f"#!{sys.executable}\n"
+                "import sys\n"
+                "from pathlib import Path\n"
+                "if '-e' in sys.argv: raise SystemExit(9)\n"
+                "source=Path(sys.argv[-1])\n"
+                "if source.is_dir():\n"
+                "    (source / 'installed-from-archive').write_text('ok')\n"
+            )
+            python_stub = bin_dir / "python3"
+            python_stub.write_text(
+                f"#!{sys.executable}\n"
+                "from pathlib import Path\n"
+                "import sys\n"
+                "if len(sys.argv) >= 3 and sys.argv[1] == '-m' and sys.argv[2] == 'venv':\n"
+                "    venv=Path(sys.argv[-1])\n"
+                "    (venv / 'bin').mkdir(parents=True, exist_ok=True)\n"
+                f"    (venv / 'bin' / 'pip').write_text({pip_code!r})\n"
+                "    (venv / 'bin' / 'pip').chmod(0o755)\n"
+                "    raise SystemExit(0)\n"
+                "raise SystemExit(f'unexpected python3 invocation: {sys.argv!r}')\n",
+                encoding="utf-8",
+            )
+            python_stub.chmod(0o755)
+            for name in ("gh", "gcloud"):
+                stub = bin_dir / name
+                stub.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+                stub.chmod(0o755)
+
+            env = {
+                **os.environ,
+                "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                "QUANT_MONITOR_ROOT": str(monitor),
+                "QUANT_PLATFORM_KIT_ROOT": str(qpk),
+                "AIAUDIT_BRIDGE_ROOT": str(aab),
+                "QUANT_PROJECTS_ROOT": str(qpk_parent),
+                "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_CONFIG_NOSYSTEM": "1",
+            }
+            self.assertFalse(qpk.exists())
+            fresh = subprocess.run(
+                ["bash", str(ROOT / "scripts" / "setup_vps_runtime.sh"), aab_sha, str(aab)],
+                text=True,
+                capture_output=True,
+                check=False,
+                env=env,
+            )
+            self.assertEqual(fresh.returncode, 0, fresh.stderr)
+            self.assertEqual(self._git(qpk, "rev-parse", "HEAD"), pin)
+            self.assertEqual((qpk / "module.py").read_text(encoding="utf-8"), "VERSION = 1\n")
+            self.assertIn(f"sha={pin}", fresh.stdout)
+            self.assertNotIn("tracked changes require mirror synchronization", fresh.stderr)
+
+            (qpk / "module.py").write_text("unknown local edit\n", encoding="utf-8")
+            blocked = subprocess.run(
+                ["bash", str(ROOT / "scripts" / "setup_vps_runtime.sh"), aab_sha, str(aab)],
+                text=True,
+                capture_output=True,
+                check=False,
+                env=env,
+            )
+            self.assertNotEqual(blocked.returncode, 0)
+            self.assertIn("QPK tracked changes require mirror synchronization/review", blocked.stderr)
+            self.assertEqual((qpk / "module.py").read_text(encoding="utf-8"), "unknown local edit\n")
+            self.assertEqual(self._git(qpk, "rev-parse", "HEAD"), pin)
 
 
 if __name__ == "__main__":

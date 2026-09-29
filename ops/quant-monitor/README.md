@@ -161,3 +161,12 @@ checkout、不 stash、不删除旧状态，也不创建第二份累计备份。
 保留目录与 `.sync-strategy-repos.lock` 的实际状态，再恢复被中断的同步；不要按定时
 重试自动删除锁或备份。此次源码修复不代表 VPS 已采用：部署后仍须读回下一次正常
 监测周期及网站结果时间；不能用本地测试代替线上恢复证明。
+
+### QPK 运行源码固定（R12）
+
+`ops/quant-monitor/qpk-runtime.sha` 保存已审的精确 40 位 QuantPlatformKit commit。
+`setup_vps_runtime.sh` 与 `sync_strategy_repos.sh` 都只从该文件读取 pin：缺失、非
+40hex、fetch/对象不可用或 checkout 后 HEAD 不匹配时直接失败，不回落 `origin/main`。
+setup 的 AAB dirty 检查包含该 pin 文件，拒绝消费未提交篡改。sync 仅固定 QPK；其余
+四策略仓仍同步 `origin/main`。metadata-only 恢复路径也 checkout 同一 pin，并保留原
+镜像目录。本批只锁 QPK 源码来源，不表示第三方 pip 依赖已全部锁定。
