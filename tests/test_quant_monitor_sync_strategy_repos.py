@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import os
-import subprocess
 import shutil
+import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
@@ -370,39 +371,91 @@ class SyncStrategyReposTests(unittest.TestCase):
             scripts = Path(__file__).resolve().parents[1] / "ops/quant-monitor/scripts"
             shutil.copyfile(scripts / "common_env.sh", monitor / "scripts/common_env.sh")
             (monitor / "qpk-runtime.sha").write_text(base + "\n", encoding="utf-8")
-            self._git(aab, "add", "ops/quant-monitor/qpk-runtime.sha", "ops/quant-monitor/scripts/common_env.sh")
-            self._git(aab, "commit", "-m", "pin qpk")
+            shutil.copyfile(
+                scripts.parent / "requirements-linux-py312.lock",
+                monitor / "requirements-linux-py312.lock",
+            )
+            self._git(
+                aab,
+                "add",
+                "ops/quant-monitor/qpk-runtime.sha",
+                "ops/quant-monitor/requirements-linux-py312.lock",
+                "ops/quant-monitor/scripts/common_env.sh",
+            )
+            self._git(aab, "commit", "-m", "pin qpk and lock")
             pinned_aab_sha = self._git(aab, "rev-parse", "HEAD")
             bin_dir = root / "bin"
             bin_dir.mkdir()
             python_stub = bin_dir / "python3"
             pip_code = (
-                "#!/usr/bin/env python3\nimport sys\nfrom pathlib import Path\n"
-                "if '-e' in sys.argv: raise SystemExit(9)\n"
-                "source=Path(sys.argv[-1])\n"
-                "if source.is_dir():\n"
-                "    (source/'src/quant_platform_kit.egg-info/PKG-INFO').write_text('generated')\n"
+                f"#!{sys.executable}\n"
+                "import sys\n"
+                "from pathlib import Path\n"
+                "args = sys.argv[1:]\n"
+                "if '-e' in args:\n"
+                "    raise SystemExit(9)\n"
+                "if 'install' in args and '-U' in args:\n"
+                "    raise SystemExit(8)\n"
+                "if args[:1] == ['check']:\n"
+                "    raise SystemExit(0)\n"
+                "if 'install' in args and '--require-hashes' in args and '-r' in args:\n"
+                "    raise SystemExit(0)\n"
+                "if 'install' in args and '--no-deps' in args and '--no-build-isolation' in args:\n"
+                "    source = Path(args[-1])\n"
+                "    if source.is_dir():\n"
+                "        (source/'src/quant_platform_kit.egg-info/PKG-INFO').write_text('generated')\n"
+                "    raise SystemExit(0)\n"
+                "raise SystemExit(f'unexpected pip: {args!r}')\n"
             )
-            # Use the actual interpreter in generated scripts, bypassing this venv stub.
-            import sys
-            pip_code = pip_code.replace("#!/usr/bin/env python3", f"#!{sys.executable}")
+            venv_python_code = (
+                f"#!{sys.executable}\n"
+                "import subprocess, sys\n"
+                "from pathlib import Path\n"
+                "args = sys.argv[1:]\n"
+                "if args[:2] == ['-m', 'pip']:\n"
+                "    raise SystemExit(subprocess.call([str(Path(__file__).with_name('pip')), *args[2:]]))\n"
+                "raise SystemExit(f'unexpected venv python: {args!r}')\n"
+            )
             python_stub.write_text(
-                f"#!{sys.executable}\nfrom pathlib import Path\nimport sys\n"
-                "venv=Path(sys.argv[-1]); (venv/'bin').mkdir(parents=True,exist_ok=True)\n"
-                f"(venv/'bin/pip').write_text({pip_code!r})\n"
-                "(venv/'bin/pip').chmod(0o755)\n"
+                f"#!{sys.executable}\n"
+                "from pathlib import Path\n"
+                "import sys\n"
+                "args = sys.argv[1:]\n"
+                "if args == ['-']:\n"
+                "    code = sys.stdin.read()\n"
+                "    if 'glibc' in code and 'need 3.12' in code:\n"
+                "        raise SystemExit(0)\n"
+                "    raise SystemExit(f'unexpected python stdin: {code[:80]!r}')\n"
+                "if len(args) >= 3 and args[0] == '-m' and args[1] == 'venv':\n"
+                "    bindir = Path(args[-1]) / 'bin'\n"
+                "    bindir.mkdir(parents=True, exist_ok=True)\n"
+                f"    (bindir / 'pip').write_text({pip_code!r})\n"
+                "    (bindir / 'pip').chmod(0o755)\n"
+                f"    (bindir / 'python').write_text({venv_python_code!r})\n"
+                "    (bindir / 'python').chmod(0o755)\n"
+                "    raise SystemExit(0)\n"
+                "raise SystemExit(f'unexpected python3: {args!r}')\n",
+                encoding="utf-8",
             )
             python_stub.chmod(0o755)
             for name in ("gh", "gcloud"):
                 (bin_dir / name).write_text("#!/bin/sh\nexit 0\n")
                 (bin_dir / name).chmod(0o755)
+            setup_env = {
+                **os.environ,
+                "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                "TMPDIR": str(root),
+                "QUANT_MONITOR_ROOT": str(monitor),
+                "QUANT_PLATFORM_KIT_ROOT": str(qpk),
+                "AIAUDIT_BRIDGE_ROOT": str(aab),
+                "QUANT_PROJECTS_ROOT": str(mirrors),
+                "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_CONFIG_NOSYSTEM": "1",
+            }
             result = subprocess.run(
                 ["bash", str(scripts / "setup_vps_runtime.sh"),
                  pinned_aab_sha, str(aab)], text=True, capture_output=True,
-                env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
-                     "QUANT_MONITOR_ROOT": str(monitor), "QUANT_PLATFORM_KIT_ROOT": str(qpk),
-                     "AIAUDIT_BRIDGE_ROOT": str(aab), "QUANT_PROJECTS_ROOT": str(mirrors),
-                     "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"},
+                env=setup_env,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             # origin/main is newer, but setup preserves the reviewed AAB checkout
@@ -419,10 +472,7 @@ class SyncStrategyReposTests(unittest.TestCase):
             blocked = subprocess.run(
                 ["bash", str(scripts / "setup_vps_runtime.sh"), pinned_aab_sha, str(aab)],
                 text=True, capture_output=True,
-                env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
-                     "QUANT_MONITOR_ROOT": str(monitor), "QUANT_PLATFORM_KIT_ROOT": str(qpk),
-                     "AIAUDIT_BRIDGE_ROOT": str(aab), "QUANT_PROJECTS_ROOT": str(mirrors),
-                     "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"},
+                env=setup_env,
             )
             self.assertNotEqual(blocked.returncode, 0)
             self.assertIn("refusing dirty AIAuditBridge runtime source", blocked.stderr)
@@ -432,10 +482,7 @@ class SyncStrategyReposTests(unittest.TestCase):
             tampered = subprocess.run(
                 ["bash", str(scripts / "setup_vps_runtime.sh"), pinned_aab_sha, str(aab)],
                 text=True, capture_output=True, check=False,
-                env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
-                     "QUANT_MONITOR_ROOT": str(monitor), "QUANT_PLATFORM_KIT_ROOT": str(qpk),
-                     "AIAUDIT_BRIDGE_ROOT": str(aab), "QUANT_PROJECTS_ROOT": str(mirrors),
-                     "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"},
+                env=setup_env,
             )
             self.assertNotEqual(tampered.returncode, 0)
             self.assertIn("refusing dirty AIAuditBridge runtime source", tampered.stderr)

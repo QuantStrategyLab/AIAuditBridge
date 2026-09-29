@@ -169,4 +169,27 @@ checkout、不 stash、不删除旧状态，也不创建第二份累计备份。
 40hex、fetch/对象不可用或 checkout 后 HEAD 不匹配时直接失败，不回落 `origin/main`。
 setup 的 AAB dirty 检查包含该 pin 文件，拒绝消费未提交篡改。sync 仅固定 QPK；其余
 四策略仓仍同步 `origin/main`。metadata-only 恢复路径也 checkout 同一 pin，并保留原
-镜像目录。本批只锁 QPK 源码来源，不表示第三方 pip 依赖已全部锁定。
+镜像目录。
+
+### 第三方依赖锁定（R12 续）
+
+`ops/quant-monitor/requirements-linux-py312.lock` 只锁定 monitor 在 **CPython 3.12 /
+Linux x86_64 / glibc ≥ 2.34** 上实际需要的直接与传递依赖（含既有 QPK 构建后端
+`setuptools==84.0.0` 与 `wheel`/`pip`），并带 PyPI wheel hash。它不是整台 VPS 或全
+组织可复现证明，也不锁定四策略仓或通用 gateway 依赖。
+
+`setup_vps_runtime.sh` 在改 mirror/venv 之前：
+
+1. 要求 lock 存在于当前 `QUANT_MONITOR_ROOT`，且字节与受审 `SOURCE_SHA` 中
+   `ops/quant-monitor/requirements-linux-py312.lock` 完全一致；缺失、未跟踪或脏
+   工作区拒绝。
+2. 校验当前解释器为 3.12、OS 为 Linux、机器为 x86_64，并用数值解析确认 glibc ≥
+   2.34；不支持的环境直接说明本 lock 仅覆盖该平台，不静默 fallback。
+3. 用当前 venv 的 `python -m pip install --require-hashes --only-binary=:all: -r
+   requirements-linux-py312.lock` 安装完整 lock，不再执行无界 `pip/wheel -U` 或无
+   版本 `numpy/pandas/google-cloud-storage`。
+4. QPK 仍从临时 git archive 安装，但使用 `--no-deps --no-build-isolation`，复用已
+   锁 setuptools/wheel，不隐式下载 build deps；最后 `pip check`。pip 成功不等于业
+   务验收。
+
+生产 venv 是否已按此 lock 迁移须另做安装/读回；本说明不声称生产已切换。
