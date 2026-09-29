@@ -192,4 +192,12 @@ Linux x86_64 / glibc ≥ 2.34** 上实际需要的直接与传递依赖（含既
    锁 setuptools/wheel，不隐式下载 build deps；最后 `pip check`。pip 成功不等于业
    务验收。
 
+需要单独准备 venv 时，可显式设置 `QUANT_MONITOR_VENV` 指向一个新的绝对目录；其
+父目录必须已存在，目标不能已存在，也不能与 AAB 源码、monitor/data、现用 `.venv`、
+`QUANT_PROJECTS_ROOT`、`LIFECYCLE_LOCAL_ROOT` 或 QPK 镜像重叠。此模式只从现有 QPK
+镜像读取精确 pin 的 Git archive，不 fetch、
+checkout 或改写共享镜像；本地缺少该 commit 时会在创建 venv 前失败。未设置该变量
+时仍安装到 `$QUANT_MONITOR_ROOT/.venv`，默认流程不变。暂存不会修改 systemd 配置；
+服务是否使用该路径须由独立的配置变更明确决定。
+
 生产 venv 是否已按此 lock 迁移须另做安装/读回；本说明不声称生产已切换。

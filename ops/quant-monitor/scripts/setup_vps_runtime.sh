@@ -121,33 +121,113 @@ if [[ ! "$QPK_RUNTIME_SHA" =~ ^[0-9a-f]{40}$ ]]; then
   exit 1
 fi
 
-VENV="$ROOT/.venv"
 QPK_ROOT="${QUANT_PLATFORM_KIT_ROOT:?QuantPlatformKit not found}"
+QPK_ARCHIVE_REF=HEAD
+if [[ "${QUANT_MONITOR_VENV+x}" == x ]]; then
+  VENV_REQUESTED="$QUANT_MONITOR_VENV"
 
-qpk_created=0
-if [[ ! -d "$QPK_ROOT/.git" ]]; then
-  echo "[setup] cloning QuantPlatformKit into $QPK_ROOT" >&2
-  mkdir -p "$(dirname "$QPK_ROOT")"
-  git clone --no-checkout https://github.com/QuantStrategyLab/QuantPlatformKit.git "$QPK_ROOT"
-  qpk_created=1
-fi
+  canonical_new_directory_path() {
+    local requested="$1" parent basename canonical_parent
+    [[ "$requested" == /* && "$requested" != *$'\n'* && "$requested" != *$'\r'* ]] || return 1
+    case "/$requested/" in */../*) return 1 ;; esac
+    [[ ! -e "$requested" && ! -L "$requested" ]] || return 1
+    parent="${requested%/*}"
+    basename="${requested##*/}"
+    [[ -n "$basename" && "$basename" != "." && "$basename" != ".." && -d "$parent" ]] || return 1
+    canonical_parent="$(cd -P "$parent" && pwd -P)" || return 1
+    CANONICAL_PATH="${canonical_parent%/}/$basename"
+  }
 
-git -C "$QPK_ROOT" fetch origin "$QPK_RUNTIME_SHA" --quiet
-# Fresh --no-checkout clones report every tracked path as deleted until the first
-# checkout; only existing mirrors must refuse unknown/staged edits first.
-if [[ "$qpk_created" -eq 0 ]]; then
-  if [[ -n "$(git -C "$QPK_ROOT" status --porcelain --untracked-files=no)" ]]; then
-    echo "[setup] QPK tracked changes require mirror synchronization/review" >&2
+  canonical_existing_or_new_path() {
+    local requested="$1" existing suffix="" basename canonical_parent
+    [[ "$requested" == /* ]] || return 1
+    if [[ -d "$requested" ]]; then
+      CANONICAL_PATH="$(cd -P "$requested" && pwd -P)"
+      return
+    fi
+    existing="$requested"
+    while [[ "$existing" != "/" && "$existing" == */ ]]; do
+      existing="${existing%/}"
+    done
+    while [[ ! -e "$existing" && ! -L "$existing" ]]; do
+      basename="${existing##*/}"
+      [[ -n "$basename" ]] || return 1
+      suffix="/$basename$suffix"
+      existing="${existing%/*}"
+      [[ -n "$existing" ]] || existing="/"
+    done
+    [[ -d "$existing" ]] || return 1
+    canonical_parent="$(cd -P "$existing" && pwd -P)" || return 1
+    if [[ "$canonical_parent" == "/" ]]; then
+      CANONICAL_PATH="/${suffix#/}"
+    else
+      CANONICAL_PATH="${canonical_parent}${suffix}"
+    fi
+  }
+
+  paths_overlap() {
+    [[ "$1" == "$2" || "$1" == "$2/"* || "$2" == "$1/"* ]]
+  }
+
+  if ! canonical_new_directory_path "$VENV_REQUESTED"; then
+    echo "[setup] staging venv must be a new absolute path with an existing parent and no '..' segments" >&2
+    exit 1
+  fi
+  VENV="$CANONICAL_PATH"
+  PROTECTED_PATHS=()
+  for protected_path in \
+    "$AAB_ROOT" "$ROOT" "$ROOT/data" "$ROOT/.venv" \
+    "$QUANT_PROJECTS_ROOT" "$LIFECYCLE_LOCAL_ROOT" "$QPK_ROOT"; do
+    if ! canonical_existing_or_new_path "$protected_path"; then
+      echo "[setup] unable to resolve protected runtime path" >&2
+      exit 1
+    fi
+    PROTECTED_PATHS+=("$CANONICAL_PATH")
+  done
+  for protected_path in "${PROTECTED_PATHS[@]}"; do
+    if paths_overlap "$VENV" "$protected_path"; then
+      echo "[setup] staging venv overlaps a protected source, data, live venv, or QPK path" >&2
+      exit 1
+    fi
+  done
+
+  if [[ ! -d "$QPK_ROOT/.git" && ! -f "$QPK_ROOT/.git" ]] || \
+    ! git -C "$QPK_ROOT" cat-file -e "${QPK_RUNTIME_SHA}^{commit}" 2>/dev/null; then
+    echo "[setup] pinned QuantPlatformKit commit is unavailable in the existing mirror; staging refused without mirror changes" >&2
+    exit 1
+  fi
+  QPK_ARCHIVE_REF="$QPK_RUNTIME_SHA"
+else
+  VENV="$ROOT/.venv"
+  qpk_created=0
+  if [[ ! -d "$QPK_ROOT/.git" ]]; then
+    echo "[setup] cloning QuantPlatformKit into $QPK_ROOT" >&2
+    mkdir -p "$(dirname "$QPK_ROOT")"
+    git clone --no-checkout https://github.com/QuantStrategyLab/QuantPlatformKit.git "$QPK_ROOT"
+    qpk_created=1
+  fi
+
+  git -C "$QPK_ROOT" fetch origin "$QPK_RUNTIME_SHA" --quiet
+  # Fresh --no-checkout clones report every tracked path as deleted until the first
+  # checkout; only existing mirrors must refuse unknown/staged edits first.
+  if [[ "$qpk_created" -eq 0 ]]; then
+    if [[ -n "$(git -C "$QPK_ROOT" status --porcelain --untracked-files=no)" ]]; then
+      echo "[setup] QPK tracked changes require mirror synchronization/review" >&2
+      exit 1
+    fi
+  fi
+  git -C "$QPK_ROOT" checkout --detach --quiet "$QPK_RUNTIME_SHA"
+  ACTUAL_QPK_SHA="$(git -C "$QPK_ROOT" rev-parse HEAD)"
+  if [[ "$ACTUAL_QPK_SHA" != "$QPK_RUNTIME_SHA" ]]; then
+    echo "[setup] QuantPlatformKit checkout does not match pinned SHA" >&2
     exit 1
   fi
 fi
-git -C "$QPK_ROOT" checkout --detach --quiet "$QPK_RUNTIME_SHA"
-ACTUAL_QPK_SHA="$(git -C "$QPK_ROOT" rev-parse HEAD)"
-if [[ "$ACTUAL_QPK_SHA" != "$QPK_RUNTIME_SHA" ]]; then
-  echo "[setup] QuantPlatformKit checkout does not match pinned SHA" >&2
+
+if [[ "${QUANT_MONITOR_VENV+x}" == x ]] && ! mkdir -- "$VENV"; then
+  echo "[setup] unable to claim the staging venv path" >&2
   exit 1
 fi
-
 python3 -m venv "$VENV"
 # Locked third-party tree only; no unbounded pip/wheel upgrade and no free-floating
 # numpy/pandas/google-cloud-storage installs.
@@ -160,7 +240,7 @@ fi
 # Reuse locked setuptools/wheel; do not download build dependencies.
 build_root=$(mktemp -d "${TMPDIR:-/tmp}/quant-monitor-qpk.XXXXXX")
 trap 'rm -rf -- "$build_root"' EXIT
-git -C "$QPK_ROOT" archive HEAD | tar -x -C "$build_root"
+git -C "$QPK_ROOT" archive "$QPK_ARCHIVE_REF" | tar -x -C "$build_root"
 if ! "$VENV/bin/python" -m pip install --no-deps --no-build-isolation "$build_root"; then
   echo "[setup] QuantPlatformKit install failed" >&2
   exit 1
