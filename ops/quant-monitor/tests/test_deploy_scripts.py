@@ -127,11 +127,9 @@ class DeployScriptTests(unittest.TestCase):
         self.assertIn('[[ "$AAB_ROOT" != "$EXPECTED_AAB_ROOT" ]]', script)
         self.assertIn('rev-parse HEAD', aab_sync)
         self.assertIn('"$ACTUAL_AAB_SHA" != "$SOURCE_SHA"', aab_sync)
-        self.assertIn(
-            'status --porcelain --untracked-files=all -- client scripts service '
-            'ops/quant-monitor/scripts ops/quant-monitor/systemd ops/quant-monitor/qpk-runtime.sha',
-            aab_sync,
-        )
+        self.assertIn('status --porcelain --untracked-files=all -- "${DIRTY_PATHSPEC[@]}"', aab_sync)
+        self.assertIn("ops/quant-monitor/qpk-runtime.sha", aab_sync)
+        self.assertIn("ops/quant-monitor/requirements-linux-py312.lock", aab_sync)
         self.assertIn('QPK_RUNTIME_SHA="$(<"$ROOT/qpk-runtime.sha")"', script)
         self.assertIn("qpk_created=0", script)
         self.assertIn("qpk_created=1", script)
@@ -139,6 +137,22 @@ class DeployScriptTests(unittest.TestCase):
         self.assertIn('fetch origin "$QPK_RUNTIME_SHA"', script)
         self.assertIn('checkout --detach --quiet "$QPK_RUNTIME_SHA"', script)
         self.assertIn('"$ACTUAL_QPK_SHA" != "$QPK_RUNTIME_SHA"', script)
+        self.assertIn('requirements-linux-py312.lock', script)
+        self.assertIn("--require-hashes", script)
+        self.assertIn("--only-binary=:all:", script)
+        self.assertIn("--no-deps", script)
+        self.assertIn("--no-build-isolation", script)
+        self.assertIn("pip check", script)
+        self.assertNotIn("install -U pip wheel", script)
+        self.assertNotIn("install numpy pandas google-cloud-storage", script)
+        self.assertLess(
+            script.index("requirements-linux-py312.lock only covers"),
+            script.index('python3 -m venv "$VENV"'),
+        )
+        self.assertLess(
+            script.index("requirements-linux-py312.lock only covers"),
+            script.index('cloning QuantPlatformKit'),
+        )
         self.assertLess(
             script.index('[[ "$qpk_created" -eq 0 ]]'),
             script.index('checkout --detach --quiet "$QPK_RUNTIME_SHA"'),
@@ -338,13 +352,18 @@ class DeployScriptTests(unittest.TestCase):
             (monitor / "scripts").mkdir(parents=True)
             shutil.copyfile(ROOT / "scripts" / "common_env.sh", monitor / "scripts" / "common_env.sh")
             (monitor / "qpk-runtime.sha").write_text(pin + "\n", encoding="utf-8")
+            shutil.copyfile(
+                ROOT / "requirements-linux-py312.lock",
+                monitor / "requirements-linux-py312.lock",
+            )
             self._git(
                 aab,
                 "add",
                 "ops/quant-monitor/qpk-runtime.sha",
+                "ops/quant-monitor/requirements-linux-py312.lock",
                 "ops/quant-monitor/scripts/common_env.sh",
             )
-            self._git(aab, "commit", "-m", "pin qpk")
+            self._git(aab, "commit", "-m", "pin qpk and lock")
             aab_sha = self._git(aab, "rev-parse", "HEAD")
 
             qpk_parent = root / "mirrors"
@@ -368,27 +387,60 @@ class DeployScriptTests(unittest.TestCase):
                 encoding="utf-8",
             )
             git_stub.chmod(0o755)
+            pip_log = root / "pip.log"
             pip_code = (
                 f"#!{sys.executable}\n"
                 "import sys\n"
                 "from pathlib import Path\n"
-                "if '-e' in sys.argv: raise SystemExit(9)\n"
-                "source=Path(sys.argv[-1])\n"
-                "if source.is_dir():\n"
-                "    (source / 'installed-from-archive').write_text('ok')\n"
+                f"log = Path({str(pip_log)!r})\n"
+                "prev = log.read_text() if log.exists() else ''\n"
+                "log.write_text(prev + ' '.join(sys.argv[1:]) + '\\n')\n"
+                "args = sys.argv[1:]\n"
+                "if '-e' in args:\n"
+                "    raise SystemExit(9)\n"
+                "if 'install' in args and '-U' in args:\n"
+                "    raise SystemExit(8)\n"
+                "if args[:1] == ['check']:\n"
+                "    raise SystemExit(0)\n"
+                "if 'install' in args and '--require-hashes' in args and '-r' in args:\n"
+                "    raise SystemExit(0)\n"
+                "if 'install' in args and '--no-deps' in args and '--no-build-isolation' in args:\n"
+                "    source = Path(args[-1])\n"
+                "    if source.is_dir():\n"
+                "        (source / 'installed-from-archive').write_text('ok')\n"
+                "    raise SystemExit(0)\n"
+                "raise SystemExit(f'unexpected pip invocation: {args!r}')\n"
+            )
+            venv_python_code = (
+                f"#!{sys.executable}\n"
+                "import subprocess\n"
+                "import sys\n"
+                "from pathlib import Path\n"
+                "args = sys.argv[1:]\n"
+                "if args[:2] == ['-m', 'pip']:\n"
+                "    raise SystemExit(subprocess.call([str(Path(__file__).with_name('pip')), *args[2:]]))\n"
+                "raise SystemExit(f'unexpected venv python: {args!r}')\n"
             )
             python_stub = bin_dir / "python3"
             python_stub.write_text(
                 f"#!{sys.executable}\n"
                 "from pathlib import Path\n"
                 "import sys\n"
-                "if len(sys.argv) >= 3 and sys.argv[1] == '-m' and sys.argv[2] == 'venv':\n"
-                "    venv=Path(sys.argv[-1])\n"
-                "    (venv / 'bin').mkdir(parents=True, exist_ok=True)\n"
-                f"    (venv / 'bin' / 'pip').write_text({pip_code!r})\n"
-                "    (venv / 'bin' / 'pip').chmod(0o755)\n"
+                "args = sys.argv[1:]\n"
+                "if args == ['-']:\n"
+                "    code = sys.stdin.read()\n"
+                "    if 'glibc' in code and 'need 3.12' in code:\n"
+                "        raise SystemExit(0)\n"
+                "    raise SystemExit(f'unexpected python stdin: {code[:80]!r}')\n"
+                "if len(args) >= 3 and args[0] == '-m' and args[1] == 'venv':\n"
+                "    bindir = Path(args[-1]) / 'bin'\n"
+                "    bindir.mkdir(parents=True, exist_ok=True)\n"
+                f"    (bindir / 'pip').write_text({pip_code!r})\n"
+                "    (bindir / 'pip').chmod(0o755)\n"
+                f"    (bindir / 'python').write_text({venv_python_code!r})\n"
+                "    (bindir / 'python').chmod(0o755)\n"
                 "    raise SystemExit(0)\n"
-                "raise SystemExit(f'unexpected python3 invocation: {sys.argv!r}')\n",
+                "raise SystemExit(f'unexpected python3 invocation: {args!r}')\n",
                 encoding="utf-8",
             )
             python_stub.chmod(0o755)
@@ -400,6 +452,7 @@ class DeployScriptTests(unittest.TestCase):
             env = {
                 **os.environ,
                 "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                "TMPDIR": str(root),
                 "QUANT_MONITOR_ROOT": str(monitor),
                 "QUANT_PLATFORM_KIT_ROOT": str(qpk),
                 "AIAUDIT_BRIDGE_ROOT": str(aab),
@@ -420,6 +473,13 @@ class DeployScriptTests(unittest.TestCase):
             self.assertEqual((qpk / "module.py").read_text(encoding="utf-8"), "VERSION = 1\n")
             self.assertIn(f"sha={pin}", fresh.stdout)
             self.assertNotIn("tracked changes require mirror synchronization", fresh.stderr)
+            pip_calls = pip_log.read_text(encoding="utf-8")
+            self.assertIn("--require-hashes", pip_calls)
+            self.assertIn("--only-binary=:all:", pip_calls)
+            self.assertIn("--no-deps", pip_calls)
+            self.assertIn("--no-build-isolation", pip_calls)
+            self.assertIn("check", pip_calls)
+            self.assertNotIn(" -U ", f" {pip_calls} ")
 
             (qpk / "module.py").write_text("unknown local edit\n", encoding="utf-8")
             blocked = subprocess.run(
@@ -433,6 +493,250 @@ class DeployScriptTests(unittest.TestCase):
             self.assertIn("QPK tracked changes require mirror synchronization/review", blocked.stderr)
             self.assertEqual((qpk / "module.py").read_text(encoding="utf-8"), "unknown local edit\n")
             self.assertEqual(self._git(qpk, "rev-parse", "HEAD"), pin)
+
+            (qpk / "module.py").write_text("VERSION = 1\n", encoding="utf-8")
+            qpk_before = self._git(qpk, "rev-parse", "HEAD")
+            (monitor / "requirements-linux-py312.lock").unlink()
+            missing_lock = subprocess.run(
+                ["bash", str(ROOT / "scripts" / "setup_vps_runtime.sh"), aab_sha, str(aab)],
+                text=True,
+                capture_output=True,
+                check=False,
+                env=env,
+            )
+            self.assertNotEqual(missing_lock.returncode, 0)
+            self.assertIn("missing requirements-linux-py312.lock", missing_lock.stderr)
+            self.assertEqual(self._git(qpk, "rev-parse", "HEAD"), qpk_before)
+
+            shutil.copyfile(
+                ROOT / "requirements-linux-py312.lock",
+                monitor / "requirements-linux-py312.lock",
+            )
+            (monitor / "requirements-linux-py312.lock").write_text(
+                (monitor / "requirements-linux-py312.lock").read_text(encoding="utf-8")
+                + "# tampered\n",
+                encoding="utf-8",
+            )
+            tampered_lock = subprocess.run(
+                ["bash", str(ROOT / "scripts" / "setup_vps_runtime.sh"), aab_sha, str(aab)],
+                text=True,
+                capture_output=True,
+                check=False,
+                env=env,
+            )
+            self.assertNotEqual(tampered_lock.returncode, 0)
+            self.assertIn("refusing dirty AIAuditBridge runtime source", tampered_lock.stderr)
+
+    def test_setup_rejects_unsupported_platform_before_mirror_or_venv_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            upstream = root / "upstream"
+            upstream.mkdir()
+            self._git(upstream, "init", "--initial-branch=main")
+            self._git(upstream, "config", "user.name", "Test")
+            self._git(upstream, "config", "user.email", "test@example.invalid")
+            (upstream / "module.py").write_text("VERSION = 1\n", encoding="utf-8")
+            self._git(upstream, "add", "module.py")
+            self._git(upstream, "commit", "-m", "base")
+            pin = self._git(upstream, "rev-parse", "HEAD")
+
+            aab = root / "AIAuditBridge"
+            self._git(root, "clone", str(upstream), str(aab))
+            self._git(aab, "config", "user.name", "Test")
+            self._git(aab, "config", "user.email", "test@example.invalid")
+            monitor = aab / "ops" / "quant-monitor"
+            (monitor / "scripts").mkdir(parents=True)
+            shutil.copyfile(ROOT / "scripts" / "common_env.sh", monitor / "scripts" / "common_env.sh")
+            (monitor / "qpk-runtime.sha").write_text(pin + "\n", encoding="utf-8")
+            shutil.copyfile(
+                ROOT / "requirements-linux-py312.lock",
+                monitor / "requirements-linux-py312.lock",
+            )
+            self._git(
+                aab,
+                "add",
+                "ops/quant-monitor/qpk-runtime.sha",
+                "ops/quant-monitor/requirements-linux-py312.lock",
+                "ops/quant-monitor/scripts/common_env.sh",
+            )
+            self._git(aab, "commit", "-m", "pin")
+            aab_sha = self._git(aab, "rev-parse", "HEAD")
+
+            qpk = root / "mirrors" / "QuantPlatformKit"
+            qpk.parent.mkdir()
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            python_stub = bin_dir / "python3"
+            python_stub.write_text(
+                f"#!{sys.executable}\n"
+                "import sys\n"
+                "args = sys.argv[1:]\n"
+                "if args == ['-']:\n"
+                "    code = sys.stdin.read()\n"
+                "    if 'glibc' in code and 'need 3.12' in code:\n"
+                "        print('[setup] unsupported OS Darwin; need Linux', file=sys.stderr)\n"
+                "        print(\n"
+                "            '[setup] requirements-linux-py312.lock only covers CPython 3.12 on '\n"
+                "            'Linux x86_64 with glibc >= 2.34; refusing unsupported environment '\n"
+                "            '(no silent fallback)',\n"
+                "            file=sys.stderr,\n"
+                "        )\n"
+                "        raise SystemExit(1)\n"
+                "    raise SystemExit(f'unexpected python stdin: {code[:80]!r}')\n"
+                "raise SystemExit(f'unexpected python3 invocation: {args!r}')\n",
+                encoding="utf-8",
+            )
+            python_stub.chmod(0o755)
+            for name in ("gh", "gcloud"):
+                stub = bin_dir / name
+                stub.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+                stub.chmod(0o755)
+
+            env = {
+                **os.environ,
+                "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                "TMPDIR": str(root),
+                "QUANT_MONITOR_ROOT": str(monitor),
+                "QUANT_PLATFORM_KIT_ROOT": str(qpk),
+                "AIAUDIT_BRIDGE_ROOT": str(aab),
+                "QUANT_PROJECTS_ROOT": str(qpk.parent),
+                "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_CONFIG_NOSYSTEM": "1",
+            }
+            result = subprocess.run(
+                ["bash", str(ROOT / "scripts" / "setup_vps_runtime.sh"), aab_sha, str(aab)],
+                text=True,
+                capture_output=True,
+                check=False,
+                env=env,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("only covers", result.stderr)
+            self.assertFalse(qpk.exists())
+            self.assertFalse((monitor / ".venv").exists())
+
+    def test_setup_reports_failure_when_locked_pip_install_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            upstream = root / "upstream"
+            upstream.mkdir()
+            self._git(upstream, "init", "--initial-branch=main")
+            self._git(upstream, "config", "user.name", "Test")
+            self._git(upstream, "config", "user.email", "test@example.invalid")
+            (upstream / "module.py").write_text("VERSION = 1\n", encoding="utf-8")
+            self._git(upstream, "add", "module.py")
+            self._git(upstream, "commit", "-m", "base")
+            pin = self._git(upstream, "rev-parse", "HEAD")
+            bare = root / "QuantPlatformKit.git"
+            self._git(root, "clone", "--bare", str(upstream), str(bare))
+
+            aab = root / "AIAuditBridge"
+            self._git(root, "clone", str(upstream), str(aab))
+            self._git(aab, "config", "user.name", "Test")
+            self._git(aab, "config", "user.email", "test@example.invalid")
+            monitor = aab / "ops" / "quant-monitor"
+            (monitor / "scripts").mkdir(parents=True)
+            shutil.copyfile(ROOT / "scripts" / "common_env.sh", monitor / "scripts" / "common_env.sh")
+            (monitor / "qpk-runtime.sha").write_text(pin + "\n", encoding="utf-8")
+            shutil.copyfile(
+                ROOT / "requirements-linux-py312.lock",
+                monitor / "requirements-linux-py312.lock",
+            )
+            self._git(
+                aab,
+                "add",
+                "ops/quant-monitor/qpk-runtime.sha",
+                "ops/quant-monitor/requirements-linux-py312.lock",
+                "ops/quant-monitor/scripts/common_env.sh",
+            )
+            self._git(aab, "commit", "-m", "pin")
+            aab_sha = self._git(aab, "rev-parse", "HEAD")
+
+            qpk = root / "mirrors" / "QuantPlatformKit"
+            qpk.parent.mkdir()
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            real_git = shutil.which("git")
+            self.assertIsNotNone(real_git)
+            git_stub = bin_dir / "git"
+            git_stub.write_text(
+                f"#!{sys.executable}\n"
+                "import os, sys\n"
+                f"real = {real_git!r}\n"
+                f"bare = {bare.as_uri()!r}\n"
+                "args = sys.argv[1:]\n"
+                "for i, arg in enumerate(args):\n"
+                "    if 'QuantStrategyLab/QuantPlatformKit.git' in arg:\n"
+                "        args[i] = bare\n"
+                "os.execv(real, ['git', *args])\n",
+                encoding="utf-8",
+            )
+            git_stub.chmod(0o755)
+            pip_code = (
+                f"#!{sys.executable}\n"
+                "import sys\n"
+                "args = sys.argv[1:]\n"
+                "if 'install' in args and '--require-hashes' in args:\n"
+                "    raise SystemExit(17)\n"
+                "raise SystemExit(0)\n"
+            )
+            venv_python_code = (
+                f"#!{sys.executable}\n"
+                "import subprocess, sys\n"
+                "from pathlib import Path\n"
+                "args = sys.argv[1:]\n"
+                "if args[:2] == ['-m', 'pip']:\n"
+                "    raise SystemExit(subprocess.call([str(Path(__file__).with_name('pip')), *args[2:]]))\n"
+                "raise SystemExit(0)\n"
+            )
+            python_stub = bin_dir / "python3"
+            python_stub.write_text(
+                f"#!{sys.executable}\n"
+                "from pathlib import Path\n"
+                "import sys\n"
+                "args = sys.argv[1:]\n"
+                "if args == ['-']:\n"
+                "    code = sys.stdin.read()\n"
+                "    if 'glibc' in code and 'need 3.12' in code:\n"
+                "        raise SystemExit(0)\n"
+                "    raise SystemExit(f'unexpected python stdin: {code[:80]!r}')\n"
+                "if len(args) >= 3 and args[0] == '-m' and args[1] == 'venv':\n"
+                "    bindir = Path(args[-1]) / 'bin'\n"
+                "    bindir.mkdir(parents=True, exist_ok=True)\n"
+                f"    (bindir / 'pip').write_text({pip_code!r})\n"
+                "    (bindir / 'pip').chmod(0o755)\n"
+                f"    (bindir / 'python').write_text({venv_python_code!r})\n"
+                "    (bindir / 'python').chmod(0o755)\n"
+                "    raise SystemExit(0)\n"
+                "raise SystemExit(f'unexpected python3 invocation: {args!r}')\n",
+                encoding="utf-8",
+            )
+            python_stub.chmod(0o755)
+            for name in ("gh", "gcloud"):
+                stub = bin_dir / name
+                stub.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+                stub.chmod(0o755)
+
+            result = subprocess.run(
+                ["bash", str(ROOT / "scripts" / "setup_vps_runtime.sh"), aab_sha, str(aab)],
+                text=True,
+                capture_output=True,
+                check=False,
+                env={
+                    **os.environ,
+                    "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                    "TMPDIR": str(root),
+                    "QUANT_MONITOR_ROOT": str(monitor),
+                    "QUANT_PLATFORM_KIT_ROOT": str(qpk),
+                    "AIAUDIT_BRIDGE_ROOT": str(aab),
+                    "QUANT_PROJECTS_ROOT": str(qpk.parent),
+                    "GIT_CONFIG_GLOBAL": os.devnull,
+                    "GIT_CONFIG_NOSYSTEM": "1",
+                },
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("locked dependency install failed", result.stderr)
+            self.assertNotIn("[setup] ok", result.stdout)
 
 
 if __name__ == "__main__":
