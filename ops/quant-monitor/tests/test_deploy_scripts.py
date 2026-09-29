@@ -371,6 +371,12 @@ class DeployScriptTests(unittest.TestCase):
             qpk_parent = root / "mirrors"
             qpk_parent.mkdir()
             qpk = qpk_parent / "QuantPlatformKit"
+            lifecycle_root = root / "lifecycle-store"
+            lifecycle_root.mkdir()
+            qpk_alias = root / "mirror-root-alias"
+            qpk_alias.symlink_to(qpk_parent, target_is_directory=True)
+            lifecycle_alias = root / "lifecycle-root-alias"
+            lifecycle_alias.symlink_to(lifecycle_root, target_is_directory=True)
             bin_dir = root / "bin"
             bin_dir.mkdir()
             real_git = shutil.which("git")
@@ -392,12 +398,15 @@ class DeployScriptTests(unittest.TestCase):
             pip_log = root / "pip.log"
             pip_code = (
                 f"#!{sys.executable}\n"
+                "import os\n"
                 "import sys\n"
                 "from pathlib import Path\n"
                 f"log = Path({str(pip_log)!r})\n"
                 "prev = log.read_text() if log.exists() else ''\n"
                 "log.write_text(prev + ' '.join(sys.argv[1:]) + '\\n')\n"
                 "args = sys.argv[1:]\n"
+                "if os.environ.get('SETUP_FAIL_PIP') == '1' and 'install' in args:\n"
+                "    raise SystemExit(17)\n"
                 "if '-e' in args:\n"
                 "    raise SystemExit(9)\n"
                 "if 'install' in args and '-U' in args:\n"
@@ -466,9 +475,11 @@ class DeployScriptTests(unittest.TestCase):
                 "QUANT_PLATFORM_KIT_ROOT": str(qpk),
                 "AIAUDIT_BRIDGE_ROOT": str(aab),
                 "QUANT_PROJECTS_ROOT": str(qpk_parent),
+                "LIFECYCLE_LOCAL_ROOT": str(lifecycle_root),
                 "GIT_CONFIG_GLOBAL": os.devnull,
                 "GIT_CONFIG_NOSYSTEM": "1",
             }
+            env.pop("QUANT_MONITOR_VENV", None)
             self.assertFalse(qpk.exists())
             fresh = subprocess.run(
                 ["bash", str(ROOT / "scripts" / "setup_vps_runtime.sh"), aab_sha, str(aab)],
@@ -489,6 +500,93 @@ class DeployScriptTests(unittest.TestCase):
             self.assertIn("--no-build-isolation", pip_calls)
             self.assertIn("check", pip_calls)
             self.assertNotIn(" -U ", f" {pip_calls} ")
+
+            live_venv_marker = monitor / ".venv" / "keep-existing-env.txt"
+            live_venv_marker.write_text("preserve\n", encoding="utf-8")
+            stage_parent = root / "isolated-stage"
+            stage_parent.mkdir()
+            staged_venv = stage_parent / ".venv"
+            staged_qpk = Path(f"{staged_venv}.qpk")
+            qpk_status_before_stage = self._git(qpk, "status", "--porcelain", "--untracked-files=all")
+            staged = subprocess.run(
+                ["bash", str(ROOT / "scripts" / "setup_vps_runtime.sh"), aab_sha, str(aab)],
+                text=True,
+                capture_output=True,
+                check=False,
+                env={**env, "QUANT_MONITOR_VENV": str(staged_venv)},
+            )
+            self.assertEqual(staged.returncode, 0, staged.stderr)
+            self.assertTrue((staged_venv / "bin" / "python").is_file())
+            self.assertFalse(staged_qpk.exists())
+            self.assertEqual(self._git(qpk, "rev-parse", "HEAD"), pin)
+            self.assertEqual(
+                self._git(qpk, "status", "--porcelain", "--untracked-files=all"),
+                qpk_status_before_stage,
+            )
+            self.assertEqual((qpk / "module.py").read_text(encoding="utf-8"), "VERSION = 1\n")
+            self.assertEqual(live_venv_marker.read_text(encoding="utf-8"), "preserve\n")
+
+            alias_parent = root / "live-venv-alias"
+            alias_parent.symlink_to(monitor / ".venv", target_is_directory=True)
+            invalid_stages = (
+                monitor / ".venv",
+                aab / "new-stage",
+                alias_parent / "staged",
+                qpk_parent / "new-stage",
+                lifecycle_root / "new-stage",
+                qpk_alias / "new-stage",
+                lifecycle_alias / "new-stage",
+                root / "missing-parent" / ".venv",
+                stage_parent / ".." / "escaped-stage",
+            )
+            for invalid_stage in invalid_stages:
+                refused = subprocess.run(
+                    ["bash", str(ROOT / "scripts" / "setup_vps_runtime.sh"), aab_sha, str(aab)],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    env={**env, "QUANT_MONITOR_VENV": str(invalid_stage)},
+                )
+                self.assertNotEqual(refused.returncode, 0, str(invalid_stage))
+                self.assertEqual(self._git(qpk, "rev-parse", "HEAD"), pin)
+                self.assertEqual((qpk / "module.py").read_text(encoding="utf-8"), "VERSION = 1\n")
+                self.assertEqual(live_venv_marker.read_text(encoding="utf-8"), "preserve\n")
+
+            relative_protected_root = subprocess.run(
+                ["bash", str(ROOT / "scripts" / "setup_vps_runtime.sh"), aab_sha, str(aab)],
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=5,
+                env={
+                    **env,
+                    "QUANT_MONITOR_VENV": str(stage_parent / "relative-root-stage"),
+                    "LIFECYCLE_LOCAL_ROOT": "missing-lifecycle-root",
+                },
+            )
+            self.assertNotEqual(relative_protected_root.returncode, 0)
+            self.assertIn("unable to resolve protected runtime path", relative_protected_root.stderr)
+            self.assertFalse((stage_parent / "relative-root-stage").exists())
+
+            failed_stage = root / "failed-stage" / ".venv"
+            failed_stage.parent.mkdir()
+            failed = subprocess.run(
+                ["bash", str(ROOT / "scripts" / "setup_vps_runtime.sh"), aab_sha, str(aab)],
+                text=True,
+                capture_output=True,
+                check=False,
+                env={
+                    **env,
+                    "QUANT_MONITOR_VENV": str(failed_stage),
+                    "SETUP_FAIL_PIP": "1",
+                },
+            )
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertIn("locked dependency install failed", failed.stderr)
+            self.assertTrue(live_venv_marker.is_file())
+            self.assertEqual(live_venv_marker.read_text(encoding="utf-8"), "preserve\n")
+            self.assertEqual(self._git(qpk, "rev-parse", "HEAD"), pin)
+            self.assertEqual((qpk / "module.py").read_text(encoding="utf-8"), "VERSION = 1\n")
 
             (qpk / "module.py").write_text("unknown local edit\n", encoding="utf-8")
             blocked = subprocess.run(
