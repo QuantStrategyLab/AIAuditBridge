@@ -192,11 +192,11 @@ AIAuditBridge 是 QuantStrategyLab 的 AI 审计控制面，负责：
 
 #### 3.3.1 单一 PR reviewer 边界
 
-若启用 GitHub Codex App，其 review 仅是非阻塞的建议性证据。AIAuditBridge 只保留月度审计和低风险修复职责，不维护 review verdict、finding 历史、重试或仲裁状态。
+普通工程 PR 的正式 AI reviewer 已获批准改为现有云端 Codex service。实现采用独立、默认关闭的 `engineering_pr_review.yml`，仅允许 AIAuditBridge 自身 main 上的手动 source-only 审查；它不发布 AI check/comment、不改标签、不合并或部署。authenticated 持久化 review 可作为正式审查证据。当前producer和gateway配置仍未部署，也未完成真实 producer run；GitHub Codex App 不再是该用途的指定 reviewer。
 
 合并仍必须同时满足源仓确定性 CI、未解决会话保护和 branch protection。任何自动化都不得用 label、admin 或自建 AI check 绕过这些控制。
 
-工程风险等级（包括 high、critical 和 unknown）只阻止自动修复/合并，并要求补齐路径、验证与恢复证据、完成独立 AI 审查；它本身不创建人工投资决策请求。只有控制策略明确升级或请求 manual 模式才进入人工决策状态。资金、账户、凭据、权限和 MFA 的既有授权门槛保持独立。
+工程风险等级（包括 high、critical 和 unknown）只阻止自动修复/合并，并要求补齐路径、验证与恢复证据、完成独立 AI 审查；source-only review 不得清除该阻塞，也不把源码回退办法描述成运行恢复。它本身不创建人工投资决策请求。只有控制策略明确升级或请求 manual 模式才进入人工决策状态。资金、账户、凭据、权限和 MFA 的既有授权门槛保持独立。
 
 ### P1：强烈建议补的缺口
 

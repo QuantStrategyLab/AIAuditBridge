@@ -11,7 +11,7 @@ ALLOWED_REPOSITORIES="${CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES:-QuantStrategyL
 # Direct review and strategy workflow identities are pinned to protected main because GitHub emits workflow_ref with the dispatch branch.
 # Delegated reusable code is constrained separately by the exact job_workflow_ref SHA below.
 # The ref allowlist retains PR merge refs because GitHub can preserve the incoming PR ref for reusable calls; _verify_github_oidc requires both allowlists.
-ALLOWED_WORKFLOW_REFS="${CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS:-QuantStrategyLab/AIAuditBridge/.github/workflows/codex_audit.yml@refs/heads/main,QuantStrategyLab/AIAuditBridge/.github/workflows/research_input_readback.yml@refs/heads/main,QuantStrategyLab/AIAuditBridge/.github/workflows/strategy_optimization_watcher.yml@refs/heads/main,QuantStrategyLab/AIAuditBridge/.github/workflows/portfolio_research_proposal_diagnosis.yml@refs/heads/main,QuantStrategyLab/AIAuditBridge/.github/workflows/dependency_audit.yml@refs/heads/main,QuantStrategyLab/AIAuditBridge/.github/workflows/global_etf_research_codegen.yml@refs/heads/main,QuantStrategyLab/CnEquityStrategies/.github/workflows/drift-check.yml@refs/heads/main,QuantStrategyLab/HkEquityStrategies/.github/workflows/drift-check.yml@refs/heads/main,QuantStrategyLab/UsEquityStrategies/.github/workflows/drift-check.yml@refs/heads/main,QuantStrategyLab/CryptoStrategies/.github/workflows/drift-check.yml@refs/heads/main}"
+ALLOWED_WORKFLOW_REFS="${CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS:-QuantStrategyLab/AIAuditBridge/.github/workflows/codex_audit.yml@refs/heads/main,QuantStrategyLab/AIAuditBridge/.github/workflows/engineering_pr_review.yml@refs/heads/main,QuantStrategyLab/AIAuditBridge/.github/workflows/research_input_readback.yml@refs/heads/main,QuantStrategyLab/AIAuditBridge/.github/workflows/strategy_optimization_watcher.yml@refs/heads/main,QuantStrategyLab/AIAuditBridge/.github/workflows/portfolio_research_proposal_diagnosis.yml@refs/heads/main,QuantStrategyLab/AIAuditBridge/.github/workflows/dependency_audit.yml@refs/heads/main,QuantStrategyLab/AIAuditBridge/.github/workflows/global_etf_research_codegen.yml@refs/heads/main,QuantStrategyLab/CnEquityStrategies/.github/workflows/drift-check.yml@refs/heads/main,QuantStrategyLab/HkEquityStrategies/.github/workflows/drift-check.yml@refs/heads/main,QuantStrategyLab/UsEquityStrategies/.github/workflows/drift-check.yml@refs/heads/main,QuantStrategyLab/CryptoStrategies/.github/workflows/drift-check.yml@refs/heads/main}"
 ALLOWED_REFS="${CODEX_AUDIT_SERVICE_ALLOWED_REFS:-refs/heads/main}"
 ALLOWED_REPOSITORY_VISIBILITIES="${CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORY_VISIBILITIES:-public}"
 # Exact canonical audit job identity. Single source of truth for delegated drift code follows.
@@ -29,10 +29,23 @@ PROVIDER_ENV_FILE="${CODEX_AUDIT_SERVICE_PROVIDER_ENV_FILE:-/etc/codex-audit-bri
 EXECUTION_POLICY_FILE="${CODEX_AUDIT_SERVICE_EXECUTION_POLICY_PATH:-/etc/codex-audit-bridge-policy/execution_policy.json}"
 AUDIT_MODEL="${CODEX_AUDIT_SERVICE_MODEL:-}"
 AUDIT_REASONING_EFFORT="${CODEX_AUDIT_SERVICE_REASONING_EFFORT:-}"
+ENGINEERING_REVIEW_ENABLED="${CODEX_AUDIT_SERVICE_ENGINEERING_REVIEW_ENABLED:-false}"
+ENGINEERING_REVIEW_WORKFLOW_SHA="${CODEX_AUDIT_SERVICE_ENGINEERING_REVIEW_WORKFLOW_SHA:-}"
 CODEX_ACCOUNT_USAGE="${CODEX_AUDIT_SERVICE_CODEX_ACCOUNT_USAGE:-1}"
 OPENAI_USAGE_WINDOW_DAYS="${CODEX_AUDIT_SERVICE_OPENAI_USAGE_WINDOW_DAYS:-7}"
 ANTHROPIC_USAGE_WINDOW_DAYS="${CODEX_AUDIT_SERVICE_ANTHROPIC_USAGE_WINDOW_DAYS:-7}"
 NGINX_CONFIG="${CODEX_AUDIT_SERVICE_NGINX_CONFIG:-}"
+
+ENGINEERING_REVIEW_ENABLED="$(printf '%s' "$ENGINEERING_REVIEW_ENABLED" | tr '[:upper:]' '[:lower:]')"
+case "$ENGINEERING_REVIEW_ENABLED" in
+  true|1|yes|on) ENGINEERING_REVIEW_ENABLED=true ;;
+  false|0|no|off|"") ENGINEERING_REVIEW_ENABLED=false ;;
+  *) echo "CODEX_AUDIT_SERVICE_ENGINEERING_REVIEW_ENABLED must be boolean" >&2; exit 1 ;;
+esac
+if [ "$ENGINEERING_REVIEW_ENABLED" = true ] && ! [[ "$ENGINEERING_REVIEW_WORKFLOW_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "engineering review requires an exact CODEX_AUDIT_SERVICE_ENGINEERING_REVIEW_WORKFLOW_SHA" >&2
+  exit 1
+fi
 
 require_sudo() {
   if ! sudo -n true; then
@@ -400,6 +413,11 @@ Environment=CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORY_VISIBILITIES=${ALLOWED_REPOSI
 Environment=CODEX_AUDIT_SERVICE_ALLOWED_JOB_WORKFLOW_REFS=${ALLOWED_JOB_WORKFLOW_REFS}
 Environment=CODEX_AUDIT_SERVICE_ALLOWED_DIRECT_REPOSITORIES=${ALLOWED_DIRECT_REPOSITORIES}
 Environment=CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES=${ALLOWED_SOURCE_REPOSITORIES}
+Environment=CODEX_AUDIT_SERVICE_ENGINEERING_REVIEW_ENABLED=${ENGINEERING_REVIEW_ENABLED}
+Environment=CODEX_AUDIT_SERVICE_ENGINEERING_REVIEW_REPOSITORY=QuantStrategyLab/AIAuditBridge
+Environment=CODEX_AUDIT_SERVICE_ENGINEERING_REVIEW_REF=refs/heads/main
+Environment=CODEX_AUDIT_SERVICE_ENGINEERING_REVIEW_WORKFLOW_REF=QuantStrategyLab/AIAuditBridge/.github/workflows/engineering_pr_review.yml@refs/heads/main
+Environment=CODEX_AUDIT_SERVICE_ENGINEERING_REVIEW_WORKFLOW_SHA=${ENGINEERING_REVIEW_WORKFLOW_SHA}
 Environment=CODEX_AUDIT_SERVICE_JOB_DIR=${JOB_DIR}
 Environment=CODEX_AUDIT_SERVICE_QUOTA_STORE=${JOB_DIR}/quota.json
 Environment=CODEX_AUDIT_SERVICE_EXECUTION_POLICY_PATH=${EXECUTION_POLICY_FILE}
@@ -499,6 +517,11 @@ Environment="CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORY_VISIBILITIES=${ALLOWED_REPOS
 Environment="CODEX_AUDIT_SERVICE_ALLOWED_JOB_WORKFLOW_REFS=${ALLOWED_JOB_WORKFLOW_REFS}"
 Environment="CODEX_AUDIT_SERVICE_ALLOWED_DIRECT_REPOSITORIES=${ALLOWED_DIRECT_REPOSITORIES}"
 Environment="CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES=${ALLOWED_SOURCE_REPOSITORIES}"
+Environment="CODEX_AUDIT_SERVICE_ENGINEERING_REVIEW_ENABLED=${ENGINEERING_REVIEW_ENABLED}"
+Environment="CODEX_AUDIT_SERVICE_ENGINEERING_REVIEW_REPOSITORY=QuantStrategyLab/AIAuditBridge"
+Environment="CODEX_AUDIT_SERVICE_ENGINEERING_REVIEW_REF=refs/heads/main"
+Environment="CODEX_AUDIT_SERVICE_ENGINEERING_REVIEW_WORKFLOW_REF=QuantStrategyLab/AIAuditBridge/.github/workflows/engineering_pr_review.yml@refs/heads/main"
+Environment="CODEX_AUDIT_SERVICE_ENGINEERING_REVIEW_WORKFLOW_SHA=${ENGINEERING_REVIEW_WORKFLOW_SHA}"
 Environment="CODEX_AUDIT_SERVICE_EXECUTION_POLICY_PATH=${EXECUTION_POLICY_FILE}"
 EOF_DROPIN
     if [ -n "$AUDIT_MODEL" ]; then

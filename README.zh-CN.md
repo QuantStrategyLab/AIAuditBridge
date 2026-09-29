@@ -37,9 +37,11 @@ AIAuditBridge 是 QuantStrategyLab 组织内的 AI 审计调用边界。各 sour
 
 Codex 执行现在只走 service backend：workflow 从 GitHub-hosted runner 调用 QuantStrategyLab 自有的 HTTPS/443 Codex audit service。service 只返回 review 文本或结构化 patch 建议；clone、路径校验、patch apply、commit、push、PR 和 issue comment 仍由 AIAuditBridge 负责。
 
-GitHub PR 的 AI review 只有一个责任方：GitHub Codex App。AIAuditBridge 不再运行第二套 PR reviewer，也不发布平行的 AI review check。确定性的 `Codex Review Gate`、源仓 CI、未解决会话保护和分支保护仍各自 fail-closed。
+普通工程 PR 的正式 AI reviewer 已批准改为现有云端 Codex service。独立的 `engineering_pr_review.yml` 目前只读取 AIAuditBridge 自身、目标为 `main` 的 open 非 draft PR，并提交只读审查；确定性的 `Codex Review Gate`、源仓 CI、未解决会话保护和分支保护仍各自 fail-closed。它不发布平行 AI check、评论、标签或合并。
 
-唯一的窄例外是 `SchwabTokenAutoRefresher` 依赖 lane。每 6 小时运行的 `dependency_audit.yml` 只把符合条件的 `otpauth` 和 `playwright` Dependabot 更新送到 VPS Codex service 做只读审查；它不会 checkout 或执行 PR 代码，只有在 exact base/head、manifest、lockfile、workflow path 和 CI 成功等确定性门槛通过后才调用 service。普通 PR review 仍由 GitHub Codex App 负责。
+该工程审查 producer 只接受 PR 编号和 CI run ID；它从 GitHub API 核验 PR head、当前最新 CI run/attempt、`ci.yml` 的 `actionlint`/`test` check-run 及源码 commit 可取回性，并 checkout OIDC 签名的 workflow SHA，不 checkout 或执行 PR 分支代码。服务端必须固定该 workflow 的精确 SHA；main 后续变化须经受审发布更新，不自动信任任意 main。审查结果以认证服务端持久化记录为准；source-only 结果不能解除 `engineering-evidence-blocked`，也不证明运行恢复。旧 monthly/recovery 路径仍受原准入且不把 AIAuditBridge 加入普通自动修复名单。职责调整虽已批准，producer 与 gateway 仍默认关闭，服务尚未部署此配置，也未完成真实 producer run。
+
+另一个独立范围是 `SchwabTokenAutoRefresher` 依赖 lane。每 6 小时运行的 `dependency_audit.yml` 只把符合条件的 `otpauth` 和 `playwright` Dependabot 更新送到 VPS Codex service 做只读审查；它不会 checkout 或执行 PR 代码，只有在 exact base/head、manifest、lockfile、workflow path 和 CI 成功等确定性门槛通过后才调用 service。
 
 `service/dependency_notification_triage.py` 是纯函数、fail-closed 的适配层：把结构化的依赖/工程 review 证据映射到现有 `BriefingFinding` / `BriefingAction`（`quiet` / `github_issue` / `telegram`），供后续接入 `dispatch_briefing_result`。它不增加第二个 PR reviewer，不调用 GitHub notifications API，不发送 Telegram/GitHub issue，也不调用真实模型。影响低风险放行的关键证据缺失、冲突或未知会升级为 `telegram` 并保持 `review_required` / `unknown`；明确的普通 source-code 或非 Dependabot review 仍走 `github_issue`。
 

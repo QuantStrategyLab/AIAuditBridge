@@ -133,6 +133,23 @@ GLOBAL_ETF_RESEARCH_CODEGEN_MODEL = "gpt-5.6-luna"
 GLOBAL_ETF_RESEARCH_CODEGEN_OBJECTIVE = (
     "Review the fixed Global ETF volatility research candidate against the author abstract; no code or parameter changes."
 )
+# Dedicated engineering-evidence review purpose (default off). Reuses task name
+# pr_review only when purpose=engineering_evidence_resume is explicit. Ordinary
+# Schwab dependency pr_review jobs without this purpose are not intercepted.
+ENGINEERING_REVIEW_PURPOSE = "engineering_evidence_resume"
+ENGINEERING_REVIEW_TASK = "pr_review"
+ENGINEERING_REVIEW_SOURCE_REPOSITORY = "QuantStrategyLab/AIAuditBridge"
+ENGINEERING_REVIEW_ENABLED_ENV = "CODEX_AUDIT_SERVICE_ENGINEERING_REVIEW_ENABLED"
+ENGINEERING_REVIEW_REPOSITORY_ENV = "CODEX_AUDIT_SERVICE_ENGINEERING_REVIEW_REPOSITORY"
+ENGINEERING_REVIEW_REF_ENV = "CODEX_AUDIT_SERVICE_ENGINEERING_REVIEW_REF"
+ENGINEERING_REVIEW_WORKFLOW_REF_ENV = "CODEX_AUDIT_SERVICE_ENGINEERING_REVIEW_WORKFLOW_REF"
+ENGINEERING_REVIEW_WORKFLOW_SHA_ENV = "CODEX_AUDIT_SERVICE_ENGINEERING_REVIEW_WORKFLOW_SHA"
+ENGINEERING_REVIEW_WORKFLOW_REF = (
+    "QuantStrategyLab/AIAuditBridge/.github/workflows/engineering_pr_review.yml@refs/heads/main"
+)
+ENGINEERING_REVIEW_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+ENGINEERING_REVIEW_VERDICTS = frozenset({"approve", "reject"})
+KNOWN_EXECUTE_PURPOSES = frozenset({ENGINEERING_REVIEW_PURPOSE})
 ACTIVE_JOB_STATUSES = frozenset({"queued", "running"})
 REUSABLE_RESEARCH_JOB_STATUSES = frozenset({"queued", "running", "succeeded", "failed"})
 REQUEST_AUTHORITY_FIELDS = (
@@ -144,6 +161,7 @@ REQUEST_AUTHORITY_FIELDS = (
     "workflow_ref",
     "job_workflow_ref",
 )
+ENGINEERING_REVIEW_AUTHORITY_FIELDS = ("workflow_sha", "event_name")
 WRITE_AUTH_METHODS = frozenset({"github_oidc", "none"})
 TRUSTED_AUTOMATION_PROOF_PATH_ENV = "CODEX_AUDIT_SERVICE_TRUSTED_AUTOMATION_PROOF_PATH"
 DASHBOARD_REPOSITORIES_ENV = "CODEX_AUDIT_SERVICE_DASHBOARD_REPOSITORIES"
@@ -298,6 +316,249 @@ def _resolve_codex_reasoning_effort(payload: dict[str, Any], task: str) -> str:
     }[complexity]
 
 
+def _engineering_review_config() -> dict[str, str]:
+    """Return the protected producer identity or raise when disabled/incomplete."""
+    enabled = _bool_env(ENGINEERING_REVIEW_ENABLED_ENV, False)
+    config = {
+        "repository": os.environ.get(ENGINEERING_REVIEW_REPOSITORY_ENV, "").strip(),
+        "ref": os.environ.get(ENGINEERING_REVIEW_REF_ENV, "").strip(),
+        "workflow_ref": os.environ.get(ENGINEERING_REVIEW_WORKFLOW_REF_ENV, "").strip(),
+        "workflow_sha": os.environ.get(ENGINEERING_REVIEW_WORKFLOW_SHA_ENV, "").strip(),
+    }
+    if not enabled:
+        raise PermissionError("engineering review is disabled")
+    if not all(config.values()):
+        raise PermissionError("engineering review configuration is incomplete")
+    if not ENGINEERING_REVIEW_SHA_RE.fullmatch(config["workflow_sha"]):
+        raise PermissionError("engineering review workflow_sha must be an exact 40-hex commit")
+    if config["repository"] != "QuantStrategyLab/AIAuditBridge":
+        raise PermissionError("engineering review producer repository is fixed")
+    if config["ref"] != "refs/heads/main":
+        raise PermissionError("engineering review producer ref is fixed")
+    if config["workflow_ref"] != ENGINEERING_REVIEW_WORKFLOW_REF:
+        raise PermissionError("engineering review producer workflow_ref is fixed")
+    return config
+
+
+def _reject_unknown_purpose(payload: Mapping[str, Any]) -> None:
+    purpose = str(payload.get("purpose") or "").strip()
+    if purpose and purpose not in KNOWN_EXECUTE_PURPOSES:
+        raise PermissionError(f"unsupported purpose: {purpose!r}")
+
+
+def _reject_caller_engineering_review_fields(payload: Mapping[str, Any]) -> None:
+    """Only the dedicated server admission path may create review bindings/results."""
+    for field in ("engineering_review_binding", "engineering_review"):
+        if field in payload:
+            raise PermissionError(f"caller-supplied {field} is not permitted")
+
+
+def _is_engineering_review_payload(payload: Mapping[str, Any]) -> bool:
+    """True only for the explicit engineering resume purpose; bare pr_review is untouched."""
+    return str(payload.get("purpose") or "").strip() == ENGINEERING_REVIEW_PURPOSE
+
+
+def _job_is_engineering_review(job: Mapping[str, Any]) -> bool:
+    for key in ("engineering_review", "engineering_review_binding"):
+        binding = job.get(key)
+        if isinstance(binding, dict) and str(binding.get("purpose") or "") == ENGINEERING_REVIEW_PURPOSE:
+            return True
+    return False
+
+
+def engineering_review_input_digest(materials: Mapping[str, Any]) -> str:
+    """Server-side material digest; callers may recompute but cannot supply a trusted digest."""
+    canonical = {
+        "purpose": ENGINEERING_REVIEW_PURPOSE,
+        "source_repository": str(materials.get("source_repository") or ""),
+        "pull_request_number": int(materials["pull_request_number"]),
+        "base_sha": str(materials.get("base_sha") or ""),
+        "head_sha": str(materials.get("head_sha") or ""),
+        "changed_paths": list(materials.get("changed_paths") or []),
+        "diff": str(materials.get("diff") or ""),
+        "diff_stats": materials.get("diff_stats") or {},
+        "validation_evidence": str(materials.get("validation_evidence") or ""),
+        "recovery_evidence": str(materials.get("recovery_evidence") or ""),
+    }
+    return hashlib.sha256(json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _engineering_review_input_digest(materials: Mapping[str, Any]) -> str:
+    return engineering_review_input_digest(materials)
+
+
+def _build_engineering_review_prompt(materials: Mapping[str, Any], *, input_digest: str) -> str:
+    paths = "\n".join(f"- `{path}`" for path in materials["changed_paths"])
+    stats = json.dumps(materials.get("diff_stats") or {}, sort_keys=True)
+    return "\n".join(
+        [
+            "You are the dedicated engineering-evidence reviewer for QuantStrategyLab.",
+            "This is a source-only engineering review of the exact PR diff and machine-verified evidence.",
+            "Do not decide or claim that an engineering block is cleared; do not infer runtime recovery from source rollback facts.",
+            "This is not an investment, trading, credential, merge, deployment, or runtime-recovery authority decision.",
+            "Return exactly one JSON object with no markdown fences:",
+            '{"verdict":"approve"} or {"verdict":"reject","summary":"<short reason>"}',
+            "",
+            f"input_digest: {input_digest}",
+            f"source_repository: {materials['source_repository']}",
+            f"pull_request_number: {materials['pull_request_number']}",
+            f"base_sha: {materials['base_sha']}",
+            f"head_sha: {materials['head_sha']}",
+            f"diff_stats: {stats}",
+            "changed_paths:",
+            paths,
+            "",
+            "validation_evidence:",
+            str(materials["validation_evidence"]),
+            "",
+            "recovery_evidence:",
+            str(materials["recovery_evidence"]),
+            "",
+            "diff:",
+            str(materials["diff"]),
+        ]
+    )
+
+
+def _parse_engineering_review_verdict(output: str) -> str:
+    text = str(output or "").strip()
+    if text.startswith("```"):
+        raise ValueError("engineering review output must be raw JSON without markdown fences")
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError("engineering review output is not structured JSON") from exc
+    if not isinstance(payload, dict):
+        raise TypeError("engineering review output must be a JSON object")
+    if "approved" in payload or "receipt" in payload or "receipt_sha256" in payload:
+        raise ValueError("engineering review output must not carry forged approval or receipt fields")
+    verdict = str(payload.get("verdict") or "").strip().lower()
+    if verdict not in ENGINEERING_REVIEW_VERDICTS:
+        raise ValueError("engineering review verdict must be approve or reject")
+    return verdict
+
+
+def _prepare_engineering_review_execute(
+    claims: Mapping[str, Any],
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Validate producer identity and replace freeform prompt with a fixed digest-bound prompt."""
+    if not _is_engineering_review_payload(payload):
+        raise PermissionError("engineering review requires purpose=engineering_evidence_resume")
+    if str(payload.get("task") or "").strip() != ENGINEERING_REVIEW_TASK:
+        raise PermissionError("engineering_evidence_resume requires task=pr_review")
+    config = _engineering_review_config()
+    if str(claims.get("auth_method") or "") != "github_oidc":
+        raise PermissionError("engineering review requires verified GitHub OIDC")
+    for field in ("repository", "ref", "workflow_ref", "workflow_sha", "event_name", "run_id", "run_attempt"):
+        value = str(claims.get(field) or "").strip()
+        if not value:
+            raise PermissionError(f"engineering review requires OIDC claim {field}")
+        if field in config and value != config[field]:
+            raise PermissionError(f"engineering review OIDC claim {field} is not the configured producer")
+    if str(claims.get("event_name") or "") != "workflow_dispatch":
+        raise PermissionError("engineering review requires event_name=workflow_dispatch")
+
+    providers = payload.get("allowed_providers", ["codex"])
+    if providers != ["codex"]:
+        raise PermissionError("engineering review permits only the Codex provider")
+    if str(payload.get("provider") or "codex").strip().lower() not in {"", "codex"}:
+        raise PermissionError("engineering review permits only the Codex provider")
+    if str(payload.get("mode") or MODE_REVIEW_ONLY).strip().lower() != MODE_REVIEW_ONLY:
+        raise PermissionError("engineering review requires review_only")
+    if str(payload.get("sandbox") or DEFAULT_SANDBOX).strip() != "read-only":
+        raise PermissionError("engineering review requires read-only sandbox")
+    if payload.get("research_stage"):
+        raise PermissionError("engineering review rejects research_stage")
+    if payload.get("auto_merge") is True or payload.get("deploy") is True or payload.get("trade") is True:
+        raise PermissionError("engineering review has no merge, deploy, or trading authority")
+    for forbidden in ("approved", "receipt", "receipt_sha256", "provenance_receipt", "input_digest"):
+        if forbidden in payload:
+            raise PermissionError(f"engineering review rejects caller-supplied {forbidden}")
+    if "prompt" in payload and str(payload.get("prompt") or "").strip():
+        raise PermissionError("engineering review rejects freeform prompt; server constructs the prompt")
+
+    source_repository = str(payload.get("source_repository") or "").strip()
+    if source_repository != ENGINEERING_REVIEW_SOURCE_REPOSITORY:
+        raise PermissionError("engineering review is restricted to AIAuditBridge")
+    try:
+        pull_request_number = int(payload.get("pull_request_number"))
+    except (TypeError, ValueError) as exc:
+        raise PermissionError("engineering review requires pull_request_number") from exc
+    if pull_request_number <= 0:
+        raise PermissionError("engineering review requires pull_request_number")
+    base_sha = str(payload.get("base_sha") or "").strip().lower()
+    head_sha = str(payload.get("head_sha") or "").strip().lower()
+    if not ENGINEERING_REVIEW_SHA_RE.fullmatch(base_sha) or not ENGINEERING_REVIEW_SHA_RE.fullmatch(head_sha):
+        raise PermissionError("engineering review requires exact base_sha and head_sha")
+    changed_paths_raw = payload.get("changed_paths")
+    if not isinstance(changed_paths_raw, list) or not changed_paths_raw:
+        raise PermissionError("engineering review requires complete changed_paths")
+    changed_paths = [str(path).strip() for path in changed_paths_raw]
+    if any(not path or path != str(raw).strip() for path, raw in zip(changed_paths, changed_paths_raw, strict=True)):
+        raise PermissionError("engineering review changed_paths are invalid")
+    if len(set(changed_paths)) != len(changed_paths):
+        raise PermissionError("engineering review changed_paths must be unique")
+    diff = payload.get("diff")
+    if not isinstance(diff, str) or not diff.strip():
+        raise PermissionError("engineering review requires the PR diff")
+    validation_evidence = payload.get("validation_evidence")
+    recovery_evidence = payload.get("recovery_evidence")
+    if not isinstance(validation_evidence, str) or not validation_evidence.strip():
+        raise PermissionError("engineering review requires validation_evidence")
+    if not isinstance(recovery_evidence, str) or not recovery_evidence.strip():
+        raise PermissionError("engineering review requires recovery_evidence")
+    diff_stats = payload.get("diff_stats")
+    if not isinstance(diff_stats, dict):
+        raise PermissionError("engineering review requires diff_stats")
+
+    materials = {
+        "purpose": ENGINEERING_REVIEW_PURPOSE,
+        "source_repository": source_repository,
+        "pull_request_number": pull_request_number,
+        "base_sha": base_sha,
+        "head_sha": head_sha,
+        "changed_paths": changed_paths,
+        "diff": diff,
+        "diff_stats": diff_stats,
+        "validation_evidence": validation_evidence.strip(),
+        "recovery_evidence": recovery_evidence.strip(),
+    }
+    input_digest = _engineering_review_input_digest(materials)
+    prompt = _build_engineering_review_prompt(materials, input_digest=input_digest)
+    binding = {
+        "purpose": ENGINEERING_REVIEW_PURPOSE,
+        "input_digest": input_digest,
+        "source_repository": source_repository,
+        "pull_request_number": pull_request_number,
+        "base_sha": base_sha,
+        "head_sha": head_sha,
+        "changed_paths": changed_paths,
+        "repository": str(claims.get("repository") or ""),
+        "ref": str(claims.get("ref") or ""),
+        "workflow_ref": str(claims.get("workflow_ref") or ""),
+        "workflow_sha": str(claims.get("workflow_sha") or ""),
+        "event_name": str(claims.get("event_name") or ""),
+        "review_scope": "source_only",
+        "run_id": str(claims.get("run_id") or ""),
+        "run_attempt": str(claims.get("run_attempt") or ""),
+    }
+    payload.update(
+        {
+            "purpose": ENGINEERING_REVIEW_PURPOSE,
+            "task": ENGINEERING_REVIEW_TASK,
+            "mode": MODE_REVIEW_ONLY,
+            "sandbox": "read-only",
+            "provider": "codex",
+            "allowed_providers": ["codex"],
+            "prompt": prompt,
+            "engineering_review_binding": binding,
+        }
+    )
+    payload.pop("research_stage", None)
+    return binding
+
+
 def _admit_codex_execute(quota: Any, repo: str, payload: dict[str, Any]) -> dict[str, Any] | None:
     """Choose a Codex research route before consuming quota or starting a job."""
     from service.provider_scenarios import cursor_canary_research_stages
@@ -306,6 +567,11 @@ def _admit_codex_execute(quota: Any, repo: str, payload: dict[str, Any]) -> dict
     _validate_platform_bugfix_payload(payload)
     _validate_soxl_rsi2_codegen_payload(payload)
     _validate_global_etf_research_codegen_payload(payload)
+    if _is_engineering_review_payload(payload):
+        if providers != ["codex"] or "cursor" in providers:
+            raise PermissionError("engineering review permits only the Codex provider")
+        if payload.get("research_stage"):
+            raise PermissionError("engineering review rejects research_stage")
     payload["provider"] = "codex"
     stage = str(payload.get("research_stage") or "").strip()
     if "cursor" in providers:
@@ -440,7 +706,12 @@ def _validate_global_etf_research_codegen_payload(payload: dict[str, Any]) -> No
 
 def _codex_tools_disabled(payload: dict[str, Any]) -> bool:
     """Disable external Codex tools for bounded codegen and drift analysis."""
-    if str(payload.get("task") or "").strip() in {SOXL_RSI2_CODEGEN_TASK, GLOBAL_ETF_RESEARCH_CODEGEN_TASK}:
+    if str(payload.get("task") or "").strip() in {
+        SOXL_RSI2_CODEGEN_TASK,
+        GLOBAL_ETF_RESEARCH_CODEGEN_TASK,
+    }:
+        return True
+    if _is_engineering_review_payload(payload):
         return True
     return (
         str(payload.get("task") or TASK_EXECUTE).strip() == TASK_EXECUTE
@@ -910,10 +1181,23 @@ def _assert_job_access(job: dict[str, Any], claims: dict[str, Any]) -> None:
         raise PermissionError("job repository is not allowed")
     request_run_id = str(claims.get("run_id") or "")
     job_run_id = str(job.get("run_id") or "")
-    if request_run_id and job_run_id and request_run_id != job_run_id:
-        raise PermissionError("job run_id is not allowed")
     request_attempt = str(claims.get("run_attempt") or "")
     job_attempt = str(job.get("run_attempt") or "")
+    if _job_is_engineering_review(job):
+        # Engineering results must not be readable by omitting run fields.
+        if not request_run_id or not job_run_id:
+            raise PermissionError("job run_id is not allowed")
+        if not request_attempt or not job_attempt:
+            raise PermissionError("job run_attempt is not allowed")
+        binding = job.get("engineering_review_binding")
+        if not isinstance(binding, dict):
+            binding = job.get("engineering_review")
+        if isinstance(binding, dict):
+            for field in ("repository", "ref", "workflow_ref", "workflow_sha", "event_name", "run_id", "run_attempt"):
+                if str(binding.get(field) or "") != str(claims.get(field) or ""):
+                    raise PermissionError(f"engineering review job {field} is not allowed")
+    if request_run_id and job_run_id and request_run_id != job_run_id:
+        raise PermissionError("job run_id is not allowed")
     if request_attempt and job_attempt and request_attempt != job_attempt:
         raise PermissionError("job run_attempt is not allowed")
 
@@ -931,6 +1215,31 @@ def _public_job_payload(job: dict[str, Any]) -> dict[str, object]:
     }
     if job.get("research_stage"):
         payload.update({key: str(job.get(key) or "") for key in ("research_stage", "model", "reasoning_effort")})
+    engineering = job.get("engineering_review")
+    if isinstance(engineering, dict):
+        # Only expose the bound review result; never invent defaults for old jobs.
+        payload["engineering_review"] = {
+            key: engineering[key]
+            for key in (
+                "purpose",
+                "verdict",
+                "input_digest",
+                "source_repository",
+                "pull_request_number",
+                "base_sha",
+                "head_sha",
+                "changed_paths",
+                "repository",
+                "ref",
+                "workflow_ref",
+                "workflow_sha",
+                "event_name",
+                "review_scope",
+                "run_id",
+                "run_attempt",
+            )
+            if key in engineering
+        }
     if job.get("status") == "succeeded":
         payload["output"] = str(job.get("output") or "")
     if job.get("status") == "failed":
@@ -1532,6 +1841,20 @@ def _job_dedupe_key(
         parts.extend(str(payload.get(key) or "") for key in ("research_stage", "model", "reasoning_effort", "provider"))
     if str(payload.get("task") or TASK_EXECUTE).strip() in {SOXL_RSI2_CODEGEN_TASK, GLOBAL_ETF_RESEARCH_CODEGEN_TASK}:
         parts.append(str(payload.get("research_objective") or ""))
+    if _is_engineering_review_payload(payload):
+        binding = payload.get("engineering_review_binding")
+        if isinstance(binding, dict):
+            parts.extend(
+                [
+                    str(binding.get("purpose") or ENGINEERING_REVIEW_PURPOSE),
+                    str(binding.get("input_digest") or ""),
+                    str(binding.get("source_repository") or ""),
+                    str(binding.get("pull_request_number") or ""),
+                    str(binding.get("base_sha") or ""),
+                    str(binding.get("head_sha") or ""),
+                    json.dumps(binding.get("changed_paths") or [], separators=(",", ":")),
+                ]
+            )
     return hashlib.sha256(json.dumps(parts, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
@@ -1553,6 +1876,25 @@ def _request_job_dedupe_key(claims: dict[str, Any], payload: dict[str, Any]) -> 
     if str(payload.get("task") or TASK_EXECUTE).strip() in {SOXL_RSI2_CODEGEN_TASK, GLOBAL_ETF_RESEARCH_CODEGEN_TASK}:
         objective = payload.get("research_objective")
         identity["research_objective"] = objective.strip() if isinstance(objective, str) else objective
+    if _is_engineering_review_payload(payload):
+        binding = payload.get("engineering_review_binding")
+        if isinstance(binding, dict):
+            identity["engineering_review_binding"] = {
+                key: binding.get(key)
+                for key in (
+                    "purpose",
+                    "input_digest",
+                    "source_repository",
+                    "pull_request_number",
+                    "base_sha",
+                    "head_sha",
+                    "changed_paths",
+                )
+            }
+        identity["engineering_review_authority"] = {
+            key: str(claims.get(key) or "")
+            for key in ENGINEERING_REVIEW_AUTHORITY_FIELDS
+        }
     return hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
@@ -1689,9 +2031,34 @@ def _run_job(job_id: str, payload: dict[str, Any]) -> None:
         result = adapter.execute(**execute_kwargs)
         job = _read_job(job_id)
         if result.success:
-            job["status"] = "succeeded"
-            job["output"] = result.output
-            job.pop("error", None)
+            if _job_is_engineering_review(job) or isinstance(job.get("engineering_review_binding"), dict):
+                binding = job.get("engineering_review_binding")
+                if (
+                    not isinstance(binding, dict)
+                    or not binding.get("input_digest")
+                    or str(binding.get("purpose") or "") != ENGINEERING_REVIEW_PURPOSE
+                ):
+                    job["status"] = "failed"
+                    job["error"] = "engineering review job is missing server-side binding"
+                    job["failure_category"] = "invalid_engineering_review_binding"
+                else:
+                    try:
+                        verdict = _parse_engineering_review_verdict(result.output)
+                    except (TypeError, ValueError) as exc:
+                        job["status"] = "failed"
+                        job["error"] = str(exc)
+                        job["failure_category"] = "invalid_engineering_review_output"
+                        job["output"] = result.output
+                    else:
+                        # Adapter success alone never grants approve; only structured verdict.
+                        job["status"] = "succeeded"
+                        job["output"] = result.output
+                        job["engineering_review"] = {**binding, "verdict": verdict}
+                        job.pop("error", None)
+            else:
+                job["status"] = "succeeded"
+                job["output"] = result.output
+                job.pop("error", None)
         else:
             job["status"] = "failed"
             job["error"] = result.error
@@ -1821,6 +2188,9 @@ def _submit_job(claims: dict[str, Any], payload: dict[str, Any], *, request_dedu
             job.update({key: payload[key] for key in ("research_stage", "model", "reasoning_effort")})
         if str(payload.get("task") or TASK_EXECUTE).strip() in {SOXL_RSI2_CODEGEN_TASK, GLOBAL_ETF_RESEARCH_CODEGEN_TASK}:
             job["research_objective"] = str(payload.get("research_objective") or "").strip()
+        binding = payload.get("engineering_review_binding")
+        if isinstance(binding, dict):
+            job["engineering_review_binding"] = dict(binding)
         _write_job(job)
         _record_job_automation_run(job)
         _audit_log("job_submitted", job_id=job_id, repository=job["repository"],
@@ -2094,6 +2464,11 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
     def _handle_execute_async(self, claims: dict[str, Any], payload: dict[str, Any]) -> None:
         """POST /v1/ai/execute/jobs — async Codex execution."""
         started = time.time()
+        _reject_caller_engineering_review_fields(payload)
+        _reject_unknown_purpose(payload)
+        if _is_engineering_review_payload(payload):
+            # Validate producer/config and construct the fixed prompt before quota/dedupe.
+            _prepare_engineering_review_execute(claims, payload)
         parse_execute_request(payload)
 
         # Security: validate source_repository against allowlist
@@ -2173,6 +2548,10 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
     def _handle_execute_sync(self, claims: dict[str, Any], payload: dict[str, Any]) -> None:
         """POST /v1/ai/execute — sync Codex execution (backward compat)."""
         started = time.time()
+        _reject_caller_engineering_review_fields(payload)
+        _reject_unknown_purpose(payload)
+        if _is_engineering_review_payload(payload):
+            raise PermissionError("engineering review requires the async execute jobs endpoint")
         req = parse_execute_request(payload)
         if payload.get("manual_approval_id"):
             raise PermissionError("platform_bugfix manual approval requires the async execute endpoint")
