@@ -4,21 +4,30 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
+import os
 import sys
+import tempfile
 from pathlib import Path
 
-REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-if str(REPOSITORY_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPOSITORY_ROOT))
 
-from service.development_research_review import (  # noqa: E402
-    A_SUMMARY_PATH,
-    DevelopmentResearchReviewError,
-    build_message_from_file,
-    canonical_json,
-    validate_development_research_review,
-)
+def _producer():
+    """Import the installed producer, or the single checkout that contains this script."""
+    try:
+        return importlib.import_module("service.development_research_review")
+    except ModuleNotFoundError:
+        repository_root = Path(__file__).resolve().parents[1]
+        sys.path.insert(0, str(repository_root))
+        return importlib.import_module("service.development_research_review")
+
+
+_producer_module = _producer()
+A_SUMMARY_PATH = _producer_module.A_SUMMARY_PATH
+DevelopmentResearchReviewError = _producer_module.DevelopmentResearchReviewError
+build_message_from_file = _producer_module.build_message_from_file
+canonical_json = _producer_module.canonical_json
+validate_development_research_review = _producer_module.validate_development_research_review
 
 
 def main() -> int:
@@ -33,7 +42,17 @@ def main() -> int:
     except DevelopmentResearchReviewError as exc:
         print(f"development review rejected: {exc.code}", file=sys.stderr)
         return 2
-    args.output.write_text(canonical_json(message) + "\n", encoding="utf-8")
+    fd, temporary = tempfile.mkstemp(prefix=f".{args.output.name}.", dir=args.output.parent)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(canonical_json(message) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, args.output)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
     print(json.dumps({
         "status": "built",
         "schema": message["schema"],
