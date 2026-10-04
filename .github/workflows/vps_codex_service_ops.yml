@@ -10,6 +10,7 @@ on:
         default: inspect
         options:
           - inspect
+          - inspect-audit-patch
           - deploy
           - repair-ssh
           - install-org-health-token
@@ -27,7 +28,7 @@ concurrency:
 
 jobs:
   vps-codex-service-ops:
-    if: inputs.mode != 'install-org-health-token'
+    if: inputs.mode != 'install-org-health-token' && inputs.mode != 'inspect-audit-patch'
     # Bind to a protected environment when available so deploy/repair-ssh requires approval.
     environment: codex-vps-ops
     runs-on:
@@ -82,6 +83,47 @@ jobs:
           ANTHROPIC_ADMIN_KEY: ${{ secrets.ANTHROPIC_ADMIN_KEY }}
           CODEX_AUDIT_SERVICE_TOKEN: ${{ secrets.CODEX_AUDIT_SERVICE_TOKEN }}
         run: bash scripts/deploy_codex_audit_service.sh "${{ inputs.mode }}"
+
+  inspect-audit-patch:
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'QuantStrategyLab/AIAuditBridge' && github.ref == 'refs/heads/main' && inputs.mode == 'inspect-audit-patch'
+    environment: codex-vps-ops
+    runs-on:
+      - self-hosted
+      - codex-vps
+    timeout-minutes: 5
+    steps:
+      - name: Checkout exact operation commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Verify exact main workflow and clean checkout before host inspection
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_REPOSITORY: ${{ github.repository }}
+          RUN_REF: ${{ github.ref }}
+          RUN_SHA: ${{ github.sha }}
+          RUN_WORKFLOW_REF: ${{ github.workflow_ref }}
+          RUN_WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          [ "$RUN_REPOSITORY" = QuantStrategyLab/AIAuditBridge ]
+          [ "$RUN_REF" = refs/heads/main ]
+          [[ "$RUN_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [ "$RUN_WORKFLOW_REF" = QuantStrategyLab/AIAuditBridge/.github/workflows/vps_codex_service_ops.yml@refs/heads/main ]
+          [ "$RUN_WORKFLOW_SHA" = "$RUN_SHA" ]
+          [ "$(git rev-parse HEAD)" = "$RUN_SHA" ]
+          [ -z "$(git status --porcelain --untracked-files=all)" ]
+          current_main="$(timeout 30s gh api repos/QuantStrategyLab/AIAuditBridge/git/ref/heads/main --jq '.object.sha')"
+          [ "$current_main" = "$RUN_SHA" ]
+
+      - name: Read fixed service metadata only
+        run: |
+          set -euo pipefail
+          env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C \
+            /usr/bin/sudo -n /usr/bin/python3 -I -B \
+            "$GITHUB_WORKSPACE/scripts/manage_codex_audit_service_patch.py" inspect
 
   org-health-token:
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.mode == 'install-org-health-token'
