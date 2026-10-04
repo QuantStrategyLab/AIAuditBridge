@@ -1800,7 +1800,8 @@ class EngineeringReviewGatewayTests(unittest.TestCase):
         self.assertEqual(dep_payload["task"], "pr_review")
         self.assertNotEqual(dep_payload.get("purpose"), ENGINEERING_REVIEW_PURPOSE)
         self.assertFalse(_is_engineering_review_payload(dep_payload))
-        self.assertFalse(_codex_tools_disabled(dep_payload))
+        # Ordinary dependency identity remains separate; all supplied-text reviews deny tools.
+        self.assertTrue(_codex_tools_disabled(dep_payload))
         _reject_unknown_purpose(dep_payload)
 
         for service_enabled in (False, True):

@@ -1,6 +1,8 @@
 """Offline regression of explicit subscription routing and frozen provider identity."""
 import json
-from unittest.mock import Mock, patch
+from contextlib import ExitStack
+from types import SimpleNamespace
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
@@ -8,6 +10,7 @@ from client.config import GatewayConfig
 from client.gateway_client import AiGatewayClient
 from service import ai_gateway_service as gateway
 from service.contracts import parse_execute_request
+from service.adapters.codex_adapter import CodexAdapter
 
 
 class Reply:
@@ -19,6 +22,130 @@ class Reply:
         pass
     def read(self):
         return json.dumps(self.payload).encode()
+
+
+_TEXT_ONLY_TASKS = (
+    ('daily_briefing', 'research_summary'),
+    ('research_summary', 'research_summary'),
+    ('execute', 'research_summary'),
+    ('new_research_design', 'optimization'),
+    ('dual_review', 'promotion_review'),
+    ('account_operational_diagnosis', 'drift_analysis'),
+    ('unknown_analytical_task', ''),
+    (' DAILY_BRIEFING ', ''),
+    ('monthly_snapshot_audit', ''),
+    ('platform_bugfix', ''),
+)
+
+
+def _assert_text_only_codex_command(command):
+    assert '--ignore-user-config' in command
+    assert '--ephemeral' in command
+    assert 'web_search="disabled"' in command
+    disabled = [command[index + 1] for index, value in enumerate(command[:-1]) if value == '--disable']
+    assert {'plugins', 'apps', 'shell_tool'} <= set(disabled)
+    assert '-C' in command
+
+
+@pytest.mark.parametrize('task,stage', _TEXT_ONLY_TASKS)
+@pytest.mark.parametrize('mode', ['review_only', 'review_and_fix', 'invalid_mode', ' REVIEW_ONLY '])
+def test_gateway_text_capability_default_deny_ignores_caller_tool_flags(task, stage, mode):
+    payload = {'task': task, 'mode': mode, 'tools_disabled': False, 'shell_tool_enabled': True,
+               'source_repository': 'QuantStrategyLab/AIAuditBridge'}
+    if stage:
+        payload['research_stage'] = stage
+    assert gateway._codex_tools_disabled(payload) is True
+
+
+@pytest.mark.parametrize('entrypoint', ['async_job', 'sync', 'api_verifier'])
+@pytest.mark.parametrize('task,stage', _TEXT_ONLY_TASKS)
+@pytest.mark.parametrize('mode', ['review_only', 'review_and_fix'])
+def test_each_gateway_codex_entrypoint_emits_deny_all_argv(entrypoint, task, stage, mode):
+    structured_patch = {'final_message': 'synthetic patch proposal',
+                        'changes': [{'path': 'tests/synthetic_case.py', 'content': '# synthetic test\n'}]}
+    output = json.dumps(structured_patch if mode == 'review_and_fix' else {
+        'verdict': 'approve', 'confidence': 0.9, 'summary': 'synthetic text only',
+    })
+    quota = MagicMock()
+    quota.check.return_value = {'allowed': True, 'cost_estimate_usd': 0.001}
+    quota.remaining_daily.return_value = quota.remaining_weekly.return_value = 100.0
+    quota.runtime_status.return_value = {'status': 'ok'}
+    adapter = CodexAdapter()
+    job = {'job_id': 'synthetic', 'status': 'queued'}
+    payload = {'prompt': 'synthetic supplied text', 'task': task, 'mode': mode,
+               'model': 'gpt-5.6-sol', 'reasoning_effort': 'medium', 'provider': 'codex',
+               'source_repository': 'QuantStrategyLab/AIAuditBridge',
+               'tools_disabled': False, 'shell_tool_enabled': True}
+    if stage:
+        payload['research_stage'] = stage
+    claims = {'repository': 'QuantStrategyLab/AIAuditBridge'}
+    with ExitStack() as stack:
+        stack.enter_context(patch.dict(gateway.os.environ, {
+            'CODEX_AUDIT_SERVICE_ENV': 'production', 'CODEX_AUDIT_SERVICE_MODEL': 'gpt-5.6-sol',
+            'CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES': 'QuantStrategyLab/AIAuditBridge',
+        }, clear=False))
+        stack.enter_context(patch('service.adapters.codex_adapter.shutil.which', return_value='/synthetic/codex'))
+        runner = stack.enter_context(patch('service.adapters.codex_adapter.subprocess.run',
+                                          return_value=SimpleNamespace(returncode=0, stdout=output, stderr='')))
+        stack.enter_context(patch.object(gateway, 'get_quota_manager', return_value=quota))
+        stack.enter_context(patch.object(gateway, '_admit_codex_execute', return_value=None))
+        stack.enter_context(patch.object(gateway, 'resolve_execution_adapter', return_value=adapter))
+        stack.enter_context(patch.object(gateway, 'CodexAdapter', return_value=adapter))
+        stack.enter_context(patch.object(gateway, '_read_job', return_value=job))
+        stack.enter_context(patch.object(gateway, '_write_job'))
+        stack.enter_context(patch.object(gateway, '_record_job_automation_run'))
+        stack.enter_context(patch.object(gateway, '_record_platform_execution_telemetry'))
+        stack.enter_context(patch.object(gateway, '_audit_log'))
+        health = stack.enter_context(patch.object(gateway, 'get_health_monitor')).return_value
+        health.status = 'healthy'
+        stack.enter_context(patch.object(gateway, 'read_org_health', return_value={'status': 'healthy'}))
+        response = stack.enter_context(patch.object(gateway, '_json_response'))
+        stack.enter_context(patch.object(gateway, 'LlmAdapter')).return_value.parallel_review.return_value = []
+        if entrypoint == 'async_job':
+            gateway._run_job('synthetic', payload)
+            assert job['status'] == 'succeeded'
+        elif entrypoint == 'sync':
+            gateway.AiGatewayRequestHandler._handle_execute_sync(object(), claims, payload)
+            assert response.call_args.args[2]['output'] == output
+        else:
+            gateway.AiGatewayRequestHandler._handle_review(object(), claims, {
+                **payload, 'reviewers': ['gpt'], 'verifier': 'codex', 'model': 'gpt-5.4-mini',
+            })
+            assert response.call_args.args[2]['results'][-1]['output'] == output
+        runner.assert_called_once()
+        _assert_text_only_codex_command(runner.call_args.args[0])
+        if mode == 'review_and_fix':
+            from scripts.run_monthly_codex_audit import parse_service_patch_response
+            final_message, changes = parse_service_patch_response(output, task='monthly_snapshot_audit')
+            assert final_message == structured_patch['final_message']
+            assert changes == structured_patch['changes']
+
+
+@pytest.mark.parametrize('entrypoint', ['_handle_execute_async', '_handle_execute_sync'])
+def test_spoofed_engineering_task_cannot_bypass_source_admission(entrypoint):
+    payload = {'prompt': 'synthetic', 'task': 'monthly_snapshot_audit', 'mode': 'review_and_fix',
+               'source_repository': 'QuantStrategyLab/NotAdmitted', 'tools_disabled': False}
+    with patch.dict(gateway.os.environ, {
+        'CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES': 'QuantStrategyLab/AIAuditBridge',
+    }), patch.object(gateway, 'resolve_execution_adapter') as adapter, patch.object(gateway, '_submit_job') as submit:
+        with pytest.raises(PermissionError, match='not allowed'):
+            getattr(gateway.AiGatewayRequestHandler, entrypoint)(
+                object(), {'repository': 'QuantStrategyLab/AIAuditBridge'}, payload,
+            )
+    adapter.assert_not_called()
+    submit.assert_not_called()
+
+
+@pytest.mark.parametrize('entrypoint', ['_handle_execute_async', '_handle_execute_sync'])
+def test_unknown_mode_is_rejected_before_adapter_or_job(entrypoint):
+    with patch.object(gateway, 'resolve_execution_adapter') as adapter, patch.object(gateway, '_submit_job') as submit:
+        with pytest.raises(ValueError, match='mode'):
+            getattr(gateway.AiGatewayRequestHandler, entrypoint)(
+                object(), {'repository': 'QuantStrategyLab/AIAuditBridge'},
+                {'prompt': 'synthetic', 'task': 'monthly_snapshot_audit', 'mode': 'invalid_mode'},
+            )
+    adapter.assert_not_called()
+    submit.assert_not_called()
 
 
 @pytest.mark.parametrize('providers', [[], ['gpt'], ['cursor', 'codex'], ['codex', 'codex'], 'cursor'])
