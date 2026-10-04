@@ -65,8 +65,9 @@ class CodexServiceMaintenanceTests(unittest.TestCase):
         self.real_unit_action = operation._unit_action
         self.real_health = operation._local_health
         for attr, kwargs in (
-            ("unit_metadata", {"side_effect": lambda: dict(self.unit)}),
-            ("service_process_metadata", {"side_effect": lambda unit: dict(self.process)}),
+            ("unit_metadata", {"side_effect": lambda **kwargs: dict(self.unit)}),
+            ("service_process_metadata", {"side_effect": lambda unit, **kwargs: dict(self.process)}),
+            ("_process_identity", {"side_effect": lambda pid: (98765, os.getuid())}),
             ("job_counts", {"return_value": self.counts}),
             ("_unit_action", {"side_effect": self.action}),
             ("_local_health", {"return_value": True}),
@@ -121,6 +122,9 @@ class CodexServiceMaintenanceTests(unittest.TestCase):
     def test_acknowledged_incomplete_snapshot_is_never_a_drain_and_two_files_preserve_metadata(self) -> None:
         result = operation.maintain_service(acknowledge_interruption=True)
         self.assertEqual(result["status"], "applied")
+        self.assertIsNone(result["failure_phase"])
+        self.assertTrue(result["startup_status"]["unit_ready"])
+        self.assertTrue(result["startup_status"]["process_identity_stable"])
         self.assertEqual(self.actions, ["stop", "start"])
         self.assertFalse(result["drain_proven"])
         self.assertTrue(result["requests_may_be_interrupted"])
@@ -251,13 +255,14 @@ class CodexServiceMaintenanceTests(unittest.TestCase):
         self.assert_original()
 
     def test_post_start_source_mutation_enters_recovery_without_overwriting_external_bytes(self) -> None:
-        def mutated_health():
+        def mutated_health(**kwargs):
             self.files["gateway"].write_bytes(b"external post-start source")
             return True
         with patch.object(operation, "_local_health", side_effect=mutated_health):
             result = operation.maintain_service(acknowledge_interruption=True)
         self.assertEqual(result["status"], "recovery_required")
         self.assertEqual(result["reason"], "rollback_failed")
+        self.assertEqual(result["failure_phase"], "target_hash_readback")
         self.assertEqual(self.files["gateway"].read_bytes(), b"external post-start source")
         self.assertEqual(self.files["codex_adapter"].read_bytes(), self.original["codex_adapter"])
         self.assertEqual(self.actions, ["stop", "start", "stop"])
@@ -340,10 +345,11 @@ class CodexServiceMaintenanceTests(unittest.TestCase):
             client.getresponse.return_value.read.assert_called_once_with(4097)
             client.close.assert_called_once()
         for status, payload in ((302, b"redirect"), (200, b"x" * 4097), (200, b'{"status":"bad"}')):
+            now = [0.0]
             client = Mock()
             client.getresponse.return_value = Mock(status=status, read=Mock(return_value=payload))
             with self.subTest(status=status), patch.object(operation.http.client, "HTTPConnection", return_value=client), \
-                 patch.object(operation.time, "monotonic", side_effect=[0, 0, 21]), patch.object(operation.time, "sleep"):
+                 patch.object(operation.time, "monotonic", side_effect=lambda: now[0]), patch.object(operation.time, "sleep", side_effect=lambda delay: now.__setitem__(0, now[0] + delay)):
                 self.assertFalse(health())
 
     def test_rollback_failure_attempts_both_files_and_leaves_unit_stopped(self) -> None:
@@ -417,12 +423,19 @@ class CodexServiceMaintenanceTests(unittest.TestCase):
 
     def test_started_acceptance_rejects_same_pid_or_wrong_route_without_http(self) -> None:
         self.unit["main_pid"] = 123
-        with patch.object(operation, "_local_health") as health:
+        now = [0.0]
+
+        def tick(delay):
+            now[0] += delay
+        with patch.object(operation.time, "monotonic", side_effect=lambda: now[0]), \
+             patch.object(operation.time, "sleep", side_effect=tick), patch.object(operation, "_local_health") as health:
             self.assertFalse(operation._started(123))
             health.assert_not_called()
         self.unit["main_pid"] = 456
         self.process["entrypoint_matches_gateway"] = False
-        with patch.object(operation, "_local_health") as health:
+        now[0] = 0
+        with patch.object(operation.time, "monotonic", side_effect=lambda: now[0]), \
+             patch.object(operation.time, "sleep", side_effect=tick), patch.object(operation, "_local_health") as health:
             self.assertFalse(operation._started(123))
             health.assert_not_called()
 
@@ -456,6 +469,177 @@ class CodexServiceMaintenanceTests(unittest.TestCase):
         self.assertLess(job.index("current_main="), job.index("manage_codex_audit_service_patch.py"))
         for forbidden in ("deploy_codex_audit_service.sh", "repair-ssh", "install-org-health-token", "secrets.", "nginx", "-k", "restart"):
             self.assertNotIn(forbidden, job)
+
+
+class CodexServiceStartupTests(unittest.TestCase):
+    """Real acceptance/proc parser, synthetic boot transitions and virtual time."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.proc = Path(self.temp.name)
+        self.now = 0.0
+        self.transition = lambda: None
+        self.unit = {"identity_verified": True, "known_working_directory": True, "user": "ubuntu",
+                     "active_state": "active", "sub_state": "running", "main_pid": 456}
+        self.write_process(456, gateway=False)
+        self.deadlines = []
+        self.health = Mock(return_value=True)
+        for attr, kwargs in (
+            ("PROC_ROOT", {"new": self.proc}),
+            ("unit_metadata", {"side_effect": self.read_unit}),
+            ("_local_health", {"new": self.health}),
+            ("source_hash", {"return_value": "a" * 64}),
+        ):
+            mock = patch.object(operation, attr, **kwargs)
+            mock.start()
+            self.addCleanup(mock.stop)
+        for target, attr, kwargs in (
+            (operation.time, "monotonic", {"side_effect": lambda: self.now}),
+            (operation.time, "sleep", {"side_effect": self.sleep}),
+            (operation.pwd, "getpwnam", {"return_value": SimpleNamespace(pw_uid=os.getuid())}),
+            (operation.shutil, "which", {"return_value": "/usr/local/bin/codex"}),
+        ):
+            mock = patch.object(target, attr, **kwargs)
+            mock.start()
+            self.addCleanup(mock.stop)
+
+    def write_process(self, pid: int, *, gateway: bool, starttime: int = 98765) -> None:
+        directory = self.proc / str(pid)
+        directory.mkdir(exist_ok=True)
+        directory.joinpath("stat").write_bytes(f"{pid} (synthetic) S ".encode() + b"0 " * 18 + f"{starttime} 0\n".encode())
+        directory.joinpath("cmdline").write_bytes(
+            b"python3\0-m\0service.ai_gateway_service\0" if gateway else
+            b"/usr/bin/env\0python3\0-m\0service.ai_gateway_service\0")
+        directory.joinpath("environ").write_bytes(b"PATH=" + operation.SERVICE_PATH.encode() + b"\0TOKEN=PRIVATE\0")
+
+    def read_unit(self, **kwargs):
+        self.deadlines.append(kwargs.get("deadline"))
+        return dict(self.unit)
+
+    def sleep(self, seconds):
+        self.assertGreater(seconds, 0)
+        self.now += seconds
+        self.transition()
+
+    def test_delayed_unit_then_python_exec_is_accepted_without_resetting_deadline(self) -> None:
+        self.unit.update(active_state="activating", sub_state="start", main_pid=0)
+
+        def transition():
+            self.unit.update(active_state="active", sub_state="running", main_pid=456)
+            if self.now >= 0.2:
+                self.write_process(456, gateway=True)
+        self.transition = transition
+        diagnostics = {}
+        self.assertTrue(operation._started(123, diagnostics=diagnostics))
+        self.assertGreaterEqual(self.now, 0.2)
+        self.health.assert_called_once()
+        self.assertEqual(self.health.call_args.kwargs["deadline"], operation.HEALTH_TIMEOUT_SECONDS)
+        self.assertEqual(set(self.deadlines), {operation.HEALTH_TIMEOUT_SECONDS})
+        self.assertTrue(diagnostics["process_identity_stable"])
+        self.assertFalse(diagnostics["deadline_expired"])
+        self.assertNotIn("PRIVATE", json.dumps(diagnostics))
+
+    def test_service_exit_after_new_pid_is_not_treated_as_another_start_attempt(self) -> None:
+        self.transition = lambda: self.unit.update(active_state="inactive", sub_state="dead", main_pid=0)
+        diagnostics = {}
+        self.assertFalse(operation._started(123, diagnostics=diagnostics))
+        self.assertEqual(diagnostics["failure_phase"], "startup_exit")
+        self.assertLess(self.now, operation.HEALTH_TIMEOUT_SECONDS)
+        self.health.assert_not_called()
+
+    def test_changed_pid_or_reused_pid_starttime_cannot_be_accepted(self) -> None:
+        for reuse in (False, True):
+            with self.subTest(reuse=reuse):
+                self.now = 0
+                self.unit.update(active_state="active", sub_state="running", main_pid=456)
+                self.write_process(456, gateway=False)
+
+                def transition():
+                    pid = 456 if reuse else 457
+                    self.unit["main_pid"] = pid
+                    self.write_process(pid, gateway=True, starttime=98766)
+                self.transition = transition
+                diagnostics = {}
+                self.assertFalse(operation._started(123, diagnostics=diagnostics))
+                self.assertEqual(diagnostics["failure_phase"], "startup_identity_changed")
+                self.health.assert_not_called()
+
+    def test_permanent_wrong_module_and_missing_pid_end_at_same_deadline_without_health(self) -> None:
+        for missing in (False, True):
+            with self.subTest(missing=missing):
+                self.now = 0
+                self.unit["main_pid"] = 0 if missing else 456
+                self.proc.joinpath("456/cmdline").write_bytes(b"python3\0-m\0other.module\0")
+                diagnostics = {}
+                self.assertFalse(operation._started(123, diagnostics=diagnostics))
+                self.assertEqual(self.now, operation.HEALTH_TIMEOUT_SECONDS)
+                self.assertTrue(diagnostics["deadline_expired"])
+                self.assertFalse(diagnostics["entrypoint_matches_gateway"])
+                self.health.assert_not_called()
+
+    def test_health_cannot_get_a_new_budget_or_accept_a_result_after_total_deadline(self) -> None:
+        def transition():
+            if self.now >= 0.3:
+                self.write_process(456, gateway=True)
+        self.transition = transition
+
+        def health(*, deadline, diagnostics):
+            self.assertEqual(deadline, operation.HEALTH_TIMEOUT_SECONDS)
+            self.assertGreater(self.now, 0)
+            self.now = deadline
+            diagnostics.update(healthz_ok=True, unauthenticated_health_rejected=True)
+            return True
+        self.health.side_effect = health
+        diagnostics = {}
+        self.assertFalse(operation._started(123, diagnostics=diagnostics))
+        self.assertTrue(diagnostics["deadline_expired"])
+        self.assertEqual(diagnostics["failure_phase"], "startup_deadline")
+
+    def test_pid_change_or_reuse_during_health_cannot_be_accepted(self) -> None:
+        for reuse in (False, True):
+            with self.subTest(reuse=reuse):
+                self.now = 0
+                self.unit["main_pid"] = 456
+                self.write_process(456, gateway=True)
+
+                def health(**kwargs):
+                    pid = 456 if reuse else 457
+                    self.unit["main_pid"] = pid
+                    self.write_process(pid, gateway=True, starttime=98766)
+                    return True
+                self.health.side_effect = health
+                diagnostics = {}
+                self.assertFalse(operation._started(123, diagnostics=diagnostics))
+                self.assertEqual(diagnostics["failure_phase"], "startup_identity_changed")
+
+    def test_exhausted_readiness_budget_never_invokes_health_or_new_metadata_command(self) -> None:
+        def exhausted(**kwargs):
+            self.now = operation.HEALTH_TIMEOUT_SECONDS
+            return dict(self.unit)
+        with patch.object(operation, "unit_metadata", side_effect=exhausted):
+            diagnostics = {}
+            self.assertFalse(operation._started(123, diagnostics=diagnostics))
+        self.assertTrue(diagnostics["deadline_expired"])
+        self.health.assert_not_called()
+
+    def test_expired_metadata_budget_does_not_spawn_systemctl_or_codex(self) -> None:
+        self.now = 5
+        with patch.object(operation.subprocess, "Popen") as popen:
+            self.assertIsNone(operation.metadata_output(operation.UNIT_COMMAND, deadline=5))
+            popen.assert_not_called()
+
+    def test_untrusted_unit_or_invalid_pid_does_not_read_any_proc_identity(self) -> None:
+        for changes in ({"identity_verified": False}, {"known_working_directory": False},
+                        {"main_pid": True}, {"main_pid": 2**31}):
+            with self.subTest(changes=changes):
+                self.now = 0
+                self.unit.update(identity_verified=True, known_working_directory=True, main_pid=456)
+                self.unit.update(changes)
+                with patch.object(operation, "_process_identity") as read:
+                    self.assertFalse(operation._started(123))
+                    read.assert_not_called()
+                self.health.assert_not_called()
 
 
 class CodexServiceInspectionTests(unittest.TestCase):
