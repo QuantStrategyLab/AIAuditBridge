@@ -867,17 +867,41 @@ def _sync_domain(
         now=now,
         max_age=max_age,
     )
-    version_dir, manifest = _load_or_download_version(
-        selected,
-        config,
-        artifacts_root=artifacts_root,
-    )
-    activate_version(
-        version_dir,
-        config,
-        projects_root=projects_root,
-        lifecycle_root=lifecycle_root,
-    )
+    cached_version = artifacts_root / "versions" / config["domain"] / str(selected["id"])
+    try:
+        version_dir, manifest = _load_or_download_version(
+            selected,
+            config,
+            artifacts_root=artifacts_root,
+        )
+    except LifecycleArtifactError as exc:
+        if exc.code == "artifact_invalid" and exc.reason_code == exc.code:
+            stage_reason = (
+                "stored_artifact_validation_failed"
+                if os.path.lexists(cached_version)
+                else "artifact_version_validation_failed"
+            )
+            raise LifecycleArtifactError(
+                "lifecycle artifact version validation failed",
+                code=exc.code,
+                reason_code=stage_reason,
+            ) from exc
+        raise
+    try:
+        activate_version(
+            version_dir,
+            config,
+            projects_root=projects_root,
+            lifecycle_root=lifecycle_root,
+        )
+    except LifecycleArtifactError as exc:
+        if exc.code == "artifact_invalid" and exc.reason_code == exc.code:
+            raise LifecycleArtifactError(
+                "lifecycle artifact activation failed",
+                code=exc.code,
+                reason_code="artifact_activation_failed",
+            ) from exc
+        raise
     created_at = _parse_timestamp(selected["created_at"])
     return {
         "status": "ready",

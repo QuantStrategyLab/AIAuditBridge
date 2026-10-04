@@ -125,6 +125,7 @@ def test_send_dry_run_cli_configured_still_skips_send(capsys) -> None:
                     "TELEGRAM_TOKEN": "secret-token-value",
                     "GLOBAL_TELEGRAM_CHAT_ID": "123",
                     "QSL_GITHUB_REPO": "QuantStrategyLab/AIAuditBridge",
+                    "QUANT_MONITOR_ROOT": str(report_dir),
                 },
                 clear=True,
             ),
@@ -143,6 +144,7 @@ def test_send_dry_run_cli_configured_still_skips_send(capsys) -> None:
         assert "123" not in json.dumps(dispatch)
         urlopen.assert_not_called()
         send_tg.assert_not_called()
+        assert not (report_dir / "data" / "alert-state" / "health_cycle.json").exists()
 
 
 def _write_summary_report(report_dir, *, as_of='2026-09-09T22:00:00+00:00'):
@@ -152,6 +154,60 @@ def _write_summary_report(report_dir, *, as_of='2026-09-09T22:00:00+00:00'):
                         'overall_score': 12, 'secret': 'private-marker'}],
         'error': 'private-marker', 'summary': {'critical': 9000},
     }))
+
+
+def test_summary_report_keeps_source_and_generation_clocks_separate():
+    from service.briefing_consumer import _summary_report
+
+    report = _summary_report({
+        'domain': 'us_equity', 'ok': True, 'data_status': 'ready',
+        'as_of': '2026-09-09T21:45:00+00:00',
+        'generated_at': '2026-09-09T22:00:00+00:00',
+        'strategies': [{'strategy_profile': 'private', 'status': 'healthy', 'as_of': '2026-09-09'}],
+    }, source='us_equity.json')
+
+    assert report['source_as_of'] == '2026-09-09T21:45:00+00:00'
+    assert report['report_generated_at'] == '2026-09-09T22:00:00+00:00'
+    assert report['data_ready'] is True
+
+
+def test_summary_report_accepts_only_explicit_not_configured_domain():
+    from service.briefing_consumer import _summary_report
+
+    report = _summary_report({
+        'domain': 'crypto', 'ok': True, 'data_status': 'not_configured',
+        'as_of': '2026-09-09T21:45:00+00:00',
+        'generated_at': '2026-09-09T22:00:00+00:00',
+        'coverage': {'expected_profiles': [], 'observed_profiles': [], 'missing_profiles': []},
+        'strategies': [],
+    }, source='crypto.json')
+    unstated = _summary_report({
+        'domain': 'crypto', 'ok': True, 'data_status': 'not_configured',
+        'as_of': '2026-09-09T21:45:00+00:00', 'generated_at': '2026-09-09T22:00:00+00:00',
+        'strategies': [],
+    }, source='crypto.json')
+
+    assert report['not_configured'] is True
+    assert report['data_ready'] is False
+    assert unstated['not_configured'] is False
+
+
+def test_summary_report_rejects_empty_ready_with_missing_profile_coverage():
+    from service.briefing_consumer import _summary_report
+
+    report = _summary_report({
+        'domain': 'us_equity', 'ok': True, 'data_status': 'ready',
+        'as_of': '2026-09-09T21:45:00+00:00',
+        'generated_at': '2026-09-09T22:00:00+00:00',
+        'coverage': {
+            'expected_profiles': ['expected_profile'],
+            'observed_profiles': [],
+            'missing_profiles': ['expected_profile'],
+        },
+        'strategies': [],
+    }, source='us_equity.json')
+
+    assert report['data_ready'] is False
 
 
 def test_ai_summary_dry_run_never_authenticates_or_calls_model(tmp_path, capsys):
@@ -202,3 +258,68 @@ def test_ai_summary_uses_gateway_contract_after_existing_alert_dispatch(tmp_path
     assert result['ai_summary']['status'] == 'available'
     assert result['ai_summary']['advisory_only'] is True
     assert result['action'] == 'github_issue'
+
+
+def _projection_file(tmp_path: Path) -> Path:
+    path = tmp_path / "projection.json"
+    path.write_text(json.dumps({
+        "platform": "longbridge",
+        "observed_at": "2026-09-28T08:40:00+00:00",
+        "completeness": "complete",
+        "read_errors": [],
+        "unmatched_reports": [],
+        "records": [{
+            "platform": "longbridge",
+            "target_key": "lb-svc|rot|paper",
+            "target": {"service": "lb-svc", "strategy_profile": "rot", "account_scope": "paper"},
+            "business_date": "2026-09-28",
+            "timezone": "Asia/Hong_Kong",
+            "status": "market_closed",
+            "completeness": "complete",
+            "execution_lane": "paper",
+            "runs": [],
+            "conflicts": [],
+            "fills": {"source": "not_connected", "records": [], "count": None},
+        }],
+    }), encoding="utf-8")
+    return path
+
+
+def test_runtime_projection_preview_does_not_send_or_call_model(tmp_path, capsys) -> None:
+    path = _projection_file(tmp_path)
+    with patch("service.briefing_dispatch.telegram_target_outcome") as send_target, patch(
+        "client.gateway_client.AiGatewayClient.execute",
+    ) as execute:
+        code = main(["--runtime-projection", str(path)])
+    captured = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert captured["kind"] == "runtime_digest"
+    assert "休市" in captured["text"]
+    assert "dispatch" not in captured
+    send_target.assert_not_called()
+    execute.assert_not_called()
+    assert not (tmp_path / "data" / "alert-state" / "health_cycle.json").exists()
+
+
+def test_runtime_projection_dry_run_does_not_persist_delivery(tmp_path, capsys) -> None:
+    path = _projection_file(tmp_path)
+    with patch.dict("os.environ", {"QUANT_MONITOR_ROOT": str(tmp_path), "TELEGRAM_TOKEN": "tok", "GLOBAL_TELEGRAM_CHAT_ID": "1"}, clear=True), patch(
+        "service.briefing_dispatch.telegram_target_outcome",
+    ) as send_target:
+        code = main(["--runtime-projection", str(path), "--dry-run"])
+    captured = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert captured["dispatch"]["skipped"] == ["dry_run"]
+    send_target.assert_not_called()
+    assert not (tmp_path / "data" / "alert-state" / "health_cycle.json").exists()
+
+
+def test_domain_quiet_route_is_unchanged(tmp_path, capsys) -> None:
+    (tmp_path / "us_equity.json").write_text(json.dumps({
+        "domain": "us_equity", "ok": True, "data_status": "ready", "as_of": "2026-09-28T08:00:00+00:00",
+        "strategies": [{"strategy_profile": "rot", "status": "healthy", "overall_score": 80, "as_of": "2026-09-28"}],
+    }), encoding="utf-8")
+    assert main(["--report-dir", str(tmp_path)]) == 0
+    captured = json.loads(capsys.readouterr().out)
+    assert captured["action"] == "quiet"
+    assert "runtime_digest" not in captured

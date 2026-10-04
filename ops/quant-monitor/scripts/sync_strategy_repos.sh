@@ -12,6 +12,17 @@ MIRROR_ROOT="${QUANT_PROJECTS_ROOT:-$ROOT/data/lifecycle-projects}"
 REPOSITORY_BASE_URL="${QUANT_MONITOR_REPOSITORY_BASE_URL:-https://github.com/QuantStrategyLab}"
 failed=0
 
+if [[ ! -f "$ROOT/qpk-runtime.sha" ]]; then
+  echo "[sync] missing qpk-runtime.sha" >&2
+  exit 1
+fi
+QPK_RUNTIME_SHA="$(<"$ROOT/qpk-runtime.sha")"
+QPK_RUNTIME_SHA="${QPK_RUNTIME_SHA%$'\n'}"
+if [[ ! "$QPK_RUNTIME_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "[sync] qpk-runtime.sha must contain a reviewed 40-character SHA" >&2
+  exit 1
+fi
+
 # Only setuptools output confirmed on the dedicated QPK mirror is recoverable.
 # Unknown/staged edits are user changes, even when checkout would carry them over.
 metadata_only_changes() {
@@ -35,15 +46,23 @@ replace_metadata_dirty_mirror() (
     echo "[sync] $repo preservation requires review" >&2
     return 1
   fi
+  if [[ "$repo" == "QuantPlatformKit" ]]; then
+    target="$QPK_RUNTIME_SHA"
+  else
+    target=$(git -C "$dir" rev-parse origin/main) || return 1
+  fi
   replacement=$(mktemp -d "$MIRROR_ROOT/.${repo}.refresh.XXXXXX") || return 1
   trap 'rm -rf -- "$replacement"' EXIT
-  target=$(git -C "$dir" rev-parse origin/main) || return 1
   origin=$(git -C "$dir" remote get-url origin) || return 1
   git clone --no-hardlinks --no-checkout --quiet "$dir" "$replacement" || return 1
   git -C "$replacement" fetch --quiet --no-tags "$dir" "$target" || return 1
   git -C "$replacement" remote set-url origin "$origin" || return 1
   git -C "$replacement" checkout --detach --quiet "$target" || return 1
-  git -C "$replacement" update-ref refs/remotes/origin/main "$target" || return 1
+  if [[ "$repo" == "QuantPlatformKit" ]]; then
+    [[ "$(git -C "$replacement" rev-parse HEAD)" == "$QPK_RUNTIME_SHA" ]] || return 1
+  else
+    git -C "$replacement" update-ref refs/remotes/origin/main "$target" || return 1
+  fi
   # No source directory is moved until the replacement is complete and clean.
   [[ -z "$(git -C "$replacement" status --porcelain --untracked-files=no)" ]] || return 1
   [[ "$(git -C "$dir" status --porcelain --untracked-files=no)" == "$dirty" ]] || return 1
@@ -68,10 +87,18 @@ trap 'rmdir -- "$sync_lock"' EXIT
 for repo in "${REPOS[@]}"; do
   dir="$MIRROR_ROOT/$repo"
   if [[ -d "$dir/.git" ]]; then
-    if ! git -C "$dir" fetch origin main --quiet; then
-      echo "[sync] $repo fetch failed" >&2
-      failed=1
-      continue
+    if [[ "$repo" == "QuantPlatformKit" ]]; then
+      if ! git -C "$dir" fetch origin "$QPK_RUNTIME_SHA" --quiet; then
+        echo "[sync] $repo fetch failed" >&2
+        failed=1
+        continue
+      fi
+    else
+      if ! git -C "$dir" fetch origin main --quiet; then
+        echo "[sync] $repo fetch failed" >&2
+        failed=1
+        continue
+      fi
     fi
     dirty=$(git -C "$dir" status --porcelain --untracked-files=no) || {
       failed=1
@@ -89,19 +116,56 @@ for repo in "${REPOS[@]}"; do
         continue
       fi
     fi
-    if ! git -C "$dir" checkout --detach --quiet origin/main; then
-      echo "[sync] $repo checkout failed" >&2
-      failed=1
-      continue
+    if [[ "$repo" == "QuantPlatformKit" ]]; then
+      if ! git -C "$dir" checkout --detach --quiet "$QPK_RUNTIME_SHA"; then
+        echo "[sync] $repo checkout failed" >&2
+        failed=1
+        continue
+      fi
+      if [[ "$(git -C "$dir" rev-parse HEAD)" != "$QPK_RUNTIME_SHA" ]]; then
+        echo "[sync] $repo checkout does not match pinned SHA" >&2
+        failed=1
+        continue
+      fi
+    else
+      if ! git -C "$dir" checkout --detach --quiet origin/main; then
+        echo "[sync] $repo checkout failed" >&2
+        failed=1
+        continue
+      fi
     fi
     echo "[sync] $repo ok"
   else
-    if ! git clone --depth 1 "$REPOSITORY_BASE_URL/$repo.git" "$dir" --quiet; then
-      echo "[sync] $repo clone failed" >&2
-      failed=1
-      continue
+    if [[ "$repo" == "QuantPlatformKit" ]]; then
+      if ! git clone --no-checkout "$REPOSITORY_BASE_URL/$repo.git" "$dir" --quiet; then
+        echo "[sync] $repo clone failed" >&2
+        failed=1
+        continue
+      fi
+      if ! git -C "$dir" fetch origin "$QPK_RUNTIME_SHA" --quiet; then
+        echo "[sync] $repo fetch failed" >&2
+        failed=1
+        continue
+      fi
+      if ! git -C "$dir" checkout --detach --quiet "$QPK_RUNTIME_SHA"; then
+        echo "[sync] $repo checkout failed" >&2
+        failed=1
+        continue
+      fi
+      if [[ "$(git -C "$dir" rev-parse HEAD)" != "$QPK_RUNTIME_SHA" ]]; then
+        echo "[sync] $repo checkout does not match pinned SHA" >&2
+        failed=1
+        continue
+      fi
+      echo "[sync] $repo cloned"
+    else
+      if ! git clone --depth 1 "$REPOSITORY_BASE_URL/$repo.git" "$dir" --quiet; then
+        echo "[sync] $repo clone failed" >&2
+        failed=1
+        continue
+      fi
+      echo "[sync] $repo cloned"
     fi
-    echo "[sync] $repo cloned"
   fi
 done
 exit "$failed"

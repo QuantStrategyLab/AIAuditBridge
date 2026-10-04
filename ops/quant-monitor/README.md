@@ -75,8 +75,8 @@ systemd unit 通过 `RuntimeDirectory=quant-monitor` 与 `ExecStartPre=.../load_
 ## VPS 部署
 
 ```bash
-# 从本机（已 clone AIAuditBridge）
-bash ops/quant-monitor/scripts/deploy_to_vps.sh
+# 从本机（已 clone AIAuditBridge）；REVIEWED_MAIN_SHA 为已审阅的 40 位 main SHA
+AIAUDIT_BRIDGE_SOURCE_SHA="$REVIEWED_MAIN_SHA" bash ops/quant-monitor/scripts/deploy_to_vps.sh
 
 # VPS 上
 sudo cp ops/quant-monitor/systemd/codex-quant.service.example /etc/systemd/system/codex-quant.service
@@ -85,6 +85,17 @@ sudo systemctl daemon-reload && sudo systemctl enable --now codex-quant.service
 ```
 
 收盘简报 + AIAuditBridge 分发：`bash scripts/daily_briefing_pipeline.sh`
+
+策略健康 domain 报告仍走原来的 quiet / issue / Telegram 分流。LongBridge 日运行投影是另一份离线输入，不并进策略健康。在 AIAuditBridge 仓库根目录：
+
+```bash
+python3 scripts/consume_daily_briefing.py --runtime-projection projection.json
+python3 scripts/consume_daily_briefing.py --runtime-projection projection.json --dispatch
+```
+
+默认只预览。`--dispatch` 才发送，并按平台、业务日和投影中的目标集合复用既有逐目标送达；同一目标集合换顺序、改观察时间或改正文不会另发。这个目标集合是否等于生产固定配置，还要云端接线验收。`--dry-run` / `--send-dry-run` 不联网、不写送达状态。投影里的成交笔数尚未接通，不能读成零成交。这不是云端真实日报，也不关闭各平台原来的通知。
+
+GCS 输入默认关闭，也不改 22:30 UTC 的简报定时。只有 `QUANT_MONITOR_RUNTIME_DIGEST_ENABLED=true`，并且同时配置合法的 `QUANT_MONITOR_RUNTIME_PROJECTION_PREFIX`（末段必须是 `runtime_daily`）、IANA `QUANT_MONITOR_RUNTIME_TIMEZONE` 和 `QUANT_MONITOR_RUNTIME_EXPECTED_TARGET_KEY`（scope 末段为 `paper`）时，pipeline 才按该时区的业务日读取 `{prefix}/longbridge/paper/{day}.json`。日期和目标键来自这三项配置，不从对象内容反推。读取用现有 `gcloud storage cat`，20 秒超时、正文上限 1MiB、不重试；缺对象、无权限、超时或非法内容都不发送。发送仍是原来的 `--dispatch`、量化哨兵和 `health_cycle.json`。domain 简报照常单独执行：它失败不会跳过 runtime，runtime 失败也不会取消已跑的 domain；任一项失败则 pipeline 以非零结束。日志不写正文、对象 URI 或 chat id。本地 `--runtime-projection` 仍然可用，并与 `--runtime-projection-gcs` 互斥。VPS 是否已安装该开关、云端身份是否能读该对象、以及首份送达，都还没有验收。
 
 ## Immutable release 安装（仅安装）
 
@@ -150,3 +161,43 @@ checkout、不 stash、不删除旧状态，也不创建第二份累计备份。
 保留目录与 `.sync-strategy-repos.lock` 的实际状态，再恢复被中断的同步；不要按定时
 重试自动删除锁或备份。此次源码修复不代表 VPS 已采用：部署后仍须读回下一次正常
 监测周期及网站结果时间；不能用本地测试代替线上恢复证明。
+
+### QPK 运行源码固定（R12）
+
+`ops/quant-monitor/qpk-runtime.sha` 保存已审的精确 40 位 QuantPlatformKit commit。
+`setup_vps_runtime.sh` 与 `sync_strategy_repos.sh` 都只从该文件读取 pin：缺失、非
+40hex、fetch/对象不可用或 checkout 后 HEAD 不匹配时直接失败，不回落 `origin/main`。
+setup 的 AAB dirty 检查包含该 pin 文件，拒绝消费未提交篡改。sync 仅固定 QPK；其余
+四策略仓仍同步 `origin/main`。metadata-only 恢复路径也 checkout 同一 pin，并保留原
+镜像目录。
+
+### 第三方依赖锁定（R12 续）
+
+`ops/quant-monitor/requirements-linux-py312.lock` 只锁定 monitor 在 **CPython 3.12 /
+Linux x86_64 / glibc ≥ 2.34** 上实际需要的直接与传递依赖（含既有 QPK 构建后端
+`setuptools==84.0.0` 与 `wheel`/`pip`），并带 PyPI wheel hash。它不是整台 VPS 或全
+组织可复现证明，也不锁定四策略仓或通用 gateway 依赖。
+
+`setup_vps_runtime.sh` 在改 mirror/venv 之前：
+
+1. 要求 lock 存在于当前 `QUANT_MONITOR_ROOT`，且字节与受审 `SOURCE_SHA` 中
+   `ops/quant-monitor/requirements-linux-py312.lock` 完全一致；缺失、未跟踪或脏
+   工作区拒绝。
+2. 校验当前解释器为 3.12、OS 为 Linux、机器为 x86_64，并用数值解析确认 glibc ≥
+   2.34；不支持的环境直接说明本 lock 仅覆盖该平台，不静默 fallback。
+3. 用当前 venv 的 `python -m pip install --require-hashes --only-binary=:all: -r
+   requirements-linux-py312.lock` 安装完整 lock，不再执行无界 `pip/wheel -U` 或无
+   版本 `numpy/pandas/google-cloud-storage`。
+4. QPK 仍从临时 git archive 安装，但使用 `--no-deps --no-build-isolation`，复用已
+   锁 setuptools/wheel，不隐式下载 build deps；最后 `pip check`。pip 成功不等于业
+   务验收。
+
+需要单独准备 venv 时，可显式设置 `QUANT_MONITOR_VENV` 指向一个新的绝对目录；其
+父目录必须已存在，目标不能已存在，也不能与 AAB 源码、monitor/data、现用 `.venv`、
+`QUANT_PROJECTS_ROOT`、`LIFECYCLE_LOCAL_ROOT` 或 QPK 镜像重叠。此模式只从现有 QPK
+镜像读取精确 pin 的 Git archive，不 fetch、
+checkout 或改写共享镜像；本地缺少该 commit 时会在创建 venv 前失败。未设置该变量
+时仍安装到 `$QUANT_MONITOR_ROOT/.venv`，默认流程不变。暂存不会修改 systemd 配置；
+服务是否使用该路径须由独立的配置变更明确决定。
+
+生产 venv 是否已按此 lock 迁移须另做安装/读回；本说明不声称生产已切换。
