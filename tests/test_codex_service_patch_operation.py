@@ -69,6 +69,10 @@ class CodexServiceInspectionTests(unittest.TestCase):
         (self.jobs / "unexpected-private-name.json").write_text("PRIVATE", encoding="utf-8")
         result = operation.job_counts(self.jobs)
         self.assertEqual(result["unknown"], 6)
+        self.assertEqual(result["unknown_reasons"]["invalid_status"], 3)
+        self.assertEqual(result["unknown_reasons"]["invalid_json_or_duplicate_key"], 1)
+        self.assertEqual(result["unknown_reasons"]["unreadable_or_not_regular"], 1)
+        self.assertEqual(result["unknown_reasons"]["invalid_name"], 1)
         self.assertFalse(result["complete"])
         self.assertNotIn("PRIVATE", json.dumps(result))
         self.assertNotIn("unexpected", json.dumps(result))
@@ -88,11 +92,13 @@ class CodexServiceInspectionTests(unittest.TestCase):
             result = operation.job_counts(self.jobs)
         self.assertEqual(result["queued"], 0)
         self.assertEqual(result["unknown"], 1)
+        self.assertEqual(result["unknown_reasons"]["per_file_limit"], 1)
         self.assertTrue(result["truncated"])
         self.assertFalse(result["complete"])
         with patch.object(operation, "MAX_TOTAL_JOB_BYTES", 8):
             result = operation.job_counts(self.jobs)
         self.assertGreaterEqual(result["unknown"], 1)
+        self.assertEqual(result["unknown_reasons"]["total_byte_limit"], 1)
         self.assertTrue(result["truncated"])
 
     def test_directory_entry_cap_marks_unexamined_records_unknown(self) -> None:
@@ -104,17 +110,135 @@ class CodexServiceInspectionTests(unittest.TestCase):
         self.assertGreaterEqual(result["unknown"], 1)
         self.assertTrue(result["truncated"])
         self.assertFalse(result["complete"])
+        self.assertEqual(result["unknown_reasons"]["entry_limit"], 1)
 
     def test_duplicate_status_is_unknown_and_failed_reads_consume_total_budget(self) -> None:
         self.job(0, {}).write_text('{"status":"running","status":"succeeded"}', encoding="utf-8")
         self.assertEqual(operation.job_counts(self.jobs)["unknown"], 1)
         self.job(1, {"status": "queued"})
         with patch.object(operation, "MAX_TOTAL_JOB_BYTES", 8), \
-             patch.object(operation, "_regular_bytes", return_value=(None, True, 8)) as reads:
+             patch.object(operation, "_regular_bytes", return_value=(None, "byte_limit", 8)) as reads:
             result = operation.job_counts(self.jobs)
         self.assertEqual(reads.call_count, 1)
         self.assertEqual(result["unknown"], 2)
         self.assertTrue(result["truncated"])
+
+    def process_fixture(self, env: bytes | None = None, argv: bytes | None = None):
+        proc = self.root / "proc"
+        directory = proc / "123"
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "stat").write_bytes(b"123 (python3) S " + b"0 " * 18 + b"98765 0\n")
+        (directory / "cmdline").write_bytes(argv if argv is not None else b"python3\0-m\0service.ai_gateway_service\0")
+        (directory / "environ").write_bytes(env if env is not None else (
+            b"PRIVATE_TOKEN=DO_NOT_OUTPUT\0PATH=" + operation.SERVICE_PATH.encode() + b"\0"
+        ))
+        uid = directory.stat().st_uid
+        unit = {"main_pid": 123, "user": "synthetic", "identity_verified": True, "known_working_directory": True}
+        return proc, directory, uid, unit
+
+    def inspect_process_fixture(self, proc, uid, unit):
+        with patch.object(operation, "PROC_ROOT", proc), \
+             patch.object(operation.pwd, "getpwnam", return_value=SimpleNamespace(pw_uid=uid)), \
+             patch.object(operation, "unit_metadata", return_value=unit), \
+             patch.object(operation.shutil, "which", return_value="/usr/local/bin/codex"), \
+             patch.object(operation, "source_hash", return_value="a" * 64), \
+             patch.object(operation, "metadata_output") as command:
+            result = operation.service_process_metadata(unit)
+        command.assert_not_called()
+        return result
+
+    def test_fixed_process_proof_is_initial_environment_only_without_secret_or_argv_output(self) -> None:
+        proc, _, uid, unit = self.process_fixture()
+        result = self.inspect_process_fixture(proc, uid, unit)
+        self.assertTrue(result["snapshot_coherent"])
+        self.assertTrue(result["entrypoint_matches_gateway"])
+        self.assertTrue(result["initial_environment_complete"])
+        self.assertTrue(result["initial_environment_known_cli_choice"])
+        self.assertEqual(result["known_cli_launch_sha256"], "a" * 64)
+        self.assertFalse(result["runtime_python_environment_verified"])
+        self.assertFalse(result["running_source_identity_verified"])
+        self.assertNotIn("DO_NOT_OUTPUT", json.dumps(result))
+        self.assertNotIn("PRIVATE_TOKEN", json.dumps(result))
+        self.assertNotIn("python3", json.dumps(result))
+        self.assertNotIn("/usr/local/bin", json.dumps(result))
+
+    def test_initial_env_unsupported_empty_relative_or_ambiguous_paths_fail_closed(self) -> None:
+        service_path = operation.SERVICE_PATH.encode()
+        for env in (
+            b"PATH=" + service_path + b"\0CODEX_AUDIT_SERVICE_CODEX_BIN=\0",
+            b"PATH=" + service_path + b"\0CODEX_AUDIT_SERVICE_CODEX_BIN=./codex\0",
+            b"PATH=" + service_path + b"\0CODEX_AUDIT_SERVICE_CODEX_BIN=/private/custom\0",
+            b"PATH=/usr/bin::/usr/local/bin\0", b"PATH=./bin:/usr/bin\0", b"PRIVATE_TOKEN=DO_NOT_OUTPUT\0",
+            b"PATH=/usr/bin\0PATH=/usr/local/bin\0", b"PATH=" + service_path,
+            b"PATH=" + service_path + b"\0CODEX_AUDIT_SERVICE_CODEX_BIN=codex\0CODEX_AUDIT_SERVICE_CODEX_BIN=codex\0",
+            b"PATH=" + b"x" * 4097 + b"\0", b"PATH=\xff\0",
+        ):
+            with self.subTest(env=env):
+                proc, _, uid, unit = self.process_fixture(env=env)
+                result = self.inspect_process_fixture(proc, uid, unit)
+                self.assertFalse(result["initial_environment_known_cli_choice"])
+                self.assertIsNone(result["known_cli_launch_sha256"])
+                self.assertNotIn("private", json.dumps(result).lower())
+
+    def test_known_absolute_override_and_absence_follow_only_documented_initial_choice(self) -> None:
+        for configured in (b"", b"CODEX_AUDIT_SERVICE_CODEX_BIN=codex\0", b"CODEX_AUDIT_SERVICE_CODEX_BIN=/usr/local/bin/codex\0"):
+            with self.subTest(configured=configured):
+                proc, _, uid, unit = self.process_fixture(env=b"PATH=" + operation.SERVICE_PATH.encode() + b"\0" + configured)
+                self.assertTrue(self.inspect_process_fixture(proc, uid, unit)["initial_environment_known_cli_choice"])
+        proc, _, uid, unit = self.process_fixture()
+        with patch.object(operation, "MAX_ENV_RECORDS", 1):
+            self.assertFalse(self.inspect_process_fixture(proc, uid, unit)["initial_environment_complete"])
+
+    def test_invalid_unit_or_bad_stat_cannot_read_environment_or_lookup_configured_binary(self) -> None:
+        _, _, uid, unit = self.process_fixture()
+        for altered in ({**unit, "main_pid": True}, {**unit, "main_pid": 0},
+                        {**unit, "known_working_directory": False}, {**unit, "identity_verified": False}):
+            with self.subTest(unit=altered), patch.object(operation, "_regular_bytes") as read, \
+                 patch.object(operation.shutil, "which") as lookup:
+                self.assertFalse(operation.service_process_metadata(altered)["snapshot_coherent"])
+                read.assert_not_called()
+                lookup.assert_not_called()
+        proc, directory, uid, unit = self.process_fixture()
+        for stat_data in (b"PRIVATE_INVALID_STAT", b"999 (python3) S " + b"0 " * 18 + b"98765", b"123 (python3) S 0"):
+            with self.subTest(stat_data=stat_data):
+                directory.joinpath("stat").write_bytes(stat_data)
+                self.assertFalse(self.inspect_process_fixture(proc, uid, unit)["snapshot_coherent"])
+        directory.joinpath("stat").write_bytes(b"123 (python3) S " + b"0 " * 18 + b"98765 0\n")
+        with patch.object(operation, "MAX_PROC_STAT_BYTES", 8):
+            self.assertFalse(self.inspect_process_fixture(proc, uid, unit)["snapshot_coherent"])
+
+    def test_process_bounds_uid_pid_starttime_and_entrypoint_mismatch_never_prove_identity(self) -> None:
+        for argv in (b"python3\0-m\0scripts.codex_audit_service\0", b"python3\0-m\0service.ai_gateway_service\0SECRET_ARG\0"):
+            with self.subTest(argv=argv):
+                proc, _, uid, unit = self.process_fixture(argv=argv)
+                result = self.inspect_process_fixture(proc, uid, unit)
+                self.assertFalse(result["entrypoint_matches_gateway"])
+                self.assertFalse(result["initial_environment_known_cli_choice"])
+                self.assertNotIn("SECRET_ARG", json.dumps(result))
+        proc, directory, uid, unit = self.process_fixture()
+        with patch.object(operation, "MAX_PROC_ENV_BYTES", 8):
+            self.assertFalse(self.inspect_process_fixture(proc, uid, unit)["initial_environment_complete"])
+        with patch.object(operation, "MAX_PROC_ARG_BYTES", 8):
+            self.assertFalse(self.inspect_process_fixture(proc, uid, unit)["entrypoint_matches_gateway"])
+        self.assertFalse(self.inspect_process_fixture(proc, uid + 1, unit)["snapshot_coherent"])
+        with patch.object(operation, "PROC_ROOT", proc), \
+             patch.object(operation.pwd, "getpwnam", return_value=SimpleNamespace(pw_uid=uid)), \
+             patch.object(operation, "unit_metadata", return_value={**unit, "main_pid": 456}):
+            self.assertFalse(operation.service_process_metadata(unit)["snapshot_coherent"])
+        before = directory.joinpath("stat").read_bytes()
+        calls = 0
+        original = operation._regular_bytes
+
+        def replace_stat(path, *args, **kwargs):
+            nonlocal calls
+            if Path(path).name == "stat":
+                calls += 1
+                if calls == 2:
+                    directory.joinpath("stat").write_bytes(before.replace(b"98765", b"98766"))
+            return original(path, *args, **kwargs)
+
+        with patch.object(operation, "_regular_bytes", side_effect=replace_stat):
+            self.assertFalse(self.inspect_process_fixture(proc, uid, unit)["snapshot_coherent"])
 
     def test_source_replacement_during_read_is_unknown(self) -> None:
         source = self.root / "source.py"
@@ -233,12 +357,13 @@ class CodexServiceInspectionTests(unittest.TestCase):
         with patch.object(operation, "SOURCE_FILES", {"gateway": source, "codex_adapter": adapter}), \
              patch.object(operation, "JOB_DIRECTORY", self.jobs), \
              patch.object(operation, "unit_metadata", return_value={"main_pid": 123}), \
+             patch.object(operation, "service_process_metadata", return_value={"snapshot_coherent": False}), \
              patch.object(operation, "cli_capabilities", return_value={"version": "0.123.4"}), \
              contextlib.redirect_stdout(out):
             self.assertEqual(operation.main(["inspect"]), 0)
         result = json.loads(out.getvalue())
         self.assertEqual(result["job_counts"]["running"], 1)
-        self.assertEqual(set(result), {"operation", "source_sha256", "unit", "job_counts", "cli"})
+        self.assertEqual(set(result), {"operation", "source_sha256", "unit", "job_counts", "cli", "service_process"})
         self.assertNotIn("PRIVATE", out.getvalue())
         self.assertEqual(before, {p: p.read_bytes() for p in before})
         for args in (["apply"], ["restart"], ["inspect", "--unit", "other"], ["inspect", "--path", "/private"]):

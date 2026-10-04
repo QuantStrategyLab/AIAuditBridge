@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import json
 import os
+import pwd
 import re
 import selectors
 import shutil
@@ -42,9 +43,19 @@ MAX_TOTAL_JOB_BYTES = 8 * 1024 * 1024
 MAX_COMMAND_BYTES = 64 * 1024
 COMMAND_TIMEOUT_SECONDS = 10
 JOB_NAME = re.compile(r"[A-Za-z0-9_-]{24,96}\.json\Z")
+PROC_ROOT = Path("/proc")
+MAX_PROC_STAT_BYTES = 8 * 1024
+MAX_PROC_ARG_BYTES = 8 * 1024
+MAX_PROC_ENV_BYTES = 64 * 1024
+MAX_ENV_RECORDS = 256
+UNKNOWN_REASONS = (
+    "per_file_limit", "total_byte_limit", "entry_limit", "unreadable_or_not_regular",
+    "file_or_directory_changed", "invalid_name", "invalid_json_or_duplicate_key",
+    "invalid_status", "directory_unavailable",
+)
 
 
-def _regular_bytes(path: Path | str, limit: int, *, directory_fd: int | None = None) -> tuple[bytes | None, bool, int]:
+def _regular_bytes(path: Path | str, limit: int, *, directory_fd: int | None = None) -> tuple[bytes | None, str | None, int]:
     """Reject links/special files and races, and read at most limit+1 bytes."""
     fd = None
     data = bytearray()
@@ -52,9 +63,9 @@ def _regular_bytes(path: Path | str, limit: int, *, directory_fd: int | None = N
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd)
         before = os.fstat(fd)
         if not stat.S_ISREG(before.st_mode):
-            return None, False, 0
+            return None, "unreadable_or_not_regular", 0
         if before.st_size > limit:
-            return None, True, 0
+            return None, "byte_limit", 0
         while len(data) <= limit:
             chunk = os.read(fd, min(65536, limit + 1 - len(data)))
             if not chunk:
@@ -62,17 +73,17 @@ def _regular_bytes(path: Path | str, limit: int, *, directory_fd: int | None = N
             data.extend(chunk)
         after = os.fstat(fd)
         if len(data) > limit:
-            return None, True, len(data)
+            return None, "byte_limit", len(data)
         current = os.stat(path, dir_fd=directory_fd, follow_symlinks=False)
         if (current.st_dev, current.st_ino) != (after.st_dev, after.st_ino):
-            return None, False, len(data)
+            return None, "file_or_directory_changed", len(data)
         if (before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
             after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns
         ):
-            return None, False, len(data)
-        return bytes(data), False, len(data)
+            return None, "file_or_directory_changed", len(data)
+        return bytes(data), None, len(data)
     except OSError:
-        return None, False, len(data)
+        return None, "unreadable_or_not_regular", len(data)
     finally:
         if fd is not None:
             os.close(fd)
@@ -99,33 +110,40 @@ def job_counts(directory: Path) -> dict:
         # Only the fixed documented directory is read; environment overrides
         # are deliberately not queried, so configured-directory identity is not proved.
         "configured_directory_verified": False,
+        "unknown_reasons": dict.fromkeys(UNKNOWN_REASONS, 0),
     }
     directory_fd = None
     consumed = 0
+
+    def unknown(reason: str, *, truncated: bool = False) -> None:
+        result["unknown"] += 1
+        result["unknown_reasons"][reason] += 1
+        result["truncated"] |= truncated
+
     try:
         directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         before = os.fstat(directory_fd)
         with os.scandir(directory_fd) as entries:
             for index, entry in enumerate(entries):
                 if index >= MAX_JOB_ENTRIES:
-                    result["unknown"] += 1  # lower bound: remaining count is not enumerated
-                    result["truncated"] = True
+                    unknown("entry_limit", truncated=True)  # remaining count is not enumerated
                     break
                 if entry.name == "quota.json" or not entry.name.endswith(".json"):
                     continue
                 if not JOB_NAME.fullmatch(entry.name):
-                    result["unknown"] += 1
+                    unknown("invalid_name")
                     continue
                 remaining = MAX_TOTAL_JOB_BYTES - consumed
                 if remaining <= 0:
-                    result["unknown"] += 1
-                    result["truncated"] = True
+                    unknown("total_byte_limit", truncated=True)
                     break
-                data, truncated, bytes_read = _regular_bytes(entry.name, min(MAX_JOB_BYTES, remaining), directory_fd=directory_fd)
+                data, reason, bytes_read = _regular_bytes(entry.name, min(MAX_JOB_BYTES, remaining), directory_fd=directory_fd)
                 consumed += bytes_read
                 if data is None:
-                    result["unknown"] += 1
-                    result["truncated"] |= truncated
+                    if reason == "byte_limit":
+                        unknown("per_file_limit" if remaining >= MAX_JOB_BYTES else "total_byte_limit", truncated=True)
+                    else:
+                        unknown(reason or "unreadable_or_not_regular")
                     continue
                 try:
                     payload = json.loads(data, object_pairs_hook=_unique_object)
@@ -133,21 +151,136 @@ def job_counts(directory: Path) -> dict:
                     if status in ("queued", "running"):
                         result[status] += 1
                     elif status not in ("succeeded", "failed"):
-                        result["unknown"] += 1
+                        unknown("invalid_status")
                 except (ValueError, UnicodeError, RecursionError):
-                    result["unknown"] += 1
+                    unknown("invalid_json_or_duplicate_key")
         after = os.fstat(directory_fd)
         current = os.stat(directory, follow_symlinks=False)
         if (current.st_dev, current.st_ino) != (after.st_dev, after.st_ino):
-            result["unknown"] += 1
+            unknown("file_or_directory_changed")
         if (before.st_mtime_ns, before.st_ctime_ns) != (after.st_mtime_ns, after.st_ctime_ns):
-            result["unknown"] += 1
+            unknown("file_or_directory_changed")
     except OSError:
-        result["unknown"] += 1
+        unknown("directory_unavailable")
     finally:
         if directory_fd is not None:
             os.close(directory_fd)
     result["complete"] = result["unknown"] == 0 and not result["truncated"]
+    return result
+
+
+def _process_identity(pid: int) -> tuple[int, int] | None:
+    """Read only starttime and fresh owner UID for the fixed unit's PID."""
+    directory = PROC_ROOT / str(pid)
+    data, _, _ = _regular_bytes(directory / "stat", MAX_PROC_STAT_BYTES)
+    if data is None:
+        return None
+    try:
+        # comm may contain spaces/parentheses. Starttime is field 22, after
+        # the closing comm delimiter and fields 3..21; never print comm/stat.
+        closing = data.rfind(b")")
+        fields = data[closing + 2:].split()
+        if closing < 0 or int(data.split(b" ", 1)[0]) != pid or len(fields) < 20:
+            return None
+        starttime = int(fields[19])
+        info = directory.stat(follow_symlinks=False)
+        if starttime <= 0 or not stat.S_ISDIR(info.st_mode):
+            return None
+        return starttime, info.st_uid
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _initial_environment(data: bytes | None) -> dict[str, str] | None:
+    """Select two keys only; no other value is decoded, retained or exported.
+
+    /proc/environ is the initial process environment, not Python's current
+    os.environ. Even a complete match cannot prove absence of later mutations.
+    """
+    if data is None or not data.endswith(b"\0"):
+        return None
+    records = data.split(b"\0")[:-1]
+    if len(records) > MAX_ENV_RECORDS:
+        return None
+    selected = {}
+    allowed = {b"PATH": 4096, b"CODEX_AUDIT_SERVICE_CODEX_BIN": 512}
+    for record in records:
+        key, separator, value = record.partition(b"=")
+        if not separator:
+            return None
+        if key not in allowed:
+            continue
+        if key in selected or len(value) > allowed[key]:
+            return None
+        try:
+            selected[key] = value.decode("utf-8")
+        except UnicodeError:
+            return None
+    return {key.decode("ascii"): value for key, value in selected.items()}
+
+
+def service_process_metadata(unit: dict) -> dict:
+    """One-time, bounded fixed-unit proof; never execute a configured binary.
+
+    Source review found no CODEX_BIN/PATH mutations in this repository's service
+    sources, but procfs does not attest the current Python environment,
+    imports, managed policy, or running source bytes. Keep these limits explicit.
+    """
+    result = {
+        "snapshot_coherent": False, "entrypoint_matches_gateway": False,
+        "initial_environment_complete": False, "initial_environment_known_cli_choice": False,
+        "known_cli_launch_sha256": None, "runtime_python_environment_verified": False,
+        "running_source_identity_verified": False,
+    }
+    pid, user = unit.get("main_pid"), unit.get("user")
+    if (
+        not unit.get("identity_verified") or not unit.get("known_working_directory")
+        or type(pid) is not int or not 0 < pid < 2**31 or not isinstance(user, str)
+    ):
+        return result
+    try:
+        uid = pwd.getpwnam(user).pw_uid
+        before = _process_identity(pid)
+        if before is None or before[1] != uid:
+            return result
+        argv, _, _ = _regular_bytes(PROC_ROOT / str(pid) / "cmdline", MAX_PROC_ARG_BYTES)
+        tokens = argv.split(b"\0")[:-1] if argv and argv.endswith(b"\0") else []
+        entrypoint = len(tokens) == 3 and tokens[0] in (
+            b"python3", b"/usr/bin/python3", b"/usr/local/bin/python3",
+        ) and tokens[1:] == [b"-m", b"service.ai_gateway_service"]
+        environment = None
+        if entrypoint:
+            data, _, _ = _regular_bytes(PROC_ROOT / str(pid) / "environ", MAX_PROC_ENV_BYTES)
+            environment = _initial_environment(data)
+        after_unit = unit_metadata()
+        after = _process_identity(pid)
+        if (
+            after != before or after_unit.get("main_pid") != pid or after_unit.get("user") != user
+            or not after_unit.get("identity_verified") or not after_unit.get("known_working_directory")
+            or pwd.getpwnam(user).pw_uid != uid
+        ):
+            return result
+        result.update(snapshot_coherent=True, entrypoint_matches_gateway=entrypoint,
+                      initial_environment_complete=environment is not None)
+        if environment is None:
+            return result
+        path = environment.get("PATH")
+        # Do not model relative/empty PATH entries or execute a new configured
+        # path. This conservative positive case exactly matches the known PATH.
+        if path != SERVICE_PATH or any(not part or not Path(part).is_absolute() for part in path.split(":")):
+            return result
+        known = shutil.which("codex", path=SERVICE_PATH)
+        configured = environment.get("CODEX_AUDIT_SERVICE_CODEX_BIN", "codex")
+        if known not in {str(Path(parent) / "codex") for parent in SERVICE_PATH.split(":")}:
+            return result
+        if configured not in ("codex", known):
+            return result
+        result["initial_environment_known_cli_choice"] = True
+        # Only the previously inspected global launch path is hashed. Following
+        # its installation symlink is independent of the configured CODEX_BIN.
+        result["known_cli_launch_sha256"] = source_hash(Path(known).resolve())
+    except (OSError, KeyError, ValueError, RuntimeError):
+        return result
     return result
 
 
@@ -234,10 +367,12 @@ def cli_capabilities() -> dict:
 
 
 def inspect_service() -> dict:
+    unit = unit_metadata()
     return {
         "operation": "inspect",
         "source_sha256": {name: source_hash(path) for name, path in SOURCE_FILES.items()},
-        "unit": unit_metadata(), "job_counts": job_counts(JOB_DIRECTORY), "cli": cli_capabilities(),
+        "unit": unit, "service_process": service_process_metadata(unit),
+        "job_counts": job_counts(JOB_DIRECTORY), "cli": cli_capabilities(),
     }
 
 

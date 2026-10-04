@@ -107,7 +107,7 @@ class CodexAdapterModelDefaultTests(unittest.TestCase):
         with patch("service.adapters.codex_adapter.shutil.which", return_value="/usr/bin/codex"):
             return _codex_command(Path("message.md"), **kwargs)
 
-    def test_gateway_text_only_capability_uses_deny_all_argv_and_empty_cwd(self) -> None:
+    def test_gateway_supplied_context_uses_restricted_read_only_argv_and_empty_cwd(self) -> None:
         from service.adapters.codex_adapter import CodexAdapter
         from service.ai_gateway_service import _codex_tools_disabled
 
@@ -119,7 +119,10 @@ class CodexAdapterModelDefaultTests(unittest.TestCase):
 
             def run(command, **kwargs):
                 disabled = [command[index + 1] for index, value in enumerate(command[:-1]) if value == "--disable"]
-                self.assertTrue({"plugins", "apps", "shell_tool"}.issubset(disabled))
+                self.assertTrue({"plugins", "apps", "shell_tool", "view_image", "multi_agent_v2"}.issubset(disabled))
+                self.assertEqual(command[command.index("--sandbox") + 1], "read-only")
+                for setting in ('approval_policy="never"', 'approvals_reviewer="user"', 'agents.enabled=false'):
+                    self.assertIn(setting, command)
                 self.assertIn("--ignore-user-config", command)
                 self.assertIn("--ephemeral", command)
                 self.assertIn('web_search="disabled"', command)
@@ -137,12 +140,24 @@ class CodexAdapterModelDefaultTests(unittest.TestCase):
                 })
                 result = CodexAdapter().execute(
                     prompt="synthetic supplied text", model="gpt-5.6-sol", reasoning_effort="medium",
-                    cwd=caller_cwd, shell_tool_enabled=not disabled, tools_disabled=disabled,
+                    cwd=caller_cwd, sandbox="workspace-write", shell_tool_enabled=not disabled, tools_disabled=disabled,
                 )
             runner.assert_called_once()
             self.assertTrue(result.success)
             self.assertEqual(result.output, output)
             self.assertEqual((caller_cwd / "source.py").read_text(encoding="utf-8"), "# supplied separately as text\n")
+
+    def test_restricted_profile_overrides_requested_and_environment_sandbox_only_when_selected(self) -> None:
+        for sandbox in (None, "", "read-only", "workspace-write", "danger-full-access"):
+            with self.subTest(sandbox=sandbox), patch.dict(os.environ, {"CODEX_AUDIT_SERVICE_SANDBOX": "danger-full-access"}):
+                restricted = self._command(sandbox=sandbox, model="gpt-5.6-sol", tools_disabled=True)
+                self.assertEqual(restricted[restricted.index("--sandbox") + 1], "read-only")
+                enabled = self._command(sandbox=sandbox, model="gpt-5.6-sol", tools_disabled=False)
+                self.assertEqual(enabled[enabled.index("--sandbox") + 1], sandbox or "danger-full-access")
+                for setting in ('approval_policy="never"', 'approvals_reviewer="user"', 'agents.enabled=false'):
+                    self.assertNotIn(setting, enabled)
+                self.assertNotIn("view_image", enabled)
+                self.assertNotIn("multi_agent_v2", enabled)
 
     def test_empty_and_auto_resolve_to_non_retired_catalog_model(self) -> None:
         catalog = load_catalog(Path(self._catalog_path))

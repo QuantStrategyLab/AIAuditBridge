@@ -143,19 +143,28 @@ def _codex_command(
         "exec",
         "--skip-git-repo-check",
         "--sandbox",
-        sandbox or os.environ.get("CODEX_AUDIT_SERVICE_SANDBOX", "read-only").strip() or "read-only",
+        "read-only" if tools_disabled else (
+            sandbox or os.environ.get("CODEX_AUDIT_SERVICE_SANDBOX", "read-only").strip() or "read-only"
+        ),
         "--output-last-message",
         str(output_last_message),
     ]
     if not shell_tool_enabled:
         command.extend(["--disable", "shell_tool"])
     if tools_disabled:
+        # Supported by Codex 0.156.1. This restricts specific capabilities;
+        # read-only/never do not remove every built-in tool or prohibit reads.
         command.extend([
             "--disable", "plugins",
             "--disable", "apps",
             "--disable", "shell_tool",
+            "--disable", "view_image",
+            "--disable", "multi_agent_v2",
             "--ignore-user-config", "--ephemeral",
             "-c", 'web_search="disabled"',
+            "-c", 'approval_policy="never"',
+            "-c", 'approvals_reviewer="user"',
+            "-c", 'agents.enabled=false',
         ])
     selected_reasoning_effort = (reasoning_effort or os.environ.get("CODEX_AUDIT_SERVICE_REASONING_EFFORT", "")).strip().lower()
     selected_model = _resolve_codex_model(model, selected_reasoning_effort)
