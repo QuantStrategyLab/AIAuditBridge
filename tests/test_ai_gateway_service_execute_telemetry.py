@@ -255,7 +255,7 @@ class AiGatewayExecuteTelemetryTests(unittest.TestCase):
         self.assertEqual(execution_result["output_length"], 4)
         self.assertEqual(len(execution_result["output_sha256"]), 64)
 
-    def test_run_job_disables_shell_tool_only_for_readonly_platform_bugfix(self) -> None:
+    def test_run_job_denies_all_tools_for_supplied_text_and_patch_tasks(self) -> None:
         with patch.object(gateway, "_record_job_automation_run"), patch.object(gateway, "_audit_log"), patch.object(
             gateway, "get_health_monitor"
         ), patch.object(gateway, "_record_platform_execution_telemetry"), patch.object(
@@ -263,13 +263,13 @@ class AiGatewayExecuteTelemetryTests(unittest.TestCase):
         ), patch.object(gateway, "_write_job"), patch.object(gateway, "resolve_execution_adapter") as resolve:
             adapter = resolve.return_value
             adapter.execute.return_value = SimpleNamespace(success=True, output="review", error="")
-            for task, mode, expected, expected_tools in (
-                ("platform_bugfix", "review_only", False, False),
-                (" platform_bugfix ", " REVIEW_ONLY ", False, False),
-                ("platform_bugfix", "review_and_fix", True, False),
-                ("platform_bugfix", "review_and_fix", False, False),
-                ("execute", "review_only", True, False),
-                (gateway.SOXL_RSI2_CODEGEN_TASK, "review_only", False, True),
+            for task, mode, manual in (
+                ("platform_bugfix", "review_only", False),
+                (" platform_bugfix ", " REVIEW_ONLY ", False),
+                ("platform_bugfix", "review_and_fix", False),
+                ("platform_bugfix", "review_and_fix", True),
+                ("execute", "review_only", False),
+                (gateway.SOXL_RSI2_CODEGEN_TASK, "review_only", False),
             ):
                 with self.subTest(task=task, mode=mode), patch.object(
                     gateway,
@@ -277,12 +277,12 @@ class AiGatewayExecuteTelemetryTests(unittest.TestCase):
                     return_value={"job_id": "job-1", "status": "queued", "task": task, "mode": mode},
                 ):
                     payload = {"prompt": "review", "task": task, "mode": mode}
-                    if task == "platform_bugfix" and mode == "review_and_fix" and not expected:
+                    if manual:
                         payload["manual_approval_id"] = "sg-history-482"
                     gateway._run_job("job-1", payload)
                 kwargs = adapter.execute.call_args.kwargs
-                self.assertEqual(kwargs["shell_tool_enabled"], expected)
-                self.assertEqual(kwargs["tools_disabled"], expected_tools)
+                self.assertFalse(kwargs["shell_tool_enabled"])
+                self.assertTrue(kwargs["tools_disabled"])
 
     def test_run_job_disables_all_codex_tools_for_readonly_drift_analysis(self) -> None:
         with patch.object(gateway, "_record_job_automation_run"), patch.object(gateway, "_audit_log"), patch.object(
@@ -295,9 +295,9 @@ class AiGatewayExecuteTelemetryTests(unittest.TestCase):
             cases = [
                 ({"task": "execute", "mode": "review_only", "research_stage": "drift_analysis", "sandbox": "read-only"}, True),
                 ({"mode": "review_only", "research_stage": "drift_analysis", "sandbox": "read-only"}, True),
-                ({"task": "execute", "mode": "review_and_fix", "research_stage": "drift_analysis", "sandbox": "read-only"}, False),
-                ({"task": "execute", "mode": "review_only", "research_stage": "optimization", "sandbox": "read-only"}, False),
-                ({"task": "execute", "mode": "review_only", "research_stage": "drift_analysis", "sandbox": "workspace-write"}, False),
+                ({"task": "execute", "mode": "review_and_fix", "research_stage": "drift_analysis", "sandbox": "read-only"}, True),
+                ({"task": "execute", "mode": "review_only", "research_stage": "optimization", "sandbox": "read-only"}, True),
+                ({"task": "execute", "mode": "review_only", "research_stage": "drift_analysis", "sandbox": "workspace-write"}, True),
             ]
             for payload, expected_disabled in cases:
                 with self.subTest(payload=payload), patch.object(

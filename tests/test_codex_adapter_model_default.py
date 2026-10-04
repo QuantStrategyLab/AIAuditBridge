@@ -7,6 +7,7 @@ import shlex
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from service.adapters.codex_adapter import _CODEX_AUTO_ROSTER
@@ -105,6 +106,43 @@ class CodexAdapterModelDefaultTests(unittest.TestCase):
 
         with patch("service.adapters.codex_adapter.shutil.which", return_value="/usr/bin/codex"):
             return _codex_command(Path("message.md"), **kwargs)
+
+    def test_gateway_text_only_capability_uses_deny_all_argv_and_empty_cwd(self) -> None:
+        from service.adapters.codex_adapter import CodexAdapter
+        from service.ai_gateway_service import _codex_tools_disabled
+
+        output = '{"final_message":"synthetic patch proposal","changes":[]}'
+        with tempfile.TemporaryDirectory() as tmp:
+            caller_cwd = Path(tmp) / "caller-checkout"
+            caller_cwd.mkdir()
+            (caller_cwd / "source.py").write_text("# supplied separately as text\n", encoding="utf-8")
+
+            def run(command, **kwargs):
+                disabled = [command[index + 1] for index, value in enumerate(command[:-1]) if value == "--disable"]
+                self.assertTrue({"plugins", "apps", "shell_tool"}.issubset(disabled))
+                self.assertIn("--ignore-user-config", command)
+                self.assertIn("--ephemeral", command)
+                self.assertIn('web_search="disabled"', command)
+                isolated_cwd = Path(command[command.index("-C") + 1])
+                self.assertNotEqual(isolated_cwd, caller_cwd)
+                self.assertEqual(list(isolated_cwd.iterdir()), [])
+                self.assertEqual(kwargs["input"], "synthetic supplied text")
+                return SimpleNamespace(returncode=0, stdout=output, stderr="")
+
+            with patch("service.adapters.codex_adapter.shutil.which", return_value="/synthetic/codex"), patch(
+                "service.adapters.codex_adapter.subprocess.run", side_effect=run,
+            ) as runner, patch.dict(os.environ, {"CODEX_AUDIT_SERVICE_ENV": "production"}):
+                disabled = _codex_tools_disabled({
+                    "task": "monthly_snapshot_audit", "mode": "review_and_fix", "tools_disabled": False,
+                })
+                result = CodexAdapter().execute(
+                    prompt="synthetic supplied text", model="gpt-5.6-sol", reasoning_effort="medium",
+                    cwd=caller_cwd, shell_tool_enabled=not disabled, tools_disabled=disabled,
+                )
+            runner.assert_called_once()
+            self.assertTrue(result.success)
+            self.assertEqual(result.output, output)
+            self.assertEqual((caller_cwd / "source.py").read_text(encoding="utf-8"), "# supplied separately as text\n")
 
     def test_empty_and_auto_resolve_to_non_retired_catalog_model(self) -> None:
         catalog = load_catalog(Path(self._catalog_path))

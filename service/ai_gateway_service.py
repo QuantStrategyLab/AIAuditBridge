@@ -705,20 +705,15 @@ def _validate_global_etf_research_codegen_payload(payload: dict[str, Any]) -> No
 
 
 def _codex_tools_disabled(payload: dict[str, Any]) -> bool:
-    """Disable external Codex tools for bounded codegen and drift analysis."""
-    if str(payload.get("task") or "").strip() in {
-        SOXL_RSI2_CODEGEN_TASK,
-        GLOBAL_ETF_RESEARCH_CODEGEN_TASK,
-    }:
-        return True
-    if _is_engineering_review_payload(payload):
-        return True
-    return (
-        str(payload.get("task") or TASK_EXECUTE).strip() == TASK_EXECUTE
-        and str(payload.get("mode") or MODE_REVIEW_ONLY).strip().lower() == MODE_REVIEW_ONLY
-        and str(payload.get("research_stage") or "").strip() == "drift_analysis"
-        and str(payload.get("sandbox") or DEFAULT_SANDBOX).strip() == "read-only"
-    )
+    """Deny tools for every currently admitted text/structured-patch task.
+
+    The service receives supplied context, not a source checkout. The bridge
+    owns source reads, patch application, tests and publication, including in
+    review_and_fix mode. Task/mode/stage names and caller tool flags cannot
+    grant capabilities. A future tool-using task needs a separately reviewed
+    execution contract; unknown tasks must not fall back to inherited tools.
+    """
+    return True
 
 
 def _manual_approval_policy_matches(
@@ -2706,6 +2701,8 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                 sandbox=_validate_sandbox("read-only"),
                 reasoning_effort=_resolve_codex_reasoning_effort(payload, TASK_REVIEW),
                 timeout=req.timeout_seconds,
+                shell_tool_enabled=False,
+                tools_disabled=True,
             )
 
         # Step 3: build per-reviewer results with extracted confidence
