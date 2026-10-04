@@ -241,7 +241,7 @@ def _initial_environment(data: bytes | None) -> dict[str, str] | None:
     return {key.decode("ascii"): value for key, value in selected.items()}
 
 
-def service_process_metadata(unit: dict) -> dict:
+def service_process_metadata(unit: dict, *, deadline: float | None = None) -> dict:
     """One-time, bounded fixed-unit proof; never execute a configured binary.
 
     Source review found no CODEX_BIN/PATH mutations in this repository's service
@@ -255,6 +255,8 @@ def service_process_metadata(unit: dict) -> dict:
         "running_source_identity_verified": False,
     }
     pid, user = unit.get("main_pid"), unit.get("user")
+    if deadline is not None and time.monotonic() >= deadline:
+        return result
     if (
         not unit.get("identity_verified") or not unit.get("known_working_directory")
         or type(pid) is not int or not 0 < pid < 2**31 or not isinstance(user, str)
@@ -274,7 +276,7 @@ def service_process_metadata(unit: dict) -> dict:
         if entrypoint:
             data, _, _ = _regular_bytes(PROC_ROOT / str(pid) / "environ", MAX_PROC_ENV_BYTES)
             environment = _initial_environment(data)
-        after_unit = unit_metadata()
+        after_unit = unit_metadata(**({"deadline": deadline} if deadline is not None else {}))
         after = _process_identity(pid)
         if (
             after != before or after_unit.get("main_pid") != pid or after_unit.get("user") != user
@@ -306,7 +308,7 @@ def service_process_metadata(unit: dict) -> dict:
     return result
 
 
-def metadata_output(command: list[str]) -> str | None:
+def metadata_output(command: list[str], *, deadline: float | None = None) -> str | None:
     """Only allow fixed systemd properties or Codex parser-only metadata commands."""
     codex_paths = {str(Path(parent) / "codex") for parent in SERVICE_PATH.split(":")}
     cli_allowed = command and command[0] in codex_paths and command[1:] in (
@@ -314,18 +316,22 @@ def metadata_output(command: list[str]) -> str | None:
     )
     if command != UNIT_COMMAND and not cli_allowed:
         return None
+    command_deadline = time.monotonic() + COMMAND_TIMEOUT_SECONDS
+    if deadline is not None:
+        command_deadline = min(command_deadline, deadline)
+    if time.monotonic() >= command_deadline:
+        return None
     process = None
     try:
         process = subprocess.Popen(
             command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             env=METADATA_ENV, cwd="/", start_new_session=True,
         )
-        deadline = time.monotonic() + COMMAND_TIMEOUT_SECONDS
         data = bytearray()
         with selectors.DefaultSelector() as selector:
             selector.register(process.stdout, selectors.EVENT_READ)
             while True:
-                remaining = deadline - time.monotonic()
+                remaining = command_deadline - time.monotonic()
                 if remaining <= 0 or not selector.select(remaining):
                     return None
                 chunk = os.read(process.stdout.fileno(), min(8192, MAX_COMMAND_BYTES + 1 - len(data)))
@@ -334,7 +340,8 @@ def metadata_output(command: list[str]) -> str | None:
                 data.extend(chunk)
                 if len(data) > MAX_COMMAND_BYTES:
                     return None
-        if process.wait(timeout=max(0.01, deadline - time.monotonic())) != 0:
+        remaining = command_deadline - time.monotonic()
+        if remaining <= 0 or process.wait(timeout=remaining) != 0 or time.monotonic() >= command_deadline:
             return None
         return data.decode("utf-8")
     except (OSError, ValueError, UnicodeError, subprocess.TimeoutExpired):
@@ -351,8 +358,8 @@ def metadata_output(command: list[str]) -> str | None:
                 process.stdout.close()
 
 
-def unit_metadata() -> dict:
-    output = metadata_output(UNIT_COMMAND)
+def unit_metadata(*, deadline: float | None = None) -> dict:
+    output = metadata_output(UNIT_COMMAND, **({"deadline": deadline} if deadline is not None else {}))
     values = dict(line.split("=", 1) for line in (output or "").splitlines() if "=" in line)
     pid = values.get("MainPID", "")
     user = values.get("User", "")
@@ -436,17 +443,23 @@ def _stopped() -> bool:
             and unit.get("active_state") == "inactive" and unit.get("main_pid") == 0)
 
 
-def _local_health() -> bool:
+def _local_health(*, deadline: float | None = None, diagnostics: dict | None = None) -> bool:
     """Fixed loopback GETs only, no credentials, redirects, proxy or model call.
 
     The documented port is intentionally fixed: an override is a failed
     acceptance check, not a reason to search config or try another endpoint.
     """
-    deadline = time.monotonic() + HEALTH_TIMEOUT_SECONDS
+    if deadline is None:
+        deadline = time.monotonic() + HEALTH_TIMEOUT_SECONDS
+    diagnostics = diagnostics if diagnostics is not None else {}
+    diagnostics.update(healthz_ok=False, unauthenticated_health_rejected=False)
     while time.monotonic() < deadline:
         healthy = False
         for route, expected in (("/healthz", 200), ("/v1/ai/health", 401)):
-            connection = http.client.HTTPConnection("127.0.0.1", 8797, timeout=2)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            connection = http.client.HTTPConnection("127.0.0.1", 8797, timeout=min(2, remaining))
             try:
                 connection.request("GET", route)
                 response = connection.getresponse()
@@ -458,25 +471,119 @@ def _local_health() -> bool:
                     if not isinstance(payload, dict) or payload.get("status") not in ("ok", "healthy"):
                         break
                     healthy = True
+                    diagnostics["healthz_ok"] = True
                 elif healthy:
-                    return True
+                    diagnostics["unauthenticated_health_rejected"] = True
+                    return time.monotonic() < deadline
             except (OSError, ValueError, http.client.HTTPException):
                 break
             finally:
                 connection.close()
-        time.sleep(0.2)
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(0.2, remaining))
     return False
 
 
-def _started(old_pid: int) -> bool:
-    unit = unit_metadata()
-    if (unit.get("identity_verified") is not True or unit.get("known_working_directory") is not True
-            or unit.get("active_state") != "active" or unit.get("sub_state") != "running"
-            or type(unit.get("main_pid")) is not int or unit["main_pid"] <= 0 or unit["main_pid"] == old_pid):
-        return False
-    process = service_process_metadata(unit)
-    return (process.get("snapshot_coherent") is True and process.get("entrypoint_matches_gateway") is True
-            and process.get("initial_environment_known_cli_choice") is True and _local_health())
+def _startup_status() -> dict:
+    return {"unit_ready": False, "process_identity_stable": False, "process_coherent": False,
+            "entrypoint_matches_gateway": False, "initial_cli_choice_known": False,
+            "healthz_ok": False, "unauthenticated_health_rejected": False,
+            "deadline_expired": False, "failure_phase": None}
+
+
+def _started(old_pid: int, *, diagnostics: dict | None = None) -> bool:
+    """Wait for pre-exec transients, never a new PID/reused PID or another start.
+
+    Type=simple can return before Python exec. One deadline covers readiness,
+    bounded metadata commands and health; no gate gains a fresh time budget.
+    Fixed booleans mean proved/not proved, not unobserved failure causes.
+    """
+    diagnostics = diagnostics if diagnostics is not None else {}
+    diagnostics.update(_startup_status())
+    deadline = time.monotonic() + HEALTH_TIMEOUT_SECONDS
+    pinned = None
+    while time.monotonic() < deadline:
+        unit = unit_metadata(deadline=deadline)
+        if time.monotonic() >= deadline:
+            diagnostics.update(deadline_expired=True, failure_phase="startup_deadline")
+            return False
+        pid = unit.get("main_pid")
+        trusted_unit = unit.get("identity_verified") is True and unit.get("known_working_directory") is True
+        if pinned is not None and (unit.get("active_state") in ("inactive", "failed") or pid == 0):
+            diagnostics["failure_phase"] = "startup_exit"
+            return False
+        if trusted_unit and type(pid) is int and 0 < pid < 2**31 and pid != old_pid:
+            if pinned is not None and pid != pinned[0]:
+                diagnostics["failure_phase"] = "startup_identity_changed"
+                return False
+            identity = _process_identity(pid)
+            if identity is not None:
+                observed = (pid, identity[0])  # UID may settle before exec; the coherent proof checks it fresh.
+                if pinned is not None and observed != pinned:
+                    diagnostics["failure_phase"] = "startup_identity_changed"
+                    return False
+                pinned = observed
+        else:
+            identity = None
+        diagnostics["unit_ready"] = (
+            trusted_unit and unit.get("active_state") == "active" and unit.get("sub_state") == "running"
+            and identity is not None)
+        diagnostics["failure_phase"] = "startup_unit"
+        if diagnostics["unit_ready"]:
+            process = service_process_metadata(unit, deadline=deadline)
+            after = _process_identity(pid)
+            if after is not None and (pid, after[0]) != pinned:
+                diagnostics["failure_phase"] = "startup_identity_changed"
+                return False
+            diagnostics.update(
+                process_identity_stable=after is not None and (pid, after[0]) == pinned,
+                process_coherent=process.get("snapshot_coherent") is True,
+                entrypoint_matches_gateway=process.get("entrypoint_matches_gateway") is True,
+                initial_cli_choice_known=process.get("initial_environment_known_cli_choice") is True,
+            )
+            for key, phase in (("process_identity_stable", "startup_process"), ("process_coherent", "startup_process"),
+                               ("entrypoint_matches_gateway", "startup_entrypoint"), ("initial_cli_choice_known", "startup_cli")):
+                diagnostics["failure_phase"] = phase
+                if not diagnostics[key]:
+                    break
+            else:
+                if time.monotonic() >= deadline:
+                    diagnostics.update(deadline_expired=True, failure_phase="startup_deadline")
+                    return False
+                accepted = _local_health(deadline=deadline, diagnostics=diagnostics)
+                diagnostics["deadline_expired"] = time.monotonic() >= deadline
+                if accepted and not diagnostics["deadline_expired"]:
+                    final_unit = unit_metadata(deadline=deadline)
+                    if time.monotonic() >= deadline:
+                        diagnostics.update(deadline_expired=True, failure_phase="startup_deadline")
+                        return False
+                    final_identity = _process_identity(pid)
+                    if final_unit.get("active_state") in ("inactive", "failed") or final_unit.get("main_pid") == 0:
+                        diagnostics["failure_phase"] = "startup_exit"
+                        return False
+                    if final_unit.get("main_pid") != pid or final_identity != after:
+                        diagnostics.update(process_identity_stable=False, failure_phase="startup_identity_changed")
+                        return False
+                    if (final_unit.get("identity_verified") is not True or final_unit.get("known_working_directory") is not True
+                            or final_unit.get("active_state") != "active" or final_unit.get("sub_state") != "running"
+                            or final_unit.get("user") != unit.get("user")):
+                        diagnostics.update(unit_ready=False, failure_phase="startup_unit")
+                        return False
+                    if time.monotonic() >= deadline:
+                        diagnostics.update(deadline_expired=True, failure_phase="startup_deadline")
+                        return False
+                    diagnostics.update(healthz_ok=True, unauthenticated_health_rejected=True, failure_phase=None)
+                    return True
+                diagnostics["failure_phase"] = (
+                    "startup_deadline" if diagnostics["deadline_expired"] else
+                    "startup_auth" if diagnostics["healthz_ok"] else "startup_health")
+                return False
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(0.1, remaining))
+    diagnostics["deadline_expired"] = True
+    return False
 
 
 def _write_exclusive(path: Path | str, data: bytes, metadata: os.stat_result | None = None,
@@ -563,10 +670,12 @@ def maintain_service(*, acknowledge_interruption: bool = False) -> dict:
     """
     result = {
         "operation": "maintain", "status": "refused", "reason": None,
+        "failure_phase": None,
         "reviewed_source_commit": REVIEWED_SOURCE_COMMIT,
         "requests_may_be_interrupted": True, "drain_proven": False,
         "all_builtin_tools_disabled_proven": False, "rollback_scope": "code_only",
         "running_source_identity_verified": False, "runtime_python_environment_verified": False,
+        "startup_status": {"start_command_ok": False, "disk_hashes_match": False, **_startup_status()},
     }
     if acknowledge_interruption is not True:
         return {**result, "reason": "interruption_not_acknowledged"}
@@ -621,21 +730,32 @@ def maintain_service(*, acknowledge_interruption: bool = False) -> dict:
         except (OSError, ValueError):
             return {**result, "status": "recovery_required", "reason": "preimage_changed_after_stop"}
     reason = "replacement_failed"
+    result["failure_phase"] = "replacement"
     try:
         for name, path in SOURCE_FILES.items():
             _atomic_replace(path, targets[name], metadata[name])
         if any(source_hash(path) != TARGET_SHA256[name] for name, path in SOURCE_FILES.items()):
             raise ValueError("target mismatch")
         reason = "start_failed"
-        if (_unit_action("start") and _started(unit["main_pid"])
-                and all(source_hash(path) == TARGET_SHA256[name] for name, path in SOURCE_FILES.items())):
-            return {**result, "status": "applied", "reason": None, "source_sha256": TARGET_SHA256}
+        result["failure_phase"] = "start_command"
+        startup = result["startup_status"]
+        startup["start_command_ok"] = _unit_action("start")
+        if startup["start_command_ok"]:
+            result["failure_phase"] = "startup_unit"
+            accepted = _started(unit["main_pid"], diagnostics=startup)
+            result["failure_phase"] = startup["failure_phase"]
+            if accepted:
+                result["failure_phase"] = "target_hash_readback"
+                startup["disk_hashes_match"] = all(source_hash(path) == TARGET_SHA256[name] for name, path in SOURCE_FILES.items())
+                if startup["disk_hashes_match"]:
+                    return {**result, "status": "applied", "reason": None, "failure_phase": None, "source_sha256": TARGET_SHA256}
+                startup["failure_phase"] = "target_hash_readback"
     except (Exception, KeyboardInterrupt):
         pass  # emit only a fixed reason, never exception/source/auth values
     # A timed-out start can have succeeded on systemd. Stop and confirm again
     # before recovery; never replace code beneath a possibly running process.
     if not _stopped() and (not _unit_action("stop") or not _stopped()):
-        return {**result, "status": "recovery_required", "reason": "rollback_stop_unconfirmed"}
+        return {**result, "status": "recovery_required", "reason": "rollback_stop_unconfirmed", "failure_phase": "rollback_stop"}
     restored = True
     for name, path in SOURCE_FILES.items():
         try:
@@ -649,7 +769,9 @@ def maintain_service(*, acknowledge_interruption: bool = False) -> dict:
             restored = False  # still attempt the other fixed file
     if not restored or any(source_hash(path) != PREIMAGE_SHA256[name] for name, path in SOURCE_FILES.items()):
         return {**result, "status": "recovery_required", "reason": "rollback_failed"}
-    if not _unit_action("start") or not _started(unit["main_pid"]):
+    rollback = {"code_restored": True, "start_command_ok": _unit_action("start"), **_startup_status()}
+    result["rollback_status"] = rollback
+    if not rollback["start_command_ok"] or not _started(unit["main_pid"], diagnostics=rollback):
         # Failed original-code start is not retried. Close uncertain admission.
         stopped = _unit_action("stop") and _stopped()
         return {**result, "status": "recovery_required", "reason": "rollback_start_failed",
