@@ -6,6 +6,8 @@ import contextlib
 import hashlib
 import io
 import json
+import os
+import stat
 import subprocess
 import tempfile
 import textwrap
@@ -15,6 +17,445 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from scripts import manage_codex_audit_service_patch as operation
+
+
+class CodexServiceMaintenanceTests(unittest.TestCase):
+    """Synthetic two-file maintenance; no systemd, provider or real HTTP calls."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.files = {name: self.root / name / "source.py" for name in ("gateway", "codex_adapter")}
+        self.targets = {name: self.root / "checkout" / name / "source.py" for name in self.files}
+        self.original = {name: f"old {name}\n".encode() for name in self.files}
+        self.updated = {name: f"new {name}\n".encode() for name in self.files}
+        self.metadata = {}
+        for index, name in enumerate(self.files):
+            self.files[name].parent.mkdir()
+            self.targets[name].parent.mkdir(parents=True)
+            self.files[name].write_bytes(self.original[name])
+            self.targets[name].write_bytes(self.updated[name])
+            self.files[name].chmod(0o640 + index * 4)
+            info = self.files[name].stat()
+            self.metadata[name] = (info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode))
+        self.protected = {self.root / name: f"PRIVATE_{name}".encode() for name in (
+            "configuration.env", "token", "unit.service", "nginx.conf", "jobs.json", "quota.json",
+        )}
+        for path, data in self.protected.items():
+            path.write_bytes(data)
+        self.backup = self.root / "exclusive-backup"
+        self.unit = {"identity_verified": True, "known_working_directory": True, "load_state": "loaded",
+                     "active_state": "active", "sub_state": "running", "main_pid": 123, "user": "ubuntu"}
+        self.actions = []
+        self.process = {"snapshot_coherent": True, "entrypoint_matches_gateway": True,
+                        "initial_environment_known_cli_choice": True}
+        self.counts = {"queued": 0, "running": 0, "unknown": 10, "complete": False,
+                       "truncated": True, "admission_closed": False, "includes_sync_requests": False}
+        self.production_preimages = dict(operation.PREIMAGE_SHA256)
+        self.production_targets = dict(operation.TARGET_SHA256)
+        for attr, value in (
+            ("SOURCE_FILES", self.files), ("TARGET_FILES", self.targets), ("BACKUP_DIRECTORY", self.backup),
+            ("PREIMAGE_SHA256", {n: hashlib.sha256(d).hexdigest() for n, d in self.original.items()}),
+            ("TARGET_SHA256", {n: hashlib.sha256(d).hexdigest() for n, d in self.updated.items()}),
+        ):
+            mock = patch.object(operation, attr, value)
+            mock.start()
+            self.addCleanup(mock.stop)
+        self.real_unit_action = operation._unit_action
+        self.real_health = operation._local_health
+        for attr, kwargs in (
+            ("unit_metadata", {"side_effect": lambda: dict(self.unit)}),
+            ("service_process_metadata", {"side_effect": lambda unit: dict(self.process)}),
+            ("job_counts", {"return_value": self.counts}),
+            ("_unit_action", {"side_effect": self.action}),
+            ("_local_health", {"return_value": True}),
+        ):
+            mock = patch.object(operation, attr, **kwargs)
+            mock.start()
+            self.addCleanup(mock.stop)
+
+    def action(self, action: str) -> bool:
+        self.actions.append(action)
+        if action == "stop":
+            self.unit.update(active_state="inactive", sub_state="dead", main_pid=0)
+        else:
+            self.unit.update(active_state="active", sub_state="running", main_pid=456)
+        return True
+
+    def assert_original(self) -> None:
+        self.assertEqual({n: p.read_bytes() for n, p in self.files.items()}, self.original)
+
+    def assert_protected(self) -> None:
+        self.assertEqual({p: p.read_bytes() for p in self.protected}, self.protected)
+
+    def test_reviewed_production_hashes_and_source_commit_are_fixed(self) -> None:
+        checkout = Path(__file__).resolve().parents[1]
+        self.assertEqual(operation.REVIEWED_SOURCE_COMMIT, "8dd1b0ca830b3bdb90de2c4ca555a2f3db090d15")
+        self.assertEqual(self.production_preimages, {
+            "gateway": "1f21f4f626f8374bd957667dc471a5bc5b75bafda4f81cc95dc95b31911f5014",
+            "codex_adapter": "954476a6e82eade56a51b71c1b8087766bfa57c9aac54730a5f7376cb5f67013",
+        })
+        for path, digest in (
+            ("service/ai_gateway_service.py", "60012ad523cd0fbef0996a6d879e3625ace3a3c52a0c84957973d6ae01b95cdf"),
+            ("service/adapters/codex_adapter.py", "e5175a5fb2c132b24dfc59a0af365c5af8ba2f3b8f6079fe398f97111c347cd0"),
+        ):
+            self.assertEqual(hashlib.sha256((checkout / path).read_bytes()).hexdigest(), digest)
+        self.assertEqual(self.production_targets, {
+            "gateway": "60012ad523cd0fbef0996a6d879e3625ace3a3c52a0c84957973d6ae01b95cdf",
+            "codex_adapter": "e5175a5fb2c132b24dfc59a0af365c5af8ba2f3b8f6079fe398f97111c347cd0",
+        })
+
+    def test_cli_requires_explicit_acknowledgement_and_refuses_paths_units_or_restart(self) -> None:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(operation.main(["maintain"]), 1)
+        self.assertEqual(json.loads(output.getvalue())["reason"], "interruption_not_acknowledged")
+        self.assertEqual(self.actions, [])
+        for args in (["maintain", "--unit", "nginx"], ["maintain", "--path", "/private"], ["restart"]):
+            with self.subTest(args=args), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                operation.main(args)
+        self.assertEqual(self.actions, [])
+        self.assertFalse(self.backup.exists())
+
+    def test_acknowledged_incomplete_snapshot_is_never_a_drain_and_two_files_preserve_metadata(self) -> None:
+        result = operation.maintain_service(acknowledge_interruption=True)
+        self.assertEqual(result["status"], "applied")
+        self.assertEqual(self.actions, ["stop", "start"])
+        self.assertFalse(result["drain_proven"])
+        self.assertTrue(result["requests_may_be_interrupted"])
+        self.assertEqual(result["job_counts"], self.counts)
+        self.assertFalse(result["all_builtin_tools_disabled_proven"])
+        self.assertEqual({n: p.read_bytes() for n, p in self.files.items()}, self.updated)
+        for name, path in self.files.items():
+            info = path.stat()
+            self.assertEqual((info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)), self.metadata[name])
+            self.assertEqual((self.backup / f"{name}.py").read_bytes(), self.original[name])
+        self.assert_protected()
+        self.assertNotIn("PRIVATE", json.dumps(result))
+
+    def test_missing_acknowledgement_stale_source_or_preimage_do_nothing(self) -> None:
+        self.assertEqual(operation.maintain_service(acknowledge_interruption=False)["reason"], "interruption_not_acknowledged")
+        for destination, reason in ((self.targets["gateway"], "target_source_mismatch"),
+                                    (self.files["gateway"], "preimage_mismatch")):
+            original = destination.read_bytes()
+            destination.write_bytes(b"unreviewed PRIVATE source")
+            self.assertEqual(operation.maintain_service(acknowledge_interruption=True)["reason"], reason)
+            self.assertFalse(self.backup.exists())
+            self.assertEqual(self.actions, [])
+            destination.write_bytes(original)
+        self.assert_original()
+        self.assert_protected()
+
+    def test_unproven_entrypoint_or_known_cli_choice_never_stops_service(self) -> None:
+        for key in self.process:
+            with self.subTest(key=key):
+                self.process[key] = False
+                result = operation.maintain_service(acknowledge_interruption=True)
+                self.assertEqual(result["reason"], "service_identity_unproven")
+                self.process[key] = True
+        self.assertEqual(self.actions, [])
+        self.assertFalse(self.backup.exists())
+
+    def test_backup_is_create_only_and_checked_before_stop(self) -> None:
+        self.backup.mkdir()
+        marker = self.backup / "gateway.py"
+        marker.write_bytes(b"do not overwrite")
+        result = operation.maintain_service(acknowledge_interruption=True)
+        self.assertEqual(result["reason"], "backup_unavailable")
+        self.assertEqual(marker.read_bytes(), b"do not overwrite")
+        self.assertEqual(self.actions, [])
+        self.assert_original()
+
+    def test_stop_timeout_or_unit_not_stopped_never_replaces_or_auto_starts(self) -> None:
+        for success in (False, True):
+            with self.subTest(success=success), patch.object(operation, "_unit_action", return_value=success):
+                result = operation.maintain_service(acknowledge_interruption=True)
+                self.assertIn(result["reason"], {"stop_failed", "stop_not_confirmed"})
+                self.assert_original()
+                self.assertEqual(result["status"], "maintenance_failed")
+            # A distinct invocation cannot reuse a backup; this test uses a fresh fixture.
+            for path in self.backup.iterdir():
+                path.unlink()
+            self.backup.rmdir()
+        self.assert_protected()
+
+    def test_preimage_changed_during_stop_is_not_clobbered(self) -> None:
+        def changed(action):
+            self.action(action)
+            if action == "stop":
+                self.files["gateway"].write_bytes(b"external change")
+            return True
+        with patch.object(operation, "_unit_action", side_effect=changed):
+            result = operation.maintain_service(acknowledge_interruption=True)
+        self.assertEqual(result["status"], "recovery_required")
+        self.assertEqual(self.files["gateway"].read_bytes(), b"external change")
+        self.assertEqual(self.actions, ["stop"])
+        self.assertEqual(self.unit["active_state"], "inactive")
+
+    def test_metadata_changed_during_stop_or_special_source_mode_fails_closed(self) -> None:
+        path = self.files["gateway"]
+        path.chmod(0o4640)
+        self.assertEqual(operation.maintain_service(acknowledge_interruption=True)["status"], "refused")
+        self.assertEqual(self.actions, [])
+        path.chmod(self.metadata["gateway"][2])
+
+        def changed(action):
+            self.action(action)
+            if action == "stop":
+                path.chmod(0o600)
+            return True
+        with patch.object(operation, "_unit_action", side_effect=changed):
+            result = operation.maintain_service(acknowledge_interruption=True)
+        self.assertEqual(result["status"], "recovery_required")
+        self.assertEqual(result["reason"], "preimage_changed_after_stop")
+        self.assertEqual(self.actions, ["stop"])
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+        self.assert_original()
+
+    def test_second_replace_failure_restores_both_files_and_starts_original_once(self) -> None:
+        original_replace = operation._atomic_replace
+        calls = []
+
+        def fail_second(path, data, metadata):
+            calls.append(path)
+            if len(calls) == 2:
+                raise OSError("PRIVATE second replacement")
+            return original_replace(path, data, metadata)
+
+        with patch.object(operation, "_atomic_replace", side_effect=fail_second):
+            result = operation.maintain_service(acknowledge_interruption=True)
+        self.assertEqual(result["status"], "rolled_back")
+        self.assertEqual(result["reason"], "replacement_failed")
+        self.assertEqual(calls[2:], list(self.files.values()))
+        self.assertEqual(self.actions, ["stop", "start"])
+        self.assert_original()
+        self.assert_protected()
+        self.assertNotIn("PRIVATE", json.dumps(result))
+
+    def test_start_timeout_stops_before_two_file_rollback_then_starts_original_once(self) -> None:
+        starts = 0
+
+        def start_timeout(action):
+            nonlocal starts
+            success = self.action(action)
+            if action == "start":
+                starts += 1
+                return starts != 1
+            return success
+
+        with patch.object(operation, "_unit_action", side_effect=start_timeout):
+            result = operation.maintain_service(acknowledge_interruption=True)
+        self.assertEqual(result["status"], "rolled_back")
+        self.assertEqual(self.actions, ["stop", "start", "stop", "start"])
+        self.assert_original()
+
+    def test_post_start_source_mutation_enters_recovery_without_overwriting_external_bytes(self) -> None:
+        def mutated_health():
+            self.files["gateway"].write_bytes(b"external post-start source")
+            return True
+        with patch.object(operation, "_local_health", side_effect=mutated_health):
+            result = operation.maintain_service(acknowledge_interruption=True)
+        self.assertEqual(result["status"], "recovery_required")
+        self.assertEqual(result["reason"], "rollback_failed")
+        self.assertEqual(self.files["gateway"].read_bytes(), b"external post-start source")
+        self.assertEqual(self.files["codex_adapter"].read_bytes(), self.original["codex_adapter"])
+        self.assertEqual(self.actions, ["stop", "start", "stop"])
+        self.assertEqual(self.unit["active_state"], "inactive")
+        self.assert_protected()
+
+    def test_failed_health_restores_code_only_and_failed_rollback_stop_does_not_write(self) -> None:
+        with patch.object(operation, "_local_health", side_effect=[False, True]):
+            result = operation.maintain_service(acknowledge_interruption=True)
+        self.assertEqual(result["status"], "rolled_back")
+        self.assert_original()
+        self.assert_protected()
+
+    def test_failed_rollback_stop_never_replaces_running_target_code(self) -> None:
+        def fail_recovery_stop(action):
+            if action == "stop" and self.actions == ["stop", "start"]:
+                self.actions.append("stop")
+                return False
+            return self.action(action)
+        with patch.object(operation, "_unit_action", side_effect=fail_recovery_stop), \
+             patch.object(operation, "_local_health", return_value=False):
+            result = operation.maintain_service(acknowledge_interruption=True)
+        self.assertEqual(result["status"], "recovery_required")
+        self.assertEqual(result["reason"], "rollback_stop_unconfirmed")
+        self.assertEqual({n: p.read_bytes() for n, p in self.files.items()}, self.updated)
+        self.assert_protected()
+
+    def test_rollback_original_start_failure_is_not_retried_and_closes_admission(self) -> None:
+        with patch.object(operation, "_local_health", return_value=False):
+            result = operation.maintain_service(acknowledge_interruption=True)
+        self.assertEqual(result["status"], "recovery_required")
+        self.assertEqual(result["reason"], "rollback_start_failed")
+        self.assertTrue(result["stopped_after_rollback"])
+        self.assertEqual(self.actions, ["stop", "start", "stop", "start", "stop"])
+        self.assert_original()
+        self.assert_protected()
+
+    def test_atomic_replace_cannot_delete_preexisting_stage_or_accept_source_symlinks(self) -> None:
+        path = self.files["gateway"]
+        stage = path.with_name(f".{path.name}.audit-patch-stage")
+        stage.write_bytes(b"other attempt")
+        with self.assertRaises(FileExistsError):
+            operation._atomic_replace(path, self.updated["gateway"], path.stat())
+        self.assertEqual(stage.read_bytes(), b"other attempt")
+        self.assert_original()
+        path.unlink()
+        path.symlink_to(self.targets["gateway"])
+        result = operation.maintain_service(acknowledge_interruption=True)
+        self.assertEqual(result["status"], "refused")
+        self.assertEqual(self.actions, [])
+
+    def test_read_atime_changes_do_not_invalidate_otherwise_identical_snapshot(self) -> None:
+        path = self.files["gateway"]
+        os.utime(path, ns=(1, path.stat().st_mtime_ns))
+        data, info = operation._file_snapshot(path)
+        self.assertEqual(data, self.original["gateway"])
+        self.assertEqual((info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)), self.metadata["gateway"])
+
+    def test_health_probe_is_bounded_fixed_get_only_and_never_sends_auth_or_follows_redirects(self) -> None:
+        # Bypass only this fixture's mock; the real implementation opens no
+        # socket because every HTTPConnection is replaced with an owned fake.
+        health = self.real_health
+        connections = []
+
+        def connection(*args, **kwargs):
+            response = Mock(status=200 if not connections else 401)
+            response.read.return_value = b'{"status":"healthy"}' if not connections else b"PRIVATE_AUTH_ERROR"
+            client = Mock()
+            client.getresponse.return_value = response
+            connections.append(client)
+            self.assertEqual(args, ("127.0.0.1", 8797))
+            self.assertEqual(kwargs, {"timeout": 2})
+            return client
+
+        with patch.object(operation.http.client, "HTTPConnection", side_effect=connection):
+            self.assertTrue(health())
+        self.assertEqual([c.request.call_args.args for c in connections], [("GET", "/healthz"), ("GET", "/v1/ai/health")])
+        for client in connections:
+            self.assertEqual(client.request.call_args.kwargs, {})
+            client.getresponse.return_value.read.assert_called_once_with(4097)
+            client.close.assert_called_once()
+        for status, payload in ((302, b"redirect"), (200, b"x" * 4097), (200, b'{"status":"bad"}')):
+            client = Mock()
+            client.getresponse.return_value = Mock(status=status, read=Mock(return_value=payload))
+            with self.subTest(status=status), patch.object(operation.http.client, "HTTPConnection", return_value=client), \
+                 patch.object(operation.time, "monotonic", side_effect=[0, 0, 21]), patch.object(operation.time, "sleep"):
+                self.assertFalse(health())
+
+    def test_rollback_failure_attempts_both_files_and_leaves_unit_stopped(self) -> None:
+        original_replace = operation._atomic_replace
+        calls = []
+
+        def fail_second_and_first_rollback(path, data, metadata):
+            calls.append(path)
+            if len(calls) in (2, 3):
+                raise OSError("PRIVATE rollback failure")
+            return original_replace(path, data, metadata)
+
+        with patch.object(operation, "_atomic_replace", side_effect=fail_second_and_first_rollback):
+            result = operation.maintain_service(acknowledge_interruption=True)
+        self.assertEqual(result["status"], "recovery_required")
+        self.assertEqual(result["reason"], "rollback_failed")
+        self.assertEqual(calls[2:], list(self.files.values()))
+        self.assertEqual(self.actions, ["stop"])
+        self.assertEqual(self.unit["active_state"], "inactive")
+        self.assert_protected()
+
+    def test_corrupted_backup_is_not_used_and_other_file_is_still_restored(self) -> None:
+        original_replace = operation._atomic_replace
+        calls = 0
+
+        def corrupt_then_fail(path, data, metadata):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                (self.backup / "gateway.py").write_bytes(b"tampered backup")
+                raise OSError("synthetic second replacement failure")
+            return original_replace(path, data, metadata)
+        with patch.object(operation, "_atomic_replace", side_effect=corrupt_then_fail):
+            result = operation.maintain_service(acknowledge_interruption=True)
+        self.assertEqual(result["reason"], "rollback_failed")
+        self.assertEqual(result["status"], "recovery_required")
+        self.assertEqual(self.files["gateway"].read_bytes(), self.updated["gateway"])
+        self.assertEqual(self.files["codex_adapter"].read_bytes(), self.original["codex_adapter"])
+        self.assertEqual(self.actions, ["stop"])
+        self.assert_protected()
+
+    def test_failed_backup_write_does_not_stop_or_reuse_partial_backup(self) -> None:
+        with patch.object(operation, "_write_exclusive", side_effect=OSError("PRIVATE disk full")):
+            result = operation.maintain_service(acknowledge_interruption=True)
+        self.assertEqual(result["reason"], "backup_unavailable")
+        self.assertEqual(self.actions, [])
+        self.assertTrue(self.backup.exists())
+        self.assert_original()
+        self.assertNotIn("PRIVATE", json.dumps(result))
+
+    def test_stage_write_failure_removes_only_its_own_stage_and_never_changes_original(self) -> None:
+        path = self.files["gateway"]
+        with patch.object(operation.os, "write", side_effect=OSError("synthetic full disk")), self.assertRaises(OSError):
+            operation._atomic_replace(path, self.updated["gateway"], path.stat())
+        self.assertFalse(path.with_name(f".{path.name}.audit-patch-stage").exists())
+        self.assert_original()
+
+    def test_atomic_replace_rechecks_cas_after_staging_and_preserves_external_changes(self) -> None:
+        path = self.files["gateway"]
+        metadata = path.stat()
+        write = operation._write_exclusive
+
+        def changed(*args, **kwargs):
+            result = write(*args, **kwargs)
+            path.write_bytes(b"external mutation during staging")
+            return result
+        with patch.object(operation, "_write_exclusive", side_effect=changed), self.assertRaises(ValueError):
+            operation._atomic_replace(path, self.updated["gateway"], metadata)
+        self.assertEqual(path.read_bytes(), b"external mutation during staging")
+        self.assertFalse(path.with_name(f".{path.name}.audit-patch-stage").exists())
+
+    def test_started_acceptance_rejects_same_pid_or_wrong_route_without_http(self) -> None:
+        self.unit["main_pid"] = 123
+        with patch.object(operation, "_local_health") as health:
+            self.assertFalse(operation._started(123))
+            health.assert_not_called()
+        self.unit["main_pid"] = 456
+        self.process["entrypoint_matches_gateway"] = False
+        with patch.object(operation, "_local_health") as health:
+            self.assertFalse(operation._started(123))
+            health.assert_not_called()
+
+    def test_systemd_actions_use_only_fixed_stop_start_clean_environment_and_timeout(self) -> None:
+        with patch.object(operation.subprocess, "run", return_value=SimpleNamespace(returncode=0)) as run:
+            self.assertTrue(self.real_unit_action("stop"))
+            self.assertTrue(self.real_unit_action("start"))
+            self.assertFalse(self.real_unit_action("restart"))
+        self.assertEqual([c.args[0] for c in run.call_args_list], [
+            ["/usr/bin/systemctl", "stop", operation.UNIT], ["/usr/bin/systemctl", "start", operation.UNIT],
+        ])
+        for call in run.call_args_list:
+            self.assertEqual(call.kwargs["env"], operation.METADATA_ENV)
+            self.assertEqual(call.kwargs["timeout"], operation.UNIT_ACTION_TIMEOUT_SECONDS)
+            self.assertEqual(call.kwargs["stdout"], subprocess.DEVNULL)
+            self.assertEqual(call.kwargs["stderr"], subprocess.DEVNULL)
+            self.assertNotIn("shell", call.kwargs)
+        with patch.object(operation.subprocess, "run", side_effect=subprocess.TimeoutExpired("fixed", 30)):
+            self.assertFalse(self.real_unit_action("stop"))
+            self.assertFalse(self.real_unit_action("start"))
+
+    def test_maintenance_workflow_binds_source_and_requires_explicit_interruption_acknowledgement(self) -> None:
+        workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/vps_codex_service_ops.yml").read_text()
+        job = workflow.split("  apply-audit-patch:\n", 1)[1].split("\n  org-health-token:", 1)[0]
+        self.assertIn("inputs.acknowledge_interruption", job)
+        self.assertIn("inputs.mode != 'apply-audit-patch'", workflow)
+        for value in ("environment: codex-vps-ops", "- self-hosted", "- codex-vps", "persist-credentials: false", "ref: ${{ github.sha }}",
+                      '"$RUN_WORKFLOW_SHA" = "$RUN_SHA"', '"$(git rev-parse HEAD)" = "$RUN_SHA"', '"$current_main" = "$RUN_SHA"',
+                      '"$ACKNOWLEDGE_INTERRUPTION" = true', "env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C", "maintain --acknowledge-interruption"):
+            self.assertIn(value, job)
+        self.assertLess(job.index("current_main="), job.index("manage_codex_audit_service_patch.py"))
+        for forbidden in ("deploy_codex_audit_service.sh", "repair-ssh", "install-org-health-token", "secrets.", "nginx", "-k", "restart"):
+            self.assertNotIn(forbidden, job)
 
 
 class CodexServiceInspectionTests(unittest.TestCase):
@@ -346,7 +787,7 @@ class CodexServiceInspectionTests(unittest.TestCase):
                     self.assertIsNone(operation.metadata_output(argv))
             popen.assert_not_called()
 
-    def test_complete_inspection_is_import_free_read_only_and_has_no_apply_entrypoint(self) -> None:
+    def test_complete_inspection_is_import_free_read_only_and_rejects_arbitrary_operations(self) -> None:
         source = self.root / "gateway.py"
         adapter = self.root / "adapter.py"
         source.write_text("raise RuntimeError('PRIVATE')", encoding="utf-8")
@@ -376,7 +817,7 @@ class CodexServiceInspectionTests(unittest.TestCase):
         workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/vps_codex_service_ops.yml").read_text()
         self.assertIn("- inspect-audit-patch", workflow)
         self.assertIn("inputs.mode != 'inspect-audit-patch'", workflow)
-        job = workflow.split("  inspect-audit-patch:\n", 1)[1].split("\n  org-health-token:", 1)[0]
+        job = workflow.split("  inspect-audit-patch:\n", 1)[1].split("\n  apply-audit-patch:", 1)[0]
         for value in ("environment: codex-vps-ops", "- self-hosted", "- codex-vps", "persist-credentials: false", "ref: ${{ github.sha }}"):
             self.assertIn(value, job)
         self.assertIn('"$RUN_WORKFLOW_SHA" = "$RUN_SHA"', job)
@@ -391,8 +832,6 @@ class CodexServiceInspectionTests(unittest.TestCase):
 
     def test_actual_workflow_binding_script_rejects_stale_spoofed_or_dirty_source(self) -> None:
         workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/vps_codex_service_ops.yml").read_text()
-        step = workflow.split("      - name: Verify exact main workflow and clean checkout", 1)[1]
-        script = textwrap.dedent(step.split("        run: |\n", 1)[1].split("      - name: Read fixed", 1)[0])
         # Exercise the actual shell guards. Functions replace all git/GitHub
         # metadata commands; no CLI, network, token or host operation is used.
         fixtures = '''
@@ -409,22 +848,29 @@ class CodexServiceInspectionTests(unittest.TestCase):
             "PATH": "/usr/bin:/bin", "RUN_REPOSITORY": "QuantStrategyLab/AIAuditBridge",
             "RUN_REF": "refs/heads/main", "RUN_SHA": sha, "RUN_WORKFLOW_SHA": sha,
             "RUN_WORKFLOW_REF": "QuantStrategyLab/AIAuditBridge/.github/workflows/vps_codex_service_ops.yml@refs/heads/main",
-            "TEST_HEAD": sha, "TEST_MAIN": sha, "TEST_DIRTY": "",
+            "TEST_HEAD": sha, "TEST_MAIN": sha, "TEST_DIRTY": "", "ACKNOWLEDGE_INTERRUPTION": "true",
         }
-        command = ["/bin/bash", "-c", textwrap.dedent(fixtures) + script + '\necho INSPECTION_BOUND\n']
-        result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=5)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), "INSPECTION_BOUND")
-        for key, value in (
-            ("RUN_REPOSITORY", "other/repository"), ("RUN_REF", "refs/heads/spoof"),
-            ("RUN_SHA", "$(echo caller-command)"), ("RUN_WORKFLOW_SHA", "b" * 40),
-            ("RUN_WORKFLOW_REF", "QuantStrategyLab/AIAuditBridge/.github/workflows/other.yml@refs/heads/main"),
-            ("TEST_HEAD", "b" * 40), ("TEST_MAIN", "b" * 40), ("TEST_DIRTY", " M scripts/source.py"),
-        ):
-            with self.subTest(key=key):
-                result = subprocess.run(command, env={**env, key: value}, capture_output=True, text=True, timeout=5)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertNotIn("INSPECTION_BOUND", result.stdout)
+        for mode, boundary in (("inspect-audit-patch", "apply-audit-patch"), ("apply-audit-patch", "org-health-token")):
+            job = workflow.split(f"  {mode}:\n", 1)[1].split(f"\n  {boundary}:", 1)[0]
+            step = job.split("      - name: Verify exact main workflow and clean checkout", 1)[1]
+            script = textwrap.dedent(step.split("        run: |\n", 1)[1].split("      - name:", 1)[0])
+            command = ["/bin/bash", "-c", textwrap.dedent(fixtures) + script + '\necho INSPECTION_BOUND\n']
+            result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), "INSPECTION_BOUND")
+            failures = [
+                ("RUN_REPOSITORY", "other/repository"), ("RUN_REF", "refs/heads/spoof"),
+                ("RUN_SHA", "$(echo caller-command)"), ("RUN_WORKFLOW_SHA", "b" * 40),
+                ("RUN_WORKFLOW_REF", "QuantStrategyLab/AIAuditBridge/.github/workflows/other.yml@refs/heads/main"),
+                ("TEST_HEAD", "b" * 40), ("TEST_MAIN", "b" * 40), ("TEST_DIRTY", " M scripts/source.py"),
+            ]
+            if mode == "apply-audit-patch":
+                failures += [("ACKNOWLEDGE_INTERRUPTION", "false"), ("ACKNOWLEDGE_INTERRUPTION", "")]
+            for key, value in failures:
+                with self.subTest(mode=mode, key=key):
+                    result = subprocess.run(command, env={**env, key: value}, capture_output=True, text=True, timeout=5)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertNotIn("INSPECTION_BOUND", result.stdout)
 
 
 if __name__ == "__main__":

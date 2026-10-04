@@ -1,15 +1,21 @@
-"""Inspect one existing service; no apply, restart, import, config or auth operation.
+"""Inspect or maintain two fixed source files of one existing service.
 
 The live job counts are a bounded async snapshot, never a drain or a sync-work
 oracle. CLI help proves option syntax only: feature names and removal of every
 built-in tool require separate, version-specific review. No deployed module is
 imported, because importing service helpers can create or recover job state.
+Maintenance is an explicitly acknowledged interruption, not a graceful drain.
+Backups/rollback cover code only: startup may fail orphaned jobs/service_restart;
+sync work, provider consumption and job/quota/receipt state cannot be rewound.
+Only this fixed-unit stop/start maintenance exists; no broad legacy deploy,
+config/credential/unit/nginx/provider changes or installation operation exists.
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import json
 import os
 import pwd
@@ -28,6 +34,22 @@ SOURCE_FILES = {
     "gateway": DEPLOY_DIRECTORY / "service/ai_gateway_service.py",
     "codex_adapter": DEPLOY_DIRECTORY / "service/adapters/codex_adapter.py",
 }
+REVIEWED_SOURCE_COMMIT = "8dd1b0ca830b3bdb90de2c4ca555a2f3db090d15"
+TARGET_FILES = {name: Path(__file__).resolve().parents[1] / path.relative_to(DEPLOY_DIRECTORY)
+                for name, path in SOURCE_FILES.items()}
+PREIMAGE_SHA256 = {
+    "gateway": "1f21f4f626f8374bd957667dc471a5bc5b75bafda4f81cc95dc95b31911f5014",
+    "codex_adapter": "954476a6e82eade56a51b71c1b8087766bfa57c9aac54730a5f7376cb5f67013",
+}
+TARGET_SHA256 = {
+    "gateway": "60012ad523cd0fbef0996a6d879e3625ace3a3c52a0c84957973d6ae01b95cdf",
+    "codex_adapter": "e5175a5fb2c132b24dfc59a0af365c5af8ba2f3b8f6079fe398f97111c347cd0",
+}
+# Creation is exclusive and never reused, even after a failed operation. This
+# serializes this one-shot entrypoint only, not other administrators.
+BACKUP_DIRECTORY = DEPLOY_DIRECTORY / ".audit-patch-backup-8dd1b0ca"
+UNIT_ACTION_TIMEOUT_SECONDS = 30
+HEALTH_TIMEOUT_SECONDS = 20
 SERVICE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 # Metadata commands exit before config/auth loading. Also do not inherit the
 # runner's token/provider environment or its existing Codex credential home.
@@ -376,12 +398,274 @@ def inspect_service() -> dict:
     }
 
 
+def _file_snapshot(path: Path) -> tuple[bytes, os.stat_result]:
+    if path.resolve() != path:
+        raise ValueError("noncanonical source")
+    before = path.stat(follow_symlinks=False)
+    data, _, _ = _regular_bytes(path, MAX_SOURCE_BYTES)
+    after = path.stat(follow_symlinks=False)
+    if (data is None or not stat.S_ISREG(after.st_mode) or after.st_nlink != 1
+            or stat.S_IMODE(after.st_mode) & 0o7000 or _file_identity(before) != _file_identity(after)):
+        raise ValueError("source changed or unsupported")
+    return data, after
+
+
+def _file_identity(info: os.stat_result) -> tuple:
+    # Reads may change atime; compare mutation/ownership identity only.
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns,
+            info.st_uid, info.st_gid, info.st_mode, info.st_nlink)
+
+
+def _unit_action(action: str) -> bool:
+    """Only fixed stop/start; timeout is uncertainty, never permission to write."""
+    if action not in ("stop", "start"):
+        return False
+    try:
+        return subprocess.run(
+            ["/usr/bin/systemctl", action, UNIT], stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=METADATA_ENV,
+            cwd="/", timeout=UNIT_ACTION_TIMEOUT_SECONDS,
+        ).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def _stopped() -> bool:
+    unit = unit_metadata()
+    return (unit.get("identity_verified") is True and unit.get("load_state") == "loaded"
+            and unit.get("active_state") == "inactive" and unit.get("main_pid") == 0)
+
+
+def _local_health() -> bool:
+    """Fixed loopback GETs only, no credentials, redirects, proxy or model call.
+
+    The documented port is intentionally fixed: an override is a failed
+    acceptance check, not a reason to search config or try another endpoint.
+    """
+    deadline = time.monotonic() + HEALTH_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        healthy = False
+        for route, expected in (("/healthz", 200), ("/v1/ai/health", 401)):
+            connection = http.client.HTTPConnection("127.0.0.1", 8797, timeout=2)
+            try:
+                connection.request("GET", route)
+                response = connection.getresponse()
+                data = response.read(4097)
+                if response.status != expected or len(data) > 4096:
+                    break
+                if route == "/healthz":
+                    payload = json.loads(data, object_pairs_hook=_unique_object)
+                    if not isinstance(payload, dict) or payload.get("status") not in ("ok", "healthy"):
+                        break
+                    healthy = True
+                elif healthy:
+                    return True
+            except (OSError, ValueError, http.client.HTTPException):
+                break
+            finally:
+                connection.close()
+        time.sleep(0.2)
+    return False
+
+
+def _started(old_pid: int) -> bool:
+    unit = unit_metadata()
+    if (unit.get("identity_verified") is not True or unit.get("known_working_directory") is not True
+            or unit.get("active_state") != "active" or unit.get("sub_state") != "running"
+            or type(unit.get("main_pid")) is not int or unit["main_pid"] <= 0 or unit["main_pid"] == old_pid):
+        return False
+    process = service_process_metadata(unit)
+    return (process.get("snapshot_coherent") is True and process.get("entrypoint_matches_gateway") is True
+            and process.get("initial_environment_known_cli_choice") is True and _local_health())
+
+
+def _write_exclusive(path: Path | str, data: bytes, metadata: os.stat_result | None = None,
+                     *, directory_fd: int | None = None, cleanup_on_failure: bool = False) -> os.stat_result:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory_fd)
+    complete = False
+    try:
+        if metadata is not None:
+            os.fchown(fd, metadata.st_uid, metadata.st_gid)
+            os.fchmod(fd, stat.S_IMODE(metadata.st_mode))
+        view = memoryview(data)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                raise OSError("short source write")
+            view = view[written:]
+        os.fsync(fd)
+        complete = True
+        return os.fstat(fd)
+    finally:
+        try:
+            if not complete and cleanup_on_failure:
+                current = os.stat(path, dir_fd=directory_fd, follow_symlinks=False)
+                owned = os.fstat(fd)
+                if (current.st_dev, current.st_ino) == (owned.st_dev, owned.st_ino):
+                    os.unlink(path, dir_fd=directory_fd)
+        finally:
+            os.close(fd)
+
+
+def _sync_directory(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _atomic_replace(path: Path, data: bytes, metadata: os.stat_result) -> None:
+    """Create-only staging in the same fixed directory; preserve original UID/GID/mode."""
+    if path.parent.resolve() != path.parent:
+        raise ValueError("noncanonical directory")
+    stage = path.with_name(f".{path.name}.audit-patch-stage")
+    parent_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    created = None
+    try:
+        created = _write_exclusive(stage.name, data, metadata, directory_fd=parent_fd, cleanup_on_failure=True)
+        parent = os.fstat(parent_fd)
+        current = path.parent.stat(follow_symlinks=False)
+        if (current.st_dev, current.st_ino) != (parent.st_dev, parent.st_ino):
+            raise ValueError("directory changed")
+        name = next(name for name, fixed in SOURCE_FILES.items() if fixed == path)
+        current_data, current = _file_snapshot(path)
+        wanted_hash = hashlib.sha256(data).hexdigest()
+        current_hash = hashlib.sha256(current_data).hexdigest()
+        same_owner_mode = ((current.st_uid, current.st_gid, current.st_mode)
+                           == (metadata.st_uid, metadata.st_gid, metadata.st_mode))
+        if (not same_owner_mode or wanted_hash not in (PREIMAGE_SHA256[name], TARGET_SHA256[name])
+                or current_hash not in (PREIMAGE_SHA256[name], TARGET_SHA256[name])
+                or (wanted_hash == TARGET_SHA256[name] and _file_identity(current) != _file_identity(metadata))):
+            raise ValueError("source compare-and-swap mismatch")
+        os.replace(stage.name, path.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        os.fsync(parent_fd)
+    finally:
+        try:
+            if created is not None:
+                try:
+                    current = os.stat(stage.name, dir_fd=parent_fd, follow_symlinks=False)
+                    if (current.st_dev, current.st_ino) == (created.st_dev, created.st_ino):
+                        os.unlink(stage.name, dir_fd=parent_fd)
+                except FileNotFoundError:
+                    pass
+        finally:
+            os.close(parent_fd)
+
+
+def maintain_service(*, acknowledge_interruption: bool = False) -> dict:
+    """One reviewed two-file CAS maintenance, with code-only recovery.
+
+    A complete snapshot would still omit sync requests; explicit acknowledgement
+    accepts possible interruption, never proves idle. Power loss/SIGKILL or a
+    failed restore needs operator recovery from the durable create-only backups.
+    A stale/unknown file is never overwritten and no request/model is replayed.
+    """
+    result = {
+        "operation": "maintain", "status": "refused", "reason": None,
+        "reviewed_source_commit": REVIEWED_SOURCE_COMMIT,
+        "requests_may_be_interrupted": True, "drain_proven": False,
+        "all_builtin_tools_disabled_proven": False, "rollback_scope": "code_only",
+        "running_source_identity_verified": False, "runtime_python_environment_verified": False,
+    }
+    if acknowledge_interruption is not True:
+        return {**result, "reason": "interruption_not_acknowledged"}
+    targets, originals, metadata = {}, {}, {}
+    try:
+        for name, path in TARGET_FILES.items():
+            targets[name], _ = _file_snapshot(path)
+            if hashlib.sha256(targets[name]).hexdigest() != TARGET_SHA256[name]:
+                return {**result, "reason": "target_source_mismatch"}
+        for name, path in SOURCE_FILES.items():
+            originals[name], metadata[name] = _file_snapshot(path)
+            if hashlib.sha256(originals[name]).hexdigest() != PREIMAGE_SHA256[name]:
+                return {**result, "reason": "preimage_mismatch"}
+        unit = unit_metadata()
+        process = service_process_metadata(unit)
+        if (unit.get("active_state") != "active" or unit.get("sub_state") != "running"
+                or not all(process.get(key) is True for key in (
+                    "snapshot_coherent", "entrypoint_matches_gateway", "initial_environment_known_cli_choice"))):
+            return {**result, "reason": "service_identity_unproven"}
+        result["job_counts"] = job_counts(JOB_DIRECTORY)
+        if BACKUP_DIRECTORY.parent.resolve() != BACKUP_DIRECTORY.parent:
+            raise ValueError("noncanonical backup parent")
+        BACKUP_DIRECTORY.mkdir(mode=0o700)  # exclusive one-shot lock and backup namespace
+        for name in SOURCE_FILES:
+            _write_exclusive(BACKUP_DIRECTORY / f"{name}.py", originals[name])
+        receipt = {"reviewed_source_commit": REVIEWED_SOURCE_COMMIT, "preimage_sha256": PREIMAGE_SHA256,
+                   "target_sha256": TARGET_SHA256, "metadata": {
+                       name: {"uid": info.st_uid, "gid": info.st_gid, "mode": stat.S_IMODE(info.st_mode)}
+                       for name, info in metadata.items()}}
+        _write_exclusive(BACKUP_DIRECTORY / "metadata.json", json.dumps(receipt, sort_keys=True).encode())
+        _sync_directory(BACKUP_DIRECTORY)
+        _sync_directory(BACKUP_DIRECTORY.parent)
+        for name in SOURCE_FILES:
+            if source_hash(BACKUP_DIRECTORY / f"{name}.py") != PREIMAGE_SHA256[name]:
+                raise ValueError("backup mismatch")
+        if unit_metadata() != unit:
+            return {**result, "reason": "service_changed_before_stop"}
+    except (OSError, ValueError, KeyError):
+        return {**result, "reason": "backup_unavailable"}
+    result["status"] = "maintenance_failed"
+    if not _unit_action("stop"):
+        return {**result, "reason": "stop_failed"}
+    if not _stopped():
+        return {**result, "reason": "stop_not_confirmed"}
+    # Do not clobber a concurrent administrator's changed file, even to restore
+    # our preimage. Leave the unit stopped and require explicit recovery.
+    for name, path in SOURCE_FILES.items():
+        try:
+            data, current = _file_snapshot(path)
+            if data != originals[name] or _file_identity(current) != _file_identity(metadata[name]):
+                return {**result, "status": "recovery_required", "reason": "preimage_changed_after_stop"}
+        except (OSError, ValueError):
+            return {**result, "status": "recovery_required", "reason": "preimage_changed_after_stop"}
+    reason = "replacement_failed"
+    try:
+        for name, path in SOURCE_FILES.items():
+            _atomic_replace(path, targets[name], metadata[name])
+        if any(source_hash(path) != TARGET_SHA256[name] for name, path in SOURCE_FILES.items()):
+            raise ValueError("target mismatch")
+        reason = "start_failed"
+        if (_unit_action("start") and _started(unit["main_pid"])
+                and all(source_hash(path) == TARGET_SHA256[name] for name, path in SOURCE_FILES.items())):
+            return {**result, "status": "applied", "reason": None, "source_sha256": TARGET_SHA256}
+    except (Exception, KeyboardInterrupt):
+        pass  # emit only a fixed reason, never exception/source/auth values
+    # A timed-out start can have succeeded on systemd. Stop and confirm again
+    # before recovery; never replace code beneath a possibly running process.
+    if not _stopped() and (not _unit_action("stop") or not _stopped()):
+        return {**result, "status": "recovery_required", "reason": "rollback_stop_unconfirmed"}
+    restored = True
+    for name, path in SOURCE_FILES.items():
+        try:
+            backup, _ = _file_snapshot(BACKUP_DIRECTORY / f"{name}.py")
+            current, _ = _file_snapshot(path)
+            if (hashlib.sha256(backup).hexdigest() != PREIMAGE_SHA256[name]
+                    or hashlib.sha256(current).hexdigest() not in (PREIMAGE_SHA256[name], TARGET_SHA256[name])):
+                raise ValueError("rollback compare-and-swap mismatch")
+            _atomic_replace(path, backup, metadata[name])
+        except (Exception, KeyboardInterrupt):
+            restored = False  # still attempt the other fixed file
+    if not restored or any(source_hash(path) != PREIMAGE_SHA256[name] for name, path in SOURCE_FILES.items()):
+        return {**result, "status": "recovery_required", "reason": "rollback_failed"}
+    if not _unit_action("start") or not _started(unit["main_pid"]):
+        # Failed original-code start is not retried. Close uncertain admission.
+        stopped = _unit_action("stop") and _stopped()
+        return {**result, "status": "recovery_required", "reason": "rollback_start_failed",
+                "stopped_after_rollback": stopped}
+    return {**result, "status": "rolled_back", "reason": reason, "source_sha256": PREIMAGE_SHA256}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("inspect",))
-    parser.parse_args(argv)
-    print(json.dumps(inspect_service(), sort_keys=True))
-    return 0
+    parser.add_argument("operation", choices=("inspect", "maintain"))
+    parser.add_argument("--acknowledge-interruption", action="store_true")
+    args = parser.parse_args(argv)
+    result = (inspect_service() if args.operation == "inspect" else
+              maintain_service(acknowledge_interruption=args.acknowledge_interruption))
+    print(json.dumps(result, sort_keys=True))
+    return 0 if args.operation == "inspect" or result["status"] == "applied" else 1
 
 
 if __name__ == "__main__":
