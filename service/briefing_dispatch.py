@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
+import hashlib
+import importlib.util
 import json
 import os
 import re
 import subprocess
+import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 from typing import Any
 
 from scripts.run_strategy_optimization_watcher import dispatch_strategy_watch_findings
 from service.briefing_consumer import BriefingAction, BriefingConsumptionResult, BriefingFinding
+from service.runtime_digest import prepare_runtime_digest
 from service.strategy_watch import StrategyWatchFinding, build_strategy_monitoring_finding
 
 _REPOSITORY_RE = re.compile(
@@ -139,27 +144,103 @@ def _format_github_body(
     return "\n".join(lines)
 
 
+def _telegram_body_status(raw: bytes) -> str:
+    try:
+        body = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return "unknown"
+    if isinstance(body, dict) and body.get("ok") is True:
+        return "sent"
+    if isinstance(body, dict) and body.get("ok") is False:
+        return "failed"
+    return "unknown"
+
+
+def telegram_target_outcome(*, text: str, token: str, chat_id: str) -> str:
+    """Classify one Telegram send without collapsing other targets into one bool."""
+    payload = urllib.parse.urlencode(
+        {
+            "chat_id": chat_id,
+            "text": text,
+            "disable_web_page_preview": "true",
+        }
+    ).encode("utf-8")
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    request = urllib.request.Request(url, data=payload, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            status_value = getattr(response, "status", None)
+            if status_value is None and callable(getattr(response, "getcode", None)):
+                status_value = response.getcode()
+            status = 200 if status_value is None else int(status_value)
+            raw = response.read()
+    except urllib.error.HTTPError as exc:
+        raw = exc.read() if callable(getattr(exc, "read", None)) else b""
+        if _telegram_body_status(raw) == "failed" or 400 <= int(exc.code) < 500:
+            return "failed"
+        return "unknown"
+    except TimeoutError:
+        return "unknown"
+    except urllib.error.URLError:
+        return "unknown"
+    except Exception:
+        return "unknown"
+    if status < 200 or status >= 300:
+        return "unknown"
+    return _telegram_body_status(raw)
+
+
 def send_telegram_alert(*, text: str, token: str, chat_ids: tuple[str, ...]) -> bool:
     if not token or not chat_ids:
         return False
-    ok = True
-    for chat_id in chat_ids:
-        payload = urllib.parse.urlencode(
-            {
-                "chat_id": chat_id,
-                "text": text,
-                "disable_web_page_preview": "true",
-            }
-        ).encode("utf-8")
-        url = f"https://api.telegram.org/bot{token}/sendMessage"
-        request = urllib.request.Request(url, data=payload, method="POST")
-        try:
-            with urllib.request.urlopen(request, timeout=15) as response:
-                body = json.loads(response.read().decode("utf-8"))
-            ok = ok and bool(body.get("ok"))
-        except Exception:
-            ok = False
-    return ok
+    outcomes = [
+        telegram_target_outcome(text=text, token=token, chat_id=chat_id)
+        for chat_id in chat_ids
+    ]
+    return all(outcome == "sent" for outcome in outcomes)
+
+
+_HEALTH_CYCLE = None
+
+
+def _health_cycle_module():
+    global _HEALTH_CYCLE
+    if _HEALTH_CYCLE is not None:
+        return _HEALTH_CYCLE
+    path = Path(__file__).resolve().parents[1] / "ops" / "quant-monitor" / "scripts" / "health_cycle.py"
+    spec = importlib.util.spec_from_file_location("quant_monitor_health_cycle", path)
+    if spec is None or spec.loader is None:
+        raise OSError("alert_state_unreadable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    _HEALTH_CYCLE = module
+    return module
+
+
+def _monitor_state_root() -> Path | None:
+    raw = str(os.environ.get("QUANT_MONITOR_ROOT") or "").strip()
+    if not raw:
+        return None
+    root = Path(raw)
+    if not root.is_dir():
+        return None
+    return root
+
+
+def _briefing_delivery_event_id(result: BriefingConsumptionResult, *, record_failed: bool) -> str:
+    parts = [result.day, "record_failed" if record_failed else result.action.value]
+    for finding in result.findings:
+        if finding.level != BriefingAction.TELEGRAM and not record_failed:
+            continue
+        parts.append("\n".join((
+            finding.source,
+            finding.level.value,
+            finding.kind,
+            finding.strategy_profile,
+            finding.domain,
+            finding.reason,
+        )))
+    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
 
 
 def create_github_issue(*, title: str, body: str, labels: tuple[str, ...] = ()) -> str | None:
@@ -319,24 +400,39 @@ def dispatch_briefing_result(
         else:
             text = (
                 f"🚨 量化哨兵 operational ({result.day})\n\n"
-                "• optimization-record delivery failure; manual review required"
+                "• optimization-record delivery failed; operational recovery is required"
             )
         if record_failed and result.action == BriefingAction.TELEGRAM:
-            text += "\n• optimization-record delivery failure; manual review required"
+            text += "\n• optimization-record delivery failed; operational recovery is required"
         if dry_run:
             summary["telegram_dry_run"] = text
         else:
             token = _telegram_token()
             chat_ids = _telegram_chat_ids()
-            if token and chat_ids:
-                sent = send_telegram_alert(text=text, token=token, chat_ids=chat_ids)
-                summary["telegram_sent"] = sent
-                summary["operational_fallback_sent"] = bool(record_failed and sent)
-                if not sent:
-                    summary["errors"].append("telegram_delivery_failed")
-            else:
+            if not token or not chat_ids:
                 summary["skipped"].append("telegram_missing_env")
                 summary["errors"].append("telegram_missing_env")
+            else:
+                root = _monitor_state_root()
+                if root is None:
+                    summary["telegram_sent"] = False
+                    summary["errors"].append("alert_state_root_unavailable")
+                else:
+                    event_id = _briefing_delivery_event_id(result, record_failed=record_failed)
+
+                    def send_one(chat_id: str) -> str:
+                        return telegram_target_outcome(text=text, token=token, chat_id=chat_id)
+
+                    delivery = _health_cycle_module().deliver_telegram_targets(
+                        root, event_id, chat_ids, send_one,
+                    )
+                    summary["telegram_sent"] = bool(delivery["all_sent"])
+                    summary["operational_fallback_sent"] = bool(record_failed and delivery["all_sent"])
+                    for code in delivery["errors"]:
+                        if code not in summary["errors"]:
+                            summary["errors"].append(code)
+                    if delivery["suppressed"]:
+                        summary["skipped"].append("duplicate_delivered")
 
     if send_dry_run:
         prereqs = sender_prerequisites()
@@ -357,4 +453,67 @@ def dispatch_briefing_result(
                     summary["errors"].append("gh_executable_missing")
         return _redact_send_dry_run_summary(summary)
 
+    return summary
+
+
+def dispatch_runtime_digest(
+    projection: dict[str, Any],
+    *,
+    dry_run: bool = False,
+    send_dry_run: bool = False,
+) -> dict[str, Any]:
+    """Send one daily runtime projection, or preview it without persistence.
+
+    Health-cycle delivery state is reused. This does not confirm a health
+    fingerprint, open a GitHub issue, or call a model.
+    """
+    if send_dry_run:
+        dry_run = True
+    prepared = prepare_runtime_digest(projection)
+    summary: dict[str, Any] = {
+        "action": "runtime_digest",
+        "telegram_sent": False,
+        "github_issue": None,
+        "errors": [],
+        "skipped": [],
+        "business_date": prepared.get("business_date"),
+        "event_id": prepared.get("event_id"),
+    }
+    if not prepared.get("ok"):
+        summary["errors"].append(str(prepared.get("reason") or "runtime_projection_rejected"))
+        return summary
+    summary["telegram_preview"] = prepared["text"]
+    if not prepared.get("sendable"):
+        summary["errors"].append(str(prepared.get("reason") or "runtime_digest_too_long"))
+        return summary
+    if dry_run:
+        summary["skipped"].append("dry_run")
+        summary["telegram_dry_run"] = prepared["text"]
+        return summary
+    token = _telegram_token()
+    chat_ids = _telegram_chat_ids()
+    if not token or not chat_ids:
+        summary["skipped"].append("telegram_missing_env")
+        summary["errors"].append("telegram_missing_env")
+        return summary
+    root = _monitor_state_root()
+    if root is None:
+        summary["errors"].append("alert_state_root_unavailable")
+        return summary
+
+    def send_one(chat_id: str) -> str:
+        return telegram_target_outcome(text=prepared["text"], token=token, chat_id=chat_id)
+
+    delivery = _health_cycle_module().deliver_telegram_targets(
+        root,
+        str(prepared["event_id"]),
+        chat_ids,
+        send_one,
+    )
+    summary["telegram_sent"] = bool(delivery["all_sent"])
+    for code in delivery["errors"]:
+        if code not in summary["errors"]:
+            summary["errors"].append(code)
+    if delivery["suppressed"]:
+        summary["skipped"].append("duplicate_delivered")
     return summary

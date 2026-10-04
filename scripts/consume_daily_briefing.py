@@ -5,13 +5,327 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import select
+import subprocess
+import time
+from datetime import date
 from pathlib import Path
 
 from service.briefing_consumer import consume_briefing_dir, summarize_briefing
-from service.briefing_dispatch import dispatch_briefing_result
+from service.briefing_dispatch import dispatch_briefing_result, dispatch_runtime_digest
+from service.runtime_digest import prepare_runtime_digest
 from service.dual_review_briefing import collect_dual_review_payloads, summarize_dual_review_runs
 from service.dual_review_dispatch import dispatch_dual_review_result
 from service.dual_review_orchestrator import orchestrate_from_payload
+
+
+def _canonical_iso_day(value: str) -> str | None:
+    if len(value) != 10:
+        return None
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError:
+        return None
+    rendered = parsed.isoformat()
+    if rendered != value:
+        return None
+    return rendered
+
+
+def _producer_target_key(key: object) -> bool:
+    """Accept only the identity string the producer already emits.
+
+    That string is ``service|strategy|scope`` after strip and lowercase.
+    Empty strategy or scope is ``*``. This does not rewrite the caller's key.
+    """
+    if not isinstance(key, str) or not key or any(char.isspace() for char in key):
+        return False
+    parts = key.split("|")
+    if len(parts) != 3:
+        return False
+    service, strategy, scope = parts
+    if not service or not strategy or not scope:
+        return False
+    return (
+        service == service.strip().lower()
+        and strategy == strategy.strip().lower()
+        and scope == scope.strip().lower()
+    )
+
+
+def _runtime_day_problem(day: str, business_date: object, *, required: bool) -> str | None:
+    if not day:
+        return "missing_dispatch_day" if required else None
+    if _canonical_iso_day(day) is None:
+        return "invalid_business_day"
+    if day != business_date:
+        return "business_date_mismatch"
+    return None
+
+
+def _runtime_target_problem(keys: list[str] | None, target_scope: object, *, required: bool) -> str | None:
+    if not keys:
+        return "missing_expected_target" if required else None
+    seen: set[str] = set()
+    for key in keys:
+        if not _producer_target_key(key):
+            return "invalid_expected_target"
+        if key in seen:
+            return "duplicate_expected_target"
+        seen.add(key)
+    expected = set(target_scope) if isinstance(target_scope, list) else set()
+    if seen != expected:
+        return "expected_target_mismatch"
+    return None
+
+
+def _reject_runtime(reason: str) -> int:
+    print(json.dumps({
+        "ok": False,
+        "error": "runtime_projection_rejected",
+        "reason": reason,
+    }, ensure_ascii=False))
+    return 2
+
+
+_GCS_TIMEOUT_SECONDS = 20
+_GCS_OBJECT_LIMIT = 1024 * 1024
+_GCS_FORBIDDEN = ("*", "?", "#", "@", "\\", " ", "\n", "\r", "\t")
+
+
+def _paper_scope_problem(keys: list[str] | None) -> str | None:
+    if not keys:
+        return "missing_expected_target"
+    seen: set[str] = set()
+    for key in keys:
+        if not _producer_target_key(key):
+            return "invalid_expected_target"
+        if key in seen:
+            return "duplicate_expected_target"
+        seen.add(key)
+        if key.rsplit("|", 1)[-1] != "paper":
+            return "expected_scope_not_paper"
+    return None
+
+
+def _runtime_object_problem(uri: str, day: str) -> str | None:
+    if (
+        not isinstance(uri, str)
+        or not uri.startswith("gs://")
+        or uri.endswith("/")
+        or any(item in uri for item in _GCS_FORBIDDEN)
+        or ".." in uri
+    ):
+        return "invalid_runtime_object"
+    rest = uri[5:]
+    if not rest or rest.startswith("/") or "//" in rest or "/" not in rest:
+        return "invalid_runtime_object"
+    bucket, _, object_name = rest.partition("/")
+    if not bucket or not object_name:
+        return "invalid_runtime_object"
+    parts = object_name.split("/")
+    if len(parts) < 4 or parts[-4:-1] != ["runtime_daily", "longbridge", "paper"]:
+        return "invalid_runtime_object"
+    filename = parts[-1]
+    if not filename.endswith(".json"):
+        return "invalid_runtime_object"
+    object_day = filename[: -len(".json")]
+    if _canonical_iso_day(object_day) is None:
+        return "invalid_runtime_object"
+    if object_day != day:
+        return "runtime_object_day_mismatch"
+    return None
+
+
+def _stop_gcs_process(proc: subprocess.Popen[bytes]) -> None:
+    if proc.poll() is None:
+        proc.kill()
+    try:
+        proc.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        pass
+    for stream in (proc.stdout, proc.stderr):
+        if stream is not None:
+            try:
+                stream.close()
+            except OSError:
+                pass
+
+
+def _read_ready(fd: int, deadline: float) -> bytes | None:
+    """Read bytes already available. None means the deadline passed."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return None
+    ready, _, _ = select.select([fd], [], [], remaining)
+    if not ready:
+        return None
+    return os.read(fd, 65536)
+
+
+def _read_gcs_object(uri: str) -> tuple[bytes | None, str | None]:
+    """Read one object with gcloud. stderr is discarded and never returned."""
+    try:
+        proc = subprocess.Popen(
+            ["gcloud", "storage", "cat", "--", uri],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=0,
+        )
+    except OSError:
+        return None, "runtime_projection_unreadable"
+    if proc.stdout is None or proc.stderr is None:
+        _stop_gcs_process(proc)
+        return None, "runtime_projection_unreadable"
+    stdout_fd = proc.stdout.fileno()
+    stderr_fd = proc.stderr.fileno()
+    deadline = time.monotonic() + _GCS_TIMEOUT_SECONDS
+    chunks: list[bytes] = []
+    total = 0
+    stderr_open = True
+    try:
+        while total <= _GCS_OBJECT_LIMIT:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _stop_gcs_process(proc)
+                return None, "runtime_projection_timeout"
+            watch = [stdout_fd]
+            if stderr_open:
+                watch.append(stderr_fd)
+            ready, _, _ = select.select(watch, [], [], remaining)
+            if not ready:
+                _stop_gcs_process(proc)
+                return None, "runtime_projection_timeout"
+            if stderr_fd in ready:
+                err = os.read(stderr_fd, 4096)
+                if not err:
+                    stderr_open = False
+            if stdout_fd not in ready:
+                continue
+            block = os.read(stdout_fd, min(65536, _GCS_OBJECT_LIMIT + 1 - total))
+            if not block:
+                break
+            chunks.append(block)
+            total += len(block)
+        if total > _GCS_OBJECT_LIMIT:
+            _stop_gcs_process(proc)
+            return None, "runtime_projection_too_large"
+        code = None
+        while code is None:
+            if not stderr_open:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    _stop_gcs_process(proc)
+                    return None, "runtime_projection_timeout"
+                code = proc.poll()
+                if code is None:
+                    time.sleep(min(0.05, remaining))
+                continue
+            err = _read_ready(stderr_fd, deadline)
+            if err is None:
+                _stop_gcs_process(proc)
+                return None, "runtime_projection_timeout"
+            if not err:
+                stderr_open = False
+            code = proc.poll()
+    except OSError:
+        _stop_gcs_process(proc)
+        return None, "runtime_projection_unreadable"
+    if code != 0:
+        _stop_gcs_process(proc)
+        return None, "runtime_projection_unreadable"
+    return b"".join(chunks), None
+
+
+def _consume_runtime_payload(
+    args: argparse.Namespace,
+    payload: dict,
+    *,
+    scope_required: bool,
+) -> int:
+    prepared = prepare_runtime_digest(payload)
+    if not prepared.get("ok"):
+        print(json.dumps({
+            "ok": False,
+            "error": "runtime_projection_rejected",
+            "reason": prepared.get("reason"),
+        }, ensure_ascii=False))
+        return 2
+    dispatching = bool(args.dispatch) or scope_required
+    day_problem = _runtime_day_problem(
+        str(args.day or ""),
+        prepared.get("business_date"),
+        required=dispatching,
+    )
+    if day_problem is not None:
+        return _reject_runtime(day_problem)
+    target_problem = _runtime_target_problem(
+        args.expected_target_key,
+        prepared.get("target_scope"),
+        required=dispatching,
+    )
+    if target_problem is not None:
+        return _reject_runtime(target_problem)
+    body = {
+        "ok": True,
+        "kind": "runtime_digest",
+        "platform": prepared["platform"],
+        "business_date": prepared["business_date"],
+        "timezone": prepared["timezone"],
+        "completeness": prepared["completeness"],
+        "event_id": prepared["event_id"],
+        "text": prepared["text"],
+        "sendable": prepared["sendable"],
+        "accounts": prepared["accounts"],
+    }
+    if args.dispatch or args.send_dry_run or args.dry_run:
+        body["dispatch"] = dispatch_runtime_digest(
+            payload,
+            dry_run=bool(args.dry_run or args.send_dry_run or not args.dispatch),
+            send_dry_run=bool(args.send_dry_run),
+        )
+    print(json.dumps(body, ensure_ascii=False, indent=2))
+    dispatch = body.get("dispatch")
+    if dispatch is None:
+        return 0
+    return 0 if not _dispatch_failed(dispatch) else 2
+
+
+def _consume_runtime_projection(args: argparse.Namespace) -> int:
+    path = Path(args.runtime_projection)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        print(json.dumps({"ok": False, "error": "runtime_projection_unreadable"}, ensure_ascii=False))
+        return 2
+    if not isinstance(payload, dict):
+        return _reject_runtime("malformed")
+    return _consume_runtime_payload(args, payload, scope_required=False)
+
+
+def _consume_runtime_gcs(args: argparse.Namespace) -> int:
+    day = str(args.day or "")
+    if not day:
+        return _reject_runtime("missing_dispatch_day")
+    if _canonical_iso_day(day) is None:
+        return _reject_runtime("invalid_business_day")
+    key_problem = _paper_scope_problem(args.expected_target_key)
+    if key_problem is not None:
+        return _reject_runtime(key_problem)
+    object_problem = _runtime_object_problem(str(args.runtime_projection_gcs), day)
+    if object_problem is not None:
+        return _reject_runtime(object_problem)
+    raw, read_problem = _read_gcs_object(str(args.runtime_projection_gcs))
+    if read_problem is not None or raw is None:
+        return _reject_runtime(read_problem or "runtime_projection_unreadable")
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError):
+        return _reject_runtime("runtime_projection_unreadable")
+    if not isinstance(payload, dict):
+        return _reject_runtime("malformed")
+    return _consume_runtime_payload(args, payload, scope_required=True)
 
 
 def _dispatch_failed(summary: object) -> bool:
@@ -27,12 +341,29 @@ def _dispatch_failed(summary: object) -> bool:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Consume quant-monitor daily briefing reports.")
-    parser.add_argument(
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument(
         "--report-dir",
-        required=True,
         help="Directory containing domain JSON files (e.g. data/daily-reports/2026-07-08)",
     )
+    source.add_argument(
+        "--runtime-projection",
+        help="Offline LongBridge daily runtime projection JSON. Default is preview only.",
+    )
+    source.add_argument(
+        "--runtime-projection-gcs",
+        help=(
+            "One gs:// runtime_daily/longbridge/paper/YYYY-MM-DD.json object. "
+            "Requires --day and --expected-target-key. Preview unless --dispatch."
+        ),
+    )
     parser.add_argument("--day", default="", help="Report day label (defaults to directory name)")
+    parser.add_argument(
+        "--expected-target-key",
+        action="append",
+        default=None,
+        help="Exact deployed runtime target key. Repeat once per target. Required with --dispatch.",
+    )
     parser.add_argument(
         "--dispatch",
         action="store_true",
@@ -59,6 +390,15 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--summary-only cannot dispatch alerts or run dual review")
     if args.send_dry_run and (args.ai_summary or args.dual_review):
         parser.error("--send-dry-run cannot run AI summary or dual review")
+    if (args.runtime_projection or args.runtime_projection_gcs) and (
+        args.ai_summary or args.dual_review or args.summary_only
+    ):
+        parser.error("--runtime-projection cannot run AI summary or dual review")
+
+    if args.runtime_projection:
+        return _consume_runtime_projection(args)
+    if args.runtime_projection_gcs:
+        return _consume_runtime_gcs(args)
 
     report_dir = Path(args.report_dir)
     if not report_dir.is_dir():

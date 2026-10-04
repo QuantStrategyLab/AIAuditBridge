@@ -327,7 +327,7 @@ def consume_briefing_dir(report_dir: str | Path, *, day: str = "") -> BriefingCo
 
 
 _SUMMARY_DOMAINS = ("cn_equity", "hk_equity", "us_equity", "crypto")
-_SUMMARY_STATUSES = ("healthy", "watch", "review", "critical", "unavailable", "unknown")
+_SUMMARY_STATUSES = ("healthy", "watch", "review", "critical", "unavailable", "unknown", "not_configured")
 
 
 def _summary_report(payload: Mapping[str, Any], *, source: str) -> dict[str, Any]:
@@ -337,25 +337,71 @@ def _summary_report(payload: Mapping[str, Any], *, source: str) -> dict[str, Any
     if domain not in _SUMMARY_DOMAINS or source != f"{domain}.json" or not isinstance(rows, list):
         return {}
     try:
-        generated = datetime.fromisoformat(payload["as_of"])
+        source_as_of = datetime.fromisoformat(payload["as_of"])
+        generated = datetime.fromisoformat(payload.get("generated_at") or payload["as_of"])
+        if source_as_of.tzinfo is None:
+            return {}
         if generated.tzinfo is None:
             return {}
         generated = generated.astimezone(timezone.utc)
+        source_as_of = source_as_of.astimezone(timezone.utc)
         counts = dict.fromkeys(_SUMMARY_STATUSES, 0)
         observations: dict[str, int] = {}
+        row_profiles: list[str] = []
         for row in rows:
             if not isinstance(row, Mapping):
                 return {}
             observed = date.fromisoformat(row["as_of"]).isoformat()
             observations[observed] = observations.get(observed, 0) + 1
+            profile = row.get("strategy_profile")
+            if not isinstance(profile, str) or not profile:
+                return {}
+            row_profiles.append(profile)
             status = row.get("status")
             counts[status if status in _SUMMARY_STATUSES else "unknown"] += 1
     except (KeyError, TypeError, ValueError, OverflowError):
         return {}
+    coverage = payload.get("coverage")
+    if coverage is None:
+        # Older reports predate explicit profile coverage, but an empty ready
+        # report cannot prove that its domain had no expected profiles.
+        coverage_complete = bool(rows)
+        explicit_no_config = False
+    elif isinstance(coverage, Mapping):
+        expected = coverage.get("expected_profiles")
+        observed = coverage.get("observed_profiles")
+        missing = coverage.get("missing_profiles")
+        valid_lists = all(
+            isinstance(profiles, list)
+            and all(isinstance(profile, str) and profile for profile in profiles)
+            and len(profiles) == len(set(profiles))
+            for profiles in (expected, observed, missing)
+        )
+        if not valid_lists:
+            return {}
+        explicit_no_config = not expected and not observed and not missing and not rows
+        coverage_complete = (
+            bool(expected)
+            and not missing
+            and set(expected) == set(observed) == set(row_profiles)
+        )
+    else:
+        return {}
     return {
         "source": source, "domain": domain,
         "report_generated_at": generated.isoformat(),
-        "data_ready": payload.get("ok") is True and payload.get("data_status") == "ready",
+        "source_as_of": source_as_of.isoformat(),
+        "data_status": payload.get("data_status"),
+        "not_configured": (
+            payload.get("ok") is True
+            and payload.get("data_status") == "not_configured"
+            and explicit_no_config
+        ),
+        "data_ready": (
+            payload.get("ok") is True
+            and payload.get("data_status") == "ready"
+            and coverage_complete
+        ),
         "strategy_counts": counts, "observation_dates": observations,
     }
 
@@ -379,14 +425,18 @@ def summarize_briefing(result: BriefingConsumptionResult, *, dry_run: bool = Fal
         return unavailable("github_oidc_required")
     now = _summary_now()
     reports = result.summary_reports
-    if not reports or any(not report or not report["data_ready"] for report in reports):
+    if not reports or any(
+        not report or not (report["data_ready"] or report["not_configured"])
+        for report in reports
+    ):
         return unavailable("briefing_input_unavailable")
     # Report generation is a separate clock from the strategy observations.
     # 36 hours and 7 natural days are conservative summary limits, not a
     # trading-calendar validation or a change to existing risk classifications.
     for report in reports:
         age = (now - datetime.fromisoformat(report["report_generated_at"])).total_seconds()
-        if not 0 <= age <= 36 * 3600 or any(
+        source_age = (now - datetime.fromisoformat(report["source_as_of"])).total_seconds()
+        if not 0 <= age <= 36 * 3600 or not 0 <= source_age <= 2 * 3600 or any(
             not 0 <= (now.date() - date.fromisoformat(observed)).days <= 7
             for observed in report["observation_dates"]
         ):
@@ -402,6 +452,7 @@ def summarize_briefing(result: BriefingConsumptionResult, *, dry_run: bool = Fal
     prompt = (
         "用简短中文总结以下日报计数，仅供人工参考。输入只有已加载领域，缺失领域不能视为正常。"
         "strategy_counts 是报告中的状态数量，不是实时健康证明；report_generated_at 是生成时间，"
+        "source_as_of 是生命周期来源时间；not_configured 表示该领域无配置，不代表健康或已观察，"
         "observation_dates 才是策略观测日期，必须分别说明。缺少回测、收益、交易和晋级证据，"
         "不得声称已验证、建议自动执行、解除告警或授予交易权限。不要添加输入之外的事实。\n"
         + json.dumps(context, ensure_ascii=False, sort_keys=True)

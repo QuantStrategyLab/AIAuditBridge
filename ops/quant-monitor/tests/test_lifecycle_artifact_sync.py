@@ -8,7 +8,7 @@ import unittest
 import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -336,6 +336,110 @@ class LifecycleArtifactSyncTests(unittest.TestCase):
 
             with self.assertRaises(SYNC.LifecycleArtifactError):
                 SYNC.validate_stored_version(version, manifest, self.config)
+
+    def test_sync_domain_classifies_artifact_validation_stage_without_leaking_detail(self) -> None:
+        selected = {
+            "id": 12,
+            "name": "lifecycle-preflight-34-1",
+            "created_at": self.now.isoformat(),
+            "_created_at": self.now.isoformat(),
+            "_trusted_run": {"id": 34, "head_sha": "a" * 40},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            secret_detail = "local/path/value must not appear"
+            with (
+                patch.object(SYNC, "_run_gh", return_value={"artifacts": []}),
+                patch.object(SYNC, "select_trusted_artifact", return_value=selected),
+                patch.object(
+                    SYNC,
+                    "_load_or_download_version",
+                    side_effect=SYNC.LifecycleArtifactError(secret_detail),
+                ),
+                self.assertRaises(SYNC.LifecycleArtifactError) as context,
+            ):
+                SYNC._sync_domain(
+                    self.config,
+                    artifacts_root=root / "artifacts",
+                    projects_root=root / "projects",
+                    lifecycle_root=root / "lifecycle",
+                    max_age=timedelta(days=7),
+                    now=self.now,
+                )
+
+            status = SYNC._domain_error_status(context.exception)
+            self.assertEqual(status["code"], "artifact_invalid")
+            self.assertEqual(status["reason_code"], "artifact_version_validation_failed")
+            self.assertNotIn(secret_detail, json.dumps(status))
+
+    def test_sync_domain_distinguishes_cached_version_and_activation_failures(self) -> None:
+        selected = {
+            "id": 12,
+            "name": "lifecycle-preflight-34-1",
+            "created_at": self.now.isoformat(),
+            "_created_at": self.now.isoformat(),
+            "_trusted_run": {"id": 34, "head_sha": "a" * 40},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cached_version = root / "artifacts" / "versions" / self.config["domain"] / "12"
+            cached_version.mkdir(parents=True)
+            with (
+                patch.object(SYNC, "_run_gh", return_value={"artifacts": []}),
+                patch.object(SYNC, "select_trusted_artifact", return_value=selected),
+                patch.object(
+                    SYNC,
+                    "_load_or_download_version",
+                    side_effect=SYNC.LifecycleArtifactError("synthetic cache mismatch"),
+                ),
+                self.assertRaises(SYNC.LifecycleArtifactError) as context,
+            ):
+                SYNC._sync_domain(
+                    self.config,
+                    artifacts_root=root / "artifacts",
+                    projects_root=root / "projects",
+                    lifecycle_root=root / "lifecycle",
+                    max_age=timedelta(days=7),
+                    now=self.now,
+                )
+            self.assertEqual(
+                SYNC._domain_error_status(context.exception)["reason_code"],
+                "stored_artifact_validation_failed",
+            )
+
+            with (
+                patch.object(SYNC, "_run_gh", return_value={"artifacts": []}),
+                patch.object(SYNC, "select_trusted_artifact", return_value=selected),
+                patch.object(
+                    SYNC,
+                    "_load_or_download_version",
+                    return_value=(root / "version", {"profiles": []}),
+                ),
+                patch.object(
+                    SYNC,
+                    "activate_version",
+                    side_effect=SYNC.LifecycleArtifactError("synthetic activation failure"),
+                ),
+                self.assertRaises(SYNC.LifecycleArtifactError) as context,
+            ):
+                SYNC._sync_domain(
+                    self.config,
+                    artifacts_root=root / "fresh-artifacts",
+                    projects_root=root / "projects",
+                    lifecycle_root=root / "lifecycle",
+                    max_age=timedelta(days=7),
+                    now=self.now,
+                )
+            self.assertEqual(
+                SYNC._domain_error_status(context.exception)["reason_code"],
+                "artifact_activation_failed",
+            )
+
+    def test_unexpected_domain_error_remains_safe_and_generic(self) -> None:
+        status = SYNC._domain_error_status(ValueError("secret path and content"))
+        self.assertEqual(status["code"], "artifact_sync_unexpected")
+        self.assertEqual(status["reason_code"], "artifact_sync_unexpected")
+        self.assertNotIn("secret path", json.dumps(status))
 
     def test_classify_gh_api_rate_limit_without_leaking_stderr(self) -> None:
         secret = "ghs_this_is_not_a_real_token_leak_check"

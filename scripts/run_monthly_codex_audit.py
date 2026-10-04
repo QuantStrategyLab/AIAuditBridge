@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import argparse
 import base64
 import datetime as dt
 import hashlib
@@ -15,6 +16,7 @@ import sys
 from string import Template
 import tempfile
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 import urllib.error
@@ -25,7 +27,24 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from service.ai_gateway_service import (  # noqa: E402
+    ENGINEERING_REVIEW_PURPOSE,
+    engineering_review_input_digest,
+)
 from service.model_router import route_model  # noqa: E402
+
+ENGINEERING_EVIDENCE_RESUME_OPERATION = "engineering_evidence_resume"
+ENGINEERING_PR_REVIEW_OPERATION = "engineering_pr_review"
+ENGINEERING_PR_REVIEW_ENABLED_ENV = "CODEX_AUDIT_ENGINEERING_PR_REVIEW_ENABLED"
+ENGINEERING_PR_REVIEW_REPOSITORY = "QuantStrategyLab/AIAuditBridge"
+ENGINEERING_PR_REVIEW_WORKFLOW = ".github/workflows/engineering_pr_review.yml"
+ENGINEERING_PR_REVIEW_CI_WORKFLOW_ID = 306449122
+ENGINEERING_PR_REVIEW_REQUIRED_CHECKS = frozenset({"actionlint", "test"})
+ENGINEERING_PR_REVIEW_GITHUB_APP_ID = 15368
+ENGINEERING_PR_REVIEW_WORKFLOW_REF = (
+    "QuantStrategyLab/AIAuditBridge/.github/workflows/engineering_pr_review.yml@refs/heads/main"
+)
+ENGINEERING_PR_REVIEW_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 API_BASE = "https://api.github.com"
@@ -78,6 +97,7 @@ DEFAULT_CODEX_BACKEND = "service"
 SUPPORTED_CODEX_BACKENDS = frozenset({"service"})
 GUARDED_AUTO_MERGE_LABEL = "auto-merge-ok"
 HUMAN_REVIEW_LABEL = "human-review-required"
+ENGINEERING_EVIDENCE_BLOCKED_LABEL = "engineering-evidence-blocked"
 GUARDED_AUTO_MERGE_LOW_RISK_PREFIXES = (
     "docs/",
     "tests/",
@@ -123,7 +143,7 @@ DEFAULT_GUARDED_AUTO_MERGE_POLICY = {
             "exact": sorted(GUARDED_AUTO_MERGE_MEDIUM_RISK_EXACT),
             "reason": "monthly-review evidence/reporting helper changed",
         },
-        "high": {"reason": "blocked/high-risk files require human review"},
+        "high": {"reason": "high-risk or unknown engineering changes need evidence and independent AI review"},
     }
 }
 DEFAULT_SERVICE_AUDIENCE = "quant-codex-audit"
@@ -396,39 +416,39 @@ def guarded_auto_merge_control_plane_matches(payload: dict[str, Any]) -> list[st
 
 def guarded_auto_merge_policy_schema_error(payload: dict[str, Any]) -> str | None:
     if "version" not in payload:
-        return "invalid auto-merge policy schema requires human review"
+        return "invalid auto-merge policy schema fails closed"
     if payload.get("version") != 1:
-        return "unsupported auto-merge policy version requires human review"
+        return "unsupported auto-merge policy version fails closed"
     if not valid_policy_string(payload.get("auto_merge_label")):
-        return "invalid auto-merge policy schema requires human review"
+        return "invalid auto-merge policy schema fails closed"
     if not valid_policy_string(payload.get("human_review_label")):
-        return "invalid auto-merge policy schema requires human review"
+        return "invalid auto-merge policy schema fails closed"
     if payload["auto_merge_label"].strip() == payload["human_review_label"].strip():
-        return "auto-merge and human-review labels must be distinct requires human review"
+        return "auto-merge and human-review labels must be distinct"
     if not valid_policy_string(payload.get("monthly_marker_prefix")):
-        return "invalid auto-merge policy schema requires human review"
+        return "invalid auto-merge policy schema fails closed"
     if type(payload.get("max_changed_files")) is not int or payload["max_changed_files"] < 1:
-        return "invalid auto-merge policy schema requires human review"
+        return "invalid auto-merge policy schema fails closed"
     if type(payload.get("max_changed_lines")) is not int or payload["max_changed_lines"] < 1:
-        return "invalid auto-merge policy schema requires human review"
+        return "invalid auto-merge policy schema fails closed"
     if not valid_policy_string_list(payload.get("blocked_path_patterns"), allow_empty=False):
-        return "invalid auto-merge policy schema requires human review"
+        return "invalid auto-merge policy schema fails closed"
     risk_policy = payload.get("risk_policy")
     if not isinstance(risk_policy, dict):
-        return "invalid auto-merge policy schema requires human review"
+        return "invalid auto-merge policy schema fails closed"
     low_policy = risk_policy.get("low")
     medium_policy = risk_policy.get("medium")
     high_policy = risk_policy.get("high")
     if not isinstance(low_policy, dict) or not isinstance(medium_policy, dict) or not isinstance(high_policy, dict):
-        return "invalid auto-merge policy schema requires human review"
+        return "invalid auto-merge policy schema fails closed"
     if not valid_policy_string_list(low_policy.get("prefixes")):
-        return "invalid auto-merge policy schema requires human review"
+        return "invalid auto-merge policy schema fails closed"
     if not valid_policy_string_list(low_policy.get("exact")):
-        return "invalid auto-merge policy schema requires human review"
+        return "invalid auto-merge policy schema fails closed"
     if not valid_policy_string_list(medium_policy.get("exact")):
-        return "invalid auto-merge policy schema requires human review"
+        return "invalid auto-merge policy schema fails closed"
     if not valid_policy_string(high_policy.get("reason")):
-        return "invalid auto-merge policy schema requires human review"
+        return "invalid auto-merge policy schema fails closed"
     control_plane_matches = guarded_auto_merge_control_plane_matches(payload)
     if control_plane_matches:
         matches = ", ".join(control_plane_matches)
@@ -2283,7 +2303,8 @@ def publish_remediation(
         body_lines.extend(
             [
                 "",
-                "This PR is high-risk for unattended merge and requires human review.",
+                "Engineering is blocked from merging this change until validation and recovery evidence are complete and an independent AI review has passed.",
+                "This is an engineering evidence gate, not an investment decision request; existing funding, account, credential, permission, and MFA approvals still apply.",
                 "",
                 format_guarded_risk_details(guard_risk),
             ]
@@ -2306,18 +2327,17 @@ def publish_remediation(
         if workspace.feedback_retry_pr and workspace.stale_auto_merge_label_skip_reason:
             body_lines.extend(["", stale_auto_merge_label_skip_message(workspace.stale_auto_merge_label_skip_reason)])
         try:
-            review = request_human_review(
+            review = request_engineering_evidence_block(
                 token,
                 source_repo,
                 int(pr["number"]),
                 guard_risk,
             )
             body_lines.append("")
-            body_lines.append(f"Added `{review['label']}` to the PR so operators can review it before merge.")
+            body_lines.append(f"Added `{review['label']}` to keep this engineering change blocked pending evidence and independent AI review.")
         except (BridgeError, GitHubRequestError) as exc:
             body_lines.append("")
-            review_label = str(guard_risk.get("human_review_label") or HUMAN_REVIEW_LABEL)
-            body_lines.append(f"Could not add `{review_label}` to the PR: `{exc}`")
+            body_lines.append(f"Could not add `{ENGINEERING_EVIDENCE_BLOCKED_LABEL}` to the PR: `{exc}`")
         if auto_merge:
             body_lines.append("")
             body_lines.append(
@@ -2780,9 +2800,9 @@ def load_guarded_auto_merge_policy(policy_path: Path) -> dict[str, Any]:
     try:
         payload = json.loads(policy_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return fail_closed_guarded_auto_merge_policy("invalid auto-merge policy requires human review")
+        return fail_closed_guarded_auto_merge_policy("invalid auto-merge policy fails closed")
     if not isinstance(payload, dict):
-        return fail_closed_guarded_auto_merge_policy("invalid auto-merge policy requires human review")
+        return fail_closed_guarded_auto_merge_policy("invalid auto-merge policy fails closed")
     schema_error = guarded_auto_merge_policy_schema_error(payload)
     if schema_error:
         return fail_closed_guarded_auto_merge_policy(schema_error)
@@ -2804,12 +2824,12 @@ def guarded_blocked_patterns(policy: dict[str, Any]) -> tuple[list[re.Pattern[st
     if raw_patterns is None:
         raw_patterns = DEFAULT_GUARDED_AUTO_MERGE_POLICY["blocked_path_patterns"]
     elif not isinstance(raw_patterns, list):
-        errors.append("invalid blocked_path_patterns list requires human review")
+        errors.append("invalid blocked_path_patterns list fails closed")
         return [re.compile(r".*")], errors
     patterns: list[re.Pattern[str]] = []
     for raw_pattern in raw_patterns:
         if not isinstance(raw_pattern, str):
-            errors.append("invalid blocked_path_patterns list requires human review")
+            errors.append("invalid blocked_path_patterns list fails closed")
             return [re.compile(r".*")], errors
         pattern = str(raw_pattern)
         if not pattern.strip():
@@ -2817,7 +2837,7 @@ def guarded_blocked_patterns(policy: dict[str, Any]) -> tuple[list[re.Pattern[st
         try:
             patterns.append(re.compile(pattern, re.IGNORECASE))
         except re.error:
-            errors.append("invalid blocked_path_patterns regex requires human review")
+            errors.append("invalid blocked_path_patterns regex fails closed")
             return [re.compile(r".*")], errors
     return patterns, errors
 
@@ -2826,12 +2846,12 @@ def guarded_string_list(value: Any, field_name: str, errors: list[str]) -> list[
     if value is None:
         return []
     if not isinstance(value, list):
-        errors.append(f"invalid {field_name} list requires human review")
+        errors.append(f"invalid {field_name} list fails closed")
         return []
     items: list[str] = []
     for item in value:
         if not isinstance(item, str):
-            errors.append(f"invalid {field_name} list requires human review")
+            errors.append(f"invalid {field_name} list fails closed")
             return []
         if item.strip():
             items.append(item)
@@ -2841,7 +2861,7 @@ def guarded_string_list(value: Any, field_name: str, errors: list[str]) -> list[
 def guarded_policy_string(policy: dict[str, Any], field_name: str, fallback: str, errors: list[str]) -> str:
     value = policy.get(field_name, fallback)
     if not isinstance(value, str) or not value.strip() or "\n" in value or "\r" in value:
-        errors.append(f"invalid {field_name} string requires human review")
+        errors.append(f"invalid {field_name} string fails closed")
         return fallback
     return value.strip()
 
@@ -2849,7 +2869,7 @@ def guarded_policy_string(policy: dict[str, Any], field_name: str, fallback: str
 def guarded_policy_positive_int(policy: dict[str, Any], field_name: str, fallback: int, errors: list[str]) -> int:
     value = policy.get(field_name, fallback)
     if type(value) is not int or value < 1:
-        errors.append(f"invalid {field_name} integer requires human review")
+        errors.append(f"invalid {field_name} integer fails closed")
         return fallback
     return value
 
@@ -2858,7 +2878,7 @@ def guarded_optional_non_negative_int(value: Any, field_name: str, errors: list[
     if value is None:
         return None
     if type(value) is not int or value < 0:
-        errors.append(f"invalid {field_name} count requires human review")
+        errors.append(f"invalid {field_name} count fails closed")
         return None
     return value
 
@@ -2887,6 +2907,8 @@ def classify_guarded_auto_merge_risk(
         HUMAN_REVIEW_LABEL,
         policy_errors,
     )
+    if auto_merge_label == ENGINEERING_EVIDENCE_BLOCKED_LABEL:
+        policy_errors.append("auto-merge label collides with engineering evidence block label")
     monthly_marker_prefix = guarded_policy_string(
         policy,
         "monthly_marker_prefix",
@@ -2914,7 +2936,7 @@ def classify_guarded_auto_merge_risk(
     normalized_paths = [normalize_changed_path(path) for path in paths if normalize_changed_path(path)]
     if len(normalized_paths) > max_changed_files:
         policy_errors.append(
-            f"changed file count exceeds auto-merge limit requires human review: {len(normalized_paths)} > {max_changed_files}"
+            f"changed file count exceeds auto-merge limit: {len(normalized_paths)} > {max_changed_files}"
         )
     additions: int | None = None
     deletions: int | None = None
@@ -2934,16 +2956,16 @@ def classify_guarded_auto_merge_risk(
             changed_lines = additions + deletions
             if changed_lines > max_changed_lines:
                 policy_errors.append(
-                    f"changed line count exceeds auto-merge limit requires human review: {changed_lines} > {max_changed_lines}"
+                    f"changed line count exceeds auto-merge limit: {changed_lines} > {max_changed_lines}"
                 )
         if binary_files:
-            policy_errors.append("binary file changes require human review")
+            policy_errors.append("binary file changes block auto-merge")
         if deleted_files:
-            policy_errors.append("file deletions require human review")
+            policy_errors.append("file deletions block auto-merge")
         if renamed_files:
-            policy_errors.append("file renames require human review")
+            policy_errors.append("file renames block auto-merge")
         if copied_files:
-            policy_errors.append("file copies require human review")
+            policy_errors.append("file copies block auto-merge")
     for raw_path in paths:
         normalized = normalize_changed_path(raw_path)
         if not normalized:
@@ -3218,7 +3240,13 @@ def request_guarded_auto_merge(
         high_risk_files = ", ".join(risk["high_risk_files"])
         raise BridgeError(f"Guarded auto-merge label refused for {risk['risk_level']} risk files: {high_risk_files}")
     label = str(risk["auto_merge_label"])
+    if label == ENGINEERING_EVIDENCE_BLOCKED_LABEL:
+        raise BridgeError("Guarded auto-merge label collides with the engineering evidence block label")
     human_review_label = str(risk.get("human_review_label") or HUMAN_REVIEW_LABEL)
+    if issue_has_label(token, source_repo, pr_number, ENGINEERING_EVIDENCE_BLOCKED_LABEL):
+        raise BridgeError(
+            f"Guarded auto-merge label refused because `{ENGINEERING_EVIDENCE_BLOCKED_LABEL}` is present on the PR"
+        )
     if issue_has_label(token, source_repo, pr_number, human_review_label):
         raise BridgeError(
             f"Guarded auto-merge label refused because `{human_review_label}` is present on the PR"
@@ -3251,8 +3279,10 @@ def guarded_auto_merge_label_for_mutation(policy: dict[str, Any] | None = None) 
     errors: list[str] = []
     auto_merge_label = guarded_policy_string(policy, "auto_merge_label", GUARDED_AUTO_MERGE_LABEL, errors)
     human_review_label = guarded_policy_string(policy, "human_review_label", HUMAN_REVIEW_LABEL, errors)
+    if auto_merge_label == ENGINEERING_EVIDENCE_BLOCKED_LABEL:
+        errors.append("auto-merge and engineering evidence block labels must be distinct")
     if auto_merge_label == human_review_label:
-        errors.append("auto-merge and human-review labels must be distinct requires human review")
+        errors.append("auto-merge and human-review labels must be distinct")
     if errors:
         return "", "; ".join(errors)
     return auto_merge_label, ""
@@ -3340,7 +3370,777 @@ def request_human_review(
     return {"label": label, **risk}
 
 
-def main() -> int:
+def request_engineering_evidence_block(
+    token: str,
+    source_repo: str,
+    pr_number: int,
+    risk: dict[str, Any],
+) -> dict[str, Any]:
+    """Mark an engineering PR blocked pending evidence and independent AI review."""
+    label = ENGINEERING_EVIDENCE_BLOCKED_LABEL
+    ensure_repo_label(
+        token,
+        source_repo,
+        label,
+        color="FBCA04",
+        description="Engineering evidence and independent AI review required; auto-merge blocked",
+    )
+    github_request(
+        token,
+        "POST",
+        f"/repos/{source_repo}/issues/{pr_number}/labels",
+        {"labels": [label]},
+    )
+    return {"label": label, **risk}
+
+
+def engineering_review_client_enabled() -> bool:
+    """Default-off client switch; no model/result/label calls when disabled."""
+    return parse_bool(env_value("CODEX_AUDIT_ENGINEERING_REVIEW_ENABLED"))
+
+
+def engineering_pr_review_client_enabled() -> bool:
+    """Separate default-off switch for the read-only, machine-evidence producer."""
+    return parse_bool(env_value(ENGINEERING_PR_REVIEW_ENABLED_ENV))
+
+
+def _engineering_pr_review_producer() -> dict[str, str]:
+    producer = {
+        "repository": env_value("GITHUB_REPOSITORY"),
+        "ref": env_value("GITHUB_REF"),
+        "workflow_ref": env_value("GITHUB_WORKFLOW_REF"),
+        "workflow_sha": env_value("GITHUB_WORKFLOW_SHA").lower(),
+        "event_name": env_value("GITHUB_EVENT_NAME"),
+        "run_id": env_value("GITHUB_RUN_ID"),
+        "run_attempt": env_value("GITHUB_RUN_ATTEMPT"),
+    }
+    if producer["repository"] != ENGINEERING_PR_REVIEW_REPOSITORY:
+        raise BridgeError("engineering PR review is restricted to AIAuditBridge")
+    if producer["ref"] != "refs/heads/main" or producer["workflow_ref"] != ENGINEERING_PR_REVIEW_WORKFLOW_REF:
+        raise BridgeError("engineering PR review requires the protected main workflow")
+    if producer["event_name"] != "workflow_dispatch":
+        raise BridgeError("engineering PR review requires workflow_dispatch")
+    if not ENGINEERING_PR_REVIEW_SHA_RE.fullmatch(producer["workflow_sha"]):
+        raise BridgeError("GITHUB_WORKFLOW_SHA must be an exact 40-hex commit")
+    if not re.fullmatch(r"[1-9][0-9]*", producer["run_id"]):
+        raise BridgeError("GITHUB_RUN_ID must be a positive integer")
+    if not re.fullmatch(r"[1-9][0-9]*", producer["run_attempt"]):
+        raise BridgeError("GITHUB_RUN_ATTEMPT must be a positive integer")
+    return producer
+
+
+def _engineering_pr_meta(token: str, pr_number: int) -> dict[str, Any]:
+    if pr_number <= 0:
+        raise BridgeError("--pull-request-number must be a positive integer")
+    pr = github_request(
+        token,
+        "GET",
+        f"/repos/{ENGINEERING_PR_REVIEW_REPOSITORY}/pulls/{pr_number}",
+    )
+    if not isinstance(pr, dict) or pr.get("state") != "open" or pr.get("draft") is True:
+        raise BridgeError("engineering PR review requires an open, non-draft pull request")
+    base = pr.get("base") if isinstance(pr.get("base"), dict) else {}
+    head = pr.get("head") if isinstance(pr.get("head"), dict) else {}
+    base_repo = base.get("repo") if isinstance(base.get("repo"), dict) else {}
+    head_repo = head.get("repo") if isinstance(head.get("repo"), dict) else {}
+    if base_repo.get("full_name") != ENGINEERING_PR_REVIEW_REPOSITORY:
+        raise BridgeError("engineering PR base repository mismatch")
+    if head_repo.get("full_name") != ENGINEERING_PR_REVIEW_REPOSITORY:
+        raise BridgeError("engineering PR head must be in AIAuditBridge")
+    if base.get("ref") != "main":
+        raise BridgeError("engineering PR must target main")
+    _pull_request_base_head(pr)
+    return pr
+
+
+def _engineering_ci_run_evidence(token: str, run_id: str, *, pr_number: int, head_sha: str, base_sha: str) -> dict[str, Any]:
+    if not re.fullmatch(r"[1-9][0-9]*", run_id):
+        raise BridgeError("--ci-run-id must be a positive integer")
+    run = github_request(token, "GET", f"/repos/{ENGINEERING_PR_REVIEW_REPOSITORY}/actions/runs/{run_id}")
+    if not isinstance(run, dict):
+        raise BridgeError("GitHub Actions run response was invalid")
+    attempt = run.get("run_attempt")
+    if type(attempt) is not int or attempt < 1 or str(run.get("id")) != run_id:
+        raise BridgeError("CI run id or latest run attempt is invalid")
+    if (
+        run.get("repository", {}).get("full_name") != ENGINEERING_PR_REVIEW_REPOSITORY
+        or run.get("workflow_id") != ENGINEERING_PR_REVIEW_CI_WORKFLOW_ID
+        or not re.search(r"(?:^|/)\.github/workflows/ci\.yml(?:@.*)?$", str(run.get("path") or ""))
+        or run.get("status") != "completed"
+        or run.get("conclusion") != "success"
+        or run.get("head_sha") != head_sha
+        or run.get("event") != "pull_request"
+    ):
+        raise BridgeError("CI run does not prove successful required CI for the exact PR head")
+    run_list = github_request(
+        token,
+        "GET",
+        f"/repos/{ENGINEERING_PR_REVIEW_REPOSITORY}/actions/workflows/{ENGINEERING_PR_REVIEW_CI_WORKFLOW_ID}/runs"
+        f"?head_sha={head_sha}&per_page=100",
+    )
+    listed_runs = run_list.get("workflow_runs") if isinstance(run_list, dict) else None
+    if not isinstance(listed_runs, list) or (type(run_list.get("total_count")) is int and run_list["total_count"] > len(listed_runs)):
+        raise BridgeError("cannot establish the latest CI run for this head")
+    same_head_runs = [
+        item for item in listed_runs
+        if isinstance(item, dict)
+        and item.get("head_sha") == head_sha
+        and item.get("path", "").split("@", 1)[0].endswith(".github/workflows/ci.yml")
+        and type(item.get("run_number")) is int
+        and type(item.get("run_attempt")) is int
+    ]
+    if not same_head_runs:
+        raise BridgeError("cannot establish the latest CI run for this head")
+    latest = max(same_head_runs, key=lambda item: (item["run_number"], item["run_attempt"]))
+    if str(latest.get("id")) != run_id or latest.get("run_attempt") != attempt:
+        raise BridgeError("provided CI run is not the latest workflow run for this PR head")
+    associations = run.get("pull_requests")
+    ci_base_verified = False
+    if isinstance(associations, list) and associations:
+        matching_pr = [
+            pr for pr in associations
+            if isinstance(pr, dict)
+            and pr.get("number") == pr_number
+            and (pr.get("head") or {}).get("sha") == head_sha
+            and (pr.get("base") or {}).get("ref") == "main"
+        ]
+        if not matching_pr:
+            raise BridgeError("CI run association does not match this PR head and main base")
+        ci_base_verified = any(
+            isinstance(pr, dict)
+            and (pr.get("base") or {}).get("sha") == base_sha
+            for pr in matching_pr
+        )
+    if type(run.get("check_suite_id")) is not int:
+        raise BridgeError("CI run has no check suite identity")
+    jobs = github_request(
+        token,
+        "GET",
+        f"/repos/{ENGINEERING_PR_REVIEW_REPOSITORY}/actions/runs/{run_id}/attempts/{attempt}/jobs"
+        "?filter=latest&per_page=100",
+    )
+    job_records = jobs.get("jobs") if isinstance(jobs, dict) else None
+    if not isinstance(job_records, list):
+        raise BridgeError("CI latest-attempt job records are unavailable")
+    required: dict[str, dict[str, Any]] = {}
+    for job in job_records:
+        if not isinstance(job, dict) or job.get("name") not in ENGINEERING_PR_REVIEW_REQUIRED_CHECKS:
+            continue
+        if job.get("status") != "completed" or job.get("conclusion") != "success":
+            raise BridgeError(f"required CI job {job.get('name')} is not successful in the latest attempt")
+        check_url = str(job.get("check_run_url") or "")
+        if not check_url.startswith(f"{API_BASE}/repos/{ENGINEERING_PR_REVIEW_REPOSITORY}/check-runs/"):
+            raise BridgeError(f"required CI job {job.get('name')} has no exact check-run link")
+        check = github_request(token, "GET", check_url)
+        if not isinstance(check, dict):
+            raise BridgeError(f"required CI check {job.get('name')} record is invalid")
+        app = check.get("app") if isinstance(check.get("app"), dict) else {}
+        suite = check.get("check_suite") if isinstance(check.get("check_suite"), dict) else {}
+        if (
+            check.get("name") != job.get("name")
+            or suite.get("id") != run["check_suite_id"]
+            or check.get("head_sha") != head_sha
+            or check.get("status") != "completed"
+            or check.get("conclusion") != "success"
+            or app.get("id") != ENGINEERING_PR_REVIEW_GITHUB_APP_ID
+        ):
+            raise BridgeError(f"required CI check {check.get('name')} is not successful for the exact head")
+        required[str(check["name"])] = check
+    if set(required) != ENGINEERING_PR_REVIEW_REQUIRED_CHECKS:
+        raise BridgeError("CI run is missing actionlint or test check records")
+    return {
+        "run_id": run_id,
+        "run_attempt": attempt,
+        "workflow_id": run["workflow_id"],
+        "workflow_path": run["path"],
+        "check_suite_id": run["check_suite_id"],
+        "head_sha": head_sha,
+        "base_sha": base_sha,
+        "ci_base_verified": ci_base_verified,
+        "checks": {
+            name: {
+                "name": name,
+                "head_sha": check["head_sha"],
+                "status": check["status"],
+                "conclusion": check["conclusion"],
+                "app_id": check["app"]["id"],
+            }
+            for name, check in sorted(required.items())
+        },
+    }
+
+
+def _assert_source_commit_available(token: str, sha: str) -> None:
+    commit = github_request(token, "GET", f"/repos/{ENGINEERING_PR_REVIEW_REPOSITORY}/commits/{sha}")
+    if not isinstance(commit, dict) or commit.get("sha") != sha:
+        raise BridgeError(f"source commit {sha} is not retrievable from GitHub")
+
+
+def collect_engineering_pr_review_materials(token: str, pr_number: int, ci_run_id: str) -> dict[str, Any]:
+    """Build a review-only packet from a stable AAB PR and exact successful required CI."""
+    first = _engineering_pr_meta(token, pr_number)
+    base_sha, head_sha = _pull_request_base_head(first)
+    materials = collect_pull_request_engineering_materials(
+        token,
+        ENGINEERING_PR_REVIEW_REPOSITORY,
+        pr_number,
+        validation_evidence="pending validated GitHub Actions CI",
+        recovery_evidence="pending source-only rollback facts",
+    )
+    if (materials["base_sha"], materials["head_sha"]) != (base_sha, head_sha):
+        raise BridgeError("PR base/head changed before engineering material collection")
+    ci = _engineering_ci_run_evidence(token, ci_run_id, pr_number=pr_number, head_sha=head_sha, base_sha=base_sha)
+    _assert_source_commit_available(token, base_sha)
+    _assert_source_commit_available(token, head_sha)
+    # A Git revert is a source recovery method only; no service/runtime recovery is claimed.
+    materials["validation_evidence"] = json.dumps(
+        {"source": "GitHub Actions API", "workflow": ".github/workflows/ci.yml", "result": ci},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    materials["recovery_evidence"] = json.dumps(
+        {
+            "scope": "source_only",
+            "base_commit_retrievable": True,
+            "proposal_head_retrievable": True,
+            "source_rollback": "revert the exact merge commit and run normal source CI",
+            "runtime_recovery_verified": False,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    last = _engineering_pr_meta(token, pr_number)
+    if _pull_request_base_head(last) != (base_sha, head_sha):
+        raise BridgeError("PR base/head changed during CI evidence collection")
+    materials["source_ref"] = "refs/heads/main"
+    materials["ci_run_id"] = ci_run_id
+    return materials
+
+
+def _pull_request_base_head(pr: Mapping[str, Any] | dict[str, Any]) -> tuple[str, str]:
+    if not isinstance(pr, dict):
+        raise BridgeError("GitHub PR response was invalid")
+    base = pr.get("base") if isinstance(pr.get("base"), dict) else {}
+    head = pr.get("head") if isinstance(pr.get("head"), dict) else {}
+    base_sha = str(base.get("sha") or "").strip().lower()
+    head_sha = str(head.get("sha") or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{40}", base_sha) or not re.fullmatch(r"[0-9a-f]{40}", head_sha):
+        raise BridgeError("PR base/head SHA is missing or invalid")
+    return base_sha, head_sha
+
+
+def materials_input_digest(materials: Mapping[str, Any]) -> str:
+    """Recompute the server material digest; never trust caller- or model-supplied hashes."""
+    return engineering_review_input_digest(
+        {
+            "purpose": ENGINEERING_REVIEW_PURPOSE,
+            "source_repository": materials["source_repository"],
+            "pull_request_number": int(materials["pull_request_number"]),
+            "base_sha": materials["base_sha"],
+            "head_sha": materials["head_sha"],
+            "changed_paths": list(materials["changed_paths"]),
+            "diff": materials["diff"],
+            "diff_stats": dict(materials["diff_stats"]),
+            "validation_evidence": materials["validation_evidence"],
+            "recovery_evidence": materials["recovery_evidence"],
+        }
+    )
+
+
+def collect_pull_request_engineering_materials(
+    token: str,
+    source_repo: str,
+    pr_number: int,
+    *,
+    validation_evidence: str,
+    recovery_evidence: str,
+) -> dict[str, Any]:
+    """Fetch PR materials with meta → files/diff → meta so base/head stay a single version."""
+    if not isinstance(validation_evidence, str) or not validation_evidence.strip():
+        raise BridgeError("validation_evidence is required")
+    if not isinstance(recovery_evidence, str) or not recovery_evidence.strip():
+        raise BridgeError("recovery_evidence is required")
+    pr_meta = github_request(token, "GET", f"/repos/{source_repo}/pulls/{pr_number}")
+    base_sha, head_sha = _pull_request_base_head(pr_meta)
+    files: list[dict[str, Any]] = []
+    page = 1
+    while page <= 20:
+        batch = github_request(
+            token,
+            "GET",
+            f"/repos/{source_repo}/pulls/{pr_number}/files?per_page=100&page={page}",
+        )
+        if not isinstance(batch, list) or not batch:
+            break
+        files.extend(item for item in batch if isinstance(item, dict))
+        if len(batch) < 100:
+            break
+        page += 1
+    if not files:
+        raise BridgeError("PR changed files are unavailable")
+    changed_paths: list[str] = []
+    additions = 0
+    deletions = 0
+    binary_files = 0
+    deleted_files = 0
+    renamed_files = 0
+    copied_files = 0
+    for item in files:
+        path = str(item.get("filename") or "").strip()
+        if not path:
+            raise BridgeError("PR file path is missing")
+        changed_paths.append(path)
+        status = str(item.get("status") or "")
+        if status == "removed":
+            deleted_files += 1
+        elif status == "renamed":
+            renamed_files += 1
+        elif status == "copied":
+            copied_files += 1
+        raw_add = item.get("additions")
+        raw_del = item.get("deletions")
+        if type(raw_add) is not int or type(raw_del) is not int:
+            binary_files += 1
+            continue
+        additions += raw_add
+        deletions += raw_del
+    request = urllib.request.Request(
+        f"{API_BASE}/repos/{source_repo}/pulls/{pr_number}",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github.v3.diff",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "codex-audit-bridge",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            diff = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise BridgeError(f"Failed to fetch PR diff: {exc.code} {detail[:400]}") from exc
+    except OSError as exc:
+        raise BridgeError(f"Failed to fetch PR diff: {exc}") from exc
+    if not diff.strip():
+        raise BridgeError("PR diff is empty")
+    # Re-read metadata after files/diff so a mid-collect push cannot mix versions.
+    pr_confirm = github_request(token, "GET", f"/repos/{source_repo}/pulls/{pr_number}")
+    confirm_base, confirm_head = _pull_request_base_head(pr_confirm)
+    if (confirm_base, confirm_head) != (base_sha, head_sha):
+        raise BridgeError("PR base/head changed during material collection")
+    return {
+        "purpose": ENGINEERING_REVIEW_PURPOSE,
+        "source_repository": source_repo,
+        "pull_request_number": int(pr_number),
+        "base_sha": base_sha,
+        "head_sha": head_sha,
+        "changed_paths": changed_paths,
+        "diff": diff,
+        "diff_stats": {
+            "additions": additions,
+            "deletions": deletions,
+            "binary_files": binary_files,
+            "deleted_files": deleted_files,
+            "renamed_files": renamed_files,
+            "copied_files": copied_files,
+        },
+        "validation_evidence": validation_evidence.strip(),
+        "recovery_evidence": recovery_evidence.strip(),
+    }
+
+
+def submit_engineering_review_job(materials: dict[str, Any], *, timeout_minutes: int = 45) -> dict[str, Any]:
+    """Submit materials to the gateway and poll the authenticated same-run job result."""
+    audience = env_value("CODEX_AUDIT_SERVICE_AUDIENCE", DEFAULT_SERVICE_AUDIENCE)
+    service_url = normalize_codex_service_url(env_value("CODEX_AUDIT_SERVICE_URL"))
+    payload = {
+        "purpose": ENGINEERING_REVIEW_PURPOSE,
+        "task": "pr_review",
+        "mode": "review_only",
+        "sandbox": "read-only",
+        "provider": "codex",
+        "allowed_providers": ["codex"],
+        "source_repository": materials["source_repository"],
+        "source_ref": str(materials.get("source_ref") or ""),
+        "pull_request_number": materials["pull_request_number"],
+        "base_sha": materials["base_sha"],
+        "head_sha": materials["head_sha"],
+        "changed_paths": list(materials["changed_paths"]),
+        "diff": materials["diff"],
+        "diff_stats": dict(materials["diff_stats"]),
+        "validation_evidence": materials["validation_evidence"],
+        "recovery_evidence": materials["recovery_evidence"],
+        "timeout_seconds": timeout_minutes * 60,
+    }
+    submit_payload = request_codex_service_json(
+        method="POST",
+        url=codex_service_jobs_url(service_url),
+        audience=audience,
+        payload=payload,
+        timeout_seconds=60,
+    )
+    if submit_payload.get("status") not in {"queued", "running", "succeeded", "failed"}:
+        raise BridgeError("engineering review service did not accept the async job")
+    job_id = submit_payload.get("job_id")
+    if not isinstance(job_id, str) or not job_id:
+        raise BridgeError("engineering review service did not return a job id")
+    if submit_payload.get("status") in {"succeeded", "failed"}:
+        if str(submit_payload.get("job_id") or "") != job_id:
+            raise BridgeError("engineering review job id drifted after submit")
+        return submit_payload
+    deadline = time.time() + timeout_minutes * 60 + 60
+    poll_interval = max(2, int_env("CODEX_AUDIT_SERVICE_POLL_INTERVAL_SECONDS", 10))
+    job_url = codex_service_job_url(service_url, job_id)
+    while time.time() < deadline:
+        time.sleep(poll_interval)
+        job_payload = request_codex_service_json(
+            method="GET",
+            url=job_url,
+            audience=audience,
+            timeout_seconds=60,
+        )
+        if str(job_payload.get("job_id") or "") != job_id:
+            raise BridgeError("engineering review GET returned a different job id")
+        status = job_payload.get("status")
+        if status in {"succeeded", "failed"}:
+            return job_payload
+        if status not in {"queued", "running"}:
+            raise BridgeError(f"engineering review job returned unexpected status: {status!r}")
+    raise BridgeError("engineering review job timed out before completion")
+
+
+def _expected_engineering_producer_claims() -> dict[str, str]:
+    """Current producer run identity from the authenticated workflow environment."""
+    return {
+        "repository": env_value("GITHUB_REPOSITORY"),
+        "run_id": env_value("GITHUB_RUN_ID"),
+        "run_attempt": env_value("GITHUB_RUN_ATTEMPT"),
+        "workflow_sha": env_value("GITHUB_WORKFLOW_SHA").lower(),
+        "event_name": env_value("GITHUB_EVENT_NAME"),
+    }
+
+
+def _verify_engineering_review_binding(
+    review: Mapping[str, Any],
+    *,
+    materials: Mapping[str, Any],
+    job_id: str,
+) -> str:
+    expected_digest = materials_input_digest(materials)
+    if str(review.get("purpose") or "") != ENGINEERING_REVIEW_PURPOSE:
+        raise BridgeError("engineering review result purpose mismatch")
+    if str(review.get("input_digest") or "") != expected_digest:
+        raise BridgeError("engineering review input_digest mismatch")
+    for field, expected in (
+        ("source_repository", materials["source_repository"]),
+        ("pull_request_number", int(materials["pull_request_number"])),
+        ("base_sha", materials["base_sha"]),
+        ("head_sha", materials["head_sha"]),
+    ):
+        if review.get(field) != expected:
+            raise BridgeError(f"engineering review binding mismatch for {field}")
+    if list(review.get("changed_paths") or []) != list(materials["changed_paths"]):
+        raise BridgeError("engineering review binding mismatch for changed_paths")
+    producer = _expected_engineering_producer_claims()
+    for field in ("repository", "run_id", "run_attempt"):
+        value = str(review.get(field) or "").strip()
+        if not value:
+            raise BridgeError(f"engineering review result missing producer {field}")
+        expected = str(producer.get(field) or "").strip()
+        if expected and value != expected:
+            raise BridgeError(f"engineering review producer {field} mismatch")
+    for field in ("workflow_sha", "event_name"):
+        expected = str(producer.get(field) or "").strip()
+        value = str(review.get(field) or "").strip()
+        if expected and value != expected:
+            raise BridgeError(f"engineering review producer {field} mismatch")
+    if str(job_id or "").strip() == "":
+        raise BridgeError("engineering review job id is missing")
+    return expected_digest
+
+
+def run_engineering_pr_review_main(*, pull_request_number: int, ci_run_id: str) -> int:
+    """Review one AAB PR from current GitHub facts; never mutate the source repository."""
+    if not engineering_pr_review_client_enabled():
+        print(
+            f"error: {ENGINEERING_PR_REVIEW_OPERATION} selected but {ENGINEERING_PR_REVIEW_ENABLED_ENV} is disabled",
+            file=sys.stderr,
+        )
+        return 2
+    producer = _engineering_pr_review_producer()
+    if pull_request_number <= 0:
+        raise BridgeError("--pull-request-number is required for engineering_pr_review")
+    token = resolve_source_repo_token(ENGINEERING_PR_REVIEW_REPOSITORY)
+    materials = collect_engineering_pr_review_materials(token, pull_request_number, ci_run_id)
+    job = submit_engineering_review_job(materials)
+    job_id = str(job.get("job_id") or "")
+    if job.get("status") != "succeeded":
+        raise BridgeError(f"engineering PR review failed: {job.get('error') or job.get('status')}")
+    review = job.get("engineering_review")
+    if not isinstance(review, dict):
+        raise BridgeError("engineering PR review result binding is missing")
+    _verify_engineering_review_binding(review, materials=materials, job_id=job_id)
+    if review.get("review_scope") != "source_only":
+        raise BridgeError("engineering PR review result is not bound to source_only scope")
+    if any(str(review.get(key) or "") != producer[key] for key in ("repository", "run_id", "run_attempt", "workflow_sha", "event_name")):
+        raise BridgeError("engineering PR review result does not match this producer workflow run")
+    verdict = str(review.get("verdict") or "")
+    if verdict not in {"approve", "reject"}:
+        raise BridgeError("engineering PR review returned an invalid verdict")
+    print(json.dumps({"status": "reviewed", "verdict": verdict, "job_id": job_id}, sort_keys=True))
+    return 0
+
+
+def resume_engineering_evidence_review(
+    token: str,
+    source_repo: str,
+    pr_number: int,
+    *,
+    task: str,
+    validation_evidence: str,
+    recovery_evidence: str,
+    policy: dict[str, Any] | None = None,
+    timeout_minutes: int = 45,
+    admitted_mode: str = "review_only",
+    auto_merge: bool = False,
+) -> dict[str, Any]:
+    """Narrow consumer: authenticated GET result + fresh GitHub checks before any label change.
+
+    Default-off. Callers pass the mode and auto-merge flag only after the existing
+    automation admission. Review-only runs do not mutate labels; guarded auto-merge
+    retains the existing risk, human-review, and funding gates.
+    """
+    if not engineering_review_client_enabled():
+        return {"status": "disabled", "model_requested": False, "label_mutations": []}
+    if issue_has_label(token, source_repo, pr_number, HUMAN_REVIEW_LABEL):
+        raise BridgeError(f"`{HUMAN_REVIEW_LABEL}` remains present; engineering resume refused")
+    materials = collect_pull_request_engineering_materials(
+        token,
+        source_repo,
+        pr_number,
+        validation_evidence=validation_evidence,
+        recovery_evidence=recovery_evidence,
+    )
+    expected_digest = materials_input_digest(materials)
+    job = submit_engineering_review_job(materials, timeout_minutes=timeout_minutes)
+    job_id = str(job.get("job_id") or "")
+    if job.get("status") != "succeeded":
+        raise BridgeError(f"engineering review job failed: {job.get('error') or job.get('status')}")
+    review = job.get("engineering_review")
+    if not isinstance(review, dict):
+        raise BridgeError("engineering review result binding is missing")
+    _verify_engineering_review_binding(review, materials=materials, job_id=job_id)
+    if review.get("review_scope") == "source_only":
+        raise BridgeError("source_only review results cannot clear engineering blocks")
+    if str(review.get("verdict") or "") != "approve":
+        return {
+            "status": "rejected",
+            "verdict": review.get("verdict"),
+            "job_id": job_id,
+            "input_digest": expected_digest,
+            "label_mutations": [],
+        }
+
+    # A review-only or downgraded run may return a verdict, but cannot mutate labels.
+    if admitted_mode != "review_and_fix":
+        return {
+            "status": "reviewed",
+            "verdict": "approve",
+            "job_id": job_id,
+            "input_digest": expected_digest,
+            "label_mutations": [],
+        }
+
+    # Refresh GitHub and recompute the full materials digest before any label mutation.
+    refreshed = collect_pull_request_engineering_materials(
+        token,
+        source_repo,
+        pr_number,
+        validation_evidence=validation_evidence,
+        recovery_evidence=recovery_evidence,
+    )
+    refreshed_digest = materials_input_digest(refreshed)
+    if refreshed_digest != expected_digest:
+        raise BridgeError(
+            "PR materials changed after engineering review "
+            "(base/head/diff/paths/evidence); refusing label mutation"
+        )
+    if issue_has_label(token, source_repo, pr_number, HUMAN_REVIEW_LABEL):
+        raise BridgeError(f"`{HUMAN_REVIEW_LABEL}` remains present; engineering resume refused")
+    risk = classify_guarded_auto_merge_risk(
+        list(refreshed["changed_paths"]),
+        task=task,
+        policy=policy,
+        diff_stats=refreshed["diff_stats"],
+    )
+    if auto_merge and not risk["label_allowed"]:
+        # AI approve must not override the original guarded risk classifier.
+        return {
+            "status": "risk_blocked",
+            "verdict": "approve",
+            "job_id": job_id,
+            "input_digest": expected_digest,
+            "risk": risk,
+            "label_mutations": [],
+        }
+    label_mutations: list[str] = []
+    try:
+        if remove_issue_label_if_present(token, source_repo, pr_number, ENGINEERING_EVIDENCE_BLOCKED_LABEL):
+            label_mutations.append(f"removed:{ENGINEERING_EVIDENCE_BLOCKED_LABEL}")
+    except (BridgeError, GitHubRequestError) as exc:
+        raise BridgeError(f"failed to clear engineering evidence block label: {exc}") from exc
+    if not auto_merge:
+        return {
+            "status": "unblocked",
+            "verdict": "approve",
+            "job_id": job_id,
+            "input_digest": expected_digest,
+            "risk": risk,
+            "label_mutations": label_mutations,
+        }
+    try:
+        guard = request_guarded_auto_merge(
+            token,
+            source_repo,
+            pr_number,
+            list(refreshed["changed_paths"]),
+            task=task,
+            policy=policy,
+            diff_stats=refreshed["diff_stats"],
+        )
+    except (BridgeError, GitHubRequestError) as exc:
+        # Do not leave auto-merge-ok behind on failure; request_guarded_auto_merge only
+        # adds the label after its own checks, so a raised error means it was not added.
+        raise BridgeError(f"engineering resume cleared the block but guarded auto-merge refused: {exc}") from exc
+    label_mutations.append(f"added:{guard['label']}")
+    return {
+        "status": "resumed",
+        "verdict": "approve",
+        "job_id": job_id,
+        "input_digest": expected_digest,
+        "risk": risk,
+        "guard": guard,
+        "label_mutations": label_mutations,
+    }
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="AIAuditBridge monthly Codex audit bridge")
+    parser.add_argument(
+        "--operation",
+        default="",
+        help=(
+            "Optional operation. Use engineering_evidence_resume for the default-off "
+            "engineering block resume path. Empty keeps the ordinary monthly audit."
+        ),
+    )
+    parser.add_argument("--pull-request-number", type=int, default=0)
+    parser.add_argument("--ci-run-id", default="")
+    parser.add_argument(
+        "--validation-evidence",
+        default="",
+        help="Validation evidence text used only as engineering resume input material.",
+    )
+    parser.add_argument(
+        "--recovery-evidence",
+        default="",
+        help="Recovery evidence text used only as engineering resume input material.",
+    )
+    return parser.parse_args(argv)
+
+
+def run_engineering_evidence_resume_main(
+    *,
+    pull_request_number: int,
+    validation_evidence: str,
+    recovery_evidence: str,
+) -> int:
+    """Explicit default-off main entry; never falls through to ordinary auto-fix."""
+    if not engineering_review_client_enabled():
+        print(
+            "error: engineering_evidence_resume selected but "
+            "CODEX_AUDIT_ENGINEERING_REVIEW_ENABLED is not enabled; blocking.",
+            file=sys.stderr,
+        )
+        return 2
+    if pull_request_number <= 0:
+        raise BridgeError("--pull-request-number is required for engineering_evidence_resume")
+    if not validation_evidence.strip() or not recovery_evidence.strip():
+        raise BridgeError(
+            "validation and recovery evidence are required as input materials; "
+            "local AI verdict/receipt cannot substitute an authenticated service GET"
+        )
+    source_repo = validate_repo(env_value("SOURCE_REPO", DEFAULT_SOURCE_REPO))
+    task = validate_task(env_value("CODEX_AUDIT_TASK", DEFAULT_TASK), source_repo)
+    mode = env_value("CODEX_AUDIT_MODE", DEFAULT_MODE)
+    if mode not in {"review_only", "review_and_fix"}:
+        raise BridgeError(f"Unsupported CODEX_AUDIT_MODE: {mode}")
+    auto_merge = parse_bool(env_value("CODEX_AUDIT_AUTO_MERGE"))
+    manual_approval_id = env_value("MANUAL_APPROVAL_ID")
+    source_ref = env_value("SOURCE_REF", "main")
+    expected_source_sha = env_value("EXPECTED_SOURCE_SHA")
+    mode, auto_merge, admission_reason = admit_automation(
+        source_repo,
+        mode,
+        auto_merge,
+        task=task,
+        manual_approval_id=manual_approval_id,
+        issue_number=pull_request_number,
+        source_ref=source_ref,
+        source_sha=expected_source_sha,
+    )
+    if admission_reason:
+        print(f"Automation admission {admission_reason}; downgraded to review_only.")
+    timeout_minutes = int(env_value("CODEX_AUDIT_TIMEOUT_MINUTES", "45"))
+    token = resolve_source_repo_token(source_repo)
+    result = resume_engineering_evidence_review(
+        token,
+        source_repo,
+        pull_request_number,
+        task=task,
+        validation_evidence=validation_evidence,
+        recovery_evidence=recovery_evidence,
+        timeout_minutes=timeout_minutes,
+        admitted_mode=mode,
+        auto_merge=auto_merge,
+    )
+    print(json.dumps(result, sort_keys=True))
+    if result.get("status") == "disabled":
+        return 2
+    if result.get("status") not in {"resumed", "unblocked", "reviewed", "rejected", "risk_blocked"}:
+        return 1
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    if argv is None:
+        # Library/test callers keep the historical env-only monthly path.
+        operation = str(env_value("CODEX_AUDIT_OPERATION") or "").strip()
+        pull_request_number = int(env_value("PULL_REQUEST_NUMBER") or "0")
+        validation_evidence = env_value("VALIDATION_EVIDENCE")
+        recovery_evidence = env_value("RECOVERY_EVIDENCE")
+        ci_run_id = env_value("ENGINEERING_PR_REVIEW_CI_RUN_ID")
+    else:
+        args = parse_args(argv)
+        operation = str(args.operation or env_value("CODEX_AUDIT_OPERATION") or "").strip()
+        pull_request_number = int(args.pull_request_number or 0)
+        validation_evidence = str(args.validation_evidence or "")
+        recovery_evidence = str(args.recovery_evidence or "")
+        ci_run_id = str(args.ci_run_id or "")
+    if operation == ENGINEERING_PR_REVIEW_OPERATION:
+        return run_engineering_pr_review_main(
+            pull_request_number=pull_request_number,
+            ci_run_id=ci_run_id,
+        )
+    if operation == ENGINEERING_EVIDENCE_RESUME_OPERATION:
+        return run_engineering_evidence_resume_main(
+            pull_request_number=pull_request_number,
+            validation_evidence=validation_evidence,
+            recovery_evidence=recovery_evidence,
+        )
+    if operation:
+        raise BridgeError(f"Unsupported CODEX_AUDIT_OPERATION: {operation}")
+
     source_repo = validate_repo(env_value("SOURCE_REPO", DEFAULT_SOURCE_REPO))
     task = validate_task(env_value("CODEX_AUDIT_TASK", DEFAULT_TASK), source_repo)
     source_ref = env_value("SOURCE_REF", "main")
@@ -3560,7 +4360,7 @@ def main() -> int:
 
 if __name__ == "__main__":
     try:
-        raise SystemExit(main())
+        raise SystemExit(main(sys.argv[1:]))
     except BridgeError as exc:
         print(f"error: {exc}", file=sys.stderr)
         raise SystemExit(1)

@@ -101,7 +101,7 @@ jobs:
           python3 -m pip install 'quant-platform-kit @ git+https://github.com/QuantStrategyLab/QuantPlatformKit.git@7363011d56926d39f4fffeb036e511391114e39f'
           python3 -m pip check
           python3 -m ruff check .
-          python3 -m pytest tests ops/quant-monitor/tests -q --ignore=tests/test_run_cn_index_etf_research.py --ignore=tests/test_run_new_research.py --ignore=ops/quant-monitor/tests/test_binance_live_runs_sync.py
+          python3 -m pytest tests ops/quant-monitor/tests -q --ignore=tests/test_run_cn_index_etf_research.py --ignore=tests/test_run_new_research.py --ignore=tests/test_bilingual_research_summary.py --ignore=ops/quant-monitor/tests/test_binance_live_runs_sync.py
 
       - name: Verify Binance lifecycle consumer with interval-aware QPK
         run: |
@@ -235,3 +235,31 @@ jobs:
           _load_pinned_api(Path(os.environ["SOXL_UES_REPO_ROOT"]), Path(os.environ["SOXL_QPK_REPO_ROOT"]))
           PY
           "${RUNNER_TEMP}/aab-soxl-research/bin/python" -m pytest -q tests/test_run_soxl_financial_explanation.py -k synthetic_p1
+
+  bilingual-research-summary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install pinned bilingual research summary dependencies
+        run: |
+          set -euo pipefail
+          python3 -m pip install --upgrade pip
+          python3 -m pip install pytest pandas \
+            'quant-platform-kit @ git+https://github.com/QuantStrategyLab/QuantPlatformKit.git@628240e1b4354626db1b842e410ff9756f2dcb29' \
+            .
+          python3 -m pip check
+      - name: Run bilingual research summary tests
+        env:
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          set -euo pipefail
+          python3 -m pytest -q tests/test_bilingual_research_summary.py tests/test_research_summary.py
