@@ -38,18 +38,22 @@ _TEXT_ONLY_TASKS = (
 )
 
 
-def _assert_text_only_codex_command(command):
+def _assert_restricted_codex_command(command):
     assert '--ignore-user-config' in command
     assert '--ephemeral' in command
     assert 'web_search="disabled"' in command
     disabled = [command[index + 1] for index, value in enumerate(command[:-1]) if value == '--disable']
-    assert {'plugins', 'apps', 'shell_tool'} <= set(disabled)
+    assert {'plugins', 'apps', 'shell_tool', 'view_image', 'multi_agent_v2'} <= set(disabled)
+    assert command[command.index('--sandbox') + 1] == 'read-only'
+    assert 'approval_policy="never"' in command
+    assert 'approvals_reviewer="user"' in command
+    assert 'agents.enabled=false' in command
     assert '-C' in command
 
 
 @pytest.mark.parametrize('task,stage', _TEXT_ONLY_TASKS)
 @pytest.mark.parametrize('mode', ['review_only', 'review_and_fix', 'invalid_mode', ' REVIEW_ONLY '])
-def test_gateway_text_capability_default_deny_ignores_caller_tool_flags(task, stage, mode):
+def test_gateway_restricted_profile_ignores_caller_tool_flags(task, stage, mode):
     payload = {'task': task, 'mode': mode, 'tools_disabled': False, 'shell_tool_enabled': True,
                'source_repository': 'QuantStrategyLab/AIAuditBridge'}
     if stage:
@@ -60,7 +64,7 @@ def test_gateway_text_capability_default_deny_ignores_caller_tool_flags(task, st
 @pytest.mark.parametrize('entrypoint', ['async_job', 'sync', 'api_verifier'])
 @pytest.mark.parametrize('task,stage', _TEXT_ONLY_TASKS)
 @pytest.mark.parametrize('mode', ['review_only', 'review_and_fix'])
-def test_each_gateway_codex_entrypoint_emits_deny_all_argv(entrypoint, task, stage, mode):
+def test_each_gateway_codex_entrypoint_emits_restricted_read_only_argv(entrypoint, task, stage, mode):
     structured_patch = {'final_message': 'synthetic patch proposal',
                         'changes': [{'path': 'tests/synthetic_case.py', 'content': '# synthetic test\n'}]}
     output = json.dumps(structured_patch if mode == 'review_and_fix' else {
@@ -75,11 +79,14 @@ def test_each_gateway_codex_entrypoint_emits_deny_all_argv(entrypoint, task, sta
     payload = {'prompt': 'synthetic supplied text', 'task': task, 'mode': mode,
                'model': 'gpt-5.6-sol', 'reasoning_effort': 'medium', 'provider': 'codex',
                'source_repository': 'QuantStrategyLab/AIAuditBridge',
-               'tools_disabled': False, 'shell_tool_enabled': True}
+               'tools_disabled': False, 'shell_tool_enabled': True, 'sandbox': 'workspace-write'}
     if stage:
         payload['research_stage'] = stage
     claims = {'repository': 'QuantStrategyLab/AIAuditBridge'}
     with ExitStack() as stack:
+        # Exercise the adapter restriction even when trusted service config
+        # explicitly admits workspace-write. The product default stays read-only.
+        stack.enter_context(patch.object(gateway, 'ALLOWED_SANDBOXES', frozenset({'read-only', 'workspace-write'})))
         stack.enter_context(patch.dict(gateway.os.environ, {
             'CODEX_AUDIT_SERVICE_ENV': 'production', 'CODEX_AUDIT_SERVICE_MODEL': 'gpt-5.6-sol',
             'CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES': 'QuantStrategyLab/AIAuditBridge',
@@ -113,12 +120,18 @@ def test_each_gateway_codex_entrypoint_emits_deny_all_argv(entrypoint, task, sta
             })
             assert response.call_args.args[2]['results'][-1]['output'] == output
         runner.assert_called_once()
-        _assert_text_only_codex_command(runner.call_args.args[0])
+        _assert_restricted_codex_command(runner.call_args.args[0])
         if mode == 'review_and_fix':
             from scripts.run_monthly_codex_audit import parse_service_patch_response
             final_message, changes = parse_service_patch_response(output, task='monthly_snapshot_audit')
             assert final_message == structured_patch['final_message']
             assert changes == structured_patch['changes']
+
+
+def test_default_server_sandbox_allowlist_still_rejects_workspace_write():
+    with patch.object(gateway, 'ALLOWED_SANDBOXES', frozenset({'read-only'})):
+        with pytest.raises(ValueError, match='not allowed'):
+            gateway._validate_sandbox('workspace-write')
 
 
 @pytest.mark.parametrize('entrypoint', ['_handle_execute_async', '_handle_execute_sync'])

@@ -705,7 +705,10 @@ def _validate_global_etf_research_codegen_payload(payload: dict[str, Any]) -> No
 
 
 def _codex_tools_disabled(payload: dict[str, Any]) -> bool:
-    """Deny tools for every currently admitted text/structured-patch task.
+    """Request the restricted profile for all supplied-context/structured-patch tasks.
+
+    The adapter restricts enumerated capabilities and requests read-only/never;
+    public CLI switches do not establish removal of every built-in tool.
 
     The service receives supplied context, not a source checkout. The bridge
     owns source reads, patch application, tests and publication, including in
