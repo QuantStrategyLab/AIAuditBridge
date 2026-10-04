@@ -460,6 +460,8 @@ def test_repeated_research_request_reuses_persisted_terminal_before_quota(tmp_pa
         'ref': 'refs/heads/main',
         'workflow_ref': 'Synthetic/caller/.github/workflows/research.yml@refs/heads/main',
         'job_workflow_ref': 'Synthetic/caller/.github/workflows/research.yml@refs/heads/main',
+        'workflow_sha': 'a' * 40,
+        'event_name': 'workflow_dispatch',
     }
     request = {
         'prompt': 'same bounded task',
@@ -606,6 +608,58 @@ def test_terminal_reuse_requires_same_authority_and_request(tmp_path, difference
     record.assert_called_once()
     submit.assert_called_once()
     assert response.call_args.args[2]['job_id'] == 'new-job'
+
+
+def test_research_authority_and_dedupe_ignore_engineering_only_oidc_claims():
+    claims = {
+        'repository': 'Synthetic/caller', 'run_id': 'run-1', 'run_attempt': '1',
+        'actor': 'researcher', 'ref': 'refs/heads/main',
+        'workflow_ref': 'Synthetic/caller/.github/workflows/research.yml@refs/heads/main',
+        'job_workflow_ref': 'Synthetic/caller/.github/workflows/research.yml@refs/heads/main',
+        'workflow_sha': 'a' * 40, 'event_name': 'workflow_dispatch',
+    }
+    request = {'prompt': 'bounded task', 'mode': 'review_only', 'research_stage': 'optimization'}
+
+    assert gateway._request_authority(claims) == {
+        key: claims[key] for key in (
+            'repository', 'run_id', 'run_attempt', 'actor', 'ref', 'workflow_ref', 'job_workflow_ref'
+        )
+    }
+    changed_engineering_claims = {**claims, 'workflow_sha': 'b' * 40, 'event_name': 'push'}
+    assert gateway._request_job_dedupe_key(claims, request) == gateway._request_job_dedupe_key(
+        changed_engineering_claims, request
+    )
+
+
+def test_engineering_review_dedupe_binds_signed_workflow_claims():
+    claims = {
+        'repository': 'QuantStrategyLab/AIAuditBridge', 'run_id': 'run-1', 'run_attempt': '1',
+        'actor': 'reviewer', 'ref': 'refs/heads/main',
+        'workflow_ref': 'QuantStrategyLab/AIAuditBridge/.github/workflows/engineering_pr_review.yml@refs/heads/main',
+        'workflow_sha': 'a' * 40, 'event_name': 'workflow_dispatch',
+    }
+    request = {
+        'purpose': gateway.ENGINEERING_REVIEW_PURPOSE,
+        'task': gateway.ENGINEERING_REVIEW_TASK,
+        'prompt': 'fixed synthetic engineering review',
+        'engineering_review_binding': {
+            'purpose': gateway.ENGINEERING_REVIEW_PURPOSE,
+            'input_digest': 'd' * 64,
+            'source_repository': 'QuantStrategyLab/AIAuditBridge',
+            'pull_request_number': 17,
+            'base_sha': 'b' * 40,
+            'head_sha': 'c' * 40,
+            'changed_paths': ['src/example.py'],
+        },
+    }
+
+    original_key = gateway._request_job_dedupe_key(claims, request)
+    assert original_key != gateway._request_job_dedupe_key(
+        {**claims, 'workflow_sha': 'e' * 40}, request
+    )
+    assert original_key != gateway._request_job_dedupe_key(
+        {**claims, 'event_name': 'push'}, request
+    )
 
 
 def test_expired_or_recovered_terminal_has_explicit_reuse_semantics(tmp_path):

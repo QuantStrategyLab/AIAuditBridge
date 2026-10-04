@@ -201,6 +201,9 @@ class GatewayClientProvenanceTests(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertNotEqual((result.raw or {}).get("status"), "deferred")
         self.assertEqual(result.error, "Job polling timed out")
+        self.assertEqual(result.raw.get("request_phase"), "poll")
+        self.assertEqual(result.raw.get("failure_category"), "transient_service_failure")
+        self.assertNotIn("http_status", result.raw)
 
     def test_research_refuses_old_service_before_submitting_and_checks_completion_route(self):
         route = {"job_id": "synthetic", "provider": "codex", "research_stage": "optimization",
@@ -222,6 +225,115 @@ class GatewayClientProvenanceTests(unittest.TestCase):
             self.assertEqual(http.call_count, len(replies))
             if len(replies) == 1:
                 self.assertEqual(http.call_args.args[0].get_method(), "GET")
+
+    def test_research_http_failures_keep_phase_and_status_without_extra_calls(self) -> None:
+        sentinel = "sentinel-secret https://user:pass@gateway.invalid"
+        health = _FakeResponse({"codex_research_routing": "v1"})
+
+        def http_error(code: int) -> urllib.error.HTTPError:
+            return urllib.error.HTTPError(
+                "https://user:pass@gateway.invalid/private", code, "denied", {},
+                io.BytesIO(sentinel.encode()),
+            )
+
+        cases = (
+            ("health", 401, "auth_or_config_failure", [http_error(401)], 1),
+            ("health", 403, "auth_or_config_failure", [http_error(403)], 1),
+            ("health", 429, "quota_or_capacity_failure", [http_error(429)], 1),
+            ("health", 503, "transient_service_failure", [http_error(503)], 1),
+            ("submit", 401, "auth_or_config_failure", [health, http_error(401)], 2),
+            ("submit", 403, "auth_or_config_failure", [health, http_error(403)], 2),
+            ("submit", 429, "quota_or_capacity_failure", [health, http_error(429)], 2),
+            ("submit", 500, "transient_service_failure", [health, http_error(500)], 2),
+        )
+        for phase, status, category, replies, calls in cases:
+            client = AiGatewayClient(GatewayConfig(service_url="https://gateway.invalid"))
+            with self.subTest(phase=phase, status=status), patch(
+                "client.gateway_client._fetch_oidc_token", return_value="synthetic-token",
+            ) as oidc, patch("client.gateway_client.urllib.request.urlopen", side_effect=replies) as http, patch(
+                "client.gateway_client.time.sleep",
+            ) as sleep:
+                result = client.execute("synthetic", research_stage="promotion_review")
+            self.assertFalse(result.success)
+            self.assertEqual(result.error, "subscription_research_http_failure")
+            self.assertEqual(result.raw["request_phase"], phase)
+            self.assertEqual(result.raw["http_status"], status)
+            self.assertEqual(result.raw["failure_category"], category)
+            self.assertNotEqual(result.raw.get("status"), "deferred")
+            self.assertEqual(http.call_count, calls)
+            self.assertEqual(oidc.call_count, 1)
+            sleep.assert_not_called()
+            self.assertNotIn(sentinel, repr(result))
+            self.assertNotIn("synthetic-token", repr(result))
+
+    def test_oidc_http_failure_is_not_labeled_submit(self) -> None:
+        sentinel = "oidc-sentinel"
+        error = urllib.error.HTTPError(
+            "https://user:pass@oidc.invalid/token", 401, "denied", {}, io.BytesIO(sentinel.encode()),
+        )
+        client = AiGatewayClient(GatewayConfig(service_url="https://gateway.invalid"))
+        with patch.dict("os.environ", {
+            "ACTIONS_ID_TOKEN_REQUEST_URL": "https://oidc.invalid/token",
+            "ACTIONS_ID_TOKEN_REQUEST_TOKEN": sentinel,
+        }), patch("client.gateway_client.urllib.request.urlopen", side_effect=error) as http:
+            result = client.execute("synthetic", research_stage="promotion_review")
+        self.assertFalse(result.success)
+        self.assertEqual(result.raw["request_phase"], "oidc")
+        self.assertEqual(result.raw["http_status"], 401)
+        self.assertEqual(result.raw["failure_category"], "auth_or_config_failure")
+        self.assertNotEqual(result.raw["request_phase"], "submit")
+        self.assertEqual(http.call_count, 1)
+        self.assertNotIn(sentinel, repr(result))
+
+    def test_research_transport_and_contract_failures_omit_guessed_status(self) -> None:
+        sentinel = "dns-sentinel"
+        client = AiGatewayClient(GatewayConfig(service_url="https://gateway.invalid"))
+        with patch("client.gateway_client._fetch_oidc_token", return_value="synthetic-token"), patch(
+            "client.gateway_client.urllib.request.urlopen", side_effect=urllib.error.URLError(sentinel),
+        ) as http, patch("client.gateway_client.time.sleep") as sleep:
+            result = client.execute("synthetic", research_stage="promotion_review")
+        self.assertFalse(result.success)
+        self.assertEqual(result.error, "subscription_research_transport_failure")
+        self.assertEqual(result.raw["request_phase"], "health")
+        self.assertEqual(result.raw["failure_category"], "transient_service_failure")
+        self.assertNotIn("http_status", result.raw)
+        self.assertEqual(http.call_count, 1)
+        sleep.assert_not_called()
+        self.assertNotIn(sentinel, repr(result))
+
+        health = _FakeResponse({"codex_research_routing": "v1"})
+        admitted = _FakeResponse({"job_id": "submitted-job", "provider": "cursor", "research_stage": "optimization",
+                                  "model": "gpt-5.6-sol", "reasoning_effort": "high", "token": sentinel})
+        client = AiGatewayClient(GatewayConfig(service_url="https://gateway.invalid"))
+        with patch("client.gateway_client._fetch_oidc_token", return_value="synthetic-token"), patch(
+            "client.gateway_client.urllib.request.urlopen", side_effect=[health, admitted],
+        ) as http, patch("client.gateway_client.time.sleep") as sleep:
+            result = client.execute(
+                "synthetic", research_stage="promotion_review", model="gpt-6-astra", reasoning_effort="xhigh",
+            )
+        self.assertFalse(result.success)
+        self.assertEqual(result.error, "codex_research_route_mismatch")
+        self.assertEqual(result.raw["request_phase"], "submit")
+        self.assertEqual(result.raw["failure_category"], "patch_contract_failure")
+        self.assertNotIn("http_status", result.raw)
+        self.assertEqual(http.call_count, 2)
+        sleep.assert_not_called()
+        self.assertNotIn(sentinel, repr(result))
+
+        client = AiGatewayClient(GatewayConfig(service_url="https://gateway.invalid"))
+        broken = io.BytesIO(b"not-json " + sentinel.encode())
+        with patch("client.gateway_client._fetch_oidc_token", return_value="synthetic-token"), patch(
+            "client.gateway_client.urllib.request.urlopen",
+            side_effect=[_FakeResponse({"codex_research_routing": "v1"}), broken],
+        ) as http, patch("client.gateway_client.time.sleep") as sleep:
+            result = client.execute("synthetic", research_stage="promotion_review")
+        self.assertFalse(result.success)
+        self.assertNotIn(result.raw.get("failure_category"), {"transient_service_failure", "quota_or_capacity_failure"})
+        self.assertEqual(result.raw["request_phase"], "submit")
+        self.assertNotIn("http_status", result.raw)
+        self.assertEqual(http.call_count, 2)
+        sleep.assert_not_called()
+        self.assertNotIn(sentinel, repr(result))
 
     def test_installed_sdk_exports_consumer_api_without_source_checkout(self) -> None:
         script = """

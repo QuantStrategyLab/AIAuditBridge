@@ -35,8 +35,10 @@ VPS Codex 定时监控（`codex-quant.timer` 每 30 分钟）+ 收盘简报（`c
 ## 部署
 
 ```bash
-bash ops/quant-monitor/scripts/deploy_to_vps.sh
+AIAUDIT_BRIDGE_SOURCE_SHA="$REVIEWED_MAIN_SHA" bash ops/quant-monitor/scripts/deploy_to_vps.sh
 ```
+
+Set `REVIEWED_MAIN_SHA` to the exact reviewed 40-character commit. It must match fetched `origin/main`; the deploy script refuses an omitted or mismatched SHA.
 
 ## Codex 执行纪律
 
@@ -44,3 +46,4 @@ bash ops/quant-monitor/scripts/deploy_to_vps.sh
 - 报警只走量化哨兵 bot
 - 策略健康证据只进入可审计的 issue-only 优化队列，不自动改策略、参数、仓位或部署
 - 策略劣化记录成功后不通知人；只对数据/运行风险和记录失败 fail-closed 通知
+- Telegram 送达复用 `data/alert-state/health_cycle.json`，按事件和目标哈希记录 `pending` / `sent` / `failed` / `unknown`。发送前写不进去就停止，不退回无状态发送。明确成功才是 `sent`；服务明确拒绝是 `failed`，最多再试一次；超时、响应丢失或进程中断留下的 `pending` 都按 `unknown`，不盲重发。已成功目标不因其他目标失败而重发。状态不保存 token、正文或原始 chat id。`dry_run` / `send_dry_run` 不写这份状态。旧 fingerprint 且没有目标记录时，整次事件保持不重发，也不补写成各目标已送达。健康事件归属在首次 `pending` 时和送达记录一起写入，不表示已经成功；`fingerprint` 仍只在该事件全部目标 `sent` 后更新。健康恢复清 `health_sent_events` 里本周期每个健康事件的已确认 `sent`，不只清 fingerprint 指向的一条；`unknown` / `pending` / `failed`、日报送达和诊断尝试保留。诊断写入、恢复清理和送达更新共用同一文件锁完成读改写。这里不切换各平台自己的休市或订单心跳。

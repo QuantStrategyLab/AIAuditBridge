@@ -79,7 +79,14 @@ Automation triage is advisory: `auto_fix_allowed` and `open_fix_pr` describe eli
 to propose a bounded repair PR, not permission to merge, deploy, or change an account.
 `deploy_allowed` is always `false`; release authorization and validation belong to the
 actual release workflow. Missing, `null`, or empty `changed_paths` returns
-`file_risk: unknown`, `auto_fix_allowed: false`, and `human_review_required: true`.
+`file_risk: unknown`, `auto_fix_allowed: false`, `engineering_blocked: true`, and
+`engineering_review_required: true`; the recommended next step is to supply the
+changed paths for independent AI review. High or critical path risk likewise blocks
+engineering changes pending validation/recovery evidence and independent AI review.
+Risk classification alone does not request a human investment decision. Explicit
+control-plane escalation and manual mode still set `human_review_required`; deployment
+is never allowed by this advisory endpoint. Account, funds, credential, permission,
+and MFA authorization gates remain independent.
 When supplied, paths must be a list of non-empty repository-relative strings;
 malformed lists, blank entries, absolute paths, and parent-directory segments return
 HTTP 400 instead of silently discarding entries. Existing failure retry advice is

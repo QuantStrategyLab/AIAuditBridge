@@ -21,6 +21,7 @@ from scripts.run_monthly_codex_audit import (
     DEFAULT_GUARDED_AUTO_MERGE_POLICY,
     GUARDED_AUTO_MERGE_LABEL,
     HUMAN_REVIEW_LABEL,
+    ENGINEERING_EVIDENCE_BLOCKED_LABEL,
     GitHubRequestError,
     PLATFORM_BUGFIX_MAX_EDITS_PER_FILE,
     PLATFORM_BUGFIX_MAX_REPLACEMENT_BYTES,
@@ -64,6 +65,11 @@ from scripts.run_monthly_codex_audit import (
     request_codex_service,
     request_guarded_auto_merge,
     request_human_review,
+    request_engineering_evidence_block,
+    resume_engineering_evidence_review,
+    materials_input_digest,
+    collect_pull_request_engineering_materials,
+    ENGINEERING_EVIDENCE_RESUME_OPERATION,
     RemediationWorkspace,
     resolve_feedback_retry_pr,
     resolve_source_repo_token,
@@ -2095,7 +2101,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
     def test_guarded_auto_merge_default_high_reason_matches_source_policy(self) -> None:
         self.assertEqual(
             DEFAULT_GUARDED_AUTO_MERGE_POLICY["risk_policy"]["high"]["reason"],
-            "blocked/high-risk files require human review",
+            "high-risk or unknown engineering changes need evidence and independent AI review",
         )
 
     def test_guarded_auto_merge_default_policy_matches_local_source_policy_when_available(self) -> None:
@@ -2177,8 +2183,8 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
 
         self.assertFalse(risk["label_allowed"])
         self.assertEqual(risk["high_risk_files"], ["README.md"])
-        self.assertEqual(risk["policy_errors"], ["invalid auto-merge policy requires human review"])
-        self.assertEqual(risk["risk_reasons"], ["invalid auto-merge policy requires human review"])
+        self.assertEqual(risk["policy_errors"], ["invalid auto-merge policy fails closed"])
+        self.assertEqual(risk["risk_reasons"], ["invalid auto-merge policy fails closed"])
 
     def test_guarded_auto_merge_policy_fails_closed_when_existing_policy_schema_is_incomplete(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2191,7 +2197,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
 
         self.assertFalse(risk["label_allowed"])
         self.assertEqual(risk["high_risk_files"], ["README.md"])
-        self.assertEqual(risk["risk_reasons"], ["invalid auto-merge policy schema requires human review"])
+        self.assertEqual(risk["risk_reasons"], ["invalid auto-merge policy schema fails closed"])
 
     def test_guarded_auto_merge_policy_fails_closed_when_policy_labels_match(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2208,7 +2214,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertEqual(risk["high_risk_files"], ["README.md"])
         self.assertEqual(
             risk["risk_reasons"],
-            ["auto-merge and human-review labels must be distinct requires human review"],
+            ["auto-merge and human-review labels must be distinct"],
         )
 
     def test_guarded_auto_merge_policy_fails_closed_when_policy_allows_control_plane_exact_path(self) -> None:
@@ -2309,7 +2315,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
 
         self.assertFalse(risk["label_allowed"])
         self.assertEqual(risk["high_risk_files"], ["docs/runbook.md"])
-        self.assertEqual(risk["risk_reasons"], ["unsupported auto-merge policy version requires human review"])
+        self.assertEqual(risk["risk_reasons"], ["unsupported auto-merge policy version fails closed"])
 
     def test_guarded_auto_merge_policy_fails_closed_on_invalid_blocked_regex(self) -> None:
         risk = classify_guarded_auto_merge_risk(
@@ -2326,7 +2332,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
 
         self.assertFalse(risk["label_allowed"])
         self.assertEqual(risk["high_risk_files"], ["docs/runbook.md"])
-        self.assertEqual(risk["risk_reasons"], ["invalid blocked_path_patterns regex requires human review"])
+        self.assertEqual(risk["risk_reasons"], ["invalid blocked_path_patterns regex fails closed"])
 
     def test_guarded_auto_merge_policy_fails_closed_on_malformed_lists(self) -> None:
         risk = classify_guarded_auto_merge_risk(
@@ -2342,7 +2348,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
 
         self.assertFalse(risk["label_allowed"])
         self.assertEqual(risk["high_risk_files"], ["data/output/report.json"])
-        self.assertEqual(risk["risk_reasons"], ["invalid risk_policy.low.prefixes list requires human review"])
+        self.assertEqual(risk["risk_reasons"], ["invalid risk_policy.low.prefixes list fails closed"])
 
     def test_baseline_auto_merge_policy_blocks_policy_self_escalation(self) -> None:
         baseline_policy = {
@@ -2407,7 +2413,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertEqual(risk["high_risk_files"], paths)
         self.assertEqual(
             risk["risk_reasons"],
-            ["changed file count exceeds auto-merge limit requires human review: 21 > 20"],
+            ["changed file count exceeds auto-merge limit: 21 > 20"],
         )
 
     def test_classify_guarded_auto_merge_risk_blocks_large_low_risk_diff(self) -> None:
@@ -2422,7 +2428,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertEqual(risk["changed_lines"], 1201)
         self.assertEqual(
             risk["risk_reasons"],
-            ["changed line count exceeds auto-merge limit requires human review: 1201 > 1200"],
+            ["changed line count exceeds auto-merge limit: 1201 > 1200"],
         )
 
     def test_classify_guarded_auto_merge_risk_blocks_binary_diff(self) -> None:
@@ -2433,7 +2439,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
 
         self.assertFalse(risk["label_allowed"])
         self.assertEqual(risk["risk_level"], "high")
-        self.assertEqual(risk["risk_reasons"], ["binary file changes require human review"])
+        self.assertEqual(risk["risk_reasons"], ["binary file changes block auto-merge"])
 
     def test_classify_guarded_auto_merge_risk_blocks_file_removals_renames_and_copies(self) -> None:
         risk = classify_guarded_auto_merge_risk(
@@ -2454,9 +2460,9 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertEqual(
             risk["risk_reasons"],
             [
-                "file deletions require human review",
-                "file renames require human review",
-                "file copies require human review",
+                "file deletions block auto-merge",
+                "file renames block auto-merge",
+                "file copies block auto-merge",
             ],
         )
         self.assertEqual(risk["deleted_files"], 1)
@@ -2496,6 +2502,28 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
             "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12",
         )
 
+    def test_request_guarded_auto_merge_refuses_engineering_evidence_block(self) -> None:
+        with (
+            patch(
+                "scripts.run_monthly_codex_audit.github_request",
+                return_value={"labels": [{"name": ENGINEERING_EVIDENCE_BLOCKED_LABEL}]},
+            ) as request,
+            self.assertRaisesRegex(BridgeError, "engineering-evidence-blocked.*present"),
+        ):
+            request_guarded_auto_merge(
+                "token",
+                "QuantStrategyLab/UsEquitySnapshotPipelines",
+                12,
+                ["docs/operator_runbook.md"],
+                diff_stats={"additions": 10, "deletions": 2, "binary_files": 0},
+            )
+
+        request.assert_has_calls(
+            [
+                call("token", "GET", "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12"),
+            ]
+        )
+
     def test_request_guarded_auto_merge_refuses_existing_human_review_label(self) -> None:
         with (
             patch(
@@ -2512,14 +2540,15 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
                 diff_stats={"additions": 10, "deletions": 2, "binary_files": 0},
             )
 
-        request.assert_called_once_with(
-            "token",
-            "GET",
-            "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12",
+        request.assert_has_calls(
+            [
+                call("token", "GET", "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12"),
+                call("token", "GET", "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12"),
+            ]
         )
 
     def test_request_guarded_auto_merge_adds_source_guard_label(self) -> None:
-        with patch("scripts.run_monthly_codex_audit.github_request", side_effect=[{"labels": []}, {}, {}]) as request:
+        with patch("scripts.run_monthly_codex_audit.github_request", side_effect=[{"labels": []}, {"labels": []}, {}, {}]) as request:
             guard = request_guarded_auto_merge(
                 "token",
                 "QuantStrategyLab/UsEquitySnapshotPipelines",
@@ -2532,6 +2561,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertEqual(guard["risk_level"], "low")
         request.assert_has_calls(
             [
+                call("token", "GET", "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12"),
                 call("token", "GET", "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12"),
                 call("token", "GET", "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/labels/auto-merge-ok"),
                 call(
@@ -2552,7 +2582,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         )
         with patch(
             "scripts.run_monthly_codex_audit.github_request",
-            side_effect=[{"labels": []}, not_found, {}, {}],
+            side_effect=[{"labels": []}, {"labels": []}, not_found, {}, {}],
         ) as request:
             guard = request_guarded_auto_merge(
                 "token",
@@ -2565,6 +2595,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertEqual(guard["label"], GUARDED_AUTO_MERGE_LABEL)
         request.assert_has_calls(
             [
+                call("token", "GET", "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12"),
                 call("token", "GET", "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12"),
                 call("token", "GET", "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/labels/auto-merge-ok"),
                 call(
@@ -2596,7 +2627,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
             '{"message":"Forbidden"}',
         )
         with (
-            patch("scripts.run_monthly_codex_audit.github_request", side_effect=[{"labels": []}, forbidden]) as request,
+            patch("scripts.run_monthly_codex_audit.github_request", side_effect=[{"labels": []}, {"labels": []}, forbidden]) as request,
             self.assertRaises(BridgeError),
         ):
             request_guarded_auto_merge(
@@ -2610,6 +2641,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         request.assert_has_calls(
             [
                 call("token", "GET", "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12"),
+                call("token", "GET", "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12"),
                 call("token", "GET", "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/labels/auto-merge-ok"),
             ]
         )
@@ -2622,7 +2654,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
             '{"message":"Forbidden"}',
         )
         with (
-            patch("scripts.run_monthly_codex_audit.github_request", side_effect=[{"labels": []}, {}, forbidden]) as request,
+            patch("scripts.run_monthly_codex_audit.github_request", side_effect=[{"labels": []}, {"labels": []}, {}, forbidden]) as request,
             self.assertRaises(GitHubRequestError),
         ):
             request_guarded_auto_merge(
@@ -2635,6 +2667,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
 
         request.assert_has_calls(
             [
+                call("token", "GET", "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12"),
                 call("token", "GET", "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12"),
                 call("token", "GET", "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/labels/auto-merge-ok"),
                 call(
@@ -2656,7 +2689,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
                 "high": {"reason": "high"},
             },
         }
-        with patch("scripts.run_monthly_codex_audit.github_request", side_effect=[{"labels": []}, {}, {}]) as request:
+        with patch("scripts.run_monthly_codex_audit.github_request", side_effect=[{"labels": []}, {"labels": []}, {}, {}]) as request:
             guard = request_guarded_auto_merge(
                 "token",
                 "QuantStrategyLab/UsEquitySnapshotPipelines",
@@ -2669,6 +2702,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         self.assertEqual(guard["label"], "custom-auto-ok")
         request.assert_has_calls(
             [
+                call("token", "GET", "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12"),
                 call("token", "GET", "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12"),
                 call("token", "GET", "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/labels/custom-auto-ok"),
                 call(
@@ -2814,14 +2848,14 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
     def test_guarded_auto_merge_label_for_mutation_skips_invalid_policy(self) -> None:
         label, reason = guarded_auto_merge_label_for_mutation(
             {
-                "policy_errors": ["invalid auto-merge policy requires human review"],
+                "policy_errors": ["invalid auto-merge policy fails closed"],
                 "auto_merge_label": "auto-merge-ok",
                 "human_review_label": "human-review-required",
             }
         )
 
         self.assertEqual(label, "")
-        self.assertEqual(reason, "invalid auto-merge policy requires human review")
+        self.assertEqual(reason, "invalid auto-merge policy fails closed")
 
     def test_guarded_auto_merge_label_for_mutation_rejects_label_collision(self) -> None:
         label, reason = guarded_auto_merge_label_for_mutation(
@@ -2832,7 +2866,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         )
 
         self.assertEqual(label, "")
-        self.assertEqual(reason, "auto-merge and human-review labels must be distinct requires human review")
+        self.assertEqual(reason, "auto-merge and human-review labels must be distinct")
 
     def test_main_clears_stale_auto_merge_label_before_no_change_feedback_retry_exit(self) -> None:
         def fake_clone(token: str, source_repo: str, source_ref: str, work_root: Path) -> Path:
@@ -2948,7 +2982,7 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         body = comment.call_args.args[3]
         self.assertIn("No changes.", body)
         self.assertIn("Skipped stale guarded auto-merge label cleanup", body)
-        self.assertIn("auto-merge and human-review labels must be distinct requires human review", body)
+        self.assertIn("auto-merge and human-review labels must be distinct", body)
 
     def test_format_guarded_risk_details_includes_reasons_and_files(self) -> None:
         risk = classify_guarded_auto_merge_risk(
@@ -2958,9 +2992,688 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
         details = format_guarded_risk_details(risk)
 
         self.assertIn("Risk level: `high`", details)
-        self.assertIn("blocked/high-risk files require human review", details)
+        self.assertIn("independent AI review", details)
         self.assertIn("`src/us_equity_snapshot_pipelines/contracts.py`", details)
         self.assertIn("`pyproject.toml`", details)
+
+    def test_request_engineering_evidence_block_adds_block_label(self) -> None:
+        risk = classify_guarded_auto_merge_risk(["src/us_equity_snapshot_pipelines/contracts.py"])
+        with (
+            patch("scripts.run_monthly_codex_audit.ensure_repo_label") as ensure_label,
+            patch("scripts.run_monthly_codex_audit.github_request") as request,
+        ):
+            blocked = request_engineering_evidence_block(
+                "token",
+                "QuantStrategyLab/UsEquitySnapshotPipelines",
+                12,
+                risk,
+            )
+
+        self.assertEqual(blocked["label"], ENGINEERING_EVIDENCE_BLOCKED_LABEL)
+        ensure_label.assert_called_once_with(
+            "token",
+            "QuantStrategyLab/UsEquitySnapshotPipelines",
+            ENGINEERING_EVIDENCE_BLOCKED_LABEL,
+            color="FBCA04",
+            description="Engineering evidence and independent AI review required; auto-merge blocked",
+        )
+        request.assert_called_once_with(
+            "token",
+            "POST",
+            "/repos/QuantStrategyLab/UsEquitySnapshotPipelines/issues/12/labels",
+            {"labels": [ENGINEERING_EVIDENCE_BLOCKED_LABEL]},
+        )
+
+    def test_engineering_review_resume_default_off_and_risk_or_human_still_block(self) -> None:
+        from service.ai_gateway_service import ENGINEERING_REVIEW_PURPOSE
+
+        materials = {
+            "purpose": ENGINEERING_REVIEW_PURPOSE,
+            "source_repository": "QuantStrategyLab/UsEquitySnapshotPipelines",
+            "pull_request_number": 12,
+            "base_sha": "b" * 40,
+            "head_sha": "c" * 40,
+            "changed_paths": ["docs/readme.md"],
+            "diff": "diff",
+            "diff_stats": {
+                "additions": 1,
+                "deletions": 0,
+                "binary_files": 0,
+                "deleted_files": 0,
+                "renamed_files": 0,
+                "copied_files": 0,
+            },
+            "validation_evidence": "tests passed",
+            "recovery_evidence": "backup kept",
+        }
+        producer_env = {
+            "GITHUB_REPOSITORY": "QuantStrategyLab/AIAuditBridge",
+            "GITHUB_RUN_ID": "555",
+            "GITHUB_RUN_ATTEMPT": "1",
+            "GITHUB_WORKFLOW_SHA": "a" * 40,
+            "GITHUB_EVENT_NAME": "workflow_dispatch",
+        }
+        with patch.dict(os.environ, {"CODEX_AUDIT_ENGINEERING_REVIEW_ENABLED": ""}, clear=False):
+            disabled = resume_engineering_evidence_review(
+                "token",
+                "QuantStrategyLab/UsEquitySnapshotPipelines",
+                12,
+                task="monthly_snapshot_audit",
+                validation_evidence="tests passed",
+                recovery_evidence="backup kept",
+            )
+        self.assertEqual(disabled["status"], "disabled")
+        self.assertFalse(disabled["model_requested"])
+
+        digest = materials_input_digest(materials)
+        approve_job = {
+            "status": "succeeded",
+            "job_id": "job-1",
+            "engineering_review": {
+                "purpose": ENGINEERING_REVIEW_PURPOSE,
+                "verdict": "approve",
+                "input_digest": digest,
+                "source_repository": materials["source_repository"],
+                "pull_request_number": 12,
+                "base_sha": materials["base_sha"],
+                "head_sha": materials["head_sha"],
+                "changed_paths": materials["changed_paths"],
+                "repository": producer_env["GITHUB_REPOSITORY"],
+                "run_id": producer_env["GITHUB_RUN_ID"],
+                "run_attempt": producer_env["GITHUB_RUN_ATTEMPT"],
+                "workflow_sha": producer_env["GITHUB_WORKFLOW_SHA"],
+                "event_name": producer_env["GITHUB_EVENT_NAME"],
+            },
+        }
+        with (
+            patch.dict(
+                os.environ,
+                {**producer_env, "CODEX_AUDIT_ENGINEERING_REVIEW_ENABLED": "true"},
+                clear=False,
+            ),
+            patch("scripts.run_monthly_codex_audit.issue_has_label", return_value=True),
+            patch("scripts.run_monthly_codex_audit.collect_pull_request_engineering_materials") as collect,
+            patch("scripts.run_monthly_codex_audit.submit_engineering_review_job") as submit,
+            self.assertRaisesRegex(BridgeError, HUMAN_REVIEW_LABEL),
+        ):
+            resume_engineering_evidence_review(
+                "token",
+                "QuantStrategyLab/UsEquitySnapshotPipelines",
+                12,
+                task="monthly_snapshot_audit",
+                validation_evidence="tests passed",
+                recovery_evidence="backup kept",
+            )
+        collect.assert_not_called()
+        submit.assert_not_called()
+
+        high_risk_paths = ["src/us_equity_snapshot_pipelines/contracts.py"]
+        high_materials = {**materials, "changed_paths": high_risk_paths}
+        high_digest = materials_input_digest(high_materials)
+        high_job = {
+            **approve_job,
+            "engineering_review": {
+                **approve_job["engineering_review"],
+                "changed_paths": high_risk_paths,
+                "input_digest": high_digest,
+            },
+        }
+        with (
+            patch.dict(
+                os.environ,
+                {**producer_env, "CODEX_AUDIT_ENGINEERING_REVIEW_ENABLED": "true"},
+                clear=False,
+            ),
+            patch("scripts.run_monthly_codex_audit.issue_has_label", return_value=False),
+            patch(
+                "scripts.run_monthly_codex_audit.collect_pull_request_engineering_materials",
+                return_value=high_materials,
+            ),
+            patch("scripts.run_monthly_codex_audit.submit_engineering_review_job", return_value=high_job),
+            patch("scripts.run_monthly_codex_audit.remove_issue_label_if_present") as remove_label,
+            patch("scripts.run_monthly_codex_audit.request_guarded_auto_merge") as request_merge,
+        ):
+            blocked = resume_engineering_evidence_review(
+                "token",
+                "QuantStrategyLab/UsEquitySnapshotPipelines",
+                12,
+                task="monthly_snapshot_audit",
+                validation_evidence="tests passed",
+                recovery_evidence="backup kept",
+                admitted_mode="review_and_fix",
+                auto_merge=True,
+            )
+        self.assertEqual(blocked["status"], "risk_blocked")
+        remove_label.assert_not_called()
+        request_merge.assert_not_called()
+
+        with (
+            patch.dict(
+                os.environ,
+                {**producer_env, "CODEX_AUDIT_ENGINEERING_REVIEW_ENABLED": "true"},
+                clear=False,
+            ),
+            patch("scripts.run_monthly_codex_audit.issue_has_label", return_value=False),
+            patch(
+                "scripts.run_monthly_codex_audit.collect_pull_request_engineering_materials",
+                return_value=materials,
+            ) as collect,
+            patch("scripts.run_monthly_codex_audit.submit_engineering_review_job", return_value=approve_job),
+            patch("scripts.run_monthly_codex_audit.remove_issue_label_if_present") as remove_label,
+            patch("scripts.run_monthly_codex_audit.request_guarded_auto_merge") as request_merge,
+        ):
+            reviewed = resume_engineering_evidence_review(
+                "token",
+                "QuantStrategyLab/UsEquitySnapshotPipelines",
+                12,
+                task="monthly_snapshot_audit",
+                validation_evidence="tests passed",
+                recovery_evidence="backup kept",
+                admitted_mode="review_only",
+                auto_merge=True,
+            )
+        self.assertEqual(reviewed["status"], "reviewed")
+        self.assertEqual(reviewed["label_mutations"], [])
+        collect.assert_called_once()
+        remove_label.assert_not_called()
+        request_merge.assert_not_called()
+
+        with (
+            patch.dict(
+                os.environ,
+                {**producer_env, "CODEX_AUDIT_ENGINEERING_REVIEW_ENABLED": "true"},
+                clear=False,
+            ),
+            patch("scripts.run_monthly_codex_audit.issue_has_label", return_value=False),
+            patch(
+                "scripts.run_monthly_codex_audit.collect_pull_request_engineering_materials",
+                return_value=high_materials,
+            ),
+            patch("scripts.run_monthly_codex_audit.submit_engineering_review_job", return_value=high_job),
+            patch("scripts.run_monthly_codex_audit.remove_issue_label_if_present", return_value=True) as remove_label,
+            patch("scripts.run_monthly_codex_audit.request_guarded_auto_merge") as request_merge,
+        ):
+            unblocked = resume_engineering_evidence_review(
+                "token",
+                "QuantStrategyLab/UsEquitySnapshotPipelines",
+                12,
+                task="monthly_snapshot_audit",
+                validation_evidence="tests passed",
+                recovery_evidence="backup kept",
+                admitted_mode="review_and_fix",
+                auto_merge=False,
+            )
+        self.assertEqual(unblocked["status"], "unblocked")
+        self.assertEqual(unblocked["label_mutations"], [f"removed:{ENGINEERING_EVIDENCE_BLOCKED_LABEL}"])
+        remove_label.assert_called_once()
+        request_merge.assert_not_called()
+
+    def test_engineering_review_resume_rejects_material_drift_and_label_api_failure(self) -> None:
+        from service.ai_gateway_service import ENGINEERING_REVIEW_PURPOSE
+
+        materials = {
+            "purpose": ENGINEERING_REVIEW_PURPOSE,
+            "source_repository": "QuantStrategyLab/UsEquitySnapshotPipelines",
+            "pull_request_number": 12,
+            "base_sha": "b" * 40,
+            "head_sha": "c" * 40,
+            "changed_paths": ["docs/readme.md"],
+            "diff": "diff",
+            "diff_stats": {
+                "additions": 1,
+                "deletions": 0,
+                "binary_files": 0,
+                "deleted_files": 0,
+                "renamed_files": 0,
+                "copied_files": 0,
+            },
+            "validation_evidence": "tests passed",
+            "recovery_evidence": "backup kept",
+        }
+        producer_env = {
+            "GITHUB_REPOSITORY": "QuantStrategyLab/AIAuditBridge",
+            "GITHUB_RUN_ID": "555",
+            "GITHUB_RUN_ATTEMPT": "1",
+            "GITHUB_WORKFLOW_SHA": "a" * 40,
+            "GITHUB_EVENT_NAME": "workflow_dispatch",
+            "CODEX_AUDIT_ENGINEERING_REVIEW_ENABLED": "true",
+        }
+        digest = materials_input_digest(materials)
+        approve_job = {
+            "status": "succeeded",
+            "job_id": "job-1",
+            "engineering_review": {
+                "purpose": ENGINEERING_REVIEW_PURPOSE,
+                "verdict": "approve",
+                "input_digest": digest,
+                "source_repository": materials["source_repository"],
+                "pull_request_number": 12,
+                "base_sha": materials["base_sha"],
+                "head_sha": materials["head_sha"],
+                "changed_paths": materials["changed_paths"],
+                "repository": producer_env["GITHUB_REPOSITORY"],
+                "run_id": producer_env["GITHUB_RUN_ID"],
+                "run_attempt": producer_env["GITHUB_RUN_ATTEMPT"],
+                "workflow_sha": producer_env["GITHUB_WORKFLOW_SHA"],
+                "event_name": producer_env["GITHUB_EVENT_NAME"],
+            },
+        }
+        # base changes while head/paths stay the same must still refuse labels.
+        base_drifted = {**materials, "base_sha": "d" * 40}
+        with (
+            patch.dict(os.environ, producer_env, clear=False),
+            patch("scripts.run_monthly_codex_audit.issue_has_label", return_value=False),
+            patch(
+                "scripts.run_monthly_codex_audit.collect_pull_request_engineering_materials",
+                side_effect=[materials, base_drifted],
+            ),
+            patch("scripts.run_monthly_codex_audit.submit_engineering_review_job", return_value=approve_job),
+            patch("scripts.run_monthly_codex_audit.remove_issue_label_if_present") as remove_label,
+            self.assertRaisesRegex(BridgeError, "materials changed"),
+        ):
+            resume_engineering_evidence_review(
+                "token",
+                "QuantStrategyLab/UsEquitySnapshotPipelines",
+                12,
+                task="monthly_snapshot_audit",
+                validation_evidence="tests passed",
+                recovery_evidence="backup kept",
+                admitted_mode="review_and_fix",
+                auto_merge=True,
+            )
+        remove_label.assert_not_called()
+
+        bad_digest_job = {
+            **approve_job,
+            "engineering_review": {
+                **approve_job["engineering_review"],
+                "input_digest": "0" * 64,
+                "run_id": "",
+            },
+        }
+        with (
+            patch.dict(os.environ, producer_env, clear=False),
+            patch("scripts.run_monthly_codex_audit.issue_has_label", return_value=False),
+            patch(
+                "scripts.run_monthly_codex_audit.collect_pull_request_engineering_materials",
+                return_value=materials,
+            ),
+            patch("scripts.run_monthly_codex_audit.submit_engineering_review_job", return_value=bad_digest_job),
+            self.assertRaisesRegex(BridgeError, "input_digest mismatch|missing producer"),
+        ):
+            resume_engineering_evidence_review(
+                "token",
+                "QuantStrategyLab/UsEquitySnapshotPipelines",
+                12,
+                task="monthly_snapshot_audit",
+                validation_evidence="tests passed",
+                recovery_evidence="backup kept",
+                admitted_mode="review_and_fix",
+            )
+
+        wrong_run_job = {
+            **approve_job,
+            "engineering_review": {**approve_job["engineering_review"], "run_id": "999", "run_attempt": "9"},
+        }
+        with (
+            patch.dict(os.environ, producer_env, clear=False),
+            patch("scripts.run_monthly_codex_audit.issue_has_label", return_value=False),
+            patch(
+                "scripts.run_monthly_codex_audit.collect_pull_request_engineering_materials",
+                return_value=materials,
+            ),
+            patch("scripts.run_monthly_codex_audit.submit_engineering_review_job", return_value=wrong_run_job),
+            self.assertRaisesRegex(BridgeError, "producer run_id mismatch"),
+        ):
+            resume_engineering_evidence_review(
+                "token",
+                "QuantStrategyLab/UsEquitySnapshotPipelines",
+                12,
+                task="monthly_snapshot_audit",
+                validation_evidence="tests passed",
+                recovery_evidence="backup kept",
+                admitted_mode="review_and_fix",
+            )
+
+        evidence_changed = {**materials, "validation_evidence": "different evidence"}
+        with (
+            patch.dict(os.environ, producer_env, clear=False),
+            patch("scripts.run_monthly_codex_audit.issue_has_label", return_value=False),
+            patch(
+                "scripts.run_monthly_codex_audit.collect_pull_request_engineering_materials",
+                side_effect=[materials, evidence_changed],
+            ),
+            patch("scripts.run_monthly_codex_audit.submit_engineering_review_job", return_value=approve_job),
+            self.assertRaisesRegex(BridgeError, "materials changed"),
+        ):
+            resume_engineering_evidence_review(
+                "token",
+                "QuantStrategyLab/UsEquitySnapshotPipelines",
+                12,
+                task="monthly_snapshot_audit",
+                validation_evidence="tests passed",
+                recovery_evidence="backup kept",
+                admitted_mode="review_and_fix",
+            )
+
+        with (
+            patch.dict(os.environ, producer_env, clear=False),
+            patch("scripts.run_monthly_codex_audit.issue_has_label", return_value=False),
+            patch(
+                "scripts.run_monthly_codex_audit.collect_pull_request_engineering_materials",
+                return_value=materials,
+            ),
+            patch("scripts.run_monthly_codex_audit.submit_engineering_review_job", return_value=approve_job),
+            patch(
+                "scripts.run_monthly_codex_audit.remove_issue_label_if_present",
+                side_effect=GitHubRequestError("DELETE", "url", 500, "boom"),
+            ),
+            patch("scripts.run_monthly_codex_audit.request_guarded_auto_merge") as request_merge,
+            self.assertRaisesRegex(BridgeError, "failed to clear engineering evidence block label"),
+        ):
+            resume_engineering_evidence_review(
+                "token",
+                "QuantStrategyLab/UsEquitySnapshotPipelines",
+                12,
+                task="monthly_snapshot_audit",
+                validation_evidence="tests passed",
+                recovery_evidence="backup kept",
+                admitted_mode="review_and_fix",
+                auto_merge=True,
+            )
+        request_merge.assert_not_called()
+
+    def test_collect_engineering_materials_rejects_mid_collect_version_change(self) -> None:
+        pr_v1 = {"base": {"sha": "b" * 40}, "head": {"sha": "c" * 40}}
+        pr_v2 = {"base": {"sha": "d" * 40}, "head": {"sha": "c" * 40}}
+        files = [{"filename": "docs/readme.md", "status": "modified", "additions": 1, "deletions": 0}]
+
+        class DiffResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return b"diff --git a/docs/readme.md b/docs/readme.md\n"
+
+        with (
+            patch(
+                "scripts.run_monthly_codex_audit.github_request",
+                side_effect=[pr_v1, files, pr_v2],
+            ),
+            patch("scripts.run_monthly_codex_audit.urllib.request.urlopen", return_value=DiffResponse()),
+            self.assertRaisesRegex(BridgeError, "changed during material collection"),
+        ):
+            collect_pull_request_engineering_materials(
+                "token",
+                "QuantStrategyLab/UsEquitySnapshotPipelines",
+                12,
+                validation_evidence="tests passed",
+                recovery_evidence="backup kept",
+            )
+
+    def test_engineering_review_resume_can_return_to_guarded_auto_merge_when_risk_allows(self) -> None:
+        from service.ai_gateway_service import ENGINEERING_REVIEW_PURPOSE
+
+        materials = {
+            "purpose": ENGINEERING_REVIEW_PURPOSE,
+            "source_repository": "QuantStrategyLab/UsEquitySnapshotPipelines",
+            "pull_request_number": 12,
+            "base_sha": "b" * 40,
+            "head_sha": "c" * 40,
+            "changed_paths": ["docs/readme.md"],
+            "diff": "diff",
+            "diff_stats": {
+                "additions": 1,
+                "deletions": 0,
+                "binary_files": 0,
+                "deleted_files": 0,
+                "renamed_files": 0,
+                "copied_files": 0,
+            },
+            "validation_evidence": "tests passed",
+            "recovery_evidence": "backup kept",
+        }
+        producer_env = {
+            "GITHUB_REPOSITORY": "QuantStrategyLab/AIAuditBridge",
+            "GITHUB_RUN_ID": "555",
+            "GITHUB_RUN_ATTEMPT": "1",
+            "GITHUB_WORKFLOW_SHA": "a" * 40,
+            "GITHUB_EVENT_NAME": "workflow_dispatch",
+            "CODEX_AUDIT_ENGINEERING_REVIEW_ENABLED": "true",
+        }
+        digest = materials_input_digest(materials)
+        approve_job = {
+            "status": "succeeded",
+            "job_id": "job-1",
+            "engineering_review": {
+                "purpose": ENGINEERING_REVIEW_PURPOSE,
+                "verdict": "approve",
+                "input_digest": digest,
+                "source_repository": materials["source_repository"],
+                "pull_request_number": 12,
+                "base_sha": materials["base_sha"],
+                "head_sha": materials["head_sha"],
+                "changed_paths": materials["changed_paths"],
+                "repository": producer_env["GITHUB_REPOSITORY"],
+                "run_id": producer_env["GITHUB_RUN_ID"],
+                "run_attempt": producer_env["GITHUB_RUN_ATTEMPT"],
+                "workflow_sha": producer_env["GITHUB_WORKFLOW_SHA"],
+                "event_name": producer_env["GITHUB_EVENT_NAME"],
+            },
+        }
+        with (
+            patch.dict(os.environ, producer_env, clear=False),
+            patch("scripts.run_monthly_codex_audit.issue_has_label", return_value=False),
+            patch(
+                "scripts.run_monthly_codex_audit.collect_pull_request_engineering_materials",
+                return_value=materials,
+            ),
+            patch("scripts.run_monthly_codex_audit.submit_engineering_review_job", return_value=approve_job),
+            patch("scripts.run_monthly_codex_audit.remove_issue_label_if_present", return_value=True),
+            patch(
+                "scripts.run_monthly_codex_audit.request_guarded_auto_merge",
+                return_value={"label": GUARDED_AUTO_MERGE_LABEL, "risk_level": "low", "label_allowed": True},
+            ) as request_merge,
+        ):
+            resumed = resume_engineering_evidence_review(
+                "token",
+                "QuantStrategyLab/UsEquitySnapshotPipelines",
+                12,
+                task="monthly_snapshot_audit",
+                validation_evidence="tests passed",
+                recovery_evidence="backup kept",
+                admitted_mode="review_and_fix",
+                auto_merge=True,
+            )
+        self.assertEqual(resumed["status"], "resumed")
+        self.assertEqual(resumed["label_mutations"], [
+            f"removed:{ENGINEERING_EVIDENCE_BLOCKED_LABEL}",
+            f"added:{GUARDED_AUTO_MERGE_LABEL}",
+        ])
+        request_merge.assert_called_once()
+
+    def test_engineering_resume_main_admission_controls_all_label_mutations(self) -> None:
+        argv = [
+            "--operation", ENGINEERING_EVIDENCE_RESUME_OPERATION,
+            "--pull-request-number", "12",
+            "--validation-evidence", "tests passed",
+            "--recovery-evidence", "backup kept",
+        ]
+        base_env = {
+            "CODEX_AUDIT_ENGINEERING_REVIEW_ENABLED": "true",
+            "SOURCE_REPO": "QuantStrategyLab/UsEquitySnapshotPipelines",
+            "CODEX_AUDIT_TASK": "monthly_snapshot_audit",
+            "GITHUB_REPOSITORY": "QuantStrategyLab/AIAuditBridge",
+            "GITHUB_RUN_ID": "555",
+            "GITHUB_RUN_ATTEMPT": "1",
+            "CODEX_AUDIT_SERVICE_AUDIENCE": "quant-codex-audit",
+            "CODEX_AUDIT_MODE": "review_and_fix",
+            "CODEX_AUDIT_AUTO_MERGE": "true",
+            "ISSUE_NUMBER": "12",
+            "SOURCE_REF": "main",
+            "MANUAL_APPROVAL_ID": "",
+        }
+        cases = (
+            ("review only", {"CODEX_AUDIT_MODE": "review_only", "CODEX_AUDIT_SERVICE_URL": ""}, None, "review_only", False),
+            ("service unavailable", {"CODEX_AUDIT_SERVICE_URL": ""}, None, "review_only", False),
+            (
+                "escalated",
+                {"CODEX_AUDIT_SERVICE_URL": "https://codex.example.invalid"},
+                {"status": "ok", "control": {"auto_fix_allowed": False}},
+                "review_only",
+                False,
+            ),
+        )
+        for label, overrides, control_response, expected_mode, expected_merge in cases:
+            with self.subTest(admission=label), patch.dict(os.environ, {**base_env, **overrides}, clear=False), patch(
+                "scripts.run_monthly_codex_audit.request_codex_service_json",
+                return_value=control_response,
+            ) as service_request, patch(
+                "scripts.run_monthly_codex_audit.resolve_source_repo_token", return_value="token"
+            ), patch(
+                "scripts.run_monthly_codex_audit.resume_engineering_evidence_review",
+                return_value={"status": "reviewed"},
+            ) as resume:
+                code = run_audit_main(argv)
+            self.assertEqual(code, 0)
+            self.assertEqual(resume.call_args.kwargs["admitted_mode"], expected_mode)
+            self.assertEqual(resume.call_args.kwargs["auto_merge"], expected_merge)
+            if label in {"review only", "service unavailable"}:
+                service_request.assert_not_called()
+            else:
+                service_request.assert_called_once()
+
+        manual_env = {
+            **base_env,
+            "SOURCE_REPO": "QuantStrategyLab/LongBridgePlatform",
+            "CODEX_AUDIT_TASK": "platform_bugfix",
+            "MANUAL_APPROVAL_ID": "manual-approval",
+            "CODEX_AUDIT_SERVICE_URL": "",
+        }
+        with (
+            patch.dict(os.environ, manual_env, clear=False),
+            patch("scripts.run_monthly_codex_audit.resolve_source_repo_token") as resolve_token,
+            patch("scripts.run_monthly_codex_audit.resume_engineering_evidence_review") as resume,
+            self.assertRaisesRegex(BridgeError, "manual approval admission failed"),
+        ):
+            run_audit_main(argv)
+        resolve_token.assert_not_called()
+        resume.assert_not_called()
+
+    def test_main_engineering_resume_argparse_blocks_when_disabled_and_reaches_submit_when_enabled(self) -> None:
+        from service.ai_gateway_service import ENGINEERING_REVIEW_PURPOSE
+
+        argv = [
+            "--operation",
+            ENGINEERING_EVIDENCE_RESUME_OPERATION,
+            "--pull-request-number",
+            "12",
+            "--validation-evidence",
+            "tests passed",
+            "--recovery-evidence",
+            "backup kept",
+        ]
+        with (
+            patch.dict(os.environ, {"CODEX_AUDIT_ENGINEERING_REVIEW_ENABLED": ""}, clear=False),
+            patch("scripts.run_monthly_codex_audit.resume_engineering_evidence_review") as resume,
+            patch("scripts.run_monthly_codex_audit.resolve_source_repo_token") as resolve_token,
+        ):
+            code = run_audit_main(argv)
+        self.assertEqual(code, 2)
+        resume.assert_not_called()
+        resolve_token.assert_not_called()
+
+        materials = {
+            "purpose": ENGINEERING_REVIEW_PURPOSE,
+            "source_repository": "QuantStrategyLab/UsEquitySnapshotPipelines",
+            "pull_request_number": 12,
+            "base_sha": "b" * 40,
+            "head_sha": "c" * 40,
+            "changed_paths": ["docs/readme.md"],
+            "diff": "diff",
+            "diff_stats": {
+                "additions": 1,
+                "deletions": 0,
+                "binary_files": 0,
+                "deleted_files": 0,
+                "renamed_files": 0,
+                "copied_files": 0,
+            },
+            "validation_evidence": "tests passed",
+            "recovery_evidence": "backup kept",
+        }
+        producer_env = {
+            "SOURCE_REPO": "QuantStrategyLab/UsEquitySnapshotPipelines",
+            "CODEX_AUDIT_TASK": "monthly_snapshot_audit",
+            "GITHUB_REPOSITORY": "QuantStrategyLab/AIAuditBridge",
+            "GITHUB_RUN_ID": "555",
+            "GITHUB_RUN_ATTEMPT": "1",
+            "GITHUB_WORKFLOW_SHA": "a" * 40,
+            "GITHUB_EVENT_NAME": "workflow_dispatch",
+            "CODEX_AUDIT_ENGINEERING_REVIEW_ENABLED": "true",
+            "CODEX_AUDIT_SERVICE_URL": "https://codex.example.invalid",
+            "CODEX_AUDIT_SERVICE_AUDIENCE": "quant-codex-audit",
+            "CODEX_AUDIT_SERVICE_POLL_INTERVAL_SECONDS": "1",
+            "CODEX_AUDIT_MODE": "review_and_fix",
+            "CODEX_AUDIT_AUTO_MERGE": "true",
+            "ISSUE_NUMBER": "12",
+            "SOURCE_REF": "main",
+        }
+        digest = materials_input_digest(materials)
+        approve_job = {
+            "status": "succeeded",
+            "job_id": "job-main-engineering-resume-01",
+            "engineering_review": {
+                "purpose": ENGINEERING_REVIEW_PURPOSE,
+                "verdict": "approve",
+                "input_digest": digest,
+                "source_repository": materials["source_repository"],
+                "pull_request_number": 12,
+                "base_sha": materials["base_sha"],
+                "head_sha": materials["head_sha"],
+                "changed_paths": materials["changed_paths"],
+                "repository": producer_env["GITHUB_REPOSITORY"],
+                "run_id": producer_env["GITHUB_RUN_ID"],
+                "run_attempt": producer_env["GITHUB_RUN_ATTEMPT"],
+                "workflow_sha": producer_env["GITHUB_WORKFLOW_SHA"],
+                "event_name": producer_env["GITHUB_EVENT_NAME"],
+            },
+        }
+
+        def fake_service_json(**kwargs):
+            if "/v1/ai/automation/control?" in kwargs.get("url", ""):
+                return {"status": "ok", "control": {"auto_fix_allowed": True}}
+            if kwargs.get("method") == "POST":
+                payload = kwargs["payload"]
+                self.assertEqual(payload["purpose"], ENGINEERING_REVIEW_PURPOSE)
+                self.assertEqual(payload["task"], "pr_review")
+                return {"status": "queued", "job_id": "job-main-engineering-resume-01"}
+            self.assertIn("job-main-engineering-resume-01", kwargs["url"])
+            return approve_job
+
+        with (
+            patch.dict(os.environ, producer_env, clear=False),
+            patch("scripts.run_monthly_codex_audit.resolve_source_repo_token", return_value="token"),
+            patch(
+                "scripts.run_monthly_codex_audit.collect_pull_request_engineering_materials",
+                return_value=materials,
+            ),
+            patch("scripts.run_monthly_codex_audit.request_codex_service_json", side_effect=fake_service_json),
+            patch("scripts.run_monthly_codex_audit.time.sleep", return_value=None),
+            patch("scripts.run_monthly_codex_audit.issue_has_label", return_value=False),
+            patch("scripts.run_monthly_codex_audit.remove_issue_label_if_present", return_value=True) as remove_label,
+            patch(
+                "scripts.run_monthly_codex_audit.request_guarded_auto_merge",
+                return_value={"label": GUARDED_AUTO_MERGE_LABEL, "risk_level": "low", "label_allowed": True},
+            ) as request_merge,
+        ):
+            code = run_audit_main(argv)
+        self.assertEqual(code, 0)
+        remove_label.assert_called_once()
+        request_merge.assert_called_once()
 
     def test_request_human_review_adds_review_label(self) -> None:
         risk = classify_guarded_auto_merge_risk(["src/us_equity_snapshot_pipelines/contracts.py"])
@@ -3477,6 +4190,314 @@ class ShadowArtifactScopeTests(unittest.TestCase):
                     audit.publish_remediation("synthetic", "Synthetic/repo", "main", {}, 1,
                                                workspace, "synthetic", task=self.task, auto_merge=False)
             self.assertEqual(run.call_args.args[0], ["git", "add", "-A"])
+
+
+class EngineeringPrReviewProducerTests(unittest.TestCase):
+    repository = "QuantStrategyLab/AIAuditBridge"
+    base_sha = "b" * 40
+    head_sha = "c" * 40
+    run_id = "700"
+
+    def _github_facts(self, *, bad_run: str = "", association_base_sha: str = ""):
+        from scripts import run_monthly_codex_audit as audit
+
+        pr = {
+            "number": 17,
+            "state": "open",
+            "draft": False,
+            "base": {
+                "ref": "main",
+                "sha": self.base_sha,
+                "repo": {"full_name": self.repository},
+            },
+            "head": {
+                "sha": self.head_sha,
+                "repo": {"full_name": self.repository},
+            },
+        }
+        run = {
+            "id": int(self.run_id),
+            "run_number": 80,
+            "run_attempt": 2,
+            "repository": {"full_name": self.repository},
+            "workflow_id": 306449122,
+            "path": ".github/workflows/ci.yml@refs/pull/17/merge",
+            "status": "completed",
+            "conclusion": "success",
+            "head_sha": self.head_sha if not bad_run else bad_run,
+            "event": "pull_request",
+            "check_suite_id": 900,
+            "pull_requests": ([{
+                "number": 17,
+                "head": {"sha": self.head_sha},
+                "base": {"ref": "main", "sha": association_base_sha},
+            }] if association_base_sha else []),
+        }
+        check_base = {
+            "head_sha": self.head_sha,
+            "status": "completed",
+            "conclusion": "success",
+            "app": {"id": 15368},
+            "check_suite": {"id": 900},
+        }
+        checks = {
+            f"https://api.github.com/repos/{self.repository}/check-runs/1": {"name": "actionlint", **check_base},
+            f"https://api.github.com/repos/{self.repository}/check-runs/2": {"name": "test", **check_base},
+        }
+        calls: list[tuple[str, str]] = []
+
+        def github_request(_token, method, path, payload=None):
+            calls.append((method, path))
+            if method != "GET":
+                raise AssertionError(f"unexpected GitHub mutation: {method} {path}")
+            if path.endswith("/pulls/17"):
+                return pr
+            if "/pulls/17/files?" in path:
+                return [{"filename": "src/example.py", "status": "modified", "additions": 2, "deletions": 1}]
+            if path.endswith(f"/actions/runs/{self.run_id}"):
+                return run
+            if path.endswith("/actions/workflows/306449122/runs?head_sha=" + self.head_sha + "&per_page=100"):
+                if bad_run == "stale":
+                    return {"total_count": 2, "workflow_runs": [
+                        {"id": 700, "run_number": 80, "run_attempt": 2, "head_sha": self.head_sha,
+                         "path": ".github/workflows/ci.yml@refs/pull/17/merge"},
+                        {"id": 701, "run_number": 81, "run_attempt": 1, "head_sha": self.head_sha,
+                         "path": ".github/workflows/ci.yml@refs/pull/17/merge"},
+                    ]}
+                return {"total_count": 1, "workflow_runs": [
+                    {"id": 700, "run_number": 80, "run_attempt": 2, "head_sha": self.head_sha,
+                     "path": ".github/workflows/ci.yml@refs/pull/17/merge"},
+                ]}
+            if path.endswith(f"/actions/runs/{self.run_id}/attempts/2/jobs?filter=latest&per_page=100"):
+                return {"jobs": [
+                    {"name": "actionlint", "status": "completed", "conclusion": "success", "check_run_url": next(iter(checks))},
+                    {"name": "test", "status": "completed", "conclusion": "success", "check_run_url": list(checks)[1]},
+                ]}
+            if path in checks:
+                return checks[path]
+            if path in {
+                f"/repos/{self.repository}/commits/{self.base_sha}",
+                f"/repos/{self.repository}/commits/{self.head_sha}",
+            }:
+                return {"sha": path.rsplit("/", 1)[-1]}
+            raise AssertionError(f"unexpected GitHub read: {path}")
+
+        return audit, github_request, calls
+
+    def _producer_env(self):
+        return {
+            "CODEX_AUDIT_ENGINEERING_PR_REVIEW_ENABLED": "true",
+            "GITHUB_REPOSITORY": self.repository,
+            "GITHUB_REF": "refs/heads/main",
+            "GITHUB_WORKFLOW_REF": (
+                "QuantStrategyLab/AIAuditBridge/.github/workflows/engineering_pr_review.yml@refs/heads/main"
+            ),
+            "GITHUB_WORKFLOW_SHA": "a" * 40,
+            "GITHUB_EVENT_NAME": "workflow_dispatch",
+            "GITHUB_RUN_ID": "800",
+            "GITHUB_RUN_ATTEMPT": "1",
+            "CODEX_AUDIT_GH_TOKEN": "synthetic-read-token",
+            "CODEX_AUDIT_SERVICE_URL": "https://codex.example.invalid",
+            "CODEX_AUDIT_SERVICE_AUDIENCE": "quant-codex-audit",
+            "CODEX_AUDIT_SERVICE_POLL_INTERVAL_SECONDS": "1",
+        }
+
+    @staticmethod
+    def _diff_response():
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def read(self):
+                return b"diff --git a/src/example.py b/src/example.py\n+line\n"
+
+        return Response()
+
+    def test_main_builds_github_facts_and_uses_authenticated_service_post_get(self) -> None:
+        from scripts import run_monthly_codex_audit as audit
+        from service.ai_gateway_service import engineering_review_input_digest
+
+        _module, github_request, github_calls = self._github_facts()
+        service_calls: list[dict[str, object]] = []
+
+        class Response:
+            def __init__(self, body: bytes):
+                self.body = body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def read(self):
+                return self.body
+
+        def urlopen(request, timeout=30):
+            if request.get_header("Accept") == "application/vnd.github.v3.diff":
+                return Response(b"diff --git a/src/example.py b/src/example.py\\n+line\\n")
+            method = request.get_method()
+            self.assertEqual(request.get_header("Authorization"), "Bearer synthetic-oidc-token")
+            service_calls.append({"method": method, "url": request.full_url, "timeout": timeout})
+            if method == "POST":
+                service_calls[-1]["payload"] = json.loads(request.data.decode("utf-8"))
+                return Response(json.dumps({"status": "queued", "job_id": "synthetic-engineering-review-1"}).encode())
+            payload = service_calls[0]["payload"]
+            binding = {
+                "purpose": "engineering_evidence_resume",
+                "verdict": "approve",
+                "input_digest": engineering_review_input_digest(payload),
+                "source_repository": self.repository,
+                "pull_request_number": 17,
+                "base_sha": self.base_sha,
+                "head_sha": self.head_sha,
+                "changed_paths": ["src/example.py"],
+                "repository": self.repository,
+                "ref": "refs/heads/main",
+                "workflow_ref": self._producer_env()["GITHUB_WORKFLOW_REF"],
+                "workflow_sha": "a" * 40,
+                "event_name": "workflow_dispatch",
+                "review_scope": "source_only",
+                "run_id": "800",
+                "run_attempt": "1",
+            }
+            return Response(json.dumps({"status": "succeeded", "job_id": "synthetic-engineering-review-1", "engineering_review": binding}).encode())
+
+        with (
+            patch.dict(
+                os.environ,
+                {**self._producer_env(), "CODEX_AUDIT_ENGINEERING_REVIEW_ENABLED": "true"},
+                clear=False,
+            ),
+            patch.object(audit, "github_request", side_effect=github_request),
+            patch("scripts.run_monthly_codex_audit.urllib.request.urlopen", side_effect=urlopen),
+            patch.object(audit, "request_github_oidc_token", return_value="synthetic-oidc-token") as oidc,
+            patch.object(audit.time, "sleep", return_value=None),
+        ):
+            result = audit.main([
+                "--operation", "engineering_pr_review",
+                "--pull-request-number", "17",
+                "--ci-run-id", self.run_id,
+            ])
+        self.assertEqual(result, 0)
+        self.assertEqual([call["method"] for call in service_calls], ["POST", "GET"])
+        self.assertEqual([call["url"] for call in service_calls], [
+            "https://codex.example.invalid/v1/codex-audit/jobs",
+            "https://codex.example.invalid/v1/codex-audit/jobs/synthetic-engineering-review-1",
+        ])
+        self.assertEqual(oidc.call_args_list[0].args, ("quant-codex-audit",))
+        self.assertEqual(oidc.call_count, 2)
+        self.assertTrue(github_calls)
+        self.assertTrue(all(method == "GET" for method, _path in github_calls))
+        submitted = service_calls[0]["payload"]
+        self.assertEqual(submitted["source_repository"], self.repository)
+        self.assertEqual(submitted["mode"], "review_only")
+        self.assertIn('"ci_base_verified":false', submitted["validation_evidence"])
+        self.assertIn('"runtime_recovery_verified":false', submitted["recovery_evidence"])
+        self.assertNotIn(self.repository, SOURCE_REPO_TASKS)
+
+    def test_bad_latest_run_or_workflow_identity_never_submits_or_mutates(self) -> None:
+        from scripts import run_monthly_codex_audit as audit
+
+        for bad_run in (self.head_sha.replace("c", "d", 1), "stale"):
+            _module, github_request, github_calls = self._github_facts(bad_run=bad_run)
+            service = patch.object(audit, "request_codex_service_json")
+            with (
+                self.subTest(bad_run=bad_run),
+                patch.dict(os.environ, self._producer_env(), clear=False),
+                patch.object(audit, "github_request", side_effect=github_request),
+                patch("scripts.run_monthly_codex_audit.urllib.request.urlopen", return_value=self._diff_response()),
+                service as service_call,
+            ):
+                with self.assertRaises(BridgeError):
+                    audit.main(["--operation", "engineering_pr_review", "--pull-request-number", "17", "--ci-run-id", self.run_id])
+                service_call.assert_not_called()
+                self.assertTrue(all(method == "GET" for method, _path in github_calls))
+
+        wrong_identity = {**self._producer_env(), "GITHUB_EVENT_NAME": "push"}
+        with (
+            patch.dict(os.environ, wrong_identity, clear=False),
+            patch.object(audit, "github_request") as github,
+            patch.object(audit, "request_codex_service_json") as service_call,
+        ):
+            with self.assertRaisesRegex(BridgeError, "workflow_dispatch"):
+                audit.main(["--operation", "engineering_pr_review", "--pull-request-number", "17", "--ci-run-id", self.run_id])
+            github.assert_not_called()
+            service_call.assert_not_called()
+
+    def test_ci_from_an_older_base_is_marked_unverified_not_current_base_validation(self) -> None:
+        from scripts import run_monthly_codex_audit as audit
+
+        _module, github_request, _calls = self._github_facts(association_base_sha="d" * 40)
+        with patch.object(audit, "github_request", side_effect=github_request):
+            result = audit._engineering_ci_run_evidence(
+                "synthetic-read-token", self.run_id,
+                pr_number=17, head_sha=self.head_sha, base_sha=self.base_sha,
+            )
+        self.assertFalse(result["ci_base_verified"])
+        self.assertEqual(result["head_sha"], self.head_sha)
+
+    def test_source_only_result_cannot_be_reused_by_mutable_resume_or_monthly_allowlist(self) -> None:
+        from scripts import run_monthly_codex_audit as audit
+
+        materials = {
+            "purpose": "engineering_evidence_resume",
+            "source_repository": self.repository,
+            "pull_request_number": 17,
+            "base_sha": self.base_sha,
+            "head_sha": self.head_sha,
+            "changed_paths": ["src/example.py"],
+            "diff": "diff",
+            "diff_stats": {"additions": 1, "deletions": 0},
+            "validation_evidence": "synthetic verified CI",
+            "recovery_evidence": json.dumps({"scope": "source_only", "runtime_recovery_verified": False}),
+        }
+        review = {
+            "purpose": "engineering_evidence_resume",
+            "verdict": "approve",
+            "input_digest": audit.materials_input_digest(materials),
+            "source_repository": self.repository,
+            "pull_request_number": 17,
+            "base_sha": self.base_sha,
+            "head_sha": self.head_sha,
+            "changed_paths": ["src/example.py"],
+            "repository": self.repository,
+            "run_id": "800",
+            "run_attempt": "1",
+            "workflow_sha": "a" * 40,
+            "event_name": "workflow_dispatch",
+            "review_scope": "source_only",
+        }
+        with (
+            patch.dict(
+                os.environ,
+                {**self._producer_env(), "CODEX_AUDIT_ENGINEERING_REVIEW_ENABLED": "true"},
+                clear=False,
+            ),
+            patch.object(audit, "issue_has_label", return_value=False),
+            patch.object(audit, "collect_pull_request_engineering_materials", return_value=materials),
+            patch.object(audit, "submit_engineering_review_job", return_value={
+                "status": "succeeded", "job_id": "synthetic-review", "engineering_review": review,
+            }),
+            patch.object(audit, "remove_issue_label_if_present") as remove_label,
+            patch.object(audit, "request_guarded_auto_merge") as grant_merge,
+        ):
+            with self.assertRaisesRegex(BridgeError, "source_only review results cannot clear"):
+                audit.resume_engineering_evidence_review(
+                    "synthetic-token", self.repository, 17,
+                    task="monthly_snapshot_audit",
+                    validation_evidence="synthetic verified CI",
+                    recovery_evidence="source rollback only",
+                    admitted_mode="review_and_fix",
+                    auto_merge=True,
+                )
+        remove_label.assert_not_called()
+        grant_merge.assert_not_called()
+        with self.assertRaises(BridgeError):
+            audit.validate_task("monthly_snapshot_audit", self.repository)
 
 
 if __name__ == "__main__":
