@@ -459,7 +459,7 @@ class CodexServiceMaintenanceTests(unittest.TestCase):
 
     def test_maintenance_workflow_binds_source_and_requires_explicit_interruption_acknowledgement(self) -> None:
         workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/vps_codex_service_ops.yml").read_text()
-        job = workflow.split("  apply-audit-patch:\n", 1)[1].split("\n  org-health-token:", 1)[0]
+        job = workflow.split("  apply-audit-patch:\n", 1)[1].split("\n  retry-audit-patch-once:", 1)[0]
         self.assertIn("inputs.acknowledge_interruption", job)
         self.assertIn("inputs.mode != 'apply-audit-patch'", workflow)
         for value in ("environment: codex-vps-ops", "- self-hosted", "- codex-vps", "persist-credentials: false", "ref: ${{ github.sha }}",
@@ -468,6 +468,271 @@ class CodexServiceMaintenanceTests(unittest.TestCase):
             self.assertIn(value, job)
         self.assertLess(job.index("current_main="), job.index("manage_codex_audit_service_patch.py"))
         for forbidden in ("deploy_codex_audit_service.sh", "repair-ssh", "install-org-health-token", "secrets.", "nginx", "-k", "restart"):
+            self.assertNotIn(forbidden, job)
+
+
+class CodexServiceRetryTests(unittest.TestCase):
+    """Reuse only synthetic fixtures, not the maintenance test methods."""
+
+    action = CodexServiceMaintenanceTests.action
+    assert_original = CodexServiceMaintenanceTests.assert_original
+    assert_protected = CodexServiceMaintenanceTests.assert_protected
+
+    def setUp(self) -> None:
+        CodexServiceMaintenanceTests.setUp(self)
+        self.default_backup_owner = operation.BACKUP_OWNER_UID
+        mock = patch.object(operation, "BACKUP_OWNER_UID", os.getuid())
+        mock.start()
+        self.addCleanup(mock.stop)
+        self.backup.mkdir(mode=0o700)
+        for name in self.files:
+            operation._write_exclusive(self.backup / f"{name}.py", self.original[name])
+        self.header = {"reviewed_source_commit": operation.REVIEWED_SOURCE_COMMIT,
+                       "preimage_sha256": operation.PREIMAGE_SHA256, "target_sha256": operation.TARGET_SHA256,
+                       "metadata": {name: {"uid": info[0], "gid": info[1], "mode": info[2]} for name, info in self.metadata.items()}}
+        operation._write_exclusive(self.backup / "metadata.json", json.dumps(self.header).encode())
+        self.immutable = {p.name: (p.read_bytes(), p.stat().st_uid, p.stat().st_gid, stat.S_IMODE(p.stat().st_mode)) for p in self.backup.iterdir()}
+
+    def assert_backup_unchanged(self) -> None:
+        actual = {name: ((self.backup / name).read_bytes(), (self.backup / name).stat().st_uid,
+                         (self.backup / name).stat().st_gid, stat.S_IMODE((self.backup / name).stat().st_mode)) for name in self.immutable}
+        self.assertEqual(actual, self.immutable)
+
+    def test_fixed_reviewed_prior_receipt_and_root_backup_owner_are_source_owned(self) -> None:
+        self.assertEqual(self.default_backup_owner, 0)
+        self.assertEqual(operation.REVIEWED_ROLLBACK_BINDING, {
+            "run_id": 37238721342, "head_sha": "a0ae533072693fbf407a1e9702abd062790a85c7",
+            "canonical_receipt_sha256": "6a2d54f0067f17fbc262b5fa85050e9bfbe4f89f07459f871d7446617d52d690",
+            "status": "rolled_back", "reason": "start_failed",
+        })
+
+    def test_one_retry_reuses_only_validated_backup_and_persists_admission_before_stop(self) -> None:
+        def checked(action):
+            self.assertTrue((self.backup / "retry-1/admission.json").is_file())
+            self.assertFalse((self.backup / "retry-1/terminal.json").exists())
+            return self.action(action)
+        with patch.object(operation, "_unit_action", side_effect=checked):
+            result = operation.retry_service_once(acknowledge_interruption=True)
+        self.assertEqual(result["status"], "applied")
+        self.assertEqual(result["operation"], "retry_once")
+        self.assertTrue(result["retry_slot_consumed"])
+        self.assertTrue(result["terminal_receipt_written"])
+        self.assertEqual(self.actions, ["stop", "start"])
+        admission = json.loads((self.backup / "retry-1/admission.json").read_text())
+        self.assertEqual(admission["reviewed_prior_run"], operation.REVIEWED_ROLLBACK_BINDING)
+        self.assertEqual(admission["retry_index"], 1)
+        terminal = json.loads((self.backup / "retry-1/terminal.json").read_text())
+        self.assertEqual(terminal["status"], "applied")
+        self.assert_backup_unchanged()
+        self.assert_protected()
+        self.assertNotIn("PRIVATE", json.dumps(result))
+        calls = list(self.actions)
+        again = operation.retry_service_once(acknowledge_interruption=True)
+        self.assertEqual(again["reason"], "retry_already_consumed")
+        self.assertEqual(self.actions, calls)
+        self.assert_backup_unchanged()
+
+    def test_missing_or_corrupt_or_duplicate_metadata_never_stops_or_creates_retry_marker(self) -> None:
+        path = self.backup / "metadata.json"
+        original = path.read_bytes()
+        for data in (b"PRIVATE invalid", b'{"metadata":{},"metadata":{}}', b'{}', None):
+            with self.subTest(data=data):
+                if data is None:
+                    path.unlink()
+                else:
+                    path.write_bytes(data)
+                result = operation.retry_service_once(acknowledge_interruption=True)
+                self.assertEqual(result["reason"], "original_backup_invalid")
+                self.assertEqual(self.actions, [])
+                self.assertFalse((self.backup / "retry-1").exists())
+                if data is None:
+                    operation._write_exclusive(path, original)
+                else:
+                    path.write_bytes(original)
+        self.assert_original()
+
+    def test_wrong_pin_hash_schema_boolean_uid_or_mode_rejects_original_metadata(self) -> None:
+        for mutate in (
+            lambda x: x.update(reviewed_source_commit="0" * 40),
+            lambda x: x["preimage_sha256"].update(gateway="0" * 64),
+            lambda x: x["target_sha256"].update(gateway="0" * 64),
+            lambda x: x.update(extra="PRIVATE"),
+            lambda x: x["metadata"]["gateway"].update(uid=True),
+            lambda x: x["metadata"]["gateway"].update(gid=-1),
+            lambda x: x["metadata"]["gateway"].update(mode=0o4640),
+        ):
+            with self.subTest(mutate=mutate):
+                header = json.loads(json.dumps(self.header))
+                mutate(header)
+                (self.backup / "metadata.json").write_text(json.dumps(header))
+                self.assertEqual(operation.retry_service_once(acknowledge_interruption=True)["reason"], "original_backup_invalid")
+                self.assertEqual(self.actions, [])
+                self.assertFalse((self.backup / "retry-1").exists())
+
+    def test_corrupt_missing_symlink_extra_file_or_unsafe_backup_mode_is_rejected(self) -> None:
+        path = self.backup / "gateway.py"
+        path.write_bytes(b"tampered")
+        self.assertEqual(operation.retry_service_once(acknowledge_interruption=True)["reason"], "original_backup_invalid")
+        path.unlink()
+        self.assertEqual(operation.retry_service_once(acknowledge_interruption=True)["reason"], "original_backup_invalid")
+        path.symlink_to(self.files["gateway"])
+        self.assertEqual(operation.retry_service_once(acknowledge_interruption=True)["reason"], "original_backup_invalid")
+        path.unlink()
+        operation._write_exclusive(path, self.original["gateway"])
+        extra = self.backup / "extra"
+        extra.write_bytes(b"PRIVATE")
+        self.assertEqual(operation.retry_service_once(acknowledge_interruption=True)["reason"], "original_backup_invalid")
+        extra.unlink()
+        path.chmod(0o644)
+        self.assertEqual(operation.retry_service_once(acknowledge_interruption=True)["reason"], "original_backup_invalid")
+        path.chmod(0o600)
+        with patch.object(operation, "BACKUP_OWNER_UID", os.getuid() + 1):
+            self.assertEqual(operation.retry_service_once(acknowledge_interruption=True)["reason"], "original_backup_invalid")
+        self.assertEqual(self.actions, [])
+        self.assertFalse((self.backup / "retry-1").exists())
+
+    def test_mixed_target_current_drift_owner_mode_or_missing_acknowledgement_is_not_admitted(self) -> None:
+        self.assertEqual(operation.retry_service_once()["reason"], "interruption_not_acknowledged")
+        for name, data in (("gateway", self.updated["gateway"]), ("codex_adapter", b"unknown source")):
+            with self.subTest(name=name):
+                self.files[name].write_bytes(data)
+                self.assertEqual(operation.retry_service_once(acknowledge_interruption=True)["reason"], "preimage_mismatch")
+                self.files[name].write_bytes(self.original[name])
+        path = self.files["gateway"]
+        path.chmod(0o600)
+        self.assertEqual(operation.retry_service_once(acknowledge_interruption=True)["reason"], "current_metadata_mismatch")
+        self.assertEqual(self.actions, [])
+        self.assertFalse((self.backup / "retry-1").exists())
+        self.assert_backup_unchanged()
+
+    def test_fresh_owner_or_group_must_match_original_metadata_without_privileged_test_chown(self) -> None:
+        for field in ("uid", "gid"):
+            with self.subTest(field=field):
+                header = json.loads(json.dumps(self.header))
+                header["metadata"]["gateway"][field] += 1
+                (self.backup / "metadata.json").write_text(json.dumps(header))
+                self.assertEqual(operation.retry_service_once(acknowledge_interruption=True)["reason"], "current_metadata_mismatch")
+                self.assertEqual(self.actions, [])
+                self.assertFalse((self.backup / "retry-1").exists())
+        self.assert_original()
+
+    def test_unverified_live_identity_does_not_consume_retry_slot(self) -> None:
+        self.process["entrypoint_matches_gateway"] = False
+        result = operation.retry_service_once(acknowledge_interruption=True)
+        self.assertEqual(result["reason"], "service_identity_unproven")
+        self.assertFalse(result["retry_slot_consumed"])
+        self.assertFalse((self.backup / "retry-1").exists())
+        self.assertEqual(self.actions, [])
+        self.assert_backup_unchanged()
+
+    def test_marker_is_exclusive_and_terminal_preexistence_never_overwrites_or_restarts(self) -> None:
+        terminal_data = b"other receipt must remain unchanged"
+
+        def third_party_terminal(action):
+            if action == "start":
+                operation._write_exclusive(self.backup / "retry-1/terminal.json", terminal_data)
+            return self.action(action)
+        with patch.object(operation, "_unit_action", side_effect=third_party_terminal):
+            result = operation.retry_service_once(acknowledge_interruption=True)
+        self.assertEqual(result["status"], "applied")
+        self.assertFalse(result["terminal_receipt_written"])
+        self.assertEqual(result["receipt_error"], "terminal_receipt_unavailable")
+        self.assertEqual((self.backup / "retry-1/terminal.json").read_bytes(), terminal_data)
+        self.assertEqual(self.actions, ["stop", "start"])
+        self.assert_backup_unchanged()
+
+    def test_existing_marker_and_simulated_crash_consume_retry_forever_without_reuse(self) -> None:
+        class SimulatedCrash(BaseException):
+            pass
+        with patch.object(operation, "_unit_action", side_effect=SimulatedCrash), self.assertRaises(SimulatedCrash):
+            operation.retry_service_once(acknowledge_interruption=True)
+        self.assertTrue((self.backup / "retry-1/admission.json").exists())
+        self.assertFalse((self.backup / "retry-1/terminal.json").exists())
+        self.assertEqual(operation.retry_service_once(acknowledge_interruption=True)["reason"], "retry_already_consumed")
+        self.assertEqual(self.actions, [])
+        self.assert_backup_unchanged()
+
+    def test_failed_retry_rolls_back_once_emits_terminal_and_never_retries_again(self) -> None:
+        with patch.object(operation, "_local_health", side_effect=[False, True]):
+            result = operation.retry_service_once(acknowledge_interruption=True)
+        self.assertEqual(result["status"], "rolled_back")
+        self.assertTrue(result["terminal_receipt_written"])
+        self.assertEqual(self.actions, ["stop", "start", "stop", "start"])
+        self.assert_original()
+        self.assert_backup_unchanged()
+        calls = list(self.actions)
+        self.assertEqual(operation.retry_service_once(acknowledge_interruption=True)["reason"], "retry_already_consumed")
+        self.assertEqual(self.actions, calls)
+
+    def test_terminal_receipt_failure_retains_true_runtime_outcome_without_extra_restart(self) -> None:
+        write = operation._write_exclusive
+
+        def fail_terminal(path, *args, **kwargs):
+            if Path(path).name == "terminal.json":
+                raise OSError("PRIVATE receipt disk full")
+            return write(path, *args, **kwargs)
+        with patch.object(operation, "_write_exclusive", side_effect=fail_terminal):
+            result = operation.retry_service_once(acknowledge_interruption=True)
+        self.assertEqual(result["status"], "applied")
+        self.assertFalse(result["terminal_receipt_written"])
+        self.assertEqual(result["receipt_error"], "terminal_receipt_unavailable")
+        self.assertEqual(self.actions, ["stop", "start"])
+        self.assert_backup_unchanged()
+        self.assertNotIn("PRIVATE", json.dumps(result))
+
+    def test_admission_receipt_failure_consumes_slot_without_stop_and_records_refusal_if_possible(self) -> None:
+        write = operation._write_exclusive
+
+        def fail_admission(path, *args, **kwargs):
+            if Path(path).name == "admission.json":
+                raise OSError("synthetic admission full disk")
+            return write(path, *args, **kwargs)
+        with patch.object(operation, "_write_exclusive", side_effect=fail_admission):
+            result = operation.retry_service_once(acknowledge_interruption=True)
+        self.assertEqual(result["reason"], "retry_admission_unavailable")
+        self.assertEqual(result["status"], "refused")
+        self.assertTrue(result["retry_slot_consumed"])
+        self.assertFalse(result["admission_receipt_written"])
+        self.assertTrue(result["terminal_receipt_written"])
+        self.assertEqual(self.actions, [])
+        self.assertEqual(operation.retry_service_once(acknowledge_interruption=True)["reason"], "retry_already_consumed")
+        self.assert_backup_unchanged()
+
+    def test_unexpected_phase_error_is_recovery_required_not_a_false_admission_refusal(self) -> None:
+        with patch.object(operation, "_unit_action", side_effect=RuntimeError("PRIVATE unexpected phase")):
+            result = operation.retry_service_once(acknowledge_interruption=True)
+        self.assertEqual(result["status"], "recovery_required")
+        self.assertEqual(result["reason"], "maintenance_state_unconfirmed")
+        self.assertTrue(result["terminal_receipt_written"])
+        self.assertEqual(self.actions, [])
+        self.assertNotIn("PRIVATE", json.dumps(result))
+
+    def test_retry_cli_receipt_failure_is_exit_failure_without_faking_runtime_rollback(self) -> None:
+        output = io.StringIO()
+        result = {"operation": "retry_once", "status": "applied", "terminal_receipt_written": False}
+        with patch.object(operation, "retry_service_once", return_value=result), contextlib.redirect_stdout(output):
+            self.assertEqual(operation.main(["retry-once", "--acknowledge-interruption"]), 1)
+        self.assertEqual(json.loads(output.getvalue())["status"], "applied")
+
+    def test_normal_maintain_still_refuses_existing_backup_and_never_stops(self) -> None:
+        self.assertEqual(operation.maintain_service(acknowledge_interruption=True)["reason"], "backup_unavailable")
+        self.assertEqual(self.actions, [])
+        self.assertFalse((self.backup / "retry-1").exists())
+        self.assert_backup_unchanged()
+
+    def test_retry_workflow_is_explicit_bound_and_separate_from_legacy_or_normal_maintenance(self) -> None:
+        workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/vps_codex_service_ops.yml").read_text()
+        job = workflow.split("  retry-audit-patch-once:\n", 1)[1].split("\n  org-health-token:", 1)[0]
+        self.assertIn("- retry-audit-patch-once", workflow)
+        self.assertIn("inputs.mode != 'retry-audit-patch-once'", workflow)
+        for value in ("inputs.mode == 'retry-audit-patch-once' && inputs.acknowledge_interruption",
+                      "environment: codex-vps-ops", "- self-hosted", "- codex-vps", "persist-credentials: false",
+                      '"$RUN_WORKFLOW_SHA" = "$RUN_SHA"', '"$(git rev-parse HEAD)" = "$RUN_SHA"',
+                      '"$current_main" = "$RUN_SHA"', '"$ACKNOWLEDGE_INTERRUPTION" = true',
+                      "env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C", "retry-once --acknowledge-interruption"):
+            self.assertIn(value, job)
+        self.assertLess(job.index("current_main="), job.index("manage_codex_audit_service_patch.py"))
+        for forbidden in ("deploy_codex_audit_service.sh", "secrets.", "nginx", "repair-ssh", "--path", "--unit", "--prior-run", "--force", "restart"):
             self.assertNotIn(forbidden, job)
 
 
@@ -1034,7 +1299,7 @@ class CodexServiceInspectionTests(unittest.TestCase):
             "RUN_WORKFLOW_REF": "QuantStrategyLab/AIAuditBridge/.github/workflows/vps_codex_service_ops.yml@refs/heads/main",
             "TEST_HEAD": sha, "TEST_MAIN": sha, "TEST_DIRTY": "", "ACKNOWLEDGE_INTERRUPTION": "true",
         }
-        for mode, boundary in (("inspect-audit-patch", "apply-audit-patch"), ("apply-audit-patch", "org-health-token")):
+        for mode, boundary in (("inspect-audit-patch", "apply-audit-patch"), ("apply-audit-patch", "retry-audit-patch-once"), ("retry-audit-patch-once", "org-health-token")):
             job = workflow.split(f"  {mode}:\n", 1)[1].split(f"\n  {boundary}:", 1)[0]
             step = job.split("      - name: Verify exact main workflow and clean checkout", 1)[1]
             script = textwrap.dedent(step.split("        run: |\n", 1)[1].split("      - name:", 1)[0])
@@ -1048,7 +1313,7 @@ class CodexServiceInspectionTests(unittest.TestCase):
                 ("RUN_WORKFLOW_REF", "QuantStrategyLab/AIAuditBridge/.github/workflows/other.yml@refs/heads/main"),
                 ("TEST_HEAD", "b" * 40), ("TEST_MAIN", "b" * 40), ("TEST_DIRTY", " M scripts/source.py"),
             ]
-            if mode == "apply-audit-patch":
+            if mode in ("apply-audit-patch", "retry-audit-patch-once"):
                 failures += [("ACKNOWLEDGE_INTERRUPTION", "false"), ("ACKNOWLEDGE_INTERRUPTION", "")]
             for key, value in failures:
                 with self.subTest(mode=mode, key=key):
