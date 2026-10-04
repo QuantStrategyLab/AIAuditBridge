@@ -48,6 +48,17 @@ TARGET_SHA256 = {
 # Creation is exclusive and never reused, even after a failed operation. This
 # serializes this one-shot entrypoint only, not other administrators.
 BACKUP_DIRECTORY = DEPLOY_DIRECTORY / ".audit-patch-backup-8dd1b0ca"
+BACKUP_OWNER_UID = 0  # the existing sudo-owned private backup, never caller-selected
+MAX_BACKUP_METADATA_BYTES = 8 * 1024
+# This prerequisite was independently reviewed from the exact GitHub run/step
+# receipt. It is source-owned, never supplied by a caller or inferred from a
+# directory. Runtime eligibility additionally requires the immutable backup
+# and fresh preimages/metadata/identity. No new GitHub/credential lookup exists.
+REVIEWED_ROLLBACK_BINDING = {
+    "run_id": 37238721342, "head_sha": "a0ae533072693fbf407a1e9702abd062790a85c7",
+    "canonical_receipt_sha256": "6a2d54f0067f17fbc262b5fa85050e9bfbe4f89f07459f871d7446617d52d690",
+    "status": "rolled_back", "reason": "start_failed",
+}
 UNIT_ACTION_TIMEOUT_SECONDS = 30
 HEALTH_TIMEOUT_SECONDS = 20
 SERVICE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -660,15 +671,31 @@ def _atomic_replace(path: Path, data: bytes, metadata: os.stat_result) -> None:
             os.close(parent_fd)
 
 
-def maintain_service(*, acknowledge_interruption: bool = False) -> dict:
-    """One reviewed two-file CAS maintenance, with code-only recovery.
+def _maintenance_inputs(result: dict) -> tuple | str:
+    targets, originals, metadata = {}, {}, {}
+    try:
+        for name, path in TARGET_FILES.items():
+            targets[name], _ = _file_snapshot(path)
+            if hashlib.sha256(targets[name]).hexdigest() != TARGET_SHA256[name]:
+                return "target_source_mismatch"
+        for name, path in SOURCE_FILES.items():
+            originals[name], metadata[name] = _file_snapshot(path)
+            if hashlib.sha256(originals[name]).hexdigest() != PREIMAGE_SHA256[name]:
+                return "preimage_mismatch"
+        unit = unit_metadata()
+        process = service_process_metadata(unit)
+        if (unit.get("active_state") != "active" or unit.get("sub_state") != "running"
+                or not all(process.get(key) is True for key in (
+                    "snapshot_coherent", "entrypoint_matches_gateway", "initial_environment_known_cli_choice"))):
+            return "service_identity_unproven"
+        result["job_counts"] = job_counts(JOB_DIRECTORY)
+        return targets, originals, metadata, unit
+    except (OSError, ValueError, KeyError):
+        return "backup_unavailable"
 
-    A complete snapshot would still omit sync requests; explicit acknowledgement
-    accepts possible interruption, never proves idle. Power loss/SIGKILL or a
-    failed restore needs operator recovery from the durable create-only backups.
-    A stale/unknown file is never overwritten and no request/model is replayed.
-    """
-    result = {
+
+def _maintenance_result() -> dict:
+    return {
         "operation": "maintain", "status": "refused", "reason": None,
         "failure_phase": None,
         "reviewed_source_commit": REVIEWED_SOURCE_COMMIT,
@@ -677,25 +704,24 @@ def maintain_service(*, acknowledge_interruption: bool = False) -> dict:
         "running_source_identity_verified": False, "runtime_python_environment_verified": False,
         "startup_status": {"start_command_ok": False, "disk_hashes_match": False, **_startup_status()},
     }
+
+
+def maintain_service(*, acknowledge_interruption: bool = False) -> dict:
+    """One reviewed two-file CAS maintenance, with code-only recovery.
+
+    A complete snapshot would still omit sync requests; explicit acknowledgement
+    accepts possible interruption, never proves idle. Power loss/SIGKILL or a
+    failed restore needs operator recovery from the durable create-only backups.
+    A stale/unknown file is never overwritten and no request/model is replayed.
+    """
+    result = _maintenance_result()
     if acknowledge_interruption is not True:
         return {**result, "reason": "interruption_not_acknowledged"}
-    targets, originals, metadata = {}, {}, {}
+    prepared = _maintenance_inputs(result)
+    if isinstance(prepared, str):
+        return {**result, "reason": prepared}
+    targets, originals, metadata, unit = prepared
     try:
-        for name, path in TARGET_FILES.items():
-            targets[name], _ = _file_snapshot(path)
-            if hashlib.sha256(targets[name]).hexdigest() != TARGET_SHA256[name]:
-                return {**result, "reason": "target_source_mismatch"}
-        for name, path in SOURCE_FILES.items():
-            originals[name], metadata[name] = _file_snapshot(path)
-            if hashlib.sha256(originals[name]).hexdigest() != PREIMAGE_SHA256[name]:
-                return {**result, "reason": "preimage_mismatch"}
-        unit = unit_metadata()
-        process = service_process_metadata(unit)
-        if (unit.get("active_state") != "active" or unit.get("sub_state") != "running"
-                or not all(process.get(key) is True for key in (
-                    "snapshot_coherent", "entrypoint_matches_gateway", "initial_environment_known_cli_choice"))):
-            return {**result, "reason": "service_identity_unproven"}
-        result["job_counts"] = job_counts(JOB_DIRECTORY)
         if BACKUP_DIRECTORY.parent.resolve() != BACKUP_DIRECTORY.parent:
             raise ValueError("noncanonical backup parent")
         BACKUP_DIRECTORY.mkdir(mode=0o700)  # exclusive one-shot lock and backup namespace
@@ -715,6 +741,10 @@ def maintain_service(*, acknowledge_interruption: bool = False) -> dict:
             return {**result, "reason": "service_changed_before_stop"}
     except (OSError, ValueError, KeyError):
         return {**result, "reason": "backup_unavailable"}
+    return _maintenance_phases(targets, originals, metadata, unit, result)
+
+
+def _maintenance_phases(targets: dict, originals: dict, metadata: dict, unit: dict, result: dict) -> dict:
     result["status"] = "maintenance_failed"
     if not _unit_action("stop"):
         return {**result, "reason": "stop_failed"}
@@ -779,15 +809,152 @@ def maintain_service(*, acknowledge_interruption: bool = False) -> dict:
     return {**result, "status": "rolled_back", "reason": reason, "source_sha256": PREIMAGE_SHA256}
 
 
+def _original_backup() -> tuple | str:
+    """Only the three original private files; no rewrite, rename or new backup.
+
+    The sole retry marker is checked without following it. Existing markers,
+    including incomplete/crashed attempts, consume the retry forever.
+    """
+    directory_fd = None
+    try:
+        if BACKUP_DIRECTORY.resolve() != BACKUP_DIRECTORY:
+            return "original_backup_invalid"
+        directory_fd = os.open(BACKUP_DIRECTORY, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        before = os.fstat(directory_fd)
+        if before.st_uid != BACKUP_OWNER_UID or stat.S_IMODE(before.st_mode) != 0o700:
+            return "original_backup_invalid"
+        try:
+            os.stat("retry-1", dir_fd=directory_fd, follow_symlinks=False)
+            return "retry_already_consumed"
+        except FileNotFoundError:
+            pass
+        names = set()
+        with os.scandir(directory_fd) as entries:
+            for index, entry in enumerate(entries):
+                if index >= 3:
+                    return "original_backup_invalid"
+                names.add(entry.name)
+        if names != {"gateway.py", "codex_adapter.py", "metadata.json"}:
+            return "original_backup_invalid"
+        files = {}
+        for name in ("gateway.py", "codex_adapter.py", "metadata.json"):
+            initial = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            limit = MAX_BACKUP_METADATA_BYTES if name == "metadata.json" else MAX_SOURCE_BYTES
+            data, _, _ = _regular_bytes(name, limit, directory_fd=directory_fd)
+            after = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if (data is None or not stat.S_ISREG(after.st_mode) or after.st_nlink != 1
+                    or after.st_uid != BACKUP_OWNER_UID or stat.S_IMODE(after.st_mode) != 0o600
+                    or _file_identity(initial) != _file_identity(after)):
+                return "original_backup_invalid"
+            files[name] = data
+        header = json.loads(files["metadata.json"], object_pairs_hook=_unique_object)
+        if (not isinstance(header, dict) or set(header) != {
+                "reviewed_source_commit", "preimage_sha256", "target_sha256", "metadata"}
+                or header["reviewed_source_commit"] != REVIEWED_SOURCE_COMMIT
+                or header["preimage_sha256"] != PREIMAGE_SHA256 or header["target_sha256"] != TARGET_SHA256
+                or not isinstance(header["metadata"], dict) or set(header["metadata"]) != set(SOURCE_FILES)):
+            return "original_backup_invalid"
+        for name in SOURCE_FILES:
+            info = header["metadata"][name]
+            if (not isinstance(info, dict) or set(info) != {"uid", "gid", "mode"}
+                    or any(type(info[key]) is not int or not 0 <= info[key] < 2**31 for key in ("uid", "gid"))
+                    or type(info["mode"]) is not int or not 0 <= info["mode"] <= 0o777
+                    or hashlib.sha256(files[f"{name}.py"]).hexdigest() != PREIMAGE_SHA256[name]):
+                return "original_backup_invalid"
+        after = os.fstat(directory_fd)
+        current = BACKUP_DIRECTORY.stat(follow_symlinks=False)
+        if _file_identity(before) != _file_identity(after) or (current.st_dev, current.st_ino) != (after.st_dev, after.st_ino):
+            return "original_backup_invalid"
+        return header, hashlib.sha256(files["metadata.json"]).hexdigest()
+    except (OSError, ValueError, KeyError, UnicodeError, RecursionError):
+        return "original_backup_invalid"
+    finally:
+        if directory_fd is not None:
+            os.close(directory_fd)
+
+
+def retry_service_once(*, acknowledge_interruption: bool = False) -> dict:
+    """One explicitly reviewed retry of one known rollback, not a general retry.
+
+    Original backups stay immutable. A durable separate retry-1 admission is
+    required before STOP and is never removed, even after crash/failure. A
+    terminal receipt failure reports the true runtime outcome and audit failure;
+    it cannot trigger another stop/start, rollback, model or request replay.
+    """
+    result = {**_maintenance_result(), "operation": "retry_once", "reviewed_prior_run": REVIEWED_ROLLBACK_BINDING,
+              "retry_slot_consumed": False, "admission_receipt_written": False, "terminal_receipt_written": False}
+    if acknowledge_interruption is not True:
+        return {**result, "reason": "interruption_not_acknowledged"}
+    original = _original_backup()
+    if isinstance(original, str):
+        return {**result, "reason": original, "retry_slot_consumed": original == "retry_already_consumed"}
+    header, header_hash = original
+    prepared = _maintenance_inputs(result)
+    if isinstance(prepared, str):
+        return {**result, "reason": prepared}
+    targets, originals, metadata, unit = prepared
+    for name, info in metadata.items():
+        if header["metadata"][name] != {"uid": info.st_uid, "gid": info.st_gid, "mode": stat.S_IMODE(info.st_mode)}:
+            return {**result, "reason": "current_metadata_mismatch"}
+    retry_directory = BACKUP_DIRECTORY / "retry-1"
+    try:
+        # No alternate namespace/fallback: mkdir is the exclusive sole-retry
+        # admission. Refused/crashed attempts cannot be silently reissued.
+        retry_directory.mkdir(mode=0o700)
+        result["retry_slot_consumed"] = True
+        operator_hash = source_hash(Path(__file__).resolve())
+        if operator_hash is None:
+            raise ValueError("operator hash unavailable")
+        admission = {"retry_index": 1, "reviewed_prior_run": REVIEWED_ROLLBACK_BINDING,
+                     "reviewed_source_commit": REVIEWED_SOURCE_COMMIT, "operator_disk_sha256": operator_hash,
+                     "original_metadata_sha256": header_hash, "preimage_sha256": PREIMAGE_SHA256,
+                     "target_sha256": TARGET_SHA256, "metadata": header["metadata"]}
+        _write_exclusive(retry_directory / "admission.json", json.dumps(admission, sort_keys=True).encode())
+        _sync_directory(retry_directory)
+        _sync_directory(BACKUP_DIRECTORY)
+        result["admission_receipt_written"] = True
+    except FileExistsError:
+        return {**result, "reason": "retry_already_consumed", "retry_slot_consumed": True}
+    except (OSError, ValueError):
+        # An admission write failure never authorizes STOP or namespace reuse.
+        outcome = {**result, "reason": "retry_admission_unavailable"}
+        if not result["retry_slot_consumed"]:
+            return outcome
+    else:
+        if unit_metadata() != unit:
+            outcome = {**result, "reason": "service_changed_before_stop"}
+        else:
+            try:
+                outcome = _maintenance_phases(targets, originals, metadata, unit, result)
+            except Exception:
+                # No unrequested restart after an unexpected phase error; the
+                # state is unconfirmed, not a pre-stop/admission refusal.
+                outcome = {**result, "status": "recovery_required", "reason": "maintenance_state_unconfirmed",
+                           "failure_phase": "maintenance_exception"}
+    try:
+        _write_exclusive(retry_directory / "terminal.json", json.dumps(outcome, sort_keys=True).encode())
+        _sync_directory(retry_directory)
+        return {**outcome, "terminal_receipt_written": True}
+    except (OSError, ValueError):
+        return {**outcome, "terminal_receipt_written": False, "receipt_error": "terminal_receipt_unavailable"}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("inspect", "maintain"))
+    parser.add_argument("operation", choices=("inspect", "maintain", "retry-once"))
     parser.add_argument("--acknowledge-interruption", action="store_true")
     args = parser.parse_args(argv)
-    result = (inspect_service() if args.operation == "inspect" else
-              maintain_service(acknowledge_interruption=args.acknowledge_interruption))
+    if args.operation == "inspect":
+        result = inspect_service()
+    elif args.operation == "maintain":
+        result = maintain_service(acknowledge_interruption=args.acknowledge_interruption)
+    else:
+        result = retry_service_once(acknowledge_interruption=args.acknowledge_interruption)
     print(json.dumps(result, sort_keys=True))
-    return 0 if args.operation == "inspect" or result["status"] == "applied" else 1
+    if args.operation == "inspect":
+        return 0
+    successful = result["status"] == "applied" and (args.operation != "retry-once" or result["terminal_receipt_written"] is True)
+    return 0 if successful else 1
 
 
 if __name__ == "__main__":
