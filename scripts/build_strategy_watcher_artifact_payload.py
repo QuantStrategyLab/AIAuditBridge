@@ -137,6 +137,17 @@ def _performance_artifact(value: object, *, expected_repository: str) -> dict[st
     return artifact
 
 
+def _comparison_evidence_identity(artifact: Mapping[str, Any]) -> tuple[str, str, str]:
+    """Bind validated observations to frozen config, logic and producer commits.
+
+    Producer commit equality is conservative: cross-producer compatibility is
+    unproven, not necessarily different economics. A docs-only producer revision
+    may therefore start a new baseline. Daily P1/P3 digests and cutoffs may evolve.
+    """
+    evidence = artifact["evidence"]
+    return evidence["p2_config_digest"], evidence["strategy_revision"], evidence["producer_revision"]
+
+
 def build_strategy_watcher_artifact_payload(
     *,
     current_artifact: object,
@@ -158,6 +169,8 @@ def build_strategy_watcher_artifact_payload(
     for key in ("strategy_profile", "candidate_kind", "domain"):
         if current[key] != baseline[key]:
             raise StrategyWatcherArtifactError("artifacts describe different research candidates")
+    if _comparison_evidence_identity(current) != _comparison_evidence_identity(baseline):
+        raise StrategyWatcherArtifactError("artifacts have unproven comparison identity")
     if _timestamp(baseline["generated_at"], "baseline generated_at") >= _timestamp(current["generated_at"], "current generated_at"):
         raise StrategyWatcherArtifactError("baseline must precede current observation")
     if baseline["as_of"] >= current["as_of"]:
@@ -201,14 +214,14 @@ def select_strategy_watcher_artifact_payload(
     if not isinstance(current_run_id, str) or not current_run_id.isdigit():
         raise StrategyWatcherArtifactError("invalid workflow run id")
     current = _performance_artifact(current_artifact, expected_repository=source_repository)
-    current_identity = tuple(current[key] for key in ("strategy_profile", "candidate_kind", "domain"))
+    current_identity = tuple(current[key] for key in ("strategy_profile", "candidate_kind", "domain")) + _comparison_evidence_identity(current)
     current_generated_at = _timestamp(current["generated_at"], "current generated_at")
 
     for baseline_run_id, baseline_artifact in observations[1:]:
         if not isinstance(baseline_run_id, str) or not baseline_run_id.isdigit():
             raise StrategyWatcherArtifactError("invalid workflow run id")
         baseline = _performance_artifact(baseline_artifact, expected_repository=source_repository)
-        baseline_identity = tuple(baseline[key] for key in ("strategy_profile", "candidate_kind", "domain"))
+        baseline_identity = tuple(baseline[key] for key in ("strategy_profile", "candidate_kind", "domain")) + _comparison_evidence_identity(baseline)
         if baseline_identity != current_identity:
             continue
         if _timestamp(baseline["generated_at"], "baseline generated_at") >= current_generated_at:

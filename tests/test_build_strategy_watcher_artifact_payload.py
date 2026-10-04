@@ -5,7 +5,7 @@ import sys
 import unittest
 from pathlib import Path
 
-from service.strategy_watch import evaluate_strategy_watch
+from service.strategy_watch import evaluate_strategy_watch, finding_to_research_task
 
 
 ROOT = Path(__file__).parents[1]
@@ -216,6 +216,116 @@ class StrategyWatcherArtifactPayloadTest(unittest.TestCase):
                 source_repository="QuantStrategyLab/UsEquitySnapshotPipelines",
                 workflow_file="soxl-p1-p3-daily-research.yml",
             )
+
+    def test_each_changed_frozen_evidence_identity_rejects_direct_comparison(self) -> None:
+        for key in ("p2_config_digest", "strategy_revision", "producer_revision"):
+            with self.subTest(key=key):
+                current = self._artifact(
+                    generated_at="2026-08-20T04:00:00Z", as_of="2026-08-19", sharpe=0.8
+                )
+                baseline = self._artifact(
+                    generated_at="2026-08-19T04:00:00Z", as_of="2026-08-18"
+                )
+                baseline["evidence"][key] = "f" * len(baseline["evidence"][key])
+
+                with self.assertRaisesRegex(module.StrategyWatcherArtifactError, "unproven comparison identity"):
+                    module.build_strategy_watcher_artifact_payload(
+                        current_artifact=current,
+                        baseline_artifact=baseline,
+                        source_repository="QuantStrategyLab/UsEquitySnapshotPipelines",
+                        workflow_file="tqqq-p1-p3-daily-research.yml",
+                        current_run_id="123456",
+                        baseline_run_id="123455",
+                    )
+
+    def test_selector_skips_unproven_identity_and_uses_nearest_qualified_baseline(self) -> None:
+        for key in ("p2_config_digest", "strategy_revision", "producer_revision"):
+            with self.subTest(key=key):
+                current = self._artifact(
+                    generated_at="2026-08-20T04:00:00Z", as_of="2026-08-19", sharpe=0.8
+                )
+                incompatible = self._artifact(
+                    generated_at="2026-08-19T04:00:00Z", as_of="2026-08-18", sharpe=2.0
+                )
+                incompatible["evidence"][key] = "f" * len(incompatible["evidence"][key])
+                nearest_qualified = self._artifact(
+                    generated_at="2026-08-18T04:00:00Z", as_of="2026-08-17", sharpe=1.0
+                )
+                older_qualified = self._artifact(
+                    generated_at="2026-08-17T04:00:00Z", as_of="2026-08-16", sharpe=1.5
+                )
+
+                payload = module.select_strategy_watcher_artifact_payload(
+                    observations=[
+                        ("123456", current),
+                        ("123455", incompatible),
+                        ("123454", nearest_qualified),
+                        ("123453", older_qualified),
+                    ],
+                    source_repository="QuantStrategyLab/UsEquitySnapshotPipelines",
+                    workflow_file="tqqq-p1-p3-daily-research.yml",
+                )
+
+                self.assertIsNotNone(payload)
+                assert payload is not None
+                self.assertEqual(payload["current_metrics"]["sharpe"], 0.8)
+                self.assertEqual(payload["baseline_metrics"]["sharpe"], 1.0)
+                self.assertTrue(payload["source"].endswith(":123454-123456"))
+
+    def test_all_unproven_baselines_produce_no_payload_or_research_task(self) -> None:
+        current = self._artifact(
+            generated_at="2026-08-20T04:00:00Z", as_of="2026-08-19", sharpe=0.8
+        )
+        observations = [("123456", current)]
+        for index, key in enumerate(("p2_config_digest", "strategy_revision", "producer_revision")):
+            baseline = self._artifact(
+                generated_at=f"2026-08-{19 - index:02d}T04:00:00Z",
+                as_of=f"2026-08-{18 - index:02d}",
+            )
+            baseline["evidence"][key] = "f" * len(baseline["evidence"][key])
+            observations.append((str(123455 - index), baseline))
+
+        payload = module.select_strategy_watcher_artifact_payload(
+            observations=observations,
+            source_repository="QuantStrategyLab/UsEquitySnapshotPipelines",
+            workflow_file="tqqq-p1-p3-daily-research.yml",
+        )
+
+        self.assertIsNone(payload)
+        tasks = [] if payload is None else [
+            finding_to_research_task(finding) for finding in evaluate_strategy_watch(payload)
+        ]
+        self.assertEqual(tasks, [])
+
+    def test_same_frozen_identity_allows_daily_input_and_evidence_changes(self) -> None:
+        current = self._artifact(
+            generated_at="2026-08-20T04:00:00Z", as_of="2026-08-19", sharpe=0.8
+        )
+        baseline = self._artifact(
+            generated_at="2026-08-19T04:00:00Z", as_of="2026-08-18"
+        )
+        baseline["evidence"]["p1_input_digest"] = "f" * 64
+        baseline["evidence"]["p3_evidence_id"] = "0" * 64
+
+        payload = module.build_strategy_watcher_artifact_payload(
+            current_artifact=current,
+            baseline_artifact=baseline,
+            source_repository="QuantStrategyLab/UsEquitySnapshotPipelines",
+            workflow_file="tqqq-p1-p3-daily-research.yml",
+            current_run_id="123456",
+            baseline_run_id="123455",
+        )
+
+        self.assertEqual(payload["research_task_evidence"], current["evidence"])
+        tasks = [finding_to_research_task(finding) for finding in evaluate_strategy_watch(payload)]
+        self.assertEqual(len(tasks), 1)
+        self.assertIsNotNone(tasks[0])
+        self.assertEqual(tasks[0]["authority"], {
+            "research_only": True,
+            "no_order": True,
+            "size_zero_required": True,
+            "p4_p5_p6_authorized": False,
+        })
 
 
 if __name__ == "__main__":
