@@ -560,6 +560,33 @@ def helper_known(files, name):
     return files.get(name, {}).get("matches_reviewed_helper") is True
 
 
+def helper_model_gate(env, props, entryfiles, rootfiles, unit):
+    """Existing pre-model predicates only; null means an input is unknown."""
+    checks = {
+        "entrypoint_helper_reviewed": entryfiles.get(base.SERVICES[unit], {}).get(
+            "matches_reviewed_helper"
+        ),
+        "telegram_helper_reviewed": rootfiles.get("source_telegram_env.sh", {}).get(
+            "matches_reviewed_helper"
+        ),
+        "path_absent_or_canonical": None
+        if env.get("PATH") is UNKNOWN
+        else env.get("PATH") in (None, "/usr/bin:/bin", "/bin:/usr/bin"),
+        "user_is_ubuntu": None
+        if props.get("User") is None
+        else props.get("User") == "ubuntu",
+    }
+    for name in ("BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS"):
+        checks[name.lower() + "_absent_or_empty"] = (
+            None if env[name] is UNKNOWN else env[name] in (None, "")
+        )
+    if unit == "codex-quant.service":
+        checks["common_helper_reviewed"] = rootfiles.get("common_env.sh", {}).get(
+            "matches_reviewed_helper"
+        )
+    return all(value is True for value in checks.values()), checks
+
+
 def common(env, origins, monitor):
     default(env, origins, "QUANT_MONITOR_ROOT", monitor, "common_default")
     root = monitor_root(monitor)
@@ -704,6 +731,7 @@ def collect(*, query=query_systemd, reader=None):
             "effective_paths": None,
             "selected_call_roots": {},
             "helper_model_status": "unknown",
+            "helper_model_gate_checks": None,
         }
         output["services"][unit] = result
         start = base.parse_exec(props.get("ExecStart"), script, pre=False)
@@ -738,18 +766,10 @@ def collect(*, query=query_systemd, reader=None):
                 else ("source_telegram_env.sh", "daily_briefing.sh"),
                 pin=unit == "codex-quant.service",
             )
-            safe = (
-                helper_known(entryfiles, script)
-                and helper_known(rootfiles, "source_telegram_env.sh")
-                and not any(
-                    env[x] not in (None, "")
-                    for x in ("BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS")
-                )
-                and env.get("PATH") in (None, "/usr/bin:/bin", "/bin:/usr/bin")
-                and props.get("User") == "ubuntu"
+            safe, result["helper_model_gate_checks"] = helper_model_gate(
+                env, props, entryfiles, rootfiles, unit
             )
             if unit == "codex-quant.service":
-                safe = safe and helper_known(rootfiles, "common_env.sh")
                 if safe:
                     result["common_selected_paths"] = common(
                         env, origins, initial_monitor

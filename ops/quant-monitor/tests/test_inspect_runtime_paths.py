@@ -144,6 +144,187 @@ class PathInspectionTests(unittest.TestCase):
         )
         self.assertEqual(deps["qpk-runtime.sha"]["pin"], "c" * 40)
 
+    def test_helper_model_gate_checks_path_and_user_guards(self):
+        cases = (
+            ("Environment", "", "path_absent_or_canonical", True),
+            ("Environment", "PATH=/usr/bin:/bin", "path_absent_or_canonical", True),
+            ("Environment", "PATH=/bin:/usr/bin", "path_absent_or_canonical", True),
+            ("Environment", "PATH=", "path_absent_or_canonical", False),
+            ("Environment", "PATH=/private/" + SECRET,
+             "path_absent_or_canonical", False),
+            ("PassEnvironment", "PATH", "path_absent_or_canonical", None),
+            ("User", "ubuntu", "user_is_ubuntu", True),
+            ("User", "", "user_is_ubuntu", False),
+            ("User", SECRET, "user_is_ubuntu", False),
+            ("User", None, "user_is_ubuntu", None),
+        )
+        for unit in m.base.SERVICES:
+            for key, value, check, expected in cases:
+                with self.subTest(unit=unit, key=key, value=value):
+                    p = props(unit)
+                    p[key] = value
+                    service = run({unit: p})["services"][unit]
+                    self.assertIs(service["helper_model_gate_checks"][check], expected)
+                    self.assertEqual(
+                        service["helper_model_status"],
+                        "supported" if expected is True else "unknown",
+                    )
+                    if expected is not True:
+                        self.assertIsNone(service["effective_paths"])
+                        self.assertEqual(service["selected_call_roots"], {})
+
+    def test_helper_model_gate_checks_each_shell_startup_guard(self):
+        for unit in m.base.SERVICES:
+            for control in ("BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS"):
+                for key, value, expected in (
+                    ("Environment", "", True),
+                    ("Environment", control + "=", True),
+                    ("Environment", control + "=" + SECRET, False),
+                    ("PassEnvironment", control, None),
+                ):
+                    with self.subTest(unit=unit, control=control, value=value):
+                        p = props(unit)
+                        p[key] = value
+                        service = run({unit: p})["services"][unit]
+                        self.assertIs(
+                            service["helper_model_gate_checks"][
+                                control.lower() + "_absent_or_empty"
+                            ],
+                            expected,
+                        )
+                        self.assertEqual(
+                            service["helper_model_status"],
+                            "supported" if expected is True else "unknown",
+                        )
+                        if expected is not True:
+                            self.assertIsNone(service["effective_paths"])
+
+    def test_helper_model_gate_checks_helper_mismatch_and_unknown(self):
+        for unit, script in m.base.SERVICES.items():
+            names = [
+                (script, "entrypoint_helper_reviewed"),
+                ("source_telegram_env.sh", "telegram_helper_reviewed"),
+            ]
+            if unit == "codex-quant.service":
+                names.append(("common_env.sh", "common_helper_reviewed"))
+            for name, check in names:
+                for expected in (False, None):
+                    with self.subTest(unit=unit, name=name, expected=expected):
+                        reader = FakeReader()
+                        original = reader.read
+
+                        def changed(path, **kwargs):
+                            if path.endswith("/" + name):
+                                if expected is None:
+                                    raise FileNotFoundError
+                                return b"unrecognized helper"
+                            return original(path, **kwargs)
+
+                        reader.read = changed
+                        service = run({unit: props(unit)}, reader)["services"][unit]
+                        self.assertIs(
+                            service["helper_model_gate_checks"][check], expected
+                        )
+                        self.assertIsNone(service["effective_paths"])
+                        self.assertEqual(service["helper_model_status"], "unknown")
+
+    def test_observed_release_projection_can_distinguish_remaining_guards(self):
+        releases = {
+            "codex-quant.service": "38d172262ed60be3eb9579256649f5a1aa31f45a",
+            "codex-daily-briefing.service": "1d06c4a2687a14545280855faf2cf854e524f8c7",
+        }
+        # These synthetic variants have the same known projection. The observed
+        # snapshot did not expose which PATH/User/startup predicate blocked it.
+        for check in (
+            "path_absent_or_canonical", "user_is_ubuntu", "bash_env_absent_or_empty"
+        ):
+            with self.subTest(check=check):
+                mapping = {}
+                for unit, sha in releases.items():
+                    root = m.base.RELEASE_ROOT + "/" + sha
+                    p = props(unit, root)
+                    p["EnvironmentFiles"] = m.TELEGRAM + " (ignore_errors=yes)"
+                    p["Environment"] = (
+                        "QUANT_MONITOR_ROOT=" + root + MON
+                        + " AIAUDIT_BRIDGE_ROOT=" + root
+                        + " QUANT_MONITOR_VENV=/private/" + SECRET
+                        + " PATH=" + (
+                            "/private/" + SECRET
+                            if check == "path_absent_or_canonical"
+                            else "/usr/bin:/bin"
+                        )
+                    )
+                    if check == "user_is_ubuntu":
+                        p["User"] = SECRET
+                    if check == "bash_env_absent_or_empty":
+                        p["Environment"] += " BASH_ENV=" + SECRET
+                    mapping[unit] = p
+                reader = FakeReader()
+                result = run(mapping, reader)
+                for unit, sha in releases.items():
+                    service = result["services"][unit]
+                    self.assertEqual(service["query_status"], "ok")
+                    self.assertTrue(service["configuration_snapshot_stable"])
+                    config = service["configuration"]
+                    self.assertEqual(config["environment_syntax"], "supported")
+                    self.assertFalse(config["pass_environment_affects_paths"])
+                    self.assertEqual(config["unset_variables"], [])
+                    file = config["environment_files"][0]
+                    self.assertEqual(file["category"], "runtime_telegram")
+                    self.assertEqual(file["status"], "missing")
+                    self.assertTrue(file["optional"])
+                    self.assertEqual(file["overrides"], [])
+                    self.assertEqual(
+                        service["systemd_execution_path_overrides"],
+                        {"PATH": True, "PYTHONPATH": False},
+                    )
+                    self.assertEqual(
+                        service["systemd_paths"]["QUANT_MONITOR_ROOT"]["root"][
+                            "release_sha"
+                        ],
+                        sha,
+                    )
+                    self.assertEqual(
+                        service["systemd_paths"]["QUANT_MONITOR_VENV"]["status"],
+                        "unknown",
+                    )
+                    self.assertIs(service["helper_model_gate_checks"][check], False)
+                    self.assertIsNone(service["effective_paths"])
+                    self.assertEqual(service["selected_call_roots"], {})
+                    self.assertEqual(service["helper_model_status"], "unknown")
+                    self.assertTrue(all(
+                        value is True
+                        for key, value in service["helper_model_gate_checks"].items()
+                        if key.endswith("helper_reviewed")
+                    ))
+                self.assertFalse(any(SECRET in path for path, _ in reader.requests))
+                self.assertNotIn(SECRET, json.dumps(result))
+
+    def test_helper_model_gate_checks_are_fixed_nonsecret_flags(self):
+        p = props()
+        values = ["/private/" + SECRET, SECRET]
+        p["Environment"] = "PATH=" + values[0] + " BASH_ENV=" + values[0]
+        p["User"] = values[1]
+        result = run({"codex-quant.service": p})
+        checks = result["services"]["codex-quant.service"]["helper_model_gate_checks"]
+        self.assertEqual(set(checks), {
+            "entrypoint_helper_reviewed", "telegram_helper_reviewed",
+            "common_helper_reviewed", "path_absent_or_canonical", "user_is_ubuntu",
+            "bash_env_absent_or_empty", "env_absent_or_empty",
+            "shellopts_absent_or_empty", "bashopts_absent_or_empty",
+        })
+        self.assertTrue(all(
+            value is None or type(value) is bool for value in checks.values()
+        ))
+        encoded = json.dumps(result)
+        for value in values:
+            self.assertNotIn(value, encoded)
+            self.assertNotIn(hashlib.sha256(value.encode()).hexdigest(), encoded)
+        p["ExecStart"] += SECRET
+        service = run({"codex-quant.service": p})["services"]["codex-quant.service"]
+        self.assertIsNone(service["helper_model_gate_checks"])
+        self.assertEqual(service["helper_model_status"], "unknown")
+
     def test_environmentfile_overrides_environment_then_unset(self):
         p = props()
         p["Environment"] = (
