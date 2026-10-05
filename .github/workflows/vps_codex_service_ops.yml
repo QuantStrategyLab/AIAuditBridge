@@ -11,9 +11,11 @@ on:
         options:
           - inspect
           - inspect-quant-runtime
+          - inspect-quant-paths
           - inspect-audit-patch
           - apply-audit-patch
           - retry-audit-patch-once
+          - release-gateway-failure-repairs
           - deploy
           - repair-ssh
           - install-org-health-token
@@ -35,8 +37,64 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  release-gateway-failure-repairs:
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'QuantStrategyLab/AIAuditBridge' && github.ref == 'refs/heads/main' && inputs.mode == 'release-gateway-failure-repairs' && inputs.acknowledge_interruption
+    environment: codex-vps-ops
+    runs-on:
+      - self-hosted
+      - codex-vps
+    timeout-minutes: 8
+    steps:
+      - name: Checkout exact operation commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Verify exact main and reviewed release bytes before acknowledged maintenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_REPOSITORY: ${{ github.repository }}
+          RUN_REF: ${{ github.ref }}
+          RUN_SHA: ${{ github.sha }}
+          RUN_WORKFLOW_REF: ${{ github.workflow_ref }}
+          RUN_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          RUN_EVENT_NAME: ${{ github.event_name }}
+          RUN_MODE: ${{ inputs.mode }}
+          ACKNOWLEDGE_INTERRUPTION: ${{ inputs.acknowledge_interruption }}
+        run: |
+          set -euo pipefail
+          [ "$ACKNOWLEDGE_INTERRUPTION" = true ]
+          [ "$RUN_EVENT_NAME" = workflow_dispatch ]
+          [ "$RUN_MODE" = release-gateway-failure-repairs ]
+          [ "$RUN_REPOSITORY" = QuantStrategyLab/AIAuditBridge ]
+          [ "$RUN_REF" = refs/heads/main ]
+          [[ "$RUN_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [ "$RUN_WORKFLOW_REF" = QuantStrategyLab/AIAuditBridge/.github/workflows/vps_codex_service_ops.yml@refs/heads/main ]
+          [ "$RUN_WORKFLOW_SHA" = "$RUN_SHA" ]
+          checkout_head="$(git rev-parse HEAD)"
+          [ "$checkout_head" = "$RUN_SHA" ]
+          checkout_status="$(git status --porcelain --untracked-files=all)"
+          [ -z "$checkout_status" ]
+          current_main="$(timeout 30s gh api repos/QuantStrategyLab/AIAuditBridge/git/ref/heads/main --jq '.object.sha')"
+          [ "$current_main" = "$RUN_SHA" ]
+          cd "$GITHUB_WORKSPACE"
+          sha256sum --check --status <<'SHA256'
+          551b219111a4df19e58e0f7f8dc93ab5507d95f05130b6a97b7442e5d1b0be0a  scripts/release_gateway_failure_repairs.py
+          e0e4367eefe8c6fb9ea6c973716890145957b3466e22c60e2714035e292424c8  scripts/manage_codex_audit_service_patch.py
+          60fc288f0135720e1a26daf897ad5c898cada7a884753a6e6495aaf6de4f7ec0  service/ai_gateway_service.py
+          e5175a5fb2c132b24dfc59a0af365c5af8ba2f3b8f6079fe398f97111c347cd0  service/adapters/codex_adapter.py
+          SHA256
+
+      - name: Release fixed gateway with create-only receipt and code-only rollback
+        run: |
+          set -euo pipefail
+          env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C \
+            /usr/bin/sudo -n /usr/bin/python3 -I -B \
+            "$GITHUB_WORKSPACE/scripts/release_gateway_failure_repairs.py" release --acknowledge-interruption
+
   vps-codex-service-ops:
-    if: inputs.mode != 'install-org-health-token' && inputs.mode != 'inspect-audit-patch' && inputs.mode != 'apply-audit-patch' && inputs.mode != 'retry-audit-patch-once' && inputs.mode != 'inspect-quant-runtime'
+    if: inputs.mode != 'install-org-health-token' && inputs.mode != 'inspect-audit-patch' && inputs.mode != 'apply-audit-patch' && inputs.mode != 'retry-audit-patch-once' && inputs.mode != 'inspect-quant-runtime' && inputs.mode != 'release-gateway-failure-repairs' && inputs.mode != 'inspect-quant-paths'
     # Bind to a protected environment when available so deploy/repair-ssh requires approval.
     environment: codex-vps-ops
     runs-on:
@@ -377,3 +435,46 @@ jobs:
       - name: Remove root staging payload
         if: always()
         run: sudo -n rm -rf "/run/codex-org-health-provision/${GITHUB_RUN_ID}"
+
+  inspect-quant-paths:
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'QuantStrategyLab/AIAuditBridge' && github.ref == 'refs/heads/main' && inputs.mode == 'inspect-quant-paths'
+    environment: codex-vps-ops
+    runs-on:
+      - self-hosted
+      - codex-vps
+    timeout-minutes: 5
+    steps:
+      - name: Checkout exact operation commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Verify exact main workflow and clean checkout before host inspection
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_REPOSITORY: ${{ github.repository }}
+          RUN_REF: ${{ github.ref }}
+          RUN_SHA: ${{ github.sha }}
+          RUN_WORKFLOW_REF: ${{ github.workflow_ref }}
+          RUN_WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          [ "$RUN_REPOSITORY" = QuantStrategyLab/AIAuditBridge ]
+          [ "$RUN_REF" = refs/heads/main ]
+          [[ "$RUN_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [ "$RUN_WORKFLOW_REF" = QuantStrategyLab/AIAuditBridge/.github/workflows/vps_codex_service_ops.yml@refs/heads/main ]
+          [ "$RUN_WORKFLOW_SHA" = "$RUN_SHA" ]
+          checkout_head="$(git rev-parse HEAD)"
+          [ "$checkout_head" = "$RUN_SHA" ]
+          checkout_status="$(git status --porcelain --untracked-files=all)"
+          [ -z "$checkout_status" ]
+          current_main="$(timeout 30s gh api repos/QuantStrategyLab/AIAuditBridge/git/ref/heads/main --jq '.object.sha')"
+          [ "$current_main" = "$RUN_SHA" ]
+
+      - name: Read fixed approved path overrides only
+        run: |
+          set -euo pipefail
+          env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C \
+            /usr/bin/python3 -I -B \
+            "$GITHUB_WORKSPACE/ops/quant-monitor/scripts/inspect_runtime_paths.py"

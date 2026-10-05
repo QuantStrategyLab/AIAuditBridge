@@ -212,3 +212,34 @@ checkout 或改写共享镜像；本地缺少该 commit 时会在创建 venv 前
 服务是否使用该路径须由独立的配置变更明确决定。
 
 生产 venv 是否已按此 lock 迁移须另做安装/读回；本说明不声称生产已切换。
+
+## Fixed read-only runtime path snapshot / 限定只读路径快照
+
+The separate `VPS Codex Service Ops` mode `inspect-quant-paths` runs only
+`inspect_runtime_paths.py` from an exact-main, clean checkout with a clean process
+environment and ordinary runner privileges. The existing `inspect-quant-runtime`
+mode is unchanged. This capability does not restart services or run pipelines.
+
+The new mode filters the seven documented root variables through fixed path
+classes, in the order `PassEnvironment` → `Environment` → `EnvironmentFiles` →
+`UnsetEnvironment` → reviewed helper defaults → Telegram env assignments. It
+never sources env files or returns their contents or hashes. It reports only
+fixed provenance categories, override flags, selected public dependency SHA256s,
+the current QPK pin, and bounded service invocation metadata before/after reads.
+Only the known runtime checkout and exact 40-hex release roots can supply public
+code reads; the legacy Projects roots are classified without reading them.
+
+Unsupported syntax, unknown paths, permissions, startup controls, noncanonical
+PATH, and symlink traversal fail to unknown. Implicit HOME is not inferred from a
+username. Paths are lexical configuration categories; filesystem identity is
+reported separately and links are never resolved. This is a current config
+snapshot, not proof of a running process's environment, Python import resolution,
+next invocation after the Telegram pre-start refresh, full-tree identity, or
+business recovery. Do not change permissions to make unknown fields readable.
+
+独立的 `inspect-quant-paths` 模式只在精确 main、干净源码和干净进程环境下，使用
+runner 原权限投影七项路径、覆盖来源、限定公开依赖哈希、QPK pin 与前后调用元数据。
+它不 source 环境文件，不输出或哈希凭证内容，不重启服务、不运行 pipeline。
+未知路径、语法、权限、启动控制、非标准 PATH 和符号链接均保留未知；不会仅根据
+用户名推断 HOME。路径类别是配置的字面分类，真实文件身份另报且不解析链接。
+当前快照不证明进程环境、Python 实际导入、下次 pre-start 后环境、全树一致或业务恢复。
