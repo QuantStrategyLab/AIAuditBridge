@@ -924,8 +924,11 @@ def _run_operational_diagnosis(
             return {"status": "skipped", "reason": "daily_attempt_limit"}
         if _operational_diagnosis_attempted(root, fingerprint):
             return {"status": "skipped", "reason": "already_attempted"}
-    except OSError:
-        return {"status": "deferred", "reason": "dedupe_state_unavailable"}
+    except OSError as exc:
+        return {
+            "status": "deferred", "reason": "dedupe_state_unavailable",
+            "failure_stage": "diagnosis_state_processing", "failure_category": _diagnosis_failure_category(exc),
+        }
 
     if config_loader is None and not (
         os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL") and os.environ.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
@@ -946,8 +949,11 @@ def _run_operational_diagnosis(
         return {"status": "deferred", "reason": "ai_gateway_not_configured"}
     try:
         _record_operational_diagnosis_attempt(root, fingerprint, attempt_date=attempt_date)
-    except OSError:
-        return {"status": "deferred", "reason": "dedupe_state_unavailable"}
+    except OSError as exc:
+        return {
+            "status": "deferred", "reason": "dedupe_state_unavailable",
+            "failure_stage": "diagnosis_attempt_persistence", "failure_category": _diagnosis_failure_category(exc),
+        }
     try:
         from service.provider_scenarios import (
             SCENARIO_ACCOUNT_OPERATIONAL_DIAGNOSIS,
@@ -963,19 +969,39 @@ def _run_operational_diagnosis(
             source_ref="main",
             timeout=600,
         )
-    except Exception:
-        return {"status": "unavailable", "reason": "codex_outcome_unknown"}
+    except Exception as exc:
+        return {
+            "status": "unavailable", "reason": "codex_outcome_unknown",
+            "failure_stage": "diagnosis_execution", "failure_category": _diagnosis_failure_category(exc),
+        }
 
     raw = result.raw if isinstance(getattr(result, "raw", None), dict) else {}
     if raw.get("status") == "deferred":
         try:
             _forget_operational_diagnosis_attempt(root, fingerprint)
-        except OSError:
-            return {"status": "unavailable", "reason": "dedupe_state_unavailable"}
+        except OSError as exc:
+            return {
+                "status": "unavailable", "reason": "dedupe_state_unavailable",
+                "failure_stage": "diagnosis_deferred_state_update", "failure_category": _diagnosis_failure_category(exc),
+            }
         return {"status": "deferred", "reason": "capacity_unavailable"}
     if result.success is True and raw.get("status") == "succeeded" and raw.get("job_id"):
         return {"status": "succeeded", "job_id": str(raw["job_id"])}
-    return {"status": "unavailable", "reason": "codex_result_unavailable"}
+    return {
+        "status": "unavailable", "reason": "codex_result_unavailable",
+        "failure_stage": "diagnosis_result_processing", "failure_category": "result_unavailable",
+    }
+
+
+def _diagnosis_failure_category(error: Exception) -> str:
+    """Fixed interface-error categories, without inferring a private cause."""
+    return {
+        OSError: "io_error", FileNotFoundError: "io_error", PermissionError: "io_error",
+        IsADirectoryError: "io_error", NotADirectoryError: "io_error", TimeoutError: "io_error",
+        ValueError: "value_error", json.JSONDecodeError: "value_error",
+        TypeError: "type_error", KeyError: "key_error", AttributeError: "attribute_error",
+        RuntimeError: "runtime_error",
+    }.get(type(error), "unknown_error")
 
 
 def _read_diagnosis_cycle(path: Path, *, now: datetime, max_age: timedelta) -> tuple[datetime, list[dict[str, str]]]:
@@ -1021,25 +1047,34 @@ def diagnose_recent_cycles(root: Path, *, now: datetime | None = None) -> dict[s
     """Diagnose at most one unattempted recent category set, without recollection."""
     now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     state_root = root / "data/diagnosis-consumer"
+    failure_stage = "diagnosis_state_processing"
     try:
         state = _load_operational_diagnosis_state(state_root)
         last_date = state.get("operational_diagnosis_last_attempt_date")
         if last_date is not None and last_date >= now.date().isoformat():
             return {"status": "skipped", "reason": "daily_attempt_limit"}
+        failure_stage = "cycle_discovery"
         paths = sorted((root / "data/health").glob("cycle_*.json"))
         if not paths:
             raise ValueError("latest cycle unavailable")
+        failure_stage = "latest_cycle_input_processing"
         latest_at, latest_errors = _read_diagnosis_cycle(paths[-1], now=now, max_age=timedelta(hours=2))
+        failure_stage = "recent_cycle_selection"
         cutoff_name = f"cycle_{(now - timedelta(hours=24)).strftime('%Y%m%dT%H%M%SZ')}.json"
         recent = [path for path in paths if path.name >= cutoff_name]
         if len(recent) > 512:
-            return {"status": "rejected", "reason": "recent_cycle_limit_exceeded"}
+            return {
+                "status": "rejected", "reason": "recent_cycle_limit_exceeded",
+                "failure_stage": "recent_cycle_selection", "failure_category": "input_limit_exceeded",
+            }
         for path in reversed(recent):
+            failure_stage = "recent_cycle_input_processing"
             observed_at, errors = _read_diagnosis_cycle(path, now=now, max_age=timedelta(hours=24))
             if observed_at > latest_at:
                 raise ValueError("cycle order invalid")
             if not errors:
                 continue
+            failure_stage = "recent_cycle_selection"
             fingerprint = _operational_diagnosis_fingerprint(errors)
             if fingerprint in state.get("operational_diagnosis_attempts", []):
                 continue
@@ -1051,13 +1086,17 @@ def diagnose_recent_cycles(root: Path, *, now: datetime | None = None) -> dict[s
                     "partially_observed" if remaining else "not_observed_in_latest"
                 ),
             }
+            failure_stage = "diagnosis_processing"
             result = _run_operational_diagnosis(
                 state_root, errors, fingerprint, observation=observation,
                 attempt_date=now.date().isoformat(),
             )
             return {**result, "observation": observation}
-    except (OSError, ValueError, KeyError, TypeError, AttributeError):
-        return {"status": "rejected", "reason": "recent_cycles_or_state_unavailable"}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        return {
+            "status": "rejected", "reason": "recent_cycles_or_state_unavailable",
+            "failure_stage": failure_stage, "failure_category": _diagnosis_failure_category(exc),
+        }
     return {"status": "skipped", "reason": "no_unattempted_recent_errors"}
 
 

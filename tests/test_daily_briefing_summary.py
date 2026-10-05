@@ -173,6 +173,7 @@ def test_summary_only_missing_report_is_sanitized_unavailable(tmp_path, capsys):
     result = json.loads(capsys.readouterr().out)
     assert result == {"day": "", "ai_summary": {
         "status": "unavailable", "reason": "briefing_input_unavailable", "advisory_only": True,
+        "failure_stage": "briefing_directory_check", "failure_category": "input_unavailable",
     }}
     execute.assert_not_called()
 
@@ -289,6 +290,82 @@ def test_summary_only_deferred_exits_zero_for_oidc_actions(report, capsys):
         assert main(["--report-dir", str(path), "--day", "2026-09-09", "--summary-only"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["ai_summary"]["status"] == "deferred"
+
+
+@pytest.mark.parametrize("call,stage", [
+    ("consume_briefing_dir", "briefing_input_processing"),
+    ("summarize_briefing", "summary_processing"),
+])
+@pytest.mark.parametrize("error,category", [
+    (OSError, "io_error"), (ValueError, "value_error"),
+    (TypeError, "type_error"), (KeyError, "key_error"),
+    (OverflowError, "overflow_error"),
+])
+def test_summary_only_identifies_caught_call_without_exception_details(report, capsys, call, stage, error, category):
+    with patch(f"scripts.consume_daily_briefing.{call}", side_effect=error("private-marker /private/account token")), patch(
+        "client.gateway_client.AiGatewayClient.execute",
+    ) as execute, patch("scripts.consume_daily_briefing.dispatch_briefing_result") as dispatch:
+        assert main(["--report-dir", str(report[0]), "--summary-only"]) == 3
+    output = capsys.readouterr()
+    summary = json.loads(output.out)["ai_summary"]
+    assert summary == {
+        "status": "unavailable", "reason": "briefing_input_unavailable", "advisory_only": True,
+        "failure_stage": stage, "failure_category": category,
+    }
+    assert "private" not in output.out + output.err and str(report[0]) not in output.out
+    execute.assert_not_called()
+    dispatch.assert_not_called()
+
+
+def test_summary_only_unknown_exception_subclass_is_generic_and_uncaught_types_still_raise(report, capsys):
+    class PrivateAccountError(ValueError):
+        pass
+
+    with patch("scripts.consume_daily_briefing.consume_briefing_dir", side_effect=PrivateAccountError("private-marker")):
+        assert main(["--report-dir", str(report[0]), "--summary-only"]) == 3
+    output = capsys.readouterr()
+    assert json.loads(output.out)["ai_summary"]["failure_category"] == "unknown_error"
+    assert "PrivateAccountError" not in output.out + output.err
+    with patch("scripts.consume_daily_briefing.consume_briefing_dir", side_effect=RuntimeError("private-marker")), pytest.raises(RuntimeError):
+        main(["--report-dir", str(report[0]), "--summary-only"])
+
+
+@pytest.mark.parametrize("reason,stage,category", [
+    ("briefing_input_unavailable", "briefing_input_validation", "input_unavailable"),
+    ("briefing_source_time_unavailable", "briefing_input_validation", "input_unavailable"),
+    ("github_oidc_required", "summary_configuration", "configuration_unavailable"),
+    ("ai_gateway_not_configured", "summary_configuration", "configuration_unavailable"),
+    ("source_repository_required", "summary_configuration", "configuration_unavailable"),
+    ("summary_execution_unavailable", "summary_execution", "outcome_unknown"),
+    ("summary_result_unavailable", "summary_result_processing", "result_unavailable"),
+])
+def test_summary_only_projects_defined_failure_reason_without_new_calls(report, capsys, reason, stage, category):
+    with patch("scripts.consume_daily_briefing.summarize_briefing", return_value={
+        "status": "unavailable", "reason": reason, "advisory_only": True,
+    }) as summarize, patch("client.gateway_client.AiGatewayClient.execute") as execute:
+        assert main(["--report-dir", str(report[0]), "--summary-only"]) == 3
+    summary = json.loads(capsys.readouterr().out)["ai_summary"]
+    assert summary["reason"] == reason and summary["failure_stage"] == stage
+    assert summary["failure_category"] == category and summarize.call_count == 1
+    execute.assert_not_called()
+
+
+def test_summary_only_sdk_response_processing_failure_keeps_unknown_and_no_replay(report, capsys):
+    class BadResponse:
+        @property
+        def raw(self):
+            raise TypeError("private-marker /private/account token")
+
+    with patch("client.gateway_client.AiGatewayClient.execute", return_value=BadResponse()) as execute, patch(
+        "scripts.consume_daily_briefing.dispatch_briefing_result",
+    ) as dispatch:
+        assert main(["--report-dir", str(report[0]), "--summary-only"]) == 3
+    output = capsys.readouterr()
+    summary = json.loads(output.out)["ai_summary"]
+    assert summary["status"] == "unavailable" and summary["reason"] == "briefing_input_unavailable"
+    assert summary["failure_stage"] == "summary_processing" and summary["failure_category"] == "type_error"
+    assert "private" not in output.out + output.err and execute.call_count == 1
+    dispatch.assert_not_called()
 
 
 @pytest.mark.parametrize("field,value", [

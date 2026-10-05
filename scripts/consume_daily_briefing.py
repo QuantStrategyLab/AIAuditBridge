@@ -339,6 +339,28 @@ def _dispatch_failed(summary: object) -> bool:
     ) > 0
 
 
+def _failure_category(error: Exception) -> str:
+    """Fixed interface-error categories; never expose exception text or names."""
+    return {
+        OSError: "io_error", FileNotFoundError: "io_error", PermissionError: "io_error",
+        IsADirectoryError: "io_error", NotADirectoryError: "io_error", TimeoutError: "io_error",
+        ValueError: "value_error", json.JSONDecodeError: "value_error",
+        TypeError: "type_error", KeyError: "key_error", OverflowError: "overflow_error",
+    }.get(type(error), "unknown_error")
+
+
+# These reasons identify explicit returns in summarize_briefing, not root causes.
+_SUMMARY_FAILURE_DETAILS = {
+    "briefing_input_unavailable": ("briefing_input_validation", "input_unavailable"),
+    "briefing_source_time_unavailable": ("briefing_input_validation", "input_unavailable"),
+    "github_oidc_required": ("summary_configuration", "configuration_unavailable"),
+    "ai_gateway_not_configured": ("summary_configuration", "configuration_unavailable"),
+    "source_repository_required": ("summary_configuration", "configuration_unavailable"),
+    "summary_execution_unavailable": ("summary_execution", "outcome_unknown"),
+    "summary_result_unavailable": ("summary_result_processing", "result_unavailable"),
+}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Consume quant-monitor daily briefing reports.")
     source = parser.add_mutually_exclusive_group(required=True)
@@ -405,17 +427,29 @@ def main(argv: list[str] | None = None) -> int:
         if args.summary_only:
             print(json.dumps({"day": args.day, "ai_summary": {
                 "status": "unavailable", "reason": "briefing_input_unavailable", "advisory_only": True,
+                "failure_stage": "briefing_directory_check", "failure_category": "input_unavailable",
             }}))
             return 3
         print(json.dumps({"ok": False, "error": f"report_dir_not_found: {report_dir}"}))
         return 1
 
     if args.summary_only:
+        failure_stage = "briefing_input_processing"
         try:
             result = consume_briefing_dir(report_dir, day=args.day)
+            failure_stage = "summary_processing"
             summary = summarize_briefing(result, dry_run=args.dry_run)
-        except (OSError, ValueError, TypeError, KeyError, OverflowError):
-            summary = {"status": "unavailable", "reason": "briefing_input_unavailable", "advisory_only": True}
+        except (OSError, ValueError, TypeError, KeyError, OverflowError) as exc:
+            summary = {
+                "status": "unavailable", "reason": "briefing_input_unavailable", "advisory_only": True,
+                "failure_stage": failure_stage, "failure_category": _failure_category(exc),
+            }
+        else:
+            if isinstance(summary, dict) and summary.get("status") == "unavailable":
+                reason = summary.get("reason")
+                details = _SUMMARY_FAILURE_DETAILS.get(reason) if isinstance(reason, str) else None
+                stage, category = details or ("summary_processing", "unknown_error")
+                summary = {**summary, "failure_stage": stage, "failure_category": category}
         print(json.dumps({"day": args.day, "ai_summary": summary}, ensure_ascii=False, indent=2))
         # deferred = trusted capacity/scheduling decision with artifact; do not
         # fail the OIDC Actions job (red CI) the way unavailable/input errors do.
