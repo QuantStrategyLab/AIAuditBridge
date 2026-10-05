@@ -56,6 +56,15 @@ CODE_NAMES = (
     "load_telegram_env.sh",
 )
 QPK_NAMES = ("drift_detector.py", "health_dashboard.py", "performance_monitor.py")
+DAILY_IMPORT_FILES = (
+    "service/__init__.py", "service/briefing_consumer.py",
+    "service/briefing_dispatch.py", "service/runtime_digest.py",
+    "service/dual_review_briefing.py", "service/dual_review_dispatch.py",
+    "service/dual_review_orchestrator.py",
+)
+HEALTH_IMPORT_FILES = ("service/__init__.py", "service/briefing_dispatch.py",
+                       "service/strategy_watch.py", "scripts/run_strategy_optimization_watcher.py")
+IDENTITY_RELATIVE_FILES = DAILY_IMPORT_FILES + HEALTH_IMPORT_FILES + (base.MONITOR + "/.venv/pyvenv.cfg",)
 EXPECTED = {
     "health_check.sh": {
         "2d9ec4a9240b7547f17886015c525f43826d8d7e749b5b61a904accd52408241"
@@ -148,6 +157,9 @@ def env_category(path):
 
 
 def code_allowed(path):
+    for relative in IDENTITY_RELATIVE_FILES:
+        if path.endswith("/" + relative) and base.classify_root(path[: -len("/" + relative)]):
+            return True
     for name in CODE_NAMES:
         if path.endswith(
             "/" + base.MONITOR + "/scripts/" + name
@@ -208,6 +220,8 @@ class Reader:
         limit = (
             65536
             if environment
+            else 4096
+            if path.endswith("/.venv/pyvenv.cfg")
             else 256
             if path.endswith("/qpk-runtime.sha")
             else 2 * 1024 * 1024
@@ -246,6 +260,42 @@ class Reader:
             ) != (after.st_size, after.st_mtime_ns, after.st_ctime_ns):
                 raise OSError("unstable file")
             return data
+
+    def identity_entry(self, path):
+        """One fixed lstat/readlink, never follow an unknown link or list a directory."""
+        allowed = path in ("/usr/bin/python3", "/usr/bin/python3.12")
+        for suffix in ("/" + base.MONITOR + "/.venv", "/" + base.MONITOR + "/data",
+                       "/" + base.MONITOR + "/.venv/bin/python",
+                       "/" + base.MONITOR + "/.venv/bin/python3"):
+            allowed = allowed or path.endswith(suffix) and base.classify_root(path[: -len(suffix)]) is not None
+        if not allowed:
+            raise ValueError("outside fixed identity metadata readset")
+        parts = path.split("/")
+        parent = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            for part in parts[1:-1]:
+                new = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+                os.close(parent)
+                parent = new
+            before = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
+            result = {"kind": "directory" if stat.S_ISDIR(before.st_mode) else
+                      "regular" if stat.S_ISREG(before.st_mode) else "symlink" if stat.S_ISLNK(before.st_mode) else "other",
+                      "executable_mode": bool(before.st_mode & 0o111), "accepted_link_target": None}
+            if stat.S_ISLNK(before.st_mode):
+                raw = os.readlink(parts[-1], dir_fd=parent)
+                target = os.path.normpath(os.path.join(os.path.dirname(path), raw))
+                after = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
+                if (before.st_ino, before.st_mtime_ns, before.st_ctime_ns) != (after.st_ino, after.st_mtime_ns, after.st_ctime_ns):
+                    raise OSError("unstable identity metadata")
+                fixed = (base.RUNTIME_ROOT + "/" + base.MONITOR + "/.venv",
+                         base.RUNTIME_ROOT + "/" + base.MONITOR + "/data",
+                         "/usr/bin/python3", "/usr/bin/python3.12")
+                # Return only fixed public targets; never return an unrecognized link value.
+                if target in fixed:
+                    result["accepted_link_target"] = target
+            return result
+        finally:
+            os.close(parent)
 
 
 def query_systemd(unit):
@@ -701,6 +751,184 @@ def invocation(props):
     return output
 
 
+def identity_metadata(reader, path):
+    try:
+        return reader.identity_entry(path)
+    except FileNotFoundError:
+        return {"kind": "missing"}
+    except (OSError, ValueError, AttributeError):
+        return {"kind": "unknown"}
+
+
+def identity_alias(reader, path, category):
+    """Only the installer's exact shared data/venv link can be mapped once."""
+    if not isinstance(path, str):
+        return None
+    descriptor = classify(path)
+    if descriptor["category"] != category:
+        return None
+    suffix = "/" + base.MONITOR + ("/.venv" if category == "venv" else "/data")
+    prefix = path if category == "venv" else path.split("/data/", 1)[0] + "/data"
+    meta = identity_metadata(reader, prefix)
+    if meta["kind"] == "directory":
+        return path
+    target = base.RUNTIME_ROOT + suffix
+    if meta["kind"] == "symlink" and meta.get("accepted_link_target") == target:
+        return target + path[len(prefix):]
+    return None
+
+
+def static_interpreter(reader, path_value, venv=None, *, common_prepend=True):
+    result = {"status": "unknown", "stop_reason": None, "candidate_kind": None,
+              "candidate_path_sha256": None, "binary_bytes_verified": False,
+              "candidate_executable_metadata_verified": False, "pyvenv_cfg": None}
+    prefix = None
+    if venv is not None:
+        if classify(venv)["category"] != "venv":
+            result["stop_reason"] = "unclassified_venv"
+            return result
+        selected = identity_alias(reader, venv, "venv")
+        if selected is None:
+            result["stop_reason"] = "metadata_unavailable"
+            return result
+        result["pyvenv_cfg"] = public_hash(reader, selected + "/pyvenv.cfg")
+        enabled = identity_metadata(reader, selected + "/bin/python")
+        if enabled["kind"] == "unknown" or enabled["kind"] == "other":
+            result["stop_reason"] = "venv_python_metadata_unknown"
+            return result
+        if enabled["kind"] == "regular" and enabled.get("executable_mode"):
+            prefix = selected + "/bin"
+        elif enabled["kind"] == "symlink":
+            target = enabled.get("accepted_link_target")
+            if target not in ("/usr/bin/python3", "/usr/bin/python3.12"):
+                result["stop_reason"] = "venv_python_link_unknown"
+                return result
+            # Symlink mode is irrelevant to -x. Check only its exact fixed target.
+            target_meta = identity_metadata(reader, target)
+            if target_meta["kind"] != "regular" or not target_meta.get("executable_mode"):
+                result["stop_reason"] = "venv_python_target_unknown"
+                return result
+            prefix = selected + "/bin"
+    if path_value is UNKNOWN or path_value is None:
+        result["stop_reason"] = "inherited_path_unknown"
+        return result
+    paths = path_value.split(":") if isinstance(path_value, str) else []
+    if prefix and common_prepend:
+        paths.insert(0, prefix)
+    if not paths or len(paths) > 16:
+        result["stop_reason"] = "path_shape_unsupported"
+        return result
+    for directory in paths:
+        if directory not in ("/usr/bin", "/bin", prefix) or not directory:
+            result["stop_reason"] = "unclassified_path_prefix"
+            return result
+        # Do not traverse /bin's symlink; its alias is not proven by this readset.
+        if directory == "/bin":
+            result["stop_reason"] = "system_bin_alias_unverified"
+            return result
+        candidate = directory + "/python3"
+        meta = identity_metadata(reader, candidate)
+        if meta["kind"] == "missing":
+            continue
+        if meta["kind"] == "regular" and not meta.get("executable_mode"):
+            continue
+        if meta["kind"] not in ("regular", "symlink"):
+            result["stop_reason"] = "python3_metadata_unknown"
+            return result
+        if meta["kind"] == "symlink" and meta.get("accepted_link_target") not in ("/usr/bin/python3", "/usr/bin/python3.12"):
+            result["stop_reason"] = "python3_link_unknown"
+            return result
+        if meta["kind"] == "symlink":
+            target_meta = identity_metadata(reader, meta["accepted_link_target"])
+            if target_meta["kind"] != "regular" or not target_meta.get("executable_mode"):
+                result["stop_reason"] = "python3_target_metadata_unknown"
+                return result
+        result.update(status="candidate_metadata_only", candidate_kind="venv" if directory == prefix else "system",
+                      candidate_path_sha256=base.digest(candidate), candidate_executable_metadata_verified=True)
+        return result
+    result["stop_reason"] = "python3_not_found_in_fixed_paths"
+    return result
+
+
+def static_identity_output():
+    return {"scope": "next_invocation_static_selection", "not_historical_adoption": True,
+              "status": "unknown", "stop_reason": None, "interpreter_invoked": False,
+              "import_execution_proof": False, "import_resolution_proof": False,
+              "roots": {}, "files": {}, "import_candidates": None, "interpreter": None}
+
+
+def static_adoption_identity(unit, env, origins, reader, monitor, entry, checks):
+    """Independent bounded static evidence, never a relaxation of helper_model_gate."""
+    result = static_identity_output()
+    if not all(value is True for key, value in checks.items() if key != "path_absent_or_canonical"):
+        result["stop_reason"] = "existing_non_path_precondition_unknown_or_false"
+        return result
+    if monitor_root(monitor) is None:
+        result["stop_reason"] = "unclassified_monitor"
+        return result
+    env, origins = dict(env), dict(origins)
+    result["roots"] = {"entrypoint": classify(entry), "monitor": classify(monitor)}
+    captured_aab = env.get("AIAUDIT_BRIDGE_ROOT")
+    if unit == "codex-quant.service":
+        common(env, origins, monitor)
+        venv = env["QUANT_MONITOR_VENV"] if env["QUANT_MONITOR_VENV"] not in (None, "") else monitor + "/.venv"
+        aab = env.get("AIAUDIT_BRIDGE_ROOT")
+        qpk = env.get("QUANT_PLATFORM_KIT_ROOT")
+    elif captured_aab in (None, ""):
+        captured_aab = PROJECTS + "/AIAuditBridge" if env.get("HOME") == "/home/ubuntu" else UNKNOWN
+    source = telegram(env, origins, monitor, reader)
+    if source["status"] not in ("parsed", "missing") or source["shell_alias_override"]:
+        result["stop_reason"] = "telegram_selector_or_literal_configuration_unknown"
+        return result
+    if unit == "codex-daily-briefing.service":
+        aab = captured_aab
+        result["roots"]["consume_aab"] = classify(aab)
+        result["interpreter"] = static_interpreter(reader, env.get("PATH"))
+        child = env["QUANT_MONITOR_ROOT"] if env["QUANT_MONITOR_ROOT"] not in (None, "") else monitor
+        childfiles = add_monitor_files(reader, child, {}, ("common_env.sh", "source_telegram_env.sh", "daily_briefing_builder.py"))
+        parent_script = public_hash(reader, monitor + "/scripts/daily_briefing.sh")
+        if parent_script["matches_reviewed_helper"] is not True or not all(helper_known(childfiles, name) for name in ("common_env.sh", "source_telegram_env.sh")):
+            result["stop_reason"] = "daily_child_helper_unknown"
+            return result
+        childenv, childorigins = dict(env), dict(origins)
+        common(childenv, childorigins, child)
+        venv = childenv["QUANT_MONITOR_VENV"] if childenv["QUANT_MONITOR_VENV"] not in (None, "") else child + "/.venv"
+        qpk = childenv.get("QUANT_PLATFORM_KIT_ROOT")
+        childsource = telegram(childenv, childorigins, child, reader)
+        if childsource["status"] not in ("parsed", "missing") or childsource["shell_alias_override"]:
+            result["stop_reason"] = "daily_child_literal_configuration_unknown"
+            return result
+        result["roots"]["builder_monitor"] = classify(child)
+        result["builder_interpreter"] = static_interpreter(reader, childenv.get("PATH"), venv,
+            common_prepend=childorigins.get("PATH") != "source_telegram_env")
+        result["files"]["daily_briefing_builder.py"] = childfiles["daily_briefing_builder.py"]
+        selected_monitor = child
+        root_source = "captured_aab_with_pythonpath_dot"
+    else:
+        result["interpreter"] = static_interpreter(reader, env.get("PATH"), venv,
+            common_prepend=origins.get("PATH") != "source_telegram_env")
+        selected_monitor = monitor
+        root_source = "common_helper_qpk_src_then_aab_if_src_exists"
+    result["roots"]["import_aab"] = classify(aab)
+    result["roots"]["qpk"] = classify(qpk)
+    if not isinstance(aab, str) or base.classify_root(aab) is None:
+        result["stop_reason"] = "unclassified_import_aab"
+        return result
+    # Fixed file candidates only: no package import, finder hooks, .pth or setup code.
+    result["import_candidates"] = {"root_source": root_source, "path_precedence_proven": False,
+        "files": {relative: public_hash(reader, aab + "/" + relative)
+                  for relative in (DAILY_IMPORT_FILES if unit == "codex-daily-briefing.service" else HEALTH_IMPORT_FILES)}}
+    if unit == "codex-daily-briefing.service":
+        result["files"]["consume_daily_briefing.py"] = public_hash(reader, aab + "/scripts/consume_daily_briefing.py")
+    for name in (("health_cycle.py",) if unit == "codex-daily-briefing.service" else ("sync_lifecycle_artifacts.py", "health_cycle.py")):
+        result["files"][name] = public_hash(reader, selected_monitor + "/scripts/" + name)
+    actual_qpk = identity_alias(reader, qpk, "qpk_mirror")
+    result["qpk_import_candidates"] = {name: public_hash(reader, actual_qpk + "/src/quant_platform_kit/strategy_lifecycle/" + name)
+                                       for name in QPK_NAMES} if actual_qpk else None
+    result["status"] = "static_candidates_only"
+    return result
+
+
 def collect(*, query=query_systemd, reader=None):
     reader = reader or Reader()
     output = {
@@ -732,6 +960,7 @@ def collect(*, query=query_systemd, reader=None):
             "selected_call_roots": {},
             "helper_model_status": "unknown",
             "helper_model_gate_checks": None,
+            "static_adoption_identity": {**static_identity_output(), "stop_reason": "entrypoint_not_supported"},
         }
         output["services"][unit] = result
         start = base.parse_exec(props.get("ExecStart"), script, pre=False)
@@ -768,6 +997,10 @@ def collect(*, query=query_systemd, reader=None):
             )
             safe, result["helper_model_gate_checks"] = helper_model_gate(
                 env, props, entryfiles, rootfiles, unit
+            )
+            result["static_adoption_identity"] = static_adoption_identity(
+                unit, env, origins, reader, initial_monitor, entry,
+                result["helper_model_gate_checks"],
             )
             if unit == "codex-quant.service":
                 if safe:
@@ -901,6 +1134,9 @@ def collect(*, query=query_systemd, reader=None):
             if before and after
             else None
         )
+        if result["invocation_snapshot_stable"] is not True or result["configuration_snapshot_stable"] is not True:
+            result["static_adoption_identity"]["status"] = "unknown"
+            result["static_adoption_identity"]["stop_reason"] = "configuration_or_invocation_changed_or_unavailable"
     # Dependency identifiers contain only roots already accepted by classify_root.
     return output
 
