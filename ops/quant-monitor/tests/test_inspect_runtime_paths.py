@@ -91,6 +91,129 @@ def run(values=None, reader=None):
 
 
 class PathInspectionTests(unittest.TestCase):
+    def test_static_selection_is_separate_from_original_path_gate(self):
+        p = props()
+        p["Environment"] = "PATH=/unclassified/fixture:/usr/bin:/bin"
+        result = run({"codex-quant.service": p})["services"]["codex-quant.service"]
+        self.assertFalse(result["helper_model_gate_checks"]["path_absent_or_canonical"])
+        self.assertEqual(result["helper_model_status"], "unknown")
+        extra = result["static_adoption_identity"]
+        self.assertEqual(extra["scope"], "next_invocation_static_selection")
+        self.assertTrue(extra["not_historical_adoption"])
+        self.assertFalse(extra["interpreter_invoked"])
+        self.assertFalse(extra["import_execution_proof"])
+        self.assertEqual(extra["roots"]["monitor"]["root"]["release_sha"], "a" * 40)
+        self.assertEqual(extra["interpreter"]["stop_reason"], "metadata_unavailable")
+
+    def test_static_selection_never_guesses_unknown_venv(self):
+        p = props()
+        p["Environment"] = "QUANT_MONITOR_VENV=/private/" + SECRET
+        extra = run({"codex-quant.service": p})["services"]["codex-quant.service"]["static_adoption_identity"]
+        self.assertEqual(extra["interpreter"]["stop_reason"], "unclassified_venv")
+        self.assertNotIn(SECRET, json.dumps(extra))
+
+    def test_static_daily_parent_captures_aab_before_telegram_override(self):
+        unit = "codex-daily-briefing.service"
+        p = props(unit)
+        p["Environment"] = "AIAUDIT_BRIDGE_ROOT=" + RELEASE + " PATH=/usr/bin:/bin"
+        reader = FakeReader({m.TELEGRAM: ("AIAUDIT_BRIDGE_ROOT=" + RUNTIME + "\n").encode()})
+        extra = run({unit: p}, reader)["services"][unit]["static_adoption_identity"]
+        self.assertEqual(extra["roots"]["consume_aab"]["root"]["release_sha"], "a" * 40)
+        self.assertEqual(extra["import_candidates"]["root_source"], "captured_aab_with_pythonpath_dot")
+
+    def test_static_selection_stops_for_startup_controls_and_unreviewed_helper(self):
+        for change in ({"Environment": "BASH_ENV=/private/" + SECRET}, {"User": "other"}):
+            p = props()
+            p.update(change)
+            extra = run({"codex-quant.service": p})["services"]["codex-quant.service"]["static_adoption_identity"]
+            self.assertEqual(extra["status"], "unknown")
+            self.assertEqual(extra["stop_reason"], "existing_non_path_precondition_unknown_or_false")
+            self.assertNotIn(SECRET, json.dumps(extra))
+
+    def test_static_interpreter_fixed_metadata_without_execution(self):
+        class MetadataReader(FakeReader):
+            def __init__(self):
+                super().__init__()
+                self.metadata_requests = []
+
+            def identity_entry(self, path):
+                self.metadata_requests.append(path)
+                if path.endswith("/.venv"):
+                    return {"kind": "directory"}
+                if path.endswith("/.venv/bin/python"):
+                    return {"kind": "symlink", "accepted_link_target": "/usr/bin/python3.12"}
+                if path in ("/usr/bin/python3.12", RUNTIME + MON + "/.venv/bin/python3"):
+                    return {"kind": "regular", "executable_mode": True}
+                if path == "/usr/bin/python3":
+                    return {"kind": "symlink", "accepted_link_target": "/usr/bin/python3.12"}
+                return {"kind": "missing"}
+
+        reader = MetadataReader()
+        with mock.patch.object(m.subprocess, "run", side_effect=AssertionError("no interpreter execution")):
+            chosen = m.static_interpreter(reader, "/usr/bin:/bin", RUNTIME + MON + "/.venv")
+            self.assertEqual(chosen["candidate_kind"], "venv")
+            overridden = m.static_interpreter(reader, "/usr/bin:/bin", RUNTIME + MON + "/.venv", common_prepend=False)
+            self.assertEqual(overridden["candidate_kind"], "system")
+            unknown = m.static_interpreter(reader, "/private/" + SECRET + ":/usr/bin")
+            self.assertEqual(unknown["stop_reason"], "unclassified_path_prefix")
+        self.assertFalse(chosen["binary_bytes_verified"])
+        self.assertNotIn(SECRET, json.dumps([chosen, unknown]))
+        self.assertFalse(any(SECRET in p for p in reader.metadata_requests))
+        self.assertTrue(overridden["candidate_executable_metadata_verified"])
+
+        original = reader.identity_entry
+        reader.identity_entry = lambda path: {"kind": "missing"} if path == "/usr/bin/python3.12" else original(path)
+        missing_target = m.static_interpreter(reader, "/usr/bin:/bin")
+        self.assertEqual(missing_target["stop_reason"], "python3_target_metadata_unknown")
+        self.assertFalse(missing_target["candidate_executable_metadata_verified"])
+
+    def test_static_import_readset_is_only_direct_consumer_candidates(self):
+        for path in ("client/config.py", "client/gateway_client.py", "service/provider_scenarios.py"):
+            self.assertFalse(m.code_allowed(RUNTIME + "/" + path))
+        for relative in m.DAILY_IMPORT_FILES + m.HEALTH_IMPORT_FILES:
+            self.assertTrue(m.code_allowed(RUNTIME + "/" + relative))
+
+    def test_static_alias_only_accepts_exact_installer_shared_target(self):
+        class LinkReader:
+            def __init__(self, target):
+                self.target = target
+
+            def identity_entry(self, path):
+                return {"kind": "symlink", "accepted_link_target": self.target}
+
+        venv = RELEASE + MON + "/.venv"
+        expected = RUNTIME + MON + "/.venv"
+        self.assertEqual(m.identity_alias(LinkReader(expected), venv, "venv"), expected)
+        self.assertIsNone(m.identity_alias(LinkReader("/private/" + SECRET), venv, "venv"))
+        qpk = RELEASE + MON + "/data/lifecycle-projects/QuantPlatformKit"
+        self.assertEqual(m.identity_alias(LinkReader(RUNTIME + MON + "/data"), qpk, "qpk_mirror"),
+                         RUNTIME + MON + "/data/lifecycle-projects/QuantPlatformKit")
+
+    def test_identity_readset_rejects_arbitrary_paths_before_any_open(self):
+        with mock.patch.object(m.os, "open", side_effect=AssertionError("must not open")):
+            for path in ("/private/" + SECRET, RUNTIME + "/service/" + SECRET,
+                         RELEASE + MON + "/.venv/../../private", "/usr/local/bin/python3"):
+                with self.assertRaises(ValueError):
+                    m.Reader().identity_entry(path)
+
+    def test_static_identity_field_is_closed_when_entrypoint_is_unsupported(self):
+        p = props()
+        p["ExecStart"] = "unsupported " + SECRET
+        extra = run({"codex-quant.service": p})["services"]["codex-quant.service"]["static_adoption_identity"]
+        self.assertEqual(extra["stop_reason"], "entrypoint_not_supported")
+        self.assertNotIn(SECRET, json.dumps(extra))
+
+    def test_static_identity_is_unknown_if_snapshot_changes(self):
+        before, after = props(), props()
+        after["InvocationID"] = "c" * 32
+        values = iter((before, after))
+        result = m.collect(query=lambda unit: next(values) if unit == "codex-quant.service" else None,
+                           reader=FakeReader())["services"]["codex-quant.service"]
+        self.assertFalse(result["invocation_snapshot_stable"])
+        self.assertEqual(result["static_adoption_identity"]["status"], "unknown")
+        self.assertEqual(result["static_adoption_identity"]["stop_reason"],
+                         "configuration_or_invocation_changed_or_unavailable")
+
     def test_reviewed_helper_hashes_match_public_source(self):
         for name, hashes in m.EXPECTED.items():
             self.assertIn(
