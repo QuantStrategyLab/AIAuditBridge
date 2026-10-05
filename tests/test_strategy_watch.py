@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import unittest
 from copy import deepcopy
-from dataclasses import replace
 import json
 from unittest.mock import patch
 
@@ -543,7 +542,8 @@ class StrategyCoverageReaderTest(unittest.TestCase):
             self.assertEqual(watch.strategy_watch_coverage_status(payload)[0]["read_status"], "invalid")
 
     def test_empty_new_container_has_explicit_invalid_coverage_status(self):
-        payload=coverage_export_fixture();payload["snapshots"]=[]
+        payload=coverage_export_fixture()
+        payload["snapshots"]=[]
         self.assertEqual(watch.evaluate_strategy_watch(payload),[])
         self.assertEqual(watch.strategy_watch_coverage_status(payload)[0]["read_status"],"invalid")
 
@@ -558,12 +558,23 @@ class StrategyCoverageReaderTest(unittest.TestCase):
 
     def test_envelope_mismatch_nesting_privacy_and_v2_relabel_cannot_downgrade(self):
         variants=[]
-        p=coverage_export_fixture(); p["schema_version"]="strategy_performance.coverage_envelope.v999"; variants.append(p)
-        p=coverage_export_fixture(); p["snapshots"][0]["schema_version"]="strategy_performance.v2"; variants.append(p)
-        p=coverage_export_fixture(); p["snapshots"][0]["payload"] = deepcopy(p["snapshots"][0]); variants.append(p)
-        p=coverage_export_fixture(); p["snapshots"][0]["payload"]["metadata"]["account_scope_sha256"]="a"*64; variants.append(p)
-        p=coverage_export_fixture(); p["snapshots"][0]["payload"]["metadata"]["provenance"]["snapshot"]["path"]="/private/account.json"; variants.append(p)
-        p=coverage_export_fixture()["snapshots"][0]["payload"]; variants.append(p)
+        p=coverage_export_fixture()
+        p["schema_version"]="strategy_performance.coverage_envelope.v999"
+        variants.append(p)
+        p=coverage_export_fixture()
+        p["snapshots"][0]["schema_version"]="strategy_performance.v2"
+        variants.append(p)
+        p=coverage_export_fixture()
+        p["snapshots"][0]["payload"] = deepcopy(p["snapshots"][0])
+        variants.append(p)
+        p=coverage_export_fixture()
+        p["snapshots"][0]["payload"]["metadata"]["account_scope_sha256"]="a"*64
+        variants.append(p)
+        p=coverage_export_fixture()
+        p["snapshots"][0]["payload"]["metadata"]["provenance"]["snapshot"]["path"]="/private/account.json"
+        variants.append(p)
+        p=coverage_export_fixture()["snapshots"][0]["payload"]
+        variants.append(p)
         for payload in variants:
             with self.subTest(payload=payload):
                 with patch.object(watch, "evaluate_strategy_metrics") as evaluator:
@@ -581,8 +592,12 @@ class StrategyCoverageReaderTest(unittest.TestCase):
                 target=payload if location == "container" else payload["snapshots"][0]["payload"]
                 target[key]="/private/account.json"
                 variants.append(payload)
-        payload=coverage_export_fixture();payload["snapshots"][0]["payload"]["domain"]="us_equity";variants.append(payload)
-        payload=coverage_export_fixture();payload["snapshots"][0]["payload"]["repository"]="QuantStrategyLab/Other";variants.append(payload)
+        payload=coverage_export_fixture()
+        payload["snapshots"][0]["payload"]["domain"]="us_equity"
+        variants.append(payload)
+        payload=coverage_export_fixture()
+        payload["snapshots"][0]["payload"]["repository"]="QuantStrategyLab/Other"
+        variants.append(payload)
         payload=coverage_export_fixture()["snapshots"][0]["payload"]
         snapshot=watch.StrategyWatchSnapshot.from_dict(payload)
         variants.append(snapshot.to_dict())
@@ -645,7 +660,8 @@ class StrategyCoverageReaderTest(unittest.TestCase):
         self.assertEqual(watch.finding_event_key(baseline), "f20b8d24ad51")
         self.assertEqual(json.dumps(baseline.snapshot.to_dict(), separators=(",", ":")),
             '{"repo":"QuantStrategyLab/CryptoStrategies","profile":"legacy","plugin":"","candidate_kind":"individual","domain":"","schema_version":"strategy_performance.v2","metrics_kind":"performance","current_metrics":{"sharpe":0.5,"cagr":0.1,"calmar":0.7,"win_rate":0.52,"max_dd":0.12},"baseline_metrics":{"sharpe":1.0,"cagr":0.2,"calmar":1.0,"win_rate":0.58,"max_dd":0.08},"research_task_evidence":{},"source":"","generated_at":""}')
-        bad=deepcopy(payload); del bad["snapshots"][1]["payload"]["baseline_metrics"]["cagr"]
+        bad=deepcopy(payload)
+        del bad["snapshots"][1]["payload"]["baseline_metrics"]["cagr"]
         self.assertEqual(watch.evaluate_strategy_watch(bad)[0].finding_type,"data_quality")
 
 

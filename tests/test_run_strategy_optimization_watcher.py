@@ -567,7 +567,9 @@ class RunCoverageReaderTest(unittest.TestCase):
                  patch.object(watch,"evaluate_strategy_metrics") as evaluator, \
                  patch.object(watch,"build_strategy_diagnosis_task") as builder:
                 result=run_watcher(payload,source_repo="QuantStrategyLab/CryptoStrategies",dry_run=False)
-                dispatch.assert_not_called();evaluator.assert_not_called();builder.assert_not_called()
+                dispatch.assert_not_called()
+                evaluator.assert_not_called()
+                builder.assert_not_called()
             self.assertEqual(result["findings"],0)
             self.assertEqual(result["issues"],[])
             self.assertEqual(result["research_task_source_snapshot"]["tasks"],[])
@@ -638,7 +640,8 @@ class RunCoverageReaderTest(unittest.TestCase):
 
     def test_main_reads_real_envelope_and_prints_safe_unavailable_summary(self):
         with tempfile.TemporaryDirectory() as directory:
-            path=Path(directory)/"coverage.json";path.write_text(json.dumps(coverage_export_fixture()))
+            path=Path(directory)/"coverage.json"
+            path.write_text(json.dumps(coverage_export_fixture()))
             output=StringIO()
             with patch.dict(os.environ,{"STRATEGY_WATCH_INPUT":str(path),"STRATEGY_WATCH_SOURCE_ROOT":"",
                     "STRATEGY_WATCH_METRICS_PATH":"","STRATEGY_WATCH_SOURCE_REPO":"QuantStrategyLab/CryptoStrategies",
