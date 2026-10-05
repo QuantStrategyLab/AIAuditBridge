@@ -1,3 +1,4 @@
+import hashlib
 import importlib.util
 import json
 import os
@@ -23,6 +24,282 @@ def _load_script(name: str):
 
 
 SYNC = _load_script("sync_lifecycle_artifacts")
+
+
+class NestedLifecycleArtifactCompatibilityTests(unittest.TestCase):
+    """Synthetic fixtures mirror the producer's path contract, without private data."""
+
+    def setUp(self) -> None:
+        self.config = SYNC.DOMAIN_CONFIGS["crypto"]
+
+    def _files(self, *, profile="fixture_crypto", run_id="fixture-run", version=1):
+        domain = self.config["domain"]
+        payload = {
+            "schema_version": "strategy_lifecycle.v1",
+            "domain": domain,
+            "strategy_profile": profile,
+            "run_id": run_id,
+            "param_set_id": "fixture-parameters",
+            "params": {},
+            "param_version": version,
+            "observation_count": 2,
+            "source_script": "tests.fixture",
+            "sharpe_ratio": 0.8,
+            "max_drawdown": -0.1,
+            "cagr": 0.12,
+            "volatility": 0.2,
+            "start_date": "2026-10-01",
+            "end_date": "2026-10-02",
+            "computed_at": "2026-10-02T08:00:00+00:00",
+        }
+        digest = hashlib.sha256(run_id.encode("utf-8")).hexdigest()
+        backtest_path = (
+            f"data/lifecycle_store/backtest/{domain}/{profile}/"
+            f"runs/{digest}/backtest_v{version}.json"
+        )
+        matrix_path = (
+            f"external/{self.config['snapshot_repository']}/data/output/{profile}/"
+            "portfolio_and_tracker_returns.csv"
+        )
+        matrix = (
+            f"as_of,{profile},{self.config['benchmark_column']}\n"
+            "2026-10-01,0.01,0.005\n2026-10-02,-0.002,-0.001\n"
+        ).encode()
+        return {backtest_path: json.dumps(payload).encode(), matrix_path: matrix}
+
+    def _extract(self, root, files):
+        archive_path = root / "fixture.zip"
+        with zipfile.ZipFile(archive_path, "w") as archive:
+            for path, raw in files.items():
+                archive.writestr(path, raw)
+        output = root / "version"
+        manifest = SYNC.extract_validated_archive(archive_path, output, self.config)
+        return output, manifest
+
+    def _assert_rejected_by_archive_and_cache(self, files, *, reason=None):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with self.assertRaisesRegex(SYNC.LifecycleArtifactError, reason or ".*"):
+                self._extract(root, files)
+            self.assertFalse((root / "version").exists())
+            cache = root / "cache"
+            for name, raw in files.items():
+                target = cache / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(raw)
+            manifest = {
+                "profiles": ["fixture_crypto"],
+                "sha256": {name: hashlib.sha256(raw).hexdigest() for name, raw in files.items()},
+            }
+            with self.assertRaisesRegex(SYNC.LifecycleArtifactError, reason or ".*"):
+                SYNC.validate_stored_version(cache, manifest, self.config)
+
+    def test_accepts_two_profile_nested_bundle_and_cache_manifest(self) -> None:
+        files = self._files(profile="fixture_crypto_a", run_id="fixture-a")
+        files.update(self._files(profile="fixture_crypto_b", run_id="fixture-b", version=0))
+        with tempfile.TemporaryDirectory() as tmp:
+            output, manifest = self._extract(Path(tmp), files)
+            self.assertEqual(manifest["profiles"], ["fixture_crypto_a", "fixture_crypto_b"])
+            self.assertEqual(manifest["file_count"], 4)
+            self.assertEqual(set(manifest["sha256"]), set(files))
+            SYNC.validate_stored_version(output, manifest, self.config)
+            for name, raw in files.items():
+                self.assertEqual((output / name).read_bytes(), raw)
+
+    def test_accepts_exact_untrimmed_unicode_run_id_hash(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output, manifest = self._extract(Path(tmp), self._files(run_id="  合成-run  "))
+            SYNC.validate_stored_version(output, manifest, self.config)
+
+    def test_preserves_legacy_versions_and_timestamped_paths(self) -> None:
+        for filename, version in (("backtest_v0.json", 0), ("backtest_v12_2026-10-02T08_00_00Z.json", 12)):
+            with self.subTest(filename=filename), tempfile.TemporaryDirectory() as tmp:
+                files = self._files(version=version)
+                nested = next(name for name in files if name.endswith(".json"))
+                payload = json.loads(files.pop(nested))
+                payload.pop("run_id")
+                legacy = str(Path(nested).parents[2] / filename)
+                files[legacy] = json.dumps(payload).encode()
+                output, manifest = self._extract(Path(tmp), files)
+                SYNC.validate_stored_version(output, manifest, self.config)
+
+    def test_accepts_mixed_legacy_and_nested_distinct_run_identities(self) -> None:
+        files = self._files()
+        older = self._files(run_id="older-fixture-run")
+        nested = next(name for name in older if name.endswith(".json"))
+        files[str(Path(nested).parents[2] / "backtest_v1_older.json")] = older[nested]
+        with tempfile.TemporaryDirectory() as tmp:
+            output, manifest = self._extract(Path(tmp), files)
+            SYNC.validate_stored_version(output, manifest, self.config)
+            self.assertEqual(manifest["file_count"], 3)
+
+    def test_preserves_unidentified_legacy_history_without_nested_files(self) -> None:
+        files = self._files()
+        nested = next(name for name in files if name.endswith(".json"))
+        payload = json.loads(files.pop(nested))
+        payload.pop("run_id")
+        profile_dir = Path(nested).parents[2]
+        files[str(profile_dir / "backtest_v1_2026-10-01T08-00-00Z.json")] = json.dumps(payload).encode()
+        payload["computed_at"] = "2026-10-02T08:00:00+00:00"
+        payload["cagr"] = 0.15
+        files[str(profile_dir / "backtest_v1_2026-10-02T08-00-00Z.json")] = json.dumps(payload).encode()
+        with tempfile.TemporaryDirectory() as tmp:
+            output, manifest = self._extract(Path(tmp), files)
+            SYNC.validate_stored_version(output, manifest, self.config)
+            self.assertEqual(manifest["file_count"], 3)
+
+    def test_rejects_unidentified_legacy_and_nested_same_profile_version_in_both_orders(self) -> None:
+        for run_id in (None, "", "   ", 1, []):
+            for legacy_first in (False, True):
+                with self.subTest(run_id=run_id, legacy_first=legacy_first):
+                    files = self._files()
+                    nested = next(name for name in files if name.endswith(".json"))
+                    payload = json.loads(files[nested])
+                    if run_id is None:
+                        payload.pop("run_id")
+                    else:
+                        payload["run_id"] = run_id
+                    legacy = str(Path(nested).parents[2] / "backtest_v1_old.json")
+                    files[legacy] = json.dumps(payload).encode()
+                    if legacy_first:
+                        files = dict(reversed(list(files.items())))
+                    self._assert_rejected_by_archive_and_cache(
+                        files, reason="ambiguous backtest identity"
+                    )
+
+    def test_accepts_unidentified_legacy_and_nested_different_versions(self) -> None:
+        files = self._files()
+        older = self._files(version=0)
+        nested = next(name for name in older if name.endswith(".json"))
+        payload = json.loads(older[nested])
+        payload.pop("run_id")
+        files[str(Path(nested).parents[2] / "backtest_v0_old.json")] = json.dumps(payload).encode()
+        with tempfile.TemporaryDirectory() as tmp:
+            output, manifest = self._extract(Path(tmp), files)
+            SYNC.validate_stored_version(output, manifest, self.config)
+
+    def test_nested_allowlist_applies_to_each_domain(self) -> None:
+        for domain, config in SYNC.DOMAIN_CONFIGS.items():
+            with self.subTest(domain=domain), tempfile.TemporaryDirectory() as tmp:
+                self.config = config
+                output, manifest = self._extract(Path(tmp), self._files())
+                SYNC.validate_stored_version(output, manifest, config)
+
+    def test_rejects_nested_payload_identity_and_contract_mismatches(self) -> None:
+        for field, value in (
+            ("run_id", None), ("run_id", ""), ("run_id", "   "), ("run_id", 1),
+            ("run_id", ["fixture-run"]), ("run_id", "another-run"),
+            ("domain", "us_equity"), ("strategy_profile", "other_profile"),
+            ("param_version", 2), ("param_version", True), ("param_version", -1),
+            ("schema_version", "wrong"), ("volatility", float("inf")),
+        ):
+            with self.subTest(field=field, value=value):
+                files = self._files()
+                name = next(name for name in files if name.endswith(".json"))
+                payload = json.loads(files[name])
+                payload[field] = value
+                files[name] = json.dumps(payload).encode()
+                self._assert_rejected_by_archive_and_cache(files)
+        files = self._files()
+        name = next(name for name in files if name.endswith(".json"))
+        payload = json.loads(files[name])
+        payload.pop("run_id")
+        files[name] = json.dumps(payload).encode()
+        self._assert_rejected_by_archive_and_cache(files)
+
+    def test_rejects_noncanonical_nested_paths(self) -> None:
+        files = self._files()
+        original = next(name for name in files if name.endswith(".json"))
+        digest = original.split("/")[-2]
+        for replacement in (
+            original.replace("/runs/", "/arbitrary/"),
+            original.replace(digest, "a" * 63),
+            original.replace(digest, digest.upper()),
+            original.replace(digest, "g" * 64),
+            original.replace(digest, "b" * 64),
+            original.replace("backtest_v1.json", "backtest_v01.json"),
+            original.replace("backtest_v1.json", "backtest_v1_extra.json"),
+            original.replace("backtest_v1.json", "extra/backtest_v1.json"),
+            original.replace("data/lifecycle_store", "data//lifecycle_store"),
+            original.replace("data/lifecycle_store", "data/./lifecycle_store"),
+        ):
+            with self.subTest(path=replacement):
+                changed = dict(files)
+                changed[replacement] = changed.pop(original)
+                self._assert_rejected_by_archive_and_cache(changed)
+
+    def test_rejects_legacy_filename_version_mismatch(self) -> None:
+        files = self._files()
+        nested = next(name for name in files if name.endswith(".json"))
+        files[str(Path(nested).parents[2] / "backtest_v2_old.json")] = files.pop(nested)
+        self._assert_rejected_by_archive_and_cache(files)
+
+    def test_rejects_ambiguous_legacy_and_nested_run_identities(self) -> None:
+        for change_payload in (False, True):
+            for legacy_first in (False, True):
+                with self.subTest(change_payload=change_payload, legacy_first=legacy_first):
+                    files = self._files()
+                    nested = next(name for name in files if name.endswith(".json"))
+                    payload = json.loads(files[nested])
+                    if change_payload:
+                        payload["cagr"] = 0.15
+                    legacy = str(Path(nested).parents[2] / "backtest_v1_old.json")
+                    files[legacy] = json.dumps(payload, indent=2).encode()
+                    if legacy_first:
+                        files = dict(reversed(list(files.items())))
+                    reason = "conflicting" if change_payload else "duplicate"
+                    self._assert_rejected_by_archive_and_cache(
+                        files, reason=f"{reason} backtest identity"
+                    )
+
+    def test_rejects_nested_extra_file_duplicate_traversal_and_symlink(self) -> None:
+        for kind in ("extra", "duplicate", "traversal", "symlink"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                files = self._files()
+                nested = next(name for name in files if name.endswith(".json"))
+                archive_path = root / "fixture.zip"
+                with zipfile.ZipFile(archive_path, "w") as archive:
+                    for name, raw in files.items():
+                        archive.writestr(name, raw)
+                    if kind == "extra":
+                        archive.writestr(str(Path(nested).parent / "extra.json"), "{}")
+                    elif kind == "duplicate":
+                        with self.assertWarns(UserWarning):
+                            archive.writestr(nested, files[nested])
+                    elif kind == "traversal":
+                        archive.writestr("data/lifecycle_store/../escape", "bad")
+                    else:
+                        info = zipfile.ZipInfo(str(Path(nested).parent / "backtest_v2.json"))
+                        info.create_system = 3
+                        info.external_attr = (stat.S_IFLNK | 0o777) << 16
+                        archive.writestr(info, "/tmp/outside")
+                with self.assertRaises(SYNC.LifecycleArtifactError):
+                    SYNC.extract_validated_archive(archive_path, root / "version", self.config)
+                self.assertFalse((root / "version").exists())
+
+    def test_rejects_cached_nested_tampering_extra_files_and_symlinks(self) -> None:
+        for kind in ("hash", "extra", "symlink", "parent_symlink", "profiles"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                output, manifest = self._extract(root, self._files())
+                name = next(name for name in manifest["sha256"] if name.endswith(".json"))
+                target = output / name
+                if kind == "hash":
+                    target.write_bytes(b"{}")
+                elif kind == "extra":
+                    (target.parent / "extra.json").write_bytes(b"{}")
+                elif kind == "symlink":
+                    target.unlink()
+                    target.symlink_to(root / "outside")
+                elif kind == "parent_symlink":
+                    outside = root / "outside"
+                    target.parent.rename(outside)
+                    target.parent.symlink_to(outside, target_is_directory=True)
+                else:
+                    manifest["profiles"] = ["wrong_profile"]
+                with self.assertRaises(SYNC.LifecycleArtifactError):
+                    SYNC.validate_stored_version(output, manifest, self.config)
 
 
 class LifecycleArtifactSyncTests(unittest.TestCase):

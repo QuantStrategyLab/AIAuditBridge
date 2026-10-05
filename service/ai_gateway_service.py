@@ -1158,19 +1158,23 @@ def _recover_orphaned_jobs() -> int:
 
 
 def _mark_stale_job_failed(job: dict[str, Any]) -> dict[str, Any]:
-    if job.get("status") not in {"queued", "running"}:
+    # A caller's snapshot may predate a worker's terminal write. Recheck the
+    # persisted state under the same lock used by every job replacement.
+    with _JOB_WRITE_LOCK:
+        job = _read_job(str(job["job_id"]))
+        if job.get("status") not in ACTIVE_JOB_STATUSES:
+            return job
+        timeout_seconds = int(job.get("timeout_seconds", 2700))
+        updated_at = float(job.get("updated_at") or job.get("created_at") or 0)
+        if updated_at and _now() <= updated_at + timeout_seconds + 120:
+            return job
+        job["status"] = "failed"
+        job["updated_at"] = _now()
+        job["error"] = "codex audit job became stale before completion"
+        job["failure_category"] = "stale_job_timeout"
+        _write_job(job)
+        _record_job_automation_run(job)
         return job
-    timeout_seconds = int(job.get("timeout_seconds", 2700))
-    updated_at = float(job.get("updated_at") or job.get("created_at") or 0)
-    if updated_at and _now() <= updated_at + timeout_seconds + 120:
-        return job
-    job["status"] = "failed"
-    job["updated_at"] = _now()
-    job["error"] = "codex audit job became stale before completion"
-    job["failure_category"] = "stale_job_timeout"
-    _write_job(job)
-    _record_job_automation_run(job)
-    return job
 
 
 def _assert_job_access(job: dict[str, Any], claims: dict[str, Any]) -> None:
@@ -2287,8 +2291,12 @@ class AiGatewayRequestHandler(BaseHTTPRequestHandler):
                     return
                 try:
                     claims = authenticate(self.headers, audience=DEFAULT_AUDIENCE)
-                    job = _mark_stale_job_failed(_read_job(job_id))
-                    _assert_job_access(job, claims)
+                    # Authorization must cover the current state before a GET
+                    # can fail a stale job or record its automation outcome.
+                    with _JOB_WRITE_LOCK:
+                        job = _read_job(job_id)
+                        _assert_job_access(job, claims)
+                        job = _mark_stale_job_failed(job)
                     _json_response(self, HTTPStatus.OK, _public_job_payload(job))
                 except FileNotFoundError:
                     _json_response(self, HTTPStatus.NOT_FOUND, {"status": "error", "error": "job not found"})

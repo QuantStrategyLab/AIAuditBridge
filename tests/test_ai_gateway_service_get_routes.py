@@ -1,3 +1,4 @@
+import concurrent.futures
 import json
 import hashlib
 import os
@@ -12,6 +13,7 @@ from http.server import ThreadingHTTPServer
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import service.ai_gateway_service as gateway
 from service.adapters.llm_adapter import LlmResult
 from service.ai_gateway_service import (
     AiGatewayRequestHandler,
@@ -2042,3 +2044,237 @@ class EngineeringReviewGatewayTests(unittest.TestCase):
                 finally:
                     server.shutdown()
                     server.server_close()
+
+
+class AiGatewayJobPollAccessTests(unittest.TestCase):
+    def _job(self, **overrides):
+        return {
+            "job_id": "f" * 24,
+            "status": "running",
+            "created_at": 1,
+            "updated_at": 1,
+            "timeout_seconds": 30,
+            "repository": "Synthetic/owner",
+            "run_id": "100",
+            "run_attempt": "1",
+            **overrides,
+        }
+
+    def _poll(self, job, claims, prefix):
+        handler = SimpleNamespace(path=prefix + job["job_id"], headers={})
+        with patch.object(gateway, "authenticate", return_value=claims), patch.object(
+            gateway, "_json_response"
+        ) as respond:
+            AiGatewayRequestHandler.do_GET(handler)
+        respond.assert_called_once()
+        _, status, payload = respond.call_args.args
+        return int(status), payload
+
+    def test_denied_poll_has_no_job_write_stale_transition_or_ledger_side_effect(self) -> None:
+        claims = {"repository": "Synthetic/owner", "run_id": "100", "run_attempt": "1"}
+        for prefix in ("/v1/ai/execute/jobs/", "/v1/codex-audit/jobs/"):
+            for override in (
+                {"repository": "Synthetic/other"},
+                {"run_id": "101"},
+                {"run_attempt": "2"},
+            ):
+                with self.subTest(prefix=prefix, override=override), tempfile.TemporaryDirectory() as tmp, patch.dict(
+                    os.environ, {"CODEX_AUDIT_SERVICE_JOB_DIR": tmp}, clear=False
+                ), patch.object(gateway, "_now", return_value=1000), patch.object(
+                    gateway, "_record_job_automation_run"
+                ) as record_automation_run:
+                    job = self._job()
+                    gateway._write_job(job)
+                    before = gateway._job_path(job["job_id"]).read_bytes()
+                    with patch.object(gateway, "_mark_stale_job_failed", wraps=gateway._mark_stale_job_failed) as mark_stale, patch.object(
+                        gateway, "_write_job", wraps=gateway._write_job
+                    ) as write_job:
+                        status, _ = self._poll(job, {**claims, **override}, prefix)
+                    self.assertEqual(status, 403)
+                    self.assertEqual(gateway._job_path(job["job_id"]).read_bytes(), before)
+                    mark_stale.assert_not_called()
+                    write_job.assert_not_called()
+                    record_automation_run.assert_not_called()
+
+    def test_poll_waiting_for_lock_authorizes_current_owner_before_stale_transition(self) -> None:
+        claims = {"repository": "Synthetic/owner", "run_id": "100", "run_attempt": "1"}
+        original_lock = gateway._JOB_WRITE_LOCK
+        polling_waits_for_lock = threading.Event()
+        writer_thread_id = threading.get_ident()
+
+        class ObservedJobLock:
+            def __enter__(self):
+                if threading.get_ident() != writer_thread_id:
+                    polling_waits_for_lock.set()
+                original_lock.acquire()
+
+            def __exit__(self, *_exc):
+                original_lock.release()
+
+        for prefix in ("/v1/ai/execute/jobs/", "/v1/codex-audit/jobs/"):
+            for override in (
+                {"repository": "Synthetic/other"},
+                {"run_id": "101"},
+                {"run_attempt": "2"},
+            ):
+                polling_waits_for_lock.clear()
+                with self.subTest(prefix=prefix, override=override), tempfile.TemporaryDirectory() as tmp, patch.dict(
+                    os.environ, {"CODEX_AUDIT_SERVICE_JOB_DIR": tmp}, clear=False
+                ), patch.object(gateway, "_JOB_WRITE_LOCK", ObservedJobLock()), patch.object(
+                    gateway, "_now", return_value=1000
+                ), patch.object(gateway, "_record_job_automation_run") as record_automation_run, patch.object(
+                    gateway, "_mark_stale_job_failed", wraps=gateway._mark_stale_job_failed
+                ) as mark_stale:
+                    job = self._job()
+                    gateway._write_job(job)
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                        with gateway._JOB_WRITE_LOCK:
+                            future = pool.submit(self._poll, job, claims, prefix)
+                            self.assertTrue(polling_waits_for_lock.wait(timeout=5))
+                            current = {**job, **override}
+                            gateway._write_job(current)
+                            before = gateway._job_path(job["job_id"]).read_bytes()
+                        status, _ = future.result(timeout=5)
+                    self.assertEqual(status, 403)
+                    self.assertEqual(gateway._job_path(job["job_id"]).read_bytes(), before)
+                    mark_stale.assert_not_called()
+                    record_automation_run.assert_not_called()
+
+    def test_poll_retains_missing_corrupt_and_invalid_timeout_errors_without_side_effects(self) -> None:
+        claims = {"repository": "Synthetic/owner", "run_id": "100", "run_attempt": "1"}
+        cases = (
+            (None, 404),
+            ("{", 400),
+            ("[]", 400),
+            (json.dumps(self._job(timeout_seconds="invalid")), 400),
+        )
+        for prefix in ("/v1/ai/execute/jobs/", "/v1/codex-audit/jobs/"):
+            for content, expected_status in cases:
+                with self.subTest(prefix=prefix, content=content), tempfile.TemporaryDirectory() as tmp, patch.dict(
+                    os.environ, {"CODEX_AUDIT_SERVICE_JOB_DIR": tmp}, clear=False
+                ), patch.object(gateway, "_now", return_value=1000), patch.object(
+                    gateway, "_record_job_automation_run"
+                ) as record_automation_run, patch.object(gateway, "_write_job") as write_job:
+                    job = self._job()
+                    path = gateway._job_path(job["job_id"])
+                    if content is not None:
+                        path.write_text(content, encoding="utf-8")
+                    before = path.read_bytes() if path.exists() else None
+                    status, _ = self._poll(job, claims, prefix)
+                    self.assertEqual(status, expected_status)
+                    self.assertEqual(path.read_bytes() if path.exists() else None, before)
+                    write_job.assert_not_called()
+                    record_automation_run.assert_not_called()
+
+    def test_stale_job_write_failure_keeps_internal_error_and_does_not_record_ledger(self) -> None:
+        claims = {"repository": "Synthetic/owner", "run_id": "100", "run_attempt": "1"}
+        for prefix in ("/v1/ai/execute/jobs/", "/v1/codex-audit/jobs/"):
+            with self.subTest(prefix=prefix), tempfile.TemporaryDirectory() as tmp, patch.dict(
+                os.environ, {"CODEX_AUDIT_SERVICE_JOB_DIR": tmp}, clear=False
+            ), patch.object(gateway, "_now", return_value=1000), patch.object(
+                gateway, "_record_job_automation_run"
+            ) as record_automation_run, patch.object(gateway, "_audit_log"):
+                job = self._job()
+                gateway._write_job(job)
+                before = gateway._job_path(job["job_id"]).read_bytes()
+                with patch.object(gateway, "_write_job", side_effect=OSError("synthetic write failure")):
+                    status, body = self._poll(job, claims, prefix)
+                self.assertEqual(status, 500)
+                self.assertEqual(body, {"status": "error", "error": "internal error"})
+                self.assertEqual(gateway._job_path(job["job_id"]).read_bytes(), before)
+                record_automation_run.assert_not_called()
+
+    def test_incomplete_or_mismatched_engineering_poll_is_rejected_without_mutation(self) -> None:
+        claims = _engineering_claims()
+        binding = {"purpose": gateway.ENGINEERING_REVIEW_PURPOSE, **claims}
+        rejected_claims = [
+            {**claims, "run_id": ""},
+            {**claims, "run_attempt": ""},
+            *({**claims, field: "mismatch"} for field in (
+                "repository", "ref", "workflow_ref", "workflow_sha", "event_name", "run_id", "run_attempt"
+            )),
+        ]
+        jobs = [
+            self._job(
+                repository=claims["repository"], run_id=claims["run_id"], run_attempt=claims["run_attempt"],
+                engineering_review_binding=binding,
+            ),
+            self._job(
+                repository=claims["repository"], run_id="", run_attempt=claims["run_attempt"],
+                engineering_review_binding=binding,
+            ),
+            self._job(
+                repository=claims["repository"], run_id=claims["run_id"], run_attempt="",
+                engineering_review_binding=binding,
+            ),
+        ]
+        cases = [(jobs[0], rejected) for rejected in rejected_claims] + [(job, claims) for job in jobs[1:]]
+        for prefix in ("/v1/ai/execute/jobs/", "/v1/codex-audit/jobs/"):
+            for job, request_claims in cases:
+                with self.subTest(prefix=prefix, claims=request_claims, job_run=job["run_id"], job_attempt=job["run_attempt"]), tempfile.TemporaryDirectory() as tmp, patch.dict(
+                    os.environ, {"CODEX_AUDIT_SERVICE_JOB_DIR": tmp}, clear=False
+                ), patch.object(gateway, "_now", return_value=1000), patch.object(
+                    gateway, "_record_job_automation_run"
+                ) as record_automation_run:
+                    gateway._write_job(job)
+                    before = gateway._job_path(job["job_id"]).read_bytes()
+                    with patch.object(gateway, "_mark_stale_job_failed", wraps=gateway._mark_stale_job_failed) as mark_stale:
+                        status, _ = self._poll(job, request_claims, prefix)
+                    self.assertEqual(status, 403)
+                    self.assertEqual(gateway._job_path(job["job_id"]).read_bytes(), before)
+                    mark_stale.assert_not_called()
+                    record_automation_run.assert_not_called()
+
+    def test_authorized_stale_fresh_completed_and_legacy_polls_keep_existing_semantics(self) -> None:
+        claims = {"repository": "Synthetic/owner", "run_id": "100", "run_attempt": "1"}
+        cases = (
+            (self._job(), claims, "failed"),
+            (self._job(updated_at=999), claims, "running"),
+            (self._job(status="succeeded", output="completed"), claims, "succeeded"),
+            (self._job(run_id="", run_attempt=""), claims, "failed"),
+            (self._job(), {"repository": claims["repository"]}, "failed"),
+        )
+        for prefix in ("/v1/ai/execute/jobs/", "/v1/codex-audit/jobs/"):
+            for job, request_claims, expected in cases:
+                with self.subTest(prefix=prefix, expected=expected, job_run=job["run_id"]), tempfile.TemporaryDirectory() as tmp, patch.dict(
+                    os.environ, {"CODEX_AUDIT_SERVICE_JOB_DIR": tmp}, clear=False
+                ), patch.object(gateway, "_now", return_value=1000), patch.object(
+                    gateway, "_record_job_automation_run"
+                ) as record_automation_run:
+                    gateway._write_job(job)
+                    status, body = self._poll(job, request_claims, prefix)
+                    self.assertEqual(status, 200)
+                    self.assertEqual(body["status"], expected)
+                    if expected == "failed":
+                        self.assertEqual(body["failure_category"], "stale_job_timeout")
+                        record_automation_run.assert_called_once()
+                    elif expected == "succeeded":
+                        self.assertEqual(body["output"], "completed")
+                        record_automation_run.assert_not_called()
+                    else:
+                        record_automation_run.assert_not_called()
+                    self.assertEqual(gateway._read_job(job["job_id"])["status"], expected)
+
+    def test_authorized_engineering_success_preserves_bound_result_and_output(self) -> None:
+        claims = _engineering_claims()
+        binding = {"purpose": gateway.ENGINEERING_REVIEW_PURPOSE, **claims, "input_digest": "e" * 64}
+        job = self._job(
+            repository=claims["repository"], run_id=claims["run_id"], run_attempt=claims["run_attempt"],
+            status="succeeded", output='{"verdict":"approve"}',
+            engineering_review={**binding, "verdict": "approve"},
+        )
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ, {"CODEX_AUDIT_SERVICE_JOB_DIR": tmp}, clear=False
+        ), patch.object(gateway, "_now", return_value=1000), patch.object(
+            gateway, "_record_job_automation_run"
+        ) as record_automation_run:
+            gateway._write_job(job)
+            before = gateway._job_path(job["job_id"]).read_bytes()
+            for prefix in ("/v1/ai/execute/jobs/", "/v1/codex-audit/jobs/"):
+                status, body = self._poll(job, claims, prefix)
+                self.assertEqual(status, 200)
+                self.assertEqual(body["output"], job["output"])
+                self.assertEqual(body["engineering_review"]["verdict"], "approve")
+                self.assertEqual(body["engineering_review"]["input_digest"], binding["input_digest"])
+                self.assertEqual(gateway._job_path(job["job_id"]).read_bytes(), before)
+            record_automation_run.assert_not_called()

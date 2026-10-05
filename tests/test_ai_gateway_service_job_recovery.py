@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import concurrent.futures
 import tempfile
+import threading
 from pathlib import Path
 import time
 import unittest
@@ -40,6 +42,135 @@ class AiGatewayJobRecoveryTests(unittest.TestCase):
         record_automation_run.assert_has_calls([call(queued), call(running)], any_order=True)
         self.assertEqual(record_automation_run.call_count, 2)
 
+
+
+
+class AiGatewayStaleJobPollingTests(unittest.TestCase):
+    def _running_job(self, **overrides):
+        return {
+            "job_id": "d" * 24,
+            "status": "running",
+            "created_at": 1,
+            "updated_at": 1,
+            "timeout_seconds": 30,
+            "repository": "Synthetic/owner",
+            "run_id": "100",
+            "run_attempt": "1",
+            **overrides,
+        }
+
+    def test_stale_snapshot_cannot_overwrite_worker_success_and_review_result(self) -> None:
+        snapshot_read = threading.Event()
+        worker_completed = threading.Event()
+        running = self._running_job()
+        completed = {
+            **running,
+            "status": "succeeded",
+            "updated_at": 1000,
+            "output": '{"verdict":"approve"}',
+            "engineering_review": {
+                "purpose": gateway.ENGINEERING_REVIEW_PURPOSE,
+                "verdict": "approve",
+                "input_digest": "e" * 64,
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            gateway.os.environ, {"CODEX_AUDIT_SERVICE_JOB_DIR": tmp}, clear=False
+        ), patch.object(gateway, "_now", return_value=1000), patch.object(
+            gateway, "_record_job_automation_run"
+        ) as record_automation_run:
+            gateway._write_job(running)
+
+            def poll_after_worker_completes():
+                snapshot = gateway._read_job(running["job_id"])
+                snapshot_read.set()
+                self.assertTrue(worker_completed.wait(timeout=5))
+                return gateway._mark_stale_job_failed(snapshot)
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(poll_after_worker_completes)
+                try:
+                    self.assertTrue(snapshot_read.wait(timeout=5))
+                    gateway._write_job(completed)
+                    completed_bytes = gateway._job_path(running["job_id"]).read_bytes()
+                finally:
+                    worker_completed.set()
+                result = future.result(timeout=5)
+
+            self.assertEqual(result, completed)
+            self.assertEqual(gateway._read_job(running["job_id"]), completed)
+            self.assertEqual(gateway._job_path(running["job_id"]).read_bytes(), completed_bytes)
+            record_automation_run.assert_not_called()
+
+    def test_concurrent_stale_polls_transition_and_record_only_once(self) -> None:
+        ready = threading.Barrier(2)
+        running = self._running_job()
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            gateway.os.environ, {"CODEX_AUDIT_SERVICE_JOB_DIR": tmp}, clear=False
+        ), patch.object(gateway, "_now", return_value=1000), patch.object(
+            gateway, "_record_job_automation_run"
+        ) as record_automation_run:
+            gateway._write_job(running)
+
+            def poll_same_snapshot():
+                snapshot = gateway._read_job(running["job_id"])
+                ready.wait(timeout=5)
+                return gateway._mark_stale_job_failed(snapshot)
+
+            with patch.object(gateway, "_write_job", wraps=gateway._write_job) as write_job:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                    futures = [pool.submit(poll_same_snapshot) for _ in range(2)]
+                    results = [future.result(timeout=5) for future in futures]
+                repeated = gateway._mark_stale_job_failed(running)
+
+            persisted = gateway._read_job(running["job_id"])
+            self.assertEqual(persisted["status"], "failed")
+            self.assertEqual(persisted["failure_category"], "stale_job_timeout")
+            self.assertEqual(results, [persisted, persisted])
+            self.assertEqual(repeated, persisted)
+            write_job.assert_called_once_with(persisted)
+            record_automation_run.assert_called_once_with(persisted)
+
+    def test_current_fresh_or_terminal_state_is_returned_without_mutation(self) -> None:
+        snapshot = self._running_job()
+        for current in (
+            self._running_job(updated_at=999),
+            self._running_job(status="queued", updated_at=999),
+            self._running_job(status="succeeded", updated_at=2, output="completed"),
+            self._running_job(status="failed", updated_at=2, error="existing failure"),
+        ):
+            with self.subTest(status=current["status"]), tempfile.TemporaryDirectory() as tmp, patch.dict(
+                gateway.os.environ, {"CODEX_AUDIT_SERVICE_JOB_DIR": tmp}, clear=False
+            ), patch.object(gateway, "_now", return_value=1000), patch.object(
+                gateway, "_record_job_automation_run"
+            ) as record_automation_run:
+                gateway._write_job(current)
+                before = gateway._job_path(snapshot["job_id"]).read_bytes()
+                with patch.object(gateway, "_write_job", wraps=gateway._write_job) as write_job:
+                    result = gateway._mark_stale_job_failed(snapshot)
+                self.assertEqual(result, current)
+                self.assertEqual(gateway._job_path(snapshot["job_id"]).read_bytes(), before)
+                write_job.assert_not_called()
+                record_automation_run.assert_not_called()
+
+    def test_genuine_stale_active_jobs_fail_but_timeout_boundary_is_unchanged(self) -> None:
+        for status in ("queued", "running"):
+            for now, expected in ((151, status), (152, "failed")):
+                with self.subTest(status=status, now=now), tempfile.TemporaryDirectory() as tmp, patch.dict(
+                    gateway.os.environ, {"CODEX_AUDIT_SERVICE_JOB_DIR": tmp}, clear=False
+                ), patch.object(gateway, "_now", return_value=now), patch.object(
+                    gateway, "_record_job_automation_run"
+                ) as record_automation_run:
+                    job = self._running_job(status=status)
+                    gateway._write_job(job)
+                    result = gateway._mark_stale_job_failed(job)
+                    self.assertEqual(result["status"], expected)
+                    self.assertEqual(gateway._read_job(job["job_id"]), result)
+                    if expected == "failed":
+                        self.assertEqual(result["failure_category"], "stale_job_timeout")
+                        record_automation_run.assert_called_once_with(result)
+                    else:
+                        record_automation_run.assert_not_called()
 
 
 class AiGatewayJobAdmissionTests(unittest.TestCase):
