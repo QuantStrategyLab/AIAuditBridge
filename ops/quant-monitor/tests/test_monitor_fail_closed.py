@@ -764,6 +764,210 @@ class MonitorFailClosedTests(unittest.TestCase):
         self.assertEqual(findings[0].severity, "high")
         self.assertEqual(len(findings[0].signals), 2)
 
+    def test_health_cycle_rejects_unqualified_drift_evidence(self) -> None:
+        cases = (
+            {"reason": "not_comparable_interval_coverage", "baseline_available": False,
+             "alert_suppressed": True},
+            {"reason": "missing_baseline", "baseline_available": False},
+            {"reason": "missing_reference_window", "baseline_available": True},
+            {"reason": "not_comparable_annualization", "baseline_available": True},
+            {"baseline_available": False},
+            {"alert_suppressed": True},
+            {"baseline_available": 0},
+            {"baseline_available": 1},
+            {"baseline_available": "false"},
+            {"baseline_available": None},
+            {"alert_suppressed": 0},
+            {"alert_suppressed": "false"},
+            {"alert_suppressed": None},
+            {"reason": None},
+            {"reason": 0},
+            {"reason": False},
+        )
+        for metadata in cases:
+            with self.subTest(metadata=metadata):
+                drift = types.SimpleNamespace(
+                    strategy_profile="example", drift_score=0.5, **metadata,
+                )
+                self.assertEqual(
+                    HEALTH_CYCLE._build_monitoring_findings([], {"us_equity": [drift]}), [],
+                )
+
+    def test_health_cycle_low_score_cannot_bypass_unqualified_drift(self) -> None:
+        row = {"domain": "us_equity", "strategy_profile": "example",
+               "status": "critical", "overall_score": 14.2}
+        for score in (0.0, 0.5, 1.0):
+            with self.subTest(drift_score=score):
+                drift = types.SimpleNamespace(
+                    strategy_profile="example", drift_score=score,
+                    reason="not_comparable_interval_coverage", baseline_available=False,
+                    alert_suppressed=True,
+                )
+                self.assertEqual(
+                    HEALTH_CYCLE._build_monitoring_findings([row], {"us_equity": [drift]}), [],
+                )
+
+    def test_health_cycle_retains_previous_restriction_without_a_new_finding(self) -> None:
+        for status, score in (("review", 0.5), ("critical", 1.0)):
+            with self.subTest(previous_status=status):
+                drift = types.SimpleNamespace(
+                    strategy_profile="example", drift_score=score, status=status,
+                    previous_status=status, reason="not_comparable_interval_coverage",
+                    baseline_available=False, alert_suppressed=True,
+                )
+                before = vars(drift).copy()
+                self.assertEqual(
+                    HEALTH_CYCLE._build_monitoring_findings([], {"us_equity": [drift]}), [],
+                )
+                self.assertEqual(vars(drift), before)
+
+    def test_health_cycle_keeps_qualified_and_legacy_degradation(self) -> None:
+        for metadata in ({}, {"reason": "", "baseline_available": True, "alert_suppressed": False}):
+            with self.subTest(metadata=metadata):
+                drift = types.SimpleNamespace(
+                    strategy_profile="example", drift_score=0.8, **metadata,
+                )
+                findings = HEALTH_CYCLE._build_monitoring_findings(
+                    [{"domain": "us_equity", "strategy_profile": "example",
+                      "status": "critical", "overall_score": 35.0}],
+                    {"us_equity": [drift]},
+                )
+                self.assertEqual(len(findings), 1)
+                self.assertEqual(findings[0].severity, "high")
+                self.assertEqual(len(findings[0].signals), 2)
+                self.assertEqual(findings[0].snapshot.current_metrics["drift_score"], 0.8)
+
+    def test_health_cycle_disqualification_is_domain_and_profile_local(self) -> None:
+        rows = [
+            {"domain": "us_equity", "strategy_profile": "same", "overall_score": 35.0},
+            {"domain": "us_equity", "strategy_profile": "other", "overall_score": 35.0},
+            {"domain": "crypto", "strategy_profile": "same", "overall_score": 35.0},
+        ]
+        findings = HEALTH_CYCLE._build_monitoring_findings(rows, {
+            "us_equity": [types.SimpleNamespace(
+                strategy_profile="same", drift_score=1.0,
+                reason="not_comparable_interval_coverage", baseline_available=False,
+                alert_suppressed=True,
+            ), types.SimpleNamespace(strategy_profile="other", drift_score=0.8)],
+            "crypto": [types.SimpleNamespace(strategy_profile="same", drift_score=0.8)],
+        })
+        self.assertEqual(
+            {(finding.snapshot.repo, finding.snapshot.profile) for finding in findings},
+            {("QuantStrategyLab/UsEquityStrategies", "other"),
+             ("QuantStrategyLab/CryptoStrategies", "same")},
+        )
+        self.assertTrue(all(len(finding.signals) == 2 for finding in findings))
+
+    def test_health_cycle_low_score_without_disqualification_still_generates_finding(self) -> None:
+        findings = HEALTH_CYCLE._build_monitoring_findings(
+            [{"domain": "us_equity", "strategy_profile": "example",
+              "status": "unknown", "overall_score": 35.0}],
+            {},
+        )
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].signals[0]["metric"], "overall_score")
+
+    def test_health_cycle_mixed_drift_cannot_requalify_the_same_profile(self) -> None:
+        unqualified = types.SimpleNamespace(
+            strategy_profile="example", drift_score=1.0,
+            reason="not_comparable_interval_coverage", baseline_available=False,
+            alert_suppressed=True,
+        )
+        qualified = types.SimpleNamespace(strategy_profile="example", drift_score=0.8)
+        other = types.SimpleNamespace(strategy_profile="other", drift_score=0.8)
+        row = {"domain": "us_equity", "strategy_profile": "example", "overall_score": 35.0}
+        for drifts in ([unqualified, qualified, other], [qualified, unqualified, other]):
+            with self.subTest(first_reason=getattr(drifts[0], "reason", "")):
+                findings = HEALTH_CYCLE._build_monitoring_findings([row], {"us_equity": drifts})
+                self.assertEqual([finding.snapshot.profile for finding in findings], ["other"])
+
+    def test_health_cycle_main_suppresses_optimization_but_preserves_operational_errors(self) -> None:
+        from scripts import run_strategy_optimization_watcher as watcher
+
+        for runtime_failure in (False, True):
+            with self.subTest(runtime_failure=runtime_failure), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                _write_fresh_lifecycle_status(root)
+                qpk = types.ModuleType("quant_platform_kit")
+                lifecycle = types.ModuleType("quant_platform_kit.strategy_lifecycle")
+                drift_detector = types.ModuleType("quant_platform_kit.strategy_lifecycle.drift_detector")
+                health_dashboard = types.ModuleType("quant_platform_kit.strategy_lifecycle.health_dashboard")
+                performance_monitor = types.ModuleType("quant_platform_kit.strategy_lifecycle.performance_monitor")
+                dashboard_snapshot = types.ModuleType("build_dashboard_snapshot")
+                dashboard_snapshot.build_payload = mock.Mock(return_value={"data_status": "ready", "errors": []})
+                drift = types.SimpleNamespace(
+                    strategy_profile="us_equity_profile", drift_score=1.0, status="critical",
+                    previous_status="critical", reason="not_comparable_interval_coverage",
+                    baseline_available=False, alert_suppressed=True,
+                )
+                before = vars(drift).copy()
+                drift_detector.run_drift_detection = lambda domain: [drift] if domain == "us_equity" else []
+
+                def run_monitor(domain, *, source_revision):
+                    self.assertRegex(source_revision, r"^[0-9a-f]{40}$")
+                    if runtime_failure and domain == "crypto":
+                        raise RuntimeError("synthetic collector failure")
+                    return [types.SimpleNamespace(strategy_profile=f"{domain}_profile")]
+
+                def write_dashboard(*, output_dir, **_kwargs):
+                    Path(output_dir).mkdir(parents=True, exist_ok=True)
+                    Path(output_dir, "strategy_health_dashboard.json").write_text(json.dumps({
+                        "strategies": [{"domain": "us_equity", "strategy_profile": "us_equity_profile",
+                                        "status": "critical", "overall_score": 14.2}],
+                    }), encoding="utf-8")
+
+                performance_monitor.run_monitor = run_monitor
+                health_dashboard.build_dashboard = write_dashboard
+                create_issue = mock.Mock(return_value="https://github.com/QuantStrategyLab/UsEquityStrategies/issues/1")
+                list_issues = mock.Mock(return_value={})
+                list_archived = mock.Mock(return_value={})
+                read_issue = mock.Mock(side_effect=AssertionError("must not read an issue"))
+                comment_issue = mock.Mock(side_effect=AssertionError("must not comment on an issue"))
+                real_dispatch = watcher.dispatch_strategy_watch_findings
+
+                def dispatch(findings, **kwargs):
+                    return real_dispatch(
+                        findings, **kwargs, create_issue=create_issue, list_issues=list_issues,
+                        list_archived_issues=list_archived, read_issue=read_issue, comment_issue=comment_issue,
+                    )
+
+                with (
+                    mock.patch.dict(os.environ, {"QUANT_MONITOR_ROOT": str(root),
+                                                "TELEGRAM_TOKEN": "synthetic", "GLOBAL_TELEGRAM_CHAT_ID": "synthetic"}, clear=True),
+                    mock.patch.dict(sys.modules, {
+                        "quant_platform_kit": qpk, "quant_platform_kit.strategy_lifecycle": lifecycle,
+                        "quant_platform_kit.strategy_lifecycle.drift_detector": drift_detector,
+                        "quant_platform_kit.strategy_lifecycle.health_dashboard": health_dashboard,
+                        "quant_platform_kit.strategy_lifecycle.performance_monitor": performance_monitor,
+                        "build_dashboard_snapshot": dashboard_snapshot,
+                    }),
+                    mock.patch.object(watcher, "dispatch_strategy_watch_findings", side_effect=dispatch) as dispatched,
+                    mock.patch.object(HEALTH_CYCLE, "_run_operational_diagnosis", return_value={"status": "skipped"}) as diagnosis,
+                    mock.patch.object(HEALTH_CYCLE, "_send_health_telegram_target", return_value="sent") as telegram,
+                    mock.patch("socket.create_connection", side_effect=AssertionError("network forbidden")),
+                    mock.patch("subprocess.run", side_effect=AssertionError("process/network forbidden")),
+                    mock.patch("builtins.print"),
+                ):
+                    self.assertEqual(HEALTH_CYCLE.main(), 2 if runtime_failure else 0)
+                dispatched.assert_called_once_with([], dry_run=False, comment_existing=False)
+                for callback in (create_issue, list_issues, list_archived, read_issue, comment_issue):
+                    callback.assert_not_called()
+                summary = json.loads(next((root / "data/health").glob("cycle_*.json")).read_text())
+                expected_errors = ([{"domain": "crypto", "code": "monitor_data_unavailable",
+                                     "error_type": "RuntimeError"}] if runtime_failure else [])
+                self.assertEqual(summary["data_errors"], expected_errors)
+                self.assertEqual(summary["optimization_findings"], 0)
+                self.assertEqual(summary["optimization_issue_errors"], 0)
+                self.assertEqual(diagnosis.call_args.args[1], expected_errors)
+                self.assertEqual(vars(drift), before)
+                if runtime_failure:
+                    self.assertEqual(summary["telegram_alerts"], ["[crypto] monitor_data_unavailable (RuntimeError)"])
+                    telegram.assert_called_once()
+                    self.assertIn("monitor_data_unavailable", telegram.call_args.args[0])
+                else:
+                    self.assertEqual(summary["telegram_alerts"], [])
+                    telegram.assert_not_called()
+
     def test_health_cycle_telegram_body_is_operational_only(self) -> None:
         body = HEALTH_CYCLE._build_alert_body(["[collector] dashboard_data_unavailable"])
 
