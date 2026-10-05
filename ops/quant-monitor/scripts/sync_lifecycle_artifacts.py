@@ -64,6 +64,11 @@ DOMAIN_CONFIGS: dict[str, dict[str, str]] = {
 _TRUSTED_EVENTS = frozenset({"schedule", "workflow_dispatch"})
 _SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 _PROFILE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$")
+_RUN_DIGEST_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_RUN_BACKTEST_FILENAME_PATTERN = re.compile(r"^backtest_v(0|[1-9][0-9]*)\.json$")
+_LEGACY_BACKTEST_FILENAME_PATTERN = re.compile(
+    r"^backtest_v(0|[1-9][0-9]*)(?:_.+)?\.json$"
+)
 _MAX_FILES = 256
 _MAX_FILE_BYTES = 32 * 1024 * 1024
 _MAX_TOTAL_BYTES = 256 * 1024 * 1024
@@ -210,7 +215,12 @@ def _safe_member_path(name: str) -> PurePosixPath:
     if not name or "\x00" in name or "\\" in name:
         raise LifecycleArtifactError("archive contains an unsafe path")
     path = PurePosixPath(name)
-    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+    canonical_name = name[:-1] if name.endswith("/") else name
+    if (
+        path.is_absolute()
+        or any(part in {"", ".", ".."} for part in path.parts)
+        or canonical_name != path.as_posix()
+    ):
         raise LifecycleArtifactError("archive contains an unsafe path")
     return path
 
@@ -231,6 +241,15 @@ def _classify_member(
     ):
         return "backtest", parts[4]
     if (
+        len(parts) == 8
+        and parts[:4] == ("data", "lifecycle_store", "backtest", domain)
+        and _PROFILE_PATTERN.fullmatch(parts[4])
+        and parts[5] == "runs"
+        and _RUN_DIGEST_PATTERN.fullmatch(parts[6])
+        and _RUN_BACKTEST_FILENAME_PATTERN.fullmatch(parts[7])
+    ):
+        return "backtest", parts[4]
+    if (
         len(parts) == 6
         and parts[:4] == ("external", snapshot_repository, "data", "output")
         and _PROFILE_PATTERN.fullmatch(parts[4])
@@ -245,7 +264,8 @@ def _validate_backtest(
     *,
     domain: str,
     profile: str,
-) -> None:
+    path: PurePosixPath,
+) -> tuple[str, str | None, int, str]:
     try:
         payload = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -267,6 +287,23 @@ def _validate_backtest(
         or not str(payload.get("source_script") or "").strip()
     ):
         raise LifecycleArtifactError("backtest JSON lifecycle contract is invalid")
+    nested = len(path.parts) == 8
+    filename_pattern = (
+        _RUN_BACKTEST_FILENAME_PATTERN if nested else _LEGACY_BACKTEST_FILENAME_PATTERN
+    )
+    filename_match = filename_pattern.fullmatch(path.name)
+    if filename_match is None or filename_match[1] != str(payload["param_version"]):
+        raise LifecycleArtifactError("backtest parameter version does not match its path")
+    run_id = payload.get("run_id")
+    if nested:
+        if not isinstance(run_id, str) or not run_id.strip():
+            raise LifecycleArtifactError("backtest run identity is invalid")
+        try:
+            run_digest = hashlib.sha256(run_id.encode("utf-8")).hexdigest()
+        except UnicodeEncodeError as exc:
+            raise LifecycleArtifactError("backtest run identity is invalid") from exc
+        if run_digest != path.parts[6]:
+            raise LifecycleArtifactError("backtest run identity does not match its path")
     for key in ("sharpe_ratio", "max_drawdown", "cagr", "volatility"):
         try:
             value = float(payload[key])
@@ -284,6 +321,39 @@ def _validate_backtest(
         raise LifecycleArtifactError("backtest JSON lifecycle dates are invalid") from exc
     if end_date < start_date:
         raise LifecycleArtifactError("backtest JSON lifecycle dates are invalid")
+    identity_run_id = run_id if isinstance(run_id, str) and run_id.strip() else None
+    payload_digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return profile, identity_run_id, payload["param_version"], payload_digest
+
+
+def _record_backtest_identity(
+    identity: tuple[str, str | None, int, str],
+    *,
+    path: PurePosixPath,
+    identities: dict[tuple[str, str | None, int], tuple[bool, str]],
+) -> None:
+    profile, run_id, version, payload_digest = identity
+    nested = len(path.parts) == 8
+    key = (profile, run_id, version)
+    # Legacy results can have no run identity. Keep their historical files,
+    # but never infer which nested run an unidentified result belongs to.
+    if (
+        nested and (profile, None, version) in identities
+    ) or (
+        run_id is None
+        and any(
+            stored_nested and stored_profile == profile and stored_version == version
+            for (stored_profile, _stored_run, stored_version), (stored_nested, _digest)
+            in identities.items()
+        )
+    ):
+        raise LifecycleArtifactError("artifact contains an ambiguous backtest identity")
+    if run_id is not None and key in identities:
+        reason = "duplicate" if identities[key][1] == payload_digest else "conflicting"
+        raise LifecycleArtifactError(f"artifact contains a {reason} backtest identity")
+    identities[key] = (nested, payload_digest)
 
 
 def _validate_matrix(raw: bytes, *, profile: str, benchmark_column: str) -> None:
@@ -340,6 +410,7 @@ def extract_validated_archive(
     files: dict[PurePosixPath, bytes] = {}
     total_size = 0
     backtest_profiles: set[str] = set()
+    backtest_identities: dict[tuple[str, str | None, int], tuple[bool, str]] = {}
     matrix_profiles: set[str] = set()
     try:
         archive = zipfile.ZipFile(archive_path)
@@ -376,7 +447,12 @@ def extract_validated_archive(
                 raise LifecycleArtifactError("artifact archive entry size is inconsistent")
             kind, profile = classification
             if kind == "backtest":
-                _validate_backtest(raw, domain=config["domain"], profile=profile)
+                identity = _validate_backtest(
+                    raw, domain=config["domain"], profile=profile, path=path
+                )
+                _record_backtest_identity(
+                    identity, path=path, identities=backtest_identities
+                )
                 backtest_profiles.add(profile)
             else:
                 _validate_matrix(
@@ -420,6 +496,7 @@ def validate_stored_version(
         raise LifecycleArtifactError("stored artifact manifest is incomplete")
     expected_files: set[str] = set()
     backtest_profiles: set[str] = set()
+    backtest_identities: dict[tuple[str, str | None, int], tuple[bool, str]] = {}
     matrix_profiles: set[str] = set()
     for raw_name, raw_digest in hashes.items():
         path = _safe_member_path(str(raw_name))
@@ -442,7 +519,12 @@ def validate_stored_version(
             raise LifecycleArtifactError("stored artifact file hash does not match")
         kind, profile = classification
         if kind == "backtest":
-            _validate_backtest(raw, domain=config["domain"], profile=profile)
+            identity = _validate_backtest(
+                raw, domain=config["domain"], profile=profile, path=path
+            )
+            _record_backtest_identity(
+                identity, path=path, identities=backtest_identities
+            )
             backtest_profiles.add(profile)
         else:
             _validate_matrix(
