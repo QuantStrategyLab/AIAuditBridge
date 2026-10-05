@@ -1100,12 +1100,31 @@ def diagnose_recent_cycles(root: Path, *, now: datetime | None = None) -> dict[s
     return {"status": "skipped", "reason": "no_unattempted_recent_errors"}
 
 
+def _drift_is_qualified_for_monitoring(drift: Any) -> bool:
+    """Retained restrictions and suppressed checks are not new degradation evidence."""
+    # QPK's nonempty reason denotes an unevaluable comparison. Older drift
+    # objects without qualification metadata retain their existing behavior.
+    reason = getattr(drift, "reason", "")
+    return (
+        getattr(drift, "alert_suppressed", False) is False
+        and getattr(drift, "baseline_available", True) is True
+        and isinstance(reason, str)
+        and not reason.strip()
+    )
+
+
 def _build_monitoring_findings(
     strategies: list[dict[str, Any]],
     drift_results: dict[str, list[Any]],
 ) -> list[Any]:
     from service.strategy_watch import build_strategy_monitoring_finding
 
+    unqualified_profiles = {
+        (domain, str(drift.strategy_profile or "").strip())
+        for domain, drifts in drift_results.items()
+        for drift in drifts
+        if not _drift_is_qualified_for_monitoring(drift)
+    }
     records: dict[tuple[str, str], dict[str, Any]] = {}
     metric_keys = (
         "overall_score",
@@ -1128,6 +1147,10 @@ def _build_monitoring_findings(
         profile = str(row.get("strategy_profile") or "").strip()
         if not domain or not profile:
             continue
+        # Do not let the dashboard score bypass the same profile's explicit
+        # unqualified/suppressed drift result. Operational errors route separately.
+        if (domain, profile) in unqualified_profiles:
+            continue
         record = records.setdefault(
             (domain, profile),
             {"metrics": {}, "signals": [], "severity": "medium", "generated_at": ""},
@@ -1145,10 +1168,12 @@ def _build_monitoring_findings(
 
     for domain, drifts in drift_results.items():
         for drift in drifts:
+            profile = str(drift.strategy_profile or "").strip()
+            if (domain, profile) in unqualified_profiles:
+                continue
             score = float(drift.drift_score or 0.0)
             if score < DRIFT_REVIEW:
                 continue
-            profile = str(drift.strategy_profile or "").strip()
             if not profile:
                 continue
             record = records.setdefault(
