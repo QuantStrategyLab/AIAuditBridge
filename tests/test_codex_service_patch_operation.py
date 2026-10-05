@@ -91,21 +91,40 @@ class CodexServiceMaintenanceTests(unittest.TestCase):
         self.assertEqual({p: p.read_bytes() for p in self.protected}, self.protected)
 
     def test_reviewed_production_hashes_and_source_commit_are_fixed(self) -> None:
-        checkout = Path(__file__).resolve().parents[1]
         self.assertEqual(operation.REVIEWED_SOURCE_COMMIT, "8dd1b0ca830b3bdb90de2c4ca555a2f3db090d15")
         self.assertEqual(self.production_preimages, {
             "gateway": "1f21f4f626f8374bd957667dc471a5bc5b75bafda4f81cc95dc95b31911f5014",
             "codex_adapter": "954476a6e82eade56a51b71c1b8087766bfa57c9aac54730a5f7376cb5f67013",
         })
-        for path, digest in (
-            ("service/ai_gateway_service.py", "60012ad523cd0fbef0996a6d879e3625ace3a3c52a0c84957973d6ae01b95cdf"),
-            ("service/adapters/codex_adapter.py", "e5175a5fb2c132b24dfc59a0af365c5af8ba2f3b8f6079fe398f97111c347cd0"),
-        ):
-            self.assertEqual(hashlib.sha256((checkout / path).read_bytes()).hexdigest(), digest)
         self.assertEqual(self.production_targets, {
             "gateway": "60012ad523cd0fbef0996a6d879e3625ace3a3c52a0c84957973d6ae01b95cdf",
             "codex_adapter": "e5175a5fb2c132b24dfc59a0af365c5af8ba2f3b8f6079fe398f97111c347cd0",
         })
+
+    def test_current_checkout_mismatch_cannot_expand_frozen_maintenance_release(self) -> None:
+        # The one-shot historical release stays frozen as the checkout evolves.
+        # Its tests passing must not authorize newer source through this entrypoint.
+        checkout = Path(__file__).resolve().parents[1]
+        checkout_targets = {
+            "gateway": checkout / "service/ai_gateway_service.py",
+            "codex_adapter": checkout / "service/adapters/codex_adapter.py",
+        }
+        self.assertNotEqual(hashlib.sha256(checkout_targets["gateway"].read_bytes()).hexdigest(),
+                            self.production_targets["gateway"])
+        with patch.object(operation, "TARGET_FILES", checkout_targets), \
+             patch.object(operation, "TARGET_SHA256", self.production_targets):
+            self.assertEqual(operation._maintenance_inputs({}), "target_source_mismatch")
+            result = operation.maintain_service(acknowledge_interruption=True)
+        self.assertEqual(result["status"], "refused")
+        self.assertEqual(result["reason"], "target_source_mismatch")
+        operation.unit_metadata.assert_not_called()
+        operation.service_process_metadata.assert_not_called()
+        operation.job_counts.assert_not_called()
+        operation._unit_action.assert_not_called()
+        self.assertEqual(self.actions, [])
+        self.assertFalse(self.backup.exists())
+        self.assert_original()
+        self.assert_protected()
 
     def test_cli_requires_explicit_acknowledgement_and_refuses_paths_units_or_restart(self) -> None:
         output = io.StringIO()
