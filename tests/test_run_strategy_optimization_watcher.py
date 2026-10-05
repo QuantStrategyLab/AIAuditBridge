@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from scripts.run_strategy_optimization_watcher import (
     dispatch_strategy_watch_findings,
@@ -22,6 +22,8 @@ from scripts.run_strategy_optimization_watcher import (
 )
 from service.strategy_watch import build_strategy_monitoring_finding, finding_to_automation_task, watcher_issue_key
 from service.research_task import calculate_task_sha256
+from tests.test_strategy_watch import coverage_export_fixture, guard_external_io
+import service.strategy_watch as watch
 
 
 def _performance_payload(*, repo: str = "QuantStrategyLab/TestStrategies", profile: str = "live", sharpe: float = 0.5) -> dict[str, object]:
@@ -537,6 +539,118 @@ class RunStrategyOptimizationWatcherTest(unittest.TestCase):
         self.assertEqual(result["issues"][0]["task"]["trigger"]["kind"], "strategy_metrics_contract_invalid")
         self.assertEqual(result["issues"][0]["task"]["proposed_action"]["target"], "QuantStrategyLab/TestStrategies")
         self.assertEqual(result["issues"][0]["task"]["finding_type"], "data_quality")
+
+
+class RunCoverageReaderTest(unittest.TestCase):
+    def setUp(self):
+        self.external_guards = guard_external_io(self)
+        self.forbidden_callbacks = {
+            name: Mock(name="forbidden_" + name, side_effect=AssertionError("external issue callback forbidden"))
+            for name in ("create_issue", "comment_issue", "read_issue", "list_issues", "list_archived_issues")
+        }
+        # The product binds callbacks at definition time. Patching module names
+        # alone would not isolate run_watcher, main, or direct dispatch.
+        for entrypoint in (run_watcher, dispatch_strategy_watch_findings):
+            guard = patch.dict(entrypoint.__kwdefaults__, self.forbidden_callbacks)
+            guard.start()
+            self.addCleanup(guard.stop)
+        self.addCleanup(self.assert_no_issue_callback_attempts)
+
+    def assert_no_issue_callback_attempts(self):
+        for callback in self.forbidden_callbacks.values():
+            callback.assert_not_called()
+
+    def test_coverage_run_never_dispatches_issues_research_or_metric_provider(self):
+        for requested in [False,True]:
+            payload=coverage_export_fixture(gap=True,requested=requested)
+            with patch("scripts.run_strategy_optimization_watcher.dispatch_strategy_watch_findings") as dispatch, \
+                 patch.object(watch,"evaluate_strategy_metrics") as evaluator, \
+                 patch.object(watch,"build_strategy_diagnosis_task") as builder:
+                result=run_watcher(payload,source_repo="QuantStrategyLab/CryptoStrategies",dry_run=False)
+                dispatch.assert_not_called()
+                evaluator.assert_not_called()
+                builder.assert_not_called()
+            self.assertEqual(result["findings"],0)
+            self.assertEqual(result["issues"],[])
+            self.assertEqual(result["research_task_source_snapshot"]["tasks"],[])
+            self.assertEqual(result["research_task_source_snapshot"]["data_status"],"unavailable")
+            self.assertIn("interval_scope_binding_unavailable",result["research_task_source_snapshot"]["errors"])
+            self.assertEqual(result["coverage_status"][0]["effective_window"]["return_count"],4)
+            self.assertNotIn("provenance",json.dumps(result))
+            self.assertNotIn("metadata",json.dumps(result))
+
+    def test_wrapped_identity_cannot_bypass_validated_repo_or_domain(self):
+        for key,value in [("repo","QuantStrategyLab/Other"),("repository","QuantStrategyLab/Other"),("domain","us_equity")]:
+            payload=coverage_export_fixture()
+            payload["snapshots"][0]["payload"][key]=value
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError,"repository|domain"):
+                run_watcher(payload,source_repo="QuantStrategyLab/CryptoStrategies",dry_run=False)
+        payload=coverage_export_fixture()
+        payload["snapshots"][0]["payload"]["metadata"]["domain"]="us_equity"
+        with self.assertRaisesRegex(ValueError,"domain"):
+            run_watcher(payload,source_repo="QuantStrategyLab/CryptoStrategies",dry_run=False)
+
+    def test_trusted_repository_domain_cannot_be_redeclared_through_wrapper(self):
+        payload=coverage_export_fixture()
+        payload["domain"]="us_equity"
+        payload["snapshots"][0]["payload"]["metadata"]["domain"]="us_equity"
+        with self.assertRaisesRegex(ValueError,"domain"):
+            run_watcher(payload,source_repo="QuantStrategyLab/CryptoStrategies",dry_run=False)
+
+    def test_invalid_coverage_is_unavailable_without_external_interfaces(self):
+        payload=coverage_export_fixture()
+        payload["snapshots"][0]["payload"]["metadata"]["interval_return_coverage"]["return_count"]=True
+        with patch("scripts.run_strategy_optimization_watcher.dispatch_strategy_watch_findings") as dispatch:
+            result=run_watcher(payload,source_repo="QuantStrategyLab/CryptoStrategies",dry_run=False)
+            dispatch.assert_not_called()
+        self.assertEqual(result["findings"],0)
+        self.assertEqual(result["coverage_status"][0]["read_status"],"invalid")
+        self.assertEqual(result["research_task_source_snapshot"]["data_status"],"unavailable")
+
+    def test_mixed_runner_preserves_legacy_p3_issue_and_task_exactly(self):
+        legacy=_verified_p3_payload()
+        legacy.update(repo="QuantStrategyLab/CryptoStrategies",domain="crypto",profile="crypto_legacy_p3_case")
+        callbacks={"source_repo":"QuantStrategyLab/CryptoStrategies","dry_run":False,
+                   "create_issue":Mock(return_value="https://github.com/QuantStrategyLab/CryptoStrategies/issues/1"),
+                   "list_issues":Mock(side_effect=lambda _repo:{}),"list_archived_issues":Mock(side_effect=lambda _repo:{}),
+                   "read_issue":Mock(side_effect=AssertionError("unexpected issue read")),
+                   "comment_issue":Mock(side_effect=AssertionError("unexpected comment"))}
+        baseline=run_watcher(legacy,**callbacks)
+        self.assertEqual(len(baseline["research_task_source_snapshot"]["tasks"]),1)
+        payload=coverage_export_fixture()
+        payload["snapshots"].append({"schema_version":payload["schema_version"],"metrics_kind":"performance","payload":legacy})
+        result=run_watcher(payload,**callbacks)
+        self.assertEqual(result["issues"],baseline["issues"])
+        self.assertEqual(result["research_task_source_snapshot"]["tasks"],baseline["research_task_source_snapshot"]["tasks"])
+        self.assertEqual(result["research_task_source_snapshot"]["data_status"],"ready")
+        self.assertEqual(result["findings"],1)
+        self.assertEqual(result["coverage_status"][0]["optimization_status"],"unavailable")
+        self.assertEqual(callbacks["create_issue"].call_count, 2)
+        self.assertEqual(callbacks["list_issues"].call_count, 2)
+        self.assertEqual(callbacks["list_archived_issues"].call_count, 2)
+        callbacks["read_issue"].assert_not_called()
+        callbacks["comment_issue"].assert_not_called()
+
+    def test_direct_dispatch_cannot_reopen_coverage_issue_lane(self):
+        snapshot=watch.StrategyWatchSnapshot.from_dict(coverage_export_fixture()["snapshots"][0]["payload"])
+        finding=watch.StrategyWatchFinding(snapshot,"high",[])
+        result=dispatch_strategy_watch_findings([finding],source_repo="QuantStrategyLab/CryptoStrategies",dry_run=False)
+        self.assertEqual(result["findings"],0)
+        self.assertEqual(result["issues"],[])
+
+    def test_main_reads_real_envelope_and_prints_safe_unavailable_summary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/"coverage.json"
+            path.write_text(json.dumps(coverage_export_fixture()))
+            output=StringIO()
+            with patch.dict(os.environ,{"STRATEGY_WATCH_INPUT":str(path),"STRATEGY_WATCH_SOURCE_ROOT":"",
+                    "STRATEGY_WATCH_METRICS_PATH":"","STRATEGY_WATCH_SOURCE_REPO":"QuantStrategyLab/CryptoStrategies",
+                    "STRATEGY_WATCH_DRY_RUN":"false"}), redirect_stdout(output):
+                self.assertEqual(main(),0)
+            result=json.loads(output.getvalue())
+            self.assertEqual(result["issues"],[])
+            self.assertEqual(result["research_task_source_snapshot"]["tasks"],[])
+            self.assertEqual(result["coverage_status"][0]["comparison_status"],"unknown")
 
 
 if __name__ == "__main__":
