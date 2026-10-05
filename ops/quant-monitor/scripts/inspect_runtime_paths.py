@@ -850,11 +850,82 @@ def static_interpreter(reader, path_value, venv=None, *, common_prepend=True):
     return result
 
 
+def interpreter_declaration_path(value, *, venv=False):
+    """Lexical nonsecret selection only; never authorize a new filesystem root."""
+    result = {"category": "untrusted_or_unbound", "location_family": None,
+              "path_sha256": None, "installer_qualification_proof": False}
+    if value is UNKNOWN or value is None or value == "":
+        result["category"] = "unknown" if value is UNKNOWN else "absent" if value is None else "empty"
+        return result
+    if not isinstance(value, str):
+        return result
+    known = classify(value)
+    if known["category"] == "venv":
+        category = "existing_fixed_venv"
+    elif not venv and value in ("/usr/bin", "/bin", "/usr/local/bin", "/usr/sbin", "/sbin", "/usr/local/sbin"):
+        category = "system_command_prefix"
+    elif not venv and value.endswith("/bin") and classify(value[:-4])["category"] == "venv":
+        category = "existing_fixed_venv_bin"
+    else:
+        if not isinstance(value, str) or len(value) > 512 or not re.fullmatch(r"/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*", value):
+            return result
+        if any(part in (".", "..") for part in value.split("/")) or value in (base.RUNTIME_ROOT, base.RELEASE_ROOT) or value.startswith((base.RUNTIME_ROOT + "/", base.RELEASE_ROOT + "/")):
+            return result
+        if not value.startswith(("/opt/quant-monitor/", "/home/ubuntu/")):
+            return result
+        category = "external_venv_candidate" if venv else "external_command_prefix_candidate"
+    family = ("existing_fixed_venv" if category.startswith("existing_fixed_") else "system_command_prefix" if category == "system_command_prefix"
+              else "opt_quant_monitor" if value.startswith("/opt/quant-monitor/") else "ubuntu_home")
+    result.update(category=category, location_family=family, path_sha256=base.digest(value))
+    return result
+
+
+def interpreter_declarations(env, origins, selected_venv, configured_venv, venv_origin,
+                             path_before, path_origin_before, *, common_applies):
+    """Already-parsed declaration fields, with one bounded residual evidence request."""
+    path = env.get("PATH")
+    origin = origins.get("PATH", "absent")
+    selection = ("not_used_by_parent" if not common_applies else "inherited_unknown" if configured_venv is UNKNOWN
+                 else "helper_default" if configured_venv is None else "empty_uses_helper_default" if configured_venv == "" else "explicit")
+    venv = interpreter_declaration_path(selected_venv, venv=True)
+    next_venv = ("not_used_by_parent" if not common_applies else "existing_fixed_venv_metadata_only" if venv["category"] == "existing_fixed_venv"
+                else "prebind_exact_venv_then_pyvenv_cfg_and_two_python_links" if venv["category"] == "external_venv_candidate"
+                else "obtain_trusted_exact_venv_declaration_before_any_file_read")
+    status = "unknown" if path is UNKNOWN else "absent" if path is None else "empty" if path == "" else "literal"
+    path_info = {"declaration_status": status, "provenance": origin, "prefix_count": None,
+                 "search_reachability_proof": False,
+                 "first_unrecognized_declared_prefix": None,
+                 "literal_source_override": None if origin == path_origin_before == "source_telegram_env" and path == path_before
+                    else origin == "source_telegram_env" and (origin != path_origin_before or path != path_before),
+                 "next_evidence": "obtain_selected_interpreter_from_existing_operator_no_default_assumption"}
+    if isinstance(path, str) and path and len(path.split(":")) <= 16:
+        prefixes = path.split(":")
+        path_info["prefix_count"] = len(prefixes)
+        path_info["next_evidence"] = "existing_fixed_candidates_metadata_only_no_execution"
+        for index, prefix in enumerate(prefixes):
+            if prefix not in ("/usr/bin", "/bin"):
+                declaration = interpreter_declaration_path(prefix)
+                path_info["first_unrecognized_declared_prefix"] = {"index": index, **declaration}
+                path_info["next_evidence_prerequisite"] = "earlier_fixed_candidates_excluded_and_original_static_stop_matches"
+                path_info["next_evidence"] = ("prebind_first_unrecognized_prefix_then_python3_metadata_only" if declaration["path_sha256"]
+                                             else "obtain_trusted_path_selection_before_any_candidate_read")
+                break
+    elif isinstance(path, str) and path:
+        path_info["next_evidence"] = "obtain_bounded_trusted_path_declaration_before_any_candidate_read"
+    return {"scope": "parsed_declaration_only", "filesystem_identity_proof": False,
+            "interpreter_execution_proof": False, "import_execution_proof": False,
+            "common_path_rule": "prepend_if_venv_bin_python_executable" if common_applies else "not_applied_by_parent",
+            "venv": {"selection": selection, "provenance": "common_default" if selection in ("helper_default", "empty_uses_helper_default") else venv_origin if common_applies else "not_used_by_parent",
+                     "configured_provenance": venv_origin if common_applies else "not_used_by_parent",
+                     "declaration": venv, "next_evidence": next_venv}, "path": path_info}
+
+
 def static_identity_output():
     return {"scope": "next_invocation_static_selection", "not_historical_adoption": True,
               "status": "unknown", "stop_reason": None, "interpreter_invoked": False,
               "import_execution_proof": False, "import_resolution_proof": False,
-              "roots": {}, "files": {}, "import_candidates": None, "interpreter": None}
+              "roots": {}, "files": {}, "import_candidates": None, "interpreter": None,
+              "interpreter_declarations": None}
 
 
 def static_adoption_identity(unit, env, origins, reader, monitor, entry, checks):
@@ -867,6 +938,8 @@ def static_adoption_identity(unit, env, origins, reader, monitor, entry, checks)
         result["stop_reason"] = "unclassified_monitor"
         return result
     env, origins = dict(env), dict(origins)
+    configured_venv, venv_origin = env.get("QUANT_MONITOR_VENV"), origins.get("QUANT_MONITOR_VENV", "absent")
+    path_before, path_origin_before = env.get("PATH"), origins.get("PATH", "absent")
     result["roots"] = {"entrypoint": classify(entry), "monitor": classify(monitor)}
     captured_aab = env.get("AIAUDIT_BRIDGE_ROOT")
     if unit == "codex-quant.service":
@@ -880,6 +953,9 @@ def static_adoption_identity(unit, env, origins, reader, monitor, entry, checks)
     if source["status"] not in ("parsed", "missing") or source["shell_alias_override"]:
         result["stop_reason"] = "telegram_selector_or_literal_configuration_unknown"
         return result
+    result["interpreter_declarations"] = {"consumer": interpreter_declarations(
+        env, origins, venv if unit == "codex-quant.service" else None, configured_venv, venv_origin,
+        path_before, path_origin_before, common_applies=unit == "codex-quant.service")}
     if unit == "codex-daily-briefing.service":
         aab = captured_aab
         result["roots"]["consume_aab"] = classify(aab)
@@ -891,6 +967,8 @@ def static_adoption_identity(unit, env, origins, reader, monitor, entry, checks)
             result["stop_reason"] = "daily_child_helper_unknown"
             return result
         childenv, childorigins = dict(env), dict(origins)
+        child_configured_venv, child_venv_origin = childenv.get("QUANT_MONITOR_VENV"), childorigins.get("QUANT_MONITOR_VENV", "absent")
+        child_path_before, child_path_origin_before = childenv.get("PATH"), childorigins.get("PATH", "absent")
         common(childenv, childorigins, child)
         venv = childenv["QUANT_MONITOR_VENV"] if childenv["QUANT_MONITOR_VENV"] not in (None, "") else child + "/.venv"
         qpk = childenv.get("QUANT_PLATFORM_KIT_ROOT")
@@ -899,6 +977,9 @@ def static_adoption_identity(unit, env, origins, reader, monitor, entry, checks)
             result["stop_reason"] = "daily_child_literal_configuration_unknown"
             return result
         result["roots"]["builder_monitor"] = classify(child)
+        result["interpreter_declarations"]["builder"] = interpreter_declarations(
+            childenv, childorigins, venv, child_configured_venv, child_venv_origin,
+            child_path_before, child_path_origin_before, common_applies=True)
         result["builder_interpreter"] = static_interpreter(reader, childenv.get("PATH"), venv,
             common_prepend=childorigins.get("PATH") != "source_telegram_env")
         result["files"]["daily_briefing_builder.py"] = childfiles["daily_briefing_builder.py"]
