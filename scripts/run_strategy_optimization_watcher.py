@@ -19,6 +19,8 @@ if str(ROOT) not in sys.path:
 
 from service.strategy_watch import (  # noqa: E402
     StrategyWatchFinding,
+    STRATEGY_WATCH_REGISTRY,
+    _coverage_protocol_present,
     build_research_input_unavailable_finding,
     evaluate_strategy_watch,
     finding_to_automation_task,
@@ -26,6 +28,7 @@ from service.strategy_watch import (  # noqa: E402
     research_task_context_available,
     research_task_source_snapshot,
     watcher_issue_key,
+    strategy_watch_coverage_status,
 )
 
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -299,26 +302,41 @@ def _payload_for_source_repo(payload: dict[str, Any], source_repo: str) -> dict[
     if not source_repo:
         return payload
     normalized = copy.deepcopy(payload)
-    for key in ("repo", "repository"):
-        embedded = str(normalized.get(key) or "").strip()
-        if embedded and embedded != source_repo:
-            raise ValueError("metrics payload repository does not match validated source repository")
+    raw_snapshots = normalized.get("snapshots")
+    qualified = _coverage_protocol_present(normalized) or (isinstance(raw_snapshots, list)
+        and any(isinstance(item, dict) and _coverage_protocol_present(item) for item in raw_snapshots))
+    source_domain = next((item.domain for item in STRATEGY_WATCH_REGISTRY if item.repository == source_repo), "") if qualified else ""
+
+    def bind_identity(item: dict[str, Any], domain: str = "") -> str:
+        for key in ("repo", "repository"):
+            embedded = str(item.get(key) or "").strip()
+            if embedded and embedded != source_repo:
+                raise ValueError("metrics payload repository does not match validated source repository")
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        domains = {str(value).strip() for value in (source_domain, domain, item.get("domain"), metadata.get("domain")) if value} if qualified else set()
+        if len(domains) > 1:
+            raise ValueError("metrics payload domain does not match source container domain")
+        return next(iter(domains), "")
+
+    domain = bind_identity(normalized)
     normalized["repo"] = source_repo
     raw_snapshots = normalized.get("snapshots")
     if isinstance(raw_snapshots, list):
-        clean_snapshots: list[Any] = []
         for item in raw_snapshots:
             if not isinstance(item, dict):
-                clean_snapshots.append(item)
                 continue
-            snapshot = dict(item)
-            for key in ("repo", "repository"):
-                embedded = str(snapshot.get(key) or "").strip()
-                if embedded and embedded != source_repo:
-                    raise ValueError("snapshot repository does not match validated source repository")
-            snapshot["repo"] = source_repo
-            clean_snapshots.append(snapshot)
-        normalized["snapshots"] = clean_snapshots
+            item_domain = bind_identity(item, domain)
+            if isinstance(item.get("payload"), dict):
+                inner = item["payload"]
+                bind_identity(inner, item_domain)
+                inner["repo"] = source_repo
+            else:
+                item["repo"] = source_repo
+    elif isinstance(normalized.get("payload"), dict):
+        bind_identity(normalized["payload"], domain)
+        normalized["payload"]["repo"] = source_repo
+        # A standalone item is an exact three-key envelope.
+        normalized.pop("repo", None)
     return normalized
 
 
@@ -336,6 +354,8 @@ def dispatch_strategy_watch_findings(
 ) -> dict[str, Any]:
     if source_repo and not REPO_RE.fullmatch(source_repo):
         raise ValueError("source_repo must be in owner/name form")
+    findings = [finding for finding in findings if not finding.snapshot.coverage_context
+                and not finding.snapshot.schema_version.startswith("strategy_performance.coverage")]
     issues: list[dict[str, Any]] = []
     open_issue_cache: dict[str, dict[str, str]] = {}
     archived_issue_cache: dict[str, dict[str, str]] = {}
@@ -443,6 +463,13 @@ def run_watcher(
         raise ValueError("source_repo must be in owner/name form")
     watch_payload = _payload_for_source_repo(payload, source_repo)
     findings = evaluate_strategy_watch(watch_payload)
+    coverage_status = strategy_watch_coverage_status(watch_payload)
+    if coverage_status and not findings:
+        reason = ("interval_coverage_contract_invalid" if any(item["read_status"] == "invalid" for item in coverage_status)
+                  else "interval_scope_binding_unavailable")
+        result = no_comparable_metrics_result(reason=reason, dry_run=dry_run)
+        result["coverage_status"] = coverage_status
+        return result
     result = dispatch_strategy_watch_findings(
         findings,
         source_repo=source_repo,
@@ -458,6 +485,8 @@ def run_watcher(
         context_available=research_task_context_available(watch_payload),
         computed_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     )
+    if coverage_status:
+        result["coverage_status"] = coverage_status
     archived_event_keys = {
         str(issue.get("task", {}).get("event_key") or "")
         for issue in result["issues"]
