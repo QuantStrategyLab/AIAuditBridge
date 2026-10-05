@@ -160,3 +160,121 @@ def test_next_day_can_diagnose_different_unattempted_error(tmp_path):
     result = health._run_operational_diagnosis(root, [other], health._operational_diagnosis_fingerprint([other]),
         attempt_date="2026-09-11", config_loader=lambda: object(), client_factory=lambda config: client)
     assert result["status"] == "succeeded" and client.execute.call_count == 1
+
+
+@pytest.mark.parametrize("call,stage,error,category", [
+    ("_load_operational_diagnosis_state", "diagnosis_state_processing", OSError, "io_error"),
+    ("_read_diagnosis_cycle", "latest_cycle_input_processing", ValueError, "value_error"),
+    ("_read_diagnosis_cycle", "latest_cycle_input_processing", OSError, "io_error"),
+    ("_run_operational_diagnosis", "diagnosis_processing", AttributeError, "attribute_error"),
+    ("_run_operational_diagnosis", "diagnosis_processing", TypeError, "type_error"),
+])
+def test_recent_diagnosis_identifies_caught_stage_without_details(tmp_path, monkeypatch, capsys, call, stage, error, category):
+    save(tmp_path, "2026-09-11T04:30:00+00:00", [ERROR])
+    failed = Mock(side_effect=error("private-marker /private/account token"))
+    monkeypatch.setattr(health, call, failed)
+    result = health.diagnose_recent_cycles(tmp_path, now=NOW)
+    assert result == {
+        "status": "rejected", "reason": "recent_cycles_or_state_unavailable",
+        "failure_stage": stage, "failure_category": category,
+    }
+    assert failed.call_count == 1
+    output = capsys.readouterr()
+    assert "private" not in json.dumps(result) + output.out + output.err
+
+
+def test_recent_cycle_validation_is_distinct_from_latest_and_unknown_types_stay_generic(tmp_path, monkeypatch):
+    class PrivateAccountError(ValueError):
+        pass
+
+    save(tmp_path, "2026-09-11T04:30:00+00:00", [ERROR])
+    read = Mock(side_effect=[(NOW, [ERROR]), PrivateAccountError("private-marker")])
+    monkeypatch.setattr(health, "_read_diagnosis_cycle", read)
+    result = health.diagnose_recent_cycles(tmp_path, now=NOW)
+    assert result["failure_stage"] == "recent_cycle_input_processing"
+    assert result["failure_category"] == "unknown_error"
+    assert "private" not in json.dumps(result) and "PrivateAccountError" not in json.dumps(result)
+    monkeypatch.setattr(health, "_read_diagnosis_cycle", Mock(side_effect=RuntimeError("private-marker")))
+    with pytest.raises(RuntimeError):
+        health.diagnose_recent_cycles(tmp_path, now=NOW)
+
+
+@pytest.mark.parametrize("call,stage,status,execute_calls", [
+    ("_load_operational_diagnosis_state", "diagnosis_state_processing", "deferred", 0),
+    ("_record_operational_diagnosis_attempt", "diagnosis_attempt_persistence", "deferred", 0),
+    ("_forget_operational_diagnosis_attempt", "diagnosis_deferred_state_update", "unavailable", 1),
+])
+def test_diagnosis_state_failures_preserve_admission_and_no_retries(tmp_path, monkeypatch, call, stage, status, execute_calls):
+    client = Mock()
+    client.execute.return_value = SimpleNamespace(success=False, raw={"status": "deferred"})
+    monkeypatch.setattr(health, call, Mock(side_effect=OSError("private-marker /private/account token")))
+    root = tmp_path / "data/diagnosis-consumer"
+    result = health._run_operational_diagnosis(
+        root, [ERROR], health._operational_diagnosis_fingerprint([ERROR]),
+        attempt_date="2026-09-11", config_loader=lambda: object(), client_factory=lambda _: client,
+    )
+    assert result == {
+        "status": status, "reason": "dedupe_state_unavailable",
+        "failure_stage": stage, "failure_category": "io_error",
+    }
+    assert client.execute.call_count == execute_calls and "private" not in json.dumps(result)
+    if execute_calls:
+        state = health._load_operational_diagnosis_state(root)
+        assert state["operational_diagnosis_attempts"] == [health._operational_diagnosis_fingerprint([ERROR])]
+        assert state["operational_diagnosis_last_attempt_date"] == "2026-09-11"
+
+
+@pytest.mark.parametrize("outcome,stage,category", [
+    ("unknown", "diagnosis_execution", "runtime_error"),
+    ("custom_unknown", "diagnosis_execution", "unknown_error"),
+    ("unavailable", "diagnosis_result_processing", "result_unavailable"),
+])
+def test_diagnosis_failure_projection_keeps_original_attempt_and_delivery_identity(tmp_path, outcome, stage, category):
+    class PrivateAccountError(Exception):
+        pass
+
+    root = tmp_path / "data/diagnosis-consumer"
+    fingerprint = health._operational_diagnosis_fingerprint([ERROR])
+    target = "b" * 64
+    deliveries = {"c" * 64: {target: {"status": "unknown", "attempts": 1}}}
+    health._write_alert_state(root, {"deliveries": deliveries})
+    client = Mock()
+    if outcome in {"unknown", "custom_unknown"}:
+        client.execute.side_effect = (RuntimeError if outcome == "unknown" else PrivateAccountError)("private-marker")
+    else:
+        client.execute.return_value = SimpleNamespace(success=False, raw={"private": "private-marker"})
+    kwargs = dict(attempt_date="2026-09-11", config_loader=lambda: object(), client_factory=lambda _: client)
+    result = health._run_operational_diagnosis(root, [ERROR], fingerprint, **kwargs)
+    assert result["status"] == "unavailable" and result["failure_stage"] == stage
+    assert result["failure_category"] == category and "private" not in json.dumps(result)
+    assert health._operational_diagnosis_fingerprint([ERROR]) == fingerprint
+    state = health._load_operational_diagnosis_state(root)
+    assert state["operational_diagnosis_attempts"] == [fingerprint]
+    assert state["operational_diagnosis_last_attempt_date"] == "2026-09-11"
+    assert state["deliveries"] == deliveries
+    assert "failure_stage" not in json.dumps(state) and "failure_category" not in json.dumps(state)
+    assert health._run_operational_diagnosis(root, [ERROR], fingerprint, **kwargs) == {
+        "status": "skipped", "reason": "daily_attempt_limit",
+    }
+    assert client.execute.call_count == 1
+
+
+def test_recent_sdk_result_processing_failure_preserves_attempt_without_replay(tmp_path, monkeypatch):
+    save(tmp_path, "2026-09-11T04:30:00+00:00", [ERROR])
+    client = Mock()
+    client.execute.return_value = SimpleNamespace(raw={"private": "private-marker"})
+    original = health._run_operational_diagnosis
+    run = Mock(side_effect=lambda *args, **kwargs: original(
+        *args, **kwargs, config_loader=lambda: object(), client_factory=lambda _: client,
+    ))
+    monkeypatch.setattr(health, "_run_operational_diagnosis", run)
+    result = health.diagnose_recent_cycles(tmp_path, now=NOW)
+    assert result == {
+        "status": "rejected", "reason": "recent_cycles_or_state_unavailable",
+        "failure_stage": "diagnosis_processing", "failure_category": "attribute_error",
+    }
+    assert "private" not in json.dumps(result)
+    state = health._load_operational_diagnosis_state(tmp_path / "data/diagnosis-consumer")
+    assert state["operational_diagnosis_attempts"] == [health._operational_diagnosis_fingerprint([ERROR])]
+    assert health.diagnose_recent_cycles(tmp_path, now=NOW) == {"status": "skipped", "reason": "daily_attempt_limit"}
+    assert run.call_count == client.execute.call_count == 1

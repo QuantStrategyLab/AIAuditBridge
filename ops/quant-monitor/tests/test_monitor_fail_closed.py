@@ -643,7 +643,10 @@ class MonitorFailClosedTests(unittest.TestCase):
                 config_loader=lambda: (_ for _ in ()).throw(AssertionError("must not configure")),
             )
 
-        self.assertEqual(result, {"status": "deferred", "reason": "dedupe_state_unavailable"})
+        self.assertEqual(result, {
+            "status": "deferred", "reason": "dedupe_state_unavailable",
+            "failure_stage": "diagnosis_state_processing", "failure_category": "io_error",
+        })
 
     def test_operational_diagnosis_keeps_unknown_or_auth_failed_attempt(self) -> None:
         for raw in ({"failure_category": "auth_or_config_failure"}, {}):
@@ -694,7 +697,10 @@ class MonitorFailClosedTests(unittest.TestCase):
                 client_factory=lambda _config: Client(),
             )
 
-        self.assertEqual(result, {"status": "deferred", "reason": "dedupe_state_unavailable"})
+        self.assertEqual(result, {
+            "status": "deferred", "reason": "dedupe_state_unavailable",
+            "failure_stage": "diagnosis_attempt_persistence", "failure_category": "io_error",
+        })
 
     def test_operational_diagnosis_requires_runtime_credentials_before_attempt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(

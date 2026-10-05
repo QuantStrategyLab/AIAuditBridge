@@ -37,6 +37,17 @@ GitHub API 限流或上游不可用时，`status.json` 会记录脱敏的 `reaso
 
 ## Telegram（量化哨兵）
 
+定时 AI 消费者的失败结果附加固定枚举 `failure_stage` / `failure_category`，保留原
+`status`、`reason` 和退出码。阶段只标识当前处理边界，不证明根因、模型是否收到请求或
+能否重试：日报外层的 `briefing_input_processing` 包含读取和规则处理，
+`summary_processing` 包含摘要输入校验、调用和响应处理；只有既有明确返回码才进一步
+标识摘要校验、配置、执行或结果处理。cycle 阶段仍合并读取、JSON/结构和时间校验。
+`diagnosis_attempt_persistence` / `diagnosis_deferred_state_update` 标识状态更新尝试，
+也可能在内部读取、目录或锁步骤失败。类别是固定接口异常类型或既有返回码投影，未知
+异常类型用 `unknown_error`；不输出原异常、路径、账号、提示词、响应或凭据。
+这些字段仅进入消费者结果，不进入告警/诊断 fingerprint、attempt 状态或送达身份，
+不新增调用、重试或通知。旧产物只有粗原因时仍不能据此确定缺文件或模型故障。
+
 Token 从 GCP Secret `quant-sentinel-telegram-bot-token` 加载；**不要**把 token 或 chat id 写进 git。
 
 告警路由：
