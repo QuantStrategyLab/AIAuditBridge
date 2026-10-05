@@ -91,6 +91,67 @@ def run(values=None, reader=None):
 
 
 class PathInspectionTests(unittest.TestCase):
+    def test_declaration_only_external_venv_identifies_bounded_next_read(self):
+        p = props()
+        p["Environment"] = "QUANT_MONITOR_VENV=/opt/quant-monitor/venvs/staged-20261005 PATH=/usr/bin:/bin"
+        reader = FakeReader()
+        extra = run({"codex-quant.service": p}, reader)["services"]["codex-quant.service"]["static_adoption_identity"]
+        node = extra["interpreter_declarations"]["consumer"]
+        self.assertEqual(extra["interpreter"]["stop_reason"], "unclassified_venv")
+        self.assertEqual(node["venv"]["selection"], "explicit")
+        self.assertEqual(node["venv"]["provenance"], "systemd_environment")
+        self.assertEqual(node["venv"]["declaration"]["category"], "external_venv_candidate")
+        self.assertEqual(node["venv"]["declaration"]["location_family"], "opt_quant_monitor")
+        self.assertEqual(node["venv"]["next_evidence"], "prebind_exact_venv_then_pyvenv_cfg_and_two_python_links")
+        self.assertFalse(node["filesystem_identity_proof"])
+        self.assertNotIn("/opt/quant-monitor/venvs/staged-20261005", json.dumps(node))
+        self.assertFalse(any("/venvs/" in path for path, _ in reader.requests))
+
+    def test_declaration_only_default_empty_and_inherited_venv_are_distinct(self):
+        for change, expected in (({}, "helper_default"), ({"Environment": "QUANT_MONITOR_VENV="}, "empty_uses_helper_default"),
+                                 ({"PassEnvironment": "QUANT_MONITOR_VENV"}, "inherited_unknown")):
+            p = props()
+            p.update(change)
+            node = run({"codex-quant.service": p})["services"]["codex-quant.service"]["static_adoption_identity"]["interpreter_declarations"]["consumer"]
+            self.assertEqual(node["venv"]["selection"], expected)
+            if expected != "inherited_unknown":
+                self.assertEqual(node["venv"]["provenance"], "common_default")
+
+    def test_declaration_only_daily_parent_path_has_single_bounded_blocker(self):
+        p = props("codex-daily-briefing.service")
+        p["Environment"] = "AIAUDIT_BRIDGE_ROOT=" + RELEASE + " PATH=/usr/local/bin:/usr/bin:/bin"
+        node = run({"codex-daily-briefing.service": p})["services"]["codex-daily-briefing.service"]["static_adoption_identity"]["interpreter_declarations"]["consumer"]
+        self.assertEqual(node["venv"]["selection"], "not_used_by_parent")
+        self.assertEqual(node["path"]["first_unrecognized_declared_prefix"]["index"], 0)
+        self.assertFalse(node["path"]["search_reachability_proof"])
+        self.assertEqual(node["path"]["next_evidence_prerequisite"], "earlier_fixed_candidates_excluded_and_original_static_stop_matches")
+        self.assertEqual(node["path"]["next_evidence"], "prebind_first_unrecognized_prefix_then_python3_metadata_only")
+        self.assertNotIn("/usr/local/bin", json.dumps(node))
+
+    def test_declaration_only_missing_and_telegram_overridden_path_are_explicit(self):
+        absent = run({"codex-quant.service": props()})["services"]["codex-quant.service"]["static_adoption_identity"]["interpreter_declarations"]["consumer"]
+        self.assertEqual(absent["path"]["declaration_status"], "absent")
+        self.assertEqual(absent["path"]["next_evidence"], "obtain_selected_interpreter_from_existing_operator_no_default_assumption")
+        p = props()
+        p["Environment"] = "PATH=/usr/local/bin:/usr/bin:/bin"
+        reader = FakeReader({m.TELEGRAM: b"PATH=/usr/bin:/bin\n"})
+        node = run({"codex-quant.service": p}, reader)["services"]["codex-quant.service"]["static_adoption_identity"]["interpreter_declarations"]["consumer"]
+        self.assertTrue(node["path"]["literal_source_override"])
+        self.assertEqual(node["path"]["provenance"], "source_telegram_env")
+        p = props()
+        p["Environment"] = "PATH="
+        empty = run({"codex-quant.service": p})["services"]["codex-quant.service"]["static_adoption_identity"]["interpreter_declarations"]["consumer"]
+        self.assertEqual(empty["path"]["declaration_status"], "empty")
+        self.assertIsNone(empty["path"]["first_unrecognized_declared_prefix"])
+
+    def test_declaration_only_untrusted_paths_are_neither_echoed_nor_hashed(self):
+        for value in ("/root/" + SECRET, "/private/" + SECRET, "/opt/quant-monitor/../" + SECRET,
+                      "/home/ubuntu/quant-monitor-runtime/AIAuditBridge/private", RUNTIME, m.base.RELEASE_ROOT, 123):
+            result = m.interpreter_declaration_path(value, venv=True)
+            self.assertEqual(result["category"], "untrusted_or_unbound")
+            self.assertIsNone(result["path_sha256"])
+            self.assertNotIn(SECRET, json.dumps(result))
+
     def test_static_selection_is_separate_from_original_path_gate(self):
         p = props()
         p["Environment"] = "PATH=/unclassified/fixture:/usr/bin:/bin"
