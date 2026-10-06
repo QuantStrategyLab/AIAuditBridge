@@ -243,3 +243,80 @@ runner 原权限投影七项路径、覆盖来源、限定公开依赖哈希、Q
 未知路径、语法、权限、启动控制、非标准 PATH 和符号链接均保留未知；不会仅根据
 用户名推断 HOME。路径类别是配置的字面分类，真实文件身份另报且不解析链接。
 当前快照不证明进程环境、Python 实际导入、下次 pre-start 后环境、全树一致或业务恢复。
+
+## Bounded current-invocation failure evidence / 限定退出证据
+
+The manual-only `VPS Codex Service Ops` mode `inspect-monitor-failures` is a
+separate protected `codex-vps-ops` job under the existing concurrency group. It
+verifies exact current main, workflow SHA, and a clean checkout, then runs
+`inspect_monitor_failures.py --inspect` with `env -i` and `/usr/bin/python3 -I -B`.
+It has ordinary runner privileges, no provider/admin secrets, and no sudo or
+permission expansion. Existing modes and their read sets are unchanged.
+
+The fixed whitelist is `codex-quant.service`, `codex-daily-briefing.service`, and
+their two timers. Each unit has two bounded `/usr/bin/systemctl --no-pager show`
+reads, before/after its evidence read. The exact properties are `Id`, `LoadState`,
+`ActiveState`, `SubState`, `UnitFileState`, `InvocationID`, and `Result`; services
+add `MainPID`, `ExecMainCode`, `ExecMainStatus`, `ExecMainStartTimestampMonotonic`,
+`ExecMainExitTimestampMonotonic`, `ActiveEnterTimestampMonotonic`, and
+`InactiveEnterTimestampMonotonic`; timers add `LastTriggerUSec`,
+`LastTriggerUSecMonotonic`, `NextElapseUSecRealtime`, and `NextElapseUSecMonotonic`.
+Only each service's already-known nonzero 32-hex current `InvocationID` permits
+one `/usr/bin/journalctl` query, jointly matching `_SYSTEMD_UNIT` and
+`_SYSTEMD_INVOCATION_ID`. Every returned record must match both again. There is
+no timer journal, historical invocation enumeration, or whole-host log read.
+
+The metadata subprocesses alone set `TZ=UTC`; host timezone is unchanged. Timer
+realtime values are normalized UTC dates when supported. The CLI formats
+`USecMonotonic` as timespans, so the output separately retains a bounded
+`elapsed_timespan` with `clock: monotonic`, using only official duration tokens.
+`0` and `infinity` remain `unset` and `infinite` sentinels; unsupported values
+remain unknown. These are elapsed monotonic clock readings, not time remaining
+or UTC conversions. This preserves the quant timer's `OnBootSec=2min` /
+`OnUnitActiveSec=30min` evidence even without a realtime next-elapse value.
+CLI formatting references: [systemd v255 property printer](https://raw.githubusercontent.com/systemd/systemd/v255/src/shared/bus-print-properties.c)
+and [timespan formatter](https://raw.githubusercontent.com/systemd/systemd/v255/src/basic/time-util.c).
+
+Each command has a five-second deadline and streamed combined stdout/stderr
+byte cap (16KiB for systemd, 64KiB per service journal). Journal queries request
+at most 64 records. Reaching either cap is conservatively truncated and unknown,
+including exactly 64 records. Timeout/cap termination affects only the newly
+started metadata child. Missing units/IDs, denied visibility, stderr, malformed
+or mismatched records, and changed snapshots cannot produce a diagnosis.
+
+Journal MESSAGE is parsed only in transient memory. Output contains fixed
+stage/error counters, visibility/matching/limit booleans, normalized unit/exit
+summary and UTC timer times; it never retains log text, paths, URLs, accounts,
+tokens, raw InvocationIDs, or exceptions. Import/permission/missing-file and
+fixed consumer-stage evidence are observations, not proof of a root cause or
+Python installation damage. Exit 2 alone cannot establish a monitor alert; a
+matching health-cycle summary can establish reported alert evidence. No logs
+cannot establish health. `pre_start_or_start` means the main start timestamp is
+zero and the result failed, not identification of a particular ExecStartPre
+command. No environment/configuration files, `/proc`, venv/PATH metadata,
+account/task directories, pipelines, models, gateway, deployment, or notices are
+read or invoked. A source/model mismatch is not classified as a live failure.
+
+Offline verification uses only in-memory fake metadata runners with guards
+against processes, sockets, and external callbacks installed before helper
+import. No arguments perform host reads; only `--inspect` does. The built-in
+`--fixture-test` also exercises the collector without metadata commands:
+
+```bash
+python3 -B -m unittest discover -s ops/quant-monitor/tests -p test_inspect_monitor_failures.py -v
+env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C /usr/bin/python3 -I -B ops/quant-monitor/scripts/inspect_monitor_failures.py --fixture-test
+```
+
+独立手动模式 `inspect-monitor-failures` 只读取上述四个固定 unit 的限定状态、
+退出摘要和调度时间，以及两个 service 已知当前 InvocationID 对应的最多 64 条、
+64KiB journal；不读历史调用或整机日志。前后快照须稳定，每条记录须同时匹配 unit
+和 InvocationID。每条命令限时五秒，流式读集受字节上限约束；恰达上限也保留未知。
+缺失、拒绝、截断、畸形、错配或并发变化均不能确定原因，不 sudo 补读。
+只对 metadata 子进程设 `TZ=UTC`，不改主机时区。纯 monotonic timer 的调度值按
+CLI 的限定 duration 词法另报 `clock: monotonic` 和带单位的 elapsed_timespan；
+不转 UTC，不推算剩余时间。`0`/`infinity` 单独标为 unset/infinite，未知格式保留未知。
+原日志、路径、URL、账号、凭据、异常和 InvocationID 不输出、不落盘，只保留固定
+枚举、计数、布尔和规范时间。退出码 2 不单独证明告警或 Python 故障，日志为空不
+证明健康；源码模型不匹配也不是生产故障。本入口不启动 pipeline、不调模型、不
+触任务网关、账户、交易、通知、部署或维护。真实运行须另获本新增读集范围的授权，
+不能复用先前已消费的 inspect 次数；候选源码和离线测试不证明生产恢复或允许部署。
