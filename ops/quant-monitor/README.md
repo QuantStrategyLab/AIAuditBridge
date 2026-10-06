@@ -219,7 +219,7 @@ checkout 或改写共享镜像；本地缺少该 commit 时会在创建 venv 前
 已合为 `28675796cabbe137a1fa3970b70d1aa98e952c88`，显式 live 选择不能用 research
 CSV 补空或拼接。AAB 审计基线 `ddd85c80413ee0c1bd0d663fc80e607692c58ef9` 固定
 QPK `086166458d4e3f61bb8937054cf7e69ff6ef914a`。两版之间 12 commit / 26 file
-的静态比较及有界离线消费者验证，不表示 pin 已升级或生产采用已验收。
+的静态比较及初始有界离线消费者验证，本身不表示源码 pin 已升级或生产采用已验收。
 
 本阶段：固定 old/new QPK 的 218 个 package blobs 和上述 AAB 必要源码，分别用
 同一组明确 synthetic fixture 走实际 sync ZIP 校验、local PerformanceStore、
@@ -256,8 +256,9 @@ artifact-status 校验，从一次已验证
 `not_configured` 与 stale/invalid status 分别处理；复用既有送达状态验证去重、未知投递和恢复。
 不从用户标签或已出现样本反推 expected 集合，不降 min10，不借 CSV 凑样本，也不把整个
 dashboard 统一标为 research。AAB caller/规则修复、精确 lock 兼容、pin 采用、运行读回和
-真实业务周期分阶段验收。当前 runtime pin 文件仍为 `086166458d4e3f61bb8937054cf7e69ff6ef914a`，
-未升级至 QPK647；运行 source、实际保留记录与生产采用未验。
+真实业务周期分阶段验收。本次源码 `qpk-runtime.sha` 从上述审计基线调整为
+`28675796cabbe137a1fa3970b70d1aa98e952c88`；生产服务实际加载的 pin、运行 source、
+实际保留记录与生产采用仍未验，不能从源码文件值推定。
 
 实施验证：原源码 RED 保留一次读取与缺 profile 的真实失败，新合同尚未实现的错误亦保留；
 补充 RED 复现“缺当前 drift 但 dashboard 低分仍产生 optimization finding”，候选修复后
@@ -267,17 +268,30 @@ dashboard 统一标为 research。AAB caller/规则修复、精确 lock 兼容�
 保留，optimization findings/issues 为 0。publisher 的实际 schema-check 代码块读取同一
 normalized 文件后，其 SHA256 未变；curl/远端发送未执行。所有本阶段普通测试的 guard
 计数均为 0。前述离线环境未装 ruff，未本地运行 lint、整仓 suite 或精确 lock 验证；
-远端 exact PR/main CI 已通过。CI Python 主套件的 QPK `7363011...` 与 AAB runtime pin `086166...`
-及拟采用 `286757...` 分别记录，不能把 CI 通过当作精确 runtime lock 或生产采用证明。
+远端 exact PR/main CI 已通过。CI Python 主套件的 QPK `7363011...`、AAB 审计基线 pin
+`086166...` 及本次源码 pin `286757...` 分别记录，不能把 CI 通过当作精确 runtime lock
+或生产采用证明。
 [main CI 安装日志](https://github.com/QuantStrategyLab/AIAuditBridge/actions/runs/37465133758/job/112274151998)
 为 pandas 3.0.6 / numpy 2.5.3，ops lock 为 3.0.5 / 2.5.2；该 CI 未验证精确 runtime lock。
 新增独立精确 lock 阶段已通过：官方原 hash 锁定的 27 包下载后在隔离 venv 离线安装，
 实际 pandas 3.0.5 / numpy 2.5.2，`pip check` 成功。已合 test `065152df...` 的 64/64、
 QPK `086166...` 与 `286757...` 的实际消费者 synthetic 路径各 13/13，均无失败或 skip；
 导入的相关 AAB 路径匹配 `59cc6dde...`。产品测试进程的外部尝试均为 0，官方 wheel
-下载有真实网络，不能将全任务表述为零网络。这关闭有界精确依赖兼容阶段；pin/部署、
-实际记录覆盖和运行采用仍未验，不把旧 QPK characterization 当 live 收益资格。
+下载有真实网络，不能将全任务表述为零网络。这关闭有界精确依赖兼容阶段；本次源码
+pin 调整依据该结果、上述 12 commit / 26 file 审查和已合 health 修复。部署、实际记录
+覆盖和运行采用仍未验，不把旧 QPK characterization 当 live 收益资格。
 旧 QPK 仍体现旧 research/CSV 行为，不因此取得 live 收益资格。
+
+采用边界：源码合并或仅安装 immutable release 不会自行切换服务。实际服务源码根
+采用新 pin 后，正常 health 周期的 `sync_strategy_repos.sh` 才会 fetch/checkout 该
+QPK commit；该同步不拉 AAB main、不安装依赖、不重启服务。`common_env.sh` 在
+QPK 镜像 `src` 已存在时将其置于 `PYTHONPATH` 前面，同周期后续 Python 子进程可
+直接使用新源码，无须等 venv 重装；日报 builder 自己不做镜像同步。需只读确认实际
+源码根、pin、解释器与模块来源，不能只看 checkout 或 package 版本。完整
+`deploy_to_vps.sh` 会安装 lock/QPK、更新 systemd、重启 timer 并启动一次 health，
+不作为本次源码验证动作。真实 history/stream 尚未验收不阻止此源码候选；实际缺数仍
+保持 `unavailable`，生产验收另核 account/stream、保留连续段与原 min10，不能用
+synthetic 结果替代真实记录。本次仅更新该 pin 与本节，不改 lock、阈值或数据选择。
 
 现有 publish 脚本直接发送 health cycle 的 normalized 文件，只检查 schema，不二次
 normalize。QRS 当前 `strategy_health_dashboard.v1` receiver 对整体 `unavailable`
@@ -299,9 +313,13 @@ without changing production imports. CI installed pandas 3.0.6 / numpy 2.5.3 whi
 the ops lock pins 3.0.5 / 2.5.2. A separate exact 27-package lock venv now passed
 pip check, merged regression 64/64 and each fixed QPK consumer run 13/13, with
 zero product-test external attempts; official wheel acquisition used network.
-Runtime adoption remains unverified; the runtime QPK pin file still selects 086166.
-Sample thresholds, QPK return algorithms and the runtime pin
-remain separate adoption decisions. The current QRS aggregate receiver clears rows
+The source pin now selects the reviewed QPK 286757; production adoption remains
+unverified. Once the active service source selects that pin, its normal health sync
+can update the QPK mirror used by later Python children without reinstalling the
+venv or restarting services. Merging source or installing an inactive release does
+not prove that switch occurred. Native history/stream qualification and actual
+module identity remain deployment acceptance checks; sample thresholds and data
+selection are unchanged. The current QRS aggregate receiver clears rows
 when unavailable; valid AAB measurements remain local, and partial-row UI display is
 not claimed. Standalone dashboard refresh is a separate, unqualified rebuild path.
 
