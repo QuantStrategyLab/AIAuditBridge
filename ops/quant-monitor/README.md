@@ -404,3 +404,35 @@ Gateway, deployment, restart, account, transaction or notification is invoked.
 只输出白名单类别/阶段计数和 0..255 的退出码，完整性和错误不存在证明均为 false，
 诊断仍 unknown。空/无有效分类、截断、失败、错配或状态变化就结束，不扩词重试。
 不留原日志或异常文本，不读其他调用，不执行业务或维护动作；旧模式行为不变。
+
+## Daily result receipts / 日报结果摘要
+
+The existing daily consumer now emits one bounded stderr line at its explicit
+runtime refusal or domain/runtime return boundary, prefixed
+`[briefing-result:v1]`. It projects only fixed `branch`, `stage`, `reason`,
+`action`, `dispatch_failed` and exit-code values. Unknown reasons become
+`unknown`; missing or partial dispatch evidence keeps `dispatch_failed=unknown`.
+A false flag requires the existing dispatcher's complete, typed result fields;
+it means the result reports no failure, not that a message was delivered.
+No exception text, message body, path, object URI, date, target key, account
+identity or credentials enter this new line. Existing stdout JSON is unchanged,
+and the pipeline still discards runtime stdout.
+
+The pipeline's `[briefing-pipeline-result:v1]` line separately records
+`builder_exit`, `consumer_exit` (`not_run` if skipped) and the existing
+`domain_exit`. The first nonzero domain result still wins: a builder failure is
+not replaced by a later consumer result. With the runtime switch enabled, either
+branch failing still makes the wrapper exit 1. A Telegram-routed domain result
+still exits 2 even after a successful send; this is a routing outcome, not proof
+of a Python crash or delivery failure. These receipts add no calls, retries,
+notifications, ledger changes or new diagnostic workflow, and do not establish
+production adoption or recovery.
+
+日报消费者只在既有明确 runtime 拒绝或 domain/runtime 返回边界向 stderr 输出
+一条有版本前缀的固定值摘要。未知原因和不完整送达证据保持 `unknown`，不把缺少证据
+写成送达健康；`false` 须有既有 dispatcher 的完整、有类型结果字段支持，仅表示原结果
+未报失败，不证明消息已送达。新日志不含异常正文、消息正文、路径、对象 URI、日期、目标键、账号或
+凭据。pipeline 单独记录 builder 与 consumer 的退出码，未执行记为 `not_run`；
+保留 domain 首个非零、runtime 启用时 wrapper 失败返回 1、Telegram 路由成功发送后
+仍返回 2，以及原 stdout JSON/runtime stdout 丢弃规则。不新增调用、重试、通知、
+状态写入或诊断 workflow；源码与本地合成验证不证明生产已采用或恢复。

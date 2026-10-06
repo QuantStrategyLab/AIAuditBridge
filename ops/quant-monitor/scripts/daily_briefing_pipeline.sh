@@ -22,18 +22,30 @@ run_domain_consume() {
 }
 
 if [[ "${QUANT_MONITOR_RUNTIME_DIGEST_ENABLED:-false}" != "true" ]]; then
-  bash "$ROOT/scripts/daily_briefing.sh"
+  builder_status=0
+  bash "$ROOT/scripts/daily_briefing.sh" || builder_status=$?
+  if [[ "$builder_status" -ne 0 ]]; then
+    echo "[briefing-pipeline-result:v1] branch=domain builder_exit=${builder_status} consumer_exit=not_run domain_exit=${builder_status}" >&2
+    exit "$builder_status"
+  fi
   if [[ ! -d "$AAB" ]]; then
     echo "[briefing-pipeline] skip dispatch: AIAuditBridge not found at $AAB" >&2
+    echo "[briefing-pipeline-result:v1] branch=domain builder_exit=0 consumer_exit=not_run domain_exit=0" >&2
     exit 0
   fi
   cd "$AAB"
+  set +e
   run_domain_consume
-  exit $?
+  consume_status=$?
+  set -e
+  echo "[briefing-pipeline-result:v1] branch=domain builder_exit=0 consumer_exit=${consume_status} domain_exit=${consume_status}" >&2
+  exit "$consume_status"
 fi
 
-domain_status=0
-bash "$ROOT/scripts/daily_briefing.sh" || domain_status=$?
+builder_status=0
+consume_status=not_run
+bash "$ROOT/scripts/daily_briefing.sh" || builder_status=$?
+domain_status=$builder_status
 if [[ ! -d "$AAB" ]]; then
   echo "[briefing-pipeline] skip dispatch: AIAuditBridge not found at $AAB" >&2
 else
@@ -46,6 +58,7 @@ else
     domain_status=$consume_status
   fi
 fi
+echo "[briefing-pipeline-result:v1] branch=domain builder_exit=${builder_status} consumer_exit=${consume_status} domain_exit=${domain_status}" >&2
 
 runtime_status=0
 prefix="${QUANT_MONITOR_RUNTIME_PROJECTION_PREFIX:-}"

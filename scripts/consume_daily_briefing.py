@@ -8,6 +8,7 @@ import json
 import os
 import select
 import subprocess
+import sys
 import time
 from datetime import date
 from pathlib import Path
@@ -80,7 +81,98 @@ def _runtime_target_problem(keys: list[str] | None, target_scope: object, *, req
     return None
 
 
+# Only fixed interface codes are projected to stderr. Never stringify input,
+# exception text, dispatch bodies, paths, dates, or target/account identities.
+_RUNTIME_INPUT_REASONS = frozenset({
+    "malformed", "unsupported_platform", "invalid_observed_at", "invalid_completeness",
+    "empty_records", "invalid_target", "duplicate_target", "invalid_business_date",
+    "invalid_timezone", "invalid_status", "fills_not_connected", "schedule_hides_anomaly",
+    "invalid_run", "invalid_run_time", "invalid_lane", "business_date_conflict",
+    "timezone_conflict", "unsafe_text",
+})
+_RUNTIME_BINDING_REASONS = frozenset({
+    "missing_dispatch_day", "invalid_business_day", "business_date_mismatch",
+    "missing_expected_target", "invalid_expected_target", "duplicate_expected_target",
+    "expected_target_mismatch", "expected_scope_not_paper", "invalid_runtime_object",
+    "runtime_object_day_mismatch",
+})
+_RUNTIME_READ_REASONS = frozenset({
+    "runtime_projection_unreadable", "runtime_projection_timeout", "runtime_projection_too_large",
+})
+_DISPATCH_REASONS = frozenset({
+    "optimization_record_failed", "github_issue_record_failed", "telegram_missing_env",
+    "alert_state_root_unavailable", "alert_state_unreadable", "alert_state_malformed",
+    "alert_state_write_failed", "telegram_delivery_unknown", "telegram_delivery_failed",
+    "runtime_digest_too_long", "github_issue_target_invalid", "gh_executable_missing",
+})
+_RESULT_REASONS = (_RUNTIME_INPUT_REASONS | _RUNTIME_BINDING_REASONS | _RUNTIME_READ_REASONS
+                   | _DISPATCH_REASONS | {"unknown", "quiet", "telegram_attention",
+                   "github_issue_recorded", "dispatch_not_requested", "dispatch_completed",
+                   "dual_review_disagreement", "report_dir_not_found"})
+
+
+def _emit_result(*, branch: str, stage: str, reason: object, action: str,
+                 dispatch_failed: str = "unknown", exit_code: int) -> None:
+    branch = branch if branch in {"domain", "runtime"} else "unknown"
+    stage = stage if stage in {"input_read", "input_validation", "binding_validation", "dispatch", "routing"} else "unknown"
+    reason = reason if isinstance(reason, str) and reason in _RESULT_REASONS else "unknown"
+    action = action if action in {"none", "quiet", "github_issue", "telegram", "runtime_digest"} else "unknown"
+    dispatch_failed = dispatch_failed if dispatch_failed in {"true", "false", "unknown"} else "unknown"
+    # All exits at these existing return sites are fixed small integer codes.
+    rendered_exit = str(exit_code) if type(exit_code) is int and 0 <= exit_code <= 255 else "unknown"
+    print(f"[briefing-result:v1] branch={branch} stage={stage} reason={reason} "
+          f"action={action} dispatch_failed={dispatch_failed} exit={rendered_exit}", file=sys.stderr)
+
+
+def _dispatch_failure_evidence(summary: object) -> str:
+    """Project failure evidence, never equate no errors with confirmed delivery."""
+    if not isinstance(summary, dict):
+        return "unknown"
+    errors = summary.get("errors")
+    errors_valid = isinstance(errors, list) and all(isinstance(item, str) for item in errors)
+    if errors_valid and errors:
+        return "true"
+    watch = summary.get("optimization_watch")
+    if isinstance(watch, dict) and type(watch.get("errors")) is int and watch["errors"] > 0:
+        return "true"
+    action = summary.get("action")
+    if (not isinstance(action, str)
+        or action not in {"quiet", "github_issue", "telegram", "runtime_digest"}
+        or type(summary.get("telegram_sent")) is not bool
+        or not errors_valid
+        or not isinstance(summary.get("skipped"), list)
+        or "github_issue" not in summary
+        or (summary["github_issue"] is not None and not isinstance(summary["github_issue"], str))):
+        return "unknown"
+    if action == "runtime_digest":
+        if not isinstance(summary.get("business_date"), str) or not isinstance(summary.get("event_id"), str):
+            return "unknown"
+    else:
+        if "optimization_watch" not in summary or type(summary.get("operational_fallback_sent")) is not bool:
+            return "unknown"
+        if watch is not None and (not isinstance(watch, dict) or type(watch.get("errors")) is not int or watch["errors"] != 0):
+            return "unknown"
+    return "false"
+
+
+def _dispatch_reason(summary: object, failed: str) -> str:
+    if failed == "false":
+        return "dispatch_completed"
+    if failed == "true" and isinstance(summary, dict):
+        errors = summary.get("errors")
+        if isinstance(errors, list) and errors:
+            first = errors[0]
+            return first if isinstance(first, str) and first in _DISPATCH_REASONS else "unknown"
+        watch = summary.get("optimization_watch")
+        if isinstance(watch, dict) and type(watch.get("errors")) is int and watch["errors"] > 0:
+            return "optimization_record_failed"
+    return "unknown"
+
+
 def _reject_runtime(reason: str) -> int:
+    stage = ("input_read" if isinstance(reason, str) and reason in _RUNTIME_READ_REASONS else
+             "binding_validation" if isinstance(reason, str) and reason in _RUNTIME_BINDING_REASONS else "input_validation")
+    _emit_result(branch="runtime", stage=stage, reason=reason, action="none", exit_code=2)
     print(json.dumps({
         "ok": False,
         "error": "runtime_projection_rejected",
@@ -246,6 +338,8 @@ def _consume_runtime_payload(
 ) -> int:
     prepared = prepare_runtime_digest(payload)
     if not prepared.get("ok"):
+        _emit_result(branch="runtime", stage="input_validation", reason=prepared.get("reason"),
+                     action="none", exit_code=2)
         print(json.dumps({
             "ok": False,
             "error": "runtime_projection_rejected",
@@ -287,9 +381,13 @@ def _consume_runtime_payload(
         )
     print(json.dumps(body, ensure_ascii=False, indent=2))
     dispatch = body.get("dispatch")
-    if dispatch is None:
-        return 0
-    return 0 if not _dispatch_failed(dispatch) else 2
+    exit_code = 0 if dispatch is None or not _dispatch_failed(dispatch) else 2
+    requested = bool(args.dispatch or args.send_dry_run or args.dry_run)
+    failed = _dispatch_failure_evidence(dispatch)
+    _emit_result(branch="runtime", stage="dispatch" if requested else "routing",
+                 reason=_dispatch_reason(dispatch, failed) if requested else "dispatch_not_requested",
+                 action="runtime_digest", dispatch_failed=failed, exit_code=exit_code)
+    return exit_code
 
 
 def _consume_runtime_projection(args: argparse.Namespace) -> int:
@@ -297,6 +395,8 @@ def _consume_runtime_projection(args: argparse.Namespace) -> int:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
+        _emit_result(branch="runtime", stage="input_read", reason="runtime_projection_unreadable",
+                     action="none", exit_code=2)
         print(json.dumps({"ok": False, "error": "runtime_projection_unreadable"}, ensure_ascii=False))
         return 2
     if not isinstance(payload, dict):
@@ -430,6 +530,8 @@ def main(argv: list[str] | None = None) -> int:
                 "failure_stage": "briefing_directory_check", "failure_category": "input_unavailable",
             }}))
             return 3
+        _emit_result(branch="domain", stage="input_validation", reason="report_dir_not_found",
+                     action="none", exit_code=1)
         print(json.dumps({"ok": False, "error": f"report_dir_not_found: {report_dir}"}))
         return 1
 
@@ -489,8 +591,26 @@ def main(argv: list[str] | None = None) -> int:
         exit_code = 0
     else:
         exit_code = 2
-    if args.dual_review and payload.get("dual_review", {}).get("disagreements"):
+    disagreement = bool(args.dual_review and payload.get("dual_review", {}).get("disagreements"))
+    if disagreement:
         exit_code = 2
+    failed = _dispatch_failure_evidence(payload.get("dispatch"))
+    if disagreement:
+        reason = "dual_review_disagreement"
+    elif should_dispatch and failed != "false":
+        reason = _dispatch_reason(payload.get("dispatch"), failed)
+    elif result.action.value == "telegram" and not args.send_dry_run:
+        reason = "telegram_attention"
+    elif result.action.value == "quiet":
+        reason = "quiet"
+    elif not should_dispatch:
+        reason = "dispatch_not_requested"
+    elif result.action.value == "github_issue":
+        reason = "github_issue_recorded"
+    else:
+        reason = "dispatch_completed"
+    _emit_result(branch="domain", stage="dispatch" if failed == "true" else "routing",
+                 reason=reason, action=result.action.value, dispatch_failed=failed, exit_code=exit_code)
     return exit_code
 
 if __name__ == "__main__":
