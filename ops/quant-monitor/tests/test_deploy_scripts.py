@@ -203,6 +203,347 @@ class DeployScriptTests(unittest.TestCase):
             ],
         )
 
+    def _inactive_release_scripts(self):
+        workflow = (ROOT.parents[1] / ".github/workflows/vps_codex_service_ops.yml").read_text()
+        self.assertIn("\n  install-quant-release-inactive:\n", workflow)
+        job = workflow.split("\n  install-quant-release-inactive:\n", 1)[1].split("\n  stage-quant-runtime-inactive:\n", 1)[0]
+        scripts = [textwrap.dedent(block) for block in re.findall(r"(?m)^        run: \|\n((?:^          .*\n|^\n)*)", job)]
+        return workflow, job, scripts
+
+    def test_inactive_release_has_fixed_separate_entry_without_activation(self):
+        workflow, job, scripts = self._inactive_release_scripts()
+        self.assertEqual(len(scripts), 3)
+        self.assertIn("inputs.mode != 'install-quant-release-inactive'", workflow)
+        self.assertIn("!inputs.acknowledge_interruption", job)
+        self.assertIn("inputs.ssh_unban_ip == ''", job)
+        self.assertIn("ref: 35ac71176127f07e00fe04dbc793777f3c595bc0", job)
+        self.assertIn("persist-credentials: false", job)
+        self.assertNotRegex(job, r"systemctl|sudo|daemon-reload|setup_vps_runtime|sync_strategy_repos|load_telegram_env")
+        self.assertIn(" -I -B -", scripts[2])
+        self.assertIn('env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C', scripts[2])
+
+    def test_inactive_release_gate_binds_controller_and_application_separately(self) -> None:
+        _, _, scripts = self._inactive_release_scripts()
+        sha = "a" * 40
+        env = {"PATH": "/usr/bin:/bin", "HOME": "/tmp", "LANG": "C", "LC_ALL": "C",
+               "GITHUB_WORKSPACE": str(ROOT.parents[1]), "RUN_EVENT_NAME": "workflow_dispatch",
+               "RUN_MODE": "install-quant-release-inactive", "RUN_REPOSITORY": "QuantStrategyLab/AIAuditBridge",
+               "RUN_REF": "refs/heads/main", "RUN_ACK": "false", "RUN_UNBAN_IP": "",
+               "RUN_SHA": sha, "RUN_WORKFLOW_SHA": sha,
+               "RUN_WORKFLOW_REF": "QuantStrategyLab/AIAuditBridge/.github/workflows/vps_codex_service_ops.yml@refs/heads/main",
+               "FIXTURE_HEAD": "35ac71176127f07e00fe04dbc793777f3c595bc0", "FIXTURE_MAIN": sha, "FIXTURE_DIRTY": ""}
+        stubs = (
+            'git() { case "$*" in "rev-parse HEAD") printf "%s\\n" "$FIXTURE_HEAD" ;; '
+            '"status --porcelain --untracked-files=all") printf %s "$FIXTURE_DIRTY" ;; *) return 90 ;; esac; }\n'
+            'gh() { [[ "$*" == "api repos/QuantStrategyLab/AIAuditBridge/git/ref/heads/main --jq .object.sha" ]] || return 91; '
+            'printf "%s\\n" "$FIXTURE_MAIN"; }\n'
+            'timeout() { [[ "$1" == 30s ]] || return 92; shift; "$@"; }\n'
+        )
+        for overrides in ({}, {"FIXTURE_MAIN": "b" * 40}, {"FIXTURE_HEAD": "b" * 40},
+                          {"RUN_WORKFLOW_SHA": "b" * 40}, {"RUN_EVENT_NAME": "push"},
+                          {"RUN_MODE": "deploy"}, {"RUN_REF": "refs/heads/other"},
+                          {"RUN_ACK": "true"}, {"RUN_UNBAN_IP": "192.0.2.1"},
+                          {"FIXTURE_DIRTY": " M unreviewed"}, {"RUN_SHA": "main"}):
+            with self.subTest(overrides=overrides):
+                result = subprocess.run(["/bin/bash", "-c", stubs + scripts[0]], env={**env, **overrides},
+                                        capture_output=True, text=True, timeout=5, check=False)
+                self.assertEqual(result.returncode == 0, not overrides, result.stderr)
+
+    def test_inactive_release_installer_rejects_reuse_and_verifies_the_final_tree(self):
+        import contextlib
+        import hashlib
+        import io
+        from types import SimpleNamespace
+
+        _, _, scripts = self._inactive_release_scripts()
+        code = scripts[1].split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+        source_sha = "35ac71176127f07e00fe04dbc793777f3c595bc0"
+        cases = ("valid", "existing", "existing_link", "installer_failure", "installer_secret", "reuse",
+                 "missing", "extra", "mode", "wrong_data", "wrong_venv", "data_directory", "nested_mv", "timeout")
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                repo, releases, candidate, data = (root / x for x in ("repo", "releases", "candidate", "data"))
+                for directory in (repo, releases, candidate, data):
+                    directory.mkdir()
+                release = releases / source_sha
+                files = {"ops/quant-monitor/scripts/check.py": (b"# synthetic source\n", 0o644),
+                         "bin/tool.sh": (b"#!/bin/sh\nexit 0\n", 0o755),
+                         "docs/data/nested.txt": (b"must not be excluded\n", 0o644)}
+                manifest = b"".join((f"{mode | 0o100000:o} blob " + hashlib.sha1(b"blob " + str(len(content)).encode() + b"\0" + content).hexdigest() + "\t" + name).encode() + b"\0"
+                                    for name, (content, mode) in files.items())
+                if case == "existing":
+                    release.mkdir()
+                elif case == "existing_link":
+                    release.symlink_to(root / "missing")
+                def run(argv, **kwargs):
+                    self.assertEqual(kwargs["env"]["GIT_CONFIG_GLOBAL"], "/dev/null")
+                    self.assertNotIn("HOME", kwargs["env"])
+                    self.assertNotIn("GH_TOKEN", kwargs["env"])
+                    if argv[0] == "/usr/bin/git":
+                        self.assertEqual(argv, ["/usr/bin/git", "-C", str(repo), "ls-tree", "-rz", "--full-tree", source_sha])
+                        return SimpleNamespace(stdout=manifest, returncode=0)
+                    self.assertEqual(argv, ["/bin/bash", "--noprofile", "--norc", str(repo / "ops/quant-monitor/scripts/install_immutable_release.sh"),
+                                            "--sha", source_sha, "--repo", str(repo), "--release-root", str(releases),
+                                            "--runtime-data", str(data), "--runtime-venv", str(candidate)])
+                    if case == "timeout":
+                        raise subprocess.TimeoutExpired(argv, 120)
+                    release.mkdir()
+                    if case == "installer_failure":
+                        return SimpleNamespace(stdout=b"private token_DO_NOT_EMIT", returncode=7)
+                    destination = release / ".stage.nested" if case == "nested_mv" else release
+                    for name, (content, mode) in files.items():
+                        path = destination / name
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.write_bytes(content)
+                        path.chmod(mode)
+                    (destination / "ops/quant-monitor/data").symlink_to(data if case != "wrong_data" else candidate)
+                    (destination / "ops/quant-monitor/.venv").symlink_to(candidate if case != "wrong_venv" else data)
+                    if case == "data_directory":
+                        (destination / "ops/quant-monitor/data").unlink()
+                        (destination / "ops/quant-monitor/data").mkdir()
+                    if case == "missing":
+                        (destination / "docs/data/nested.txt").unlink()
+                    if case == "extra":
+                        (destination / "unknown").write_text("preserve")
+                    if case == "mode":
+                        (destination / "bin/tool.sh").chmod(0o644)
+                    output = "release_reused=" if case == "reuse" else "release_installed="
+                    if case == "installer_secret":
+                        return SimpleNamespace(stdout=b"token_DO_NOT_EMIT /private/path\n", returncode=0)
+                    return SimpleNamespace(stdout=(output + str(release) + "\n").encode(), returncode=0)
+                fixture = code.replace('/opt/quant-monitor/releases', str(releases)).replace('/home/ubuntu/quant-monitor-data03-286757-py312-v1', str(candidate)).replace('/home/ubuntu/quant-monitor-runtime/AIAuditBridge/ops/quant-monitor/data', str(data))
+                stdout = io.StringIO()
+                with mock.patch.object(sys, "argv", ["check", str(repo)]), mock.patch.object(subprocess, "run", side_effect=run) as calls, contextlib.redirect_stdout(stdout):
+                    if case == "valid":
+                        exec(compile(fixture, "<inactive-release-install>", "exec"), {})
+                    else:
+                        with self.assertRaises(SystemExit) as caught:
+                            exec(compile(fixture, "<inactive-release-install>", "exec"), {})
+                        self.assertNotEqual(caught.exception.code, 0)
+                if case in {"existing", "existing_link"}:
+                    calls.assert_not_called()
+                if case == "valid":
+                    receipt = json.loads(stdout.getvalue())
+                    self.assertEqual(receipt["source_files_checked"], 3)
+                    self.assertEqual(receipt["runtime_links_checked"], 2)
+                    self.assertFalse(receipt["application_import_proof"])
+                else:
+                    self.assertNotIn("_verified", stdout.getvalue())
+                    self.assertRegex(stdout.getvalue(), r"^\[inactive-release\] failure=[a-z_]+; residue preserved\n$")
+                self.assertNotIn("token_DO_NOT_EMIT", stdout.getvalue())
+                if case not in {"timeout"}:
+                    self.assertTrue(os.path.lexists(release), "unknown target must not be deleted")
+
+    def test_inactive_release_original_installer_uses_child_umask_only(self):
+        _, _, scripts = self._inactive_release_scripts()
+        code = scripts[1].split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, releases, candidate, data = (root / x for x in ("repo", "releases", "candidate", "data"))
+            for directory in (repo, releases, candidate, data):
+                directory.mkdir()
+            monitor = repo / "ops/quant-monitor"
+            (monitor / "scripts").mkdir(parents=True)
+            for name in ("common_env.sh", "health_check.sh", "daily_briefing_pipeline.sh"):
+                (monitor / "scripts" / name).write_text("#!/bin/sh\n# fixture never executed\n")
+            (monitor / "AGENTS.md").write_text("Synthetic installer fixture only\n")
+            installer = monitor / "scripts/install_immutable_release.sh"
+            shutil.copyfile(ROOT / "scripts/install_immutable_release.sh", installer)
+            installer.chmod(0o755)
+            self._git(repo, "init", "-q")
+            self._git(repo, "config", "user.email", "fixture@example.invalid")
+            self._git(repo, "config", "user.name", "Fixture")
+            self._git(repo, "add", ".")
+            self._git(repo, "commit", "-qm", "synthetic archive")
+            sha = self._git(repo, "rev-parse", "HEAD")
+            fixture = code.replace("35ac71176127f07e00fe04dbc793777f3c595bc0", sha).replace('/opt/quant-monitor/releases', str(releases)).replace('/home/ubuntu/quant-monitor-data03-286757-py312-v1', str(candidate)).replace('/home/ubuntu/quant-monitor-runtime/AIAuditBridge/ops/quant-monitor/data', str(data))
+            runner = root / "offline_install_fixture.py"
+            # The wrapper starts restrictive; only the real installer child may
+            # receive the reviewed 022. No parent/system umask mutation occurs.
+            runner.write_text(fixture + "\nprobe = Path(__file__).with_name('wrapper-mode-probe')\nprobe.touch()\nprint('wrapper_mode=' + oct(probe.stat().st_mode & 0o777))\n")
+            runner.chmod(0o600)
+            result = subprocess.run([sys.executable, "-I", "-B", str(runner), str(repo)],
+                                    env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}, umask=0o077,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30)
+            self.assertEqual(result.stderr, "")
+            self.assertEqual(result.returncode, 0, result.stdout)
+            self.assertIn('"stage": "inactive_release_tree_verified"', result.stdout)
+            self.assertIn("wrapper_mode=0o600", result.stdout)
+            release = releases / sha
+            self.assertEqual((release / "ops").stat().st_mode & 0o777, 0o755)
+            self.assertEqual((release / "ops/quant-monitor/AGENTS.md").stat().st_mode & 0o777, 0o644)
+            self.assertEqual((release / "ops/quant-monitor/scripts/install_immutable_release.sh").stat().st_mode & 0o777, 0o755)
+            self.assertEqual(os.readlink(release / "ops/quant-monitor/data"), str(data))
+            self.assertEqual(os.readlink(release / "ops/quant-monitor/.venv"), str(candidate))
+
+    def test_inactive_release_consumer_import_guards_and_all_origins_in_fresh_process(self):
+        import ast
+        import hashlib
+
+        _, _, scripts = self._inactive_release_scripts()
+        code = scripts[2].split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+        parsed = ast.parse(code)
+        assignments = {n.targets[0].id: n for n in parsed.body if isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Name)}
+        ops = ast.literal_eval(assignments["OPS_IMPORTS"].value)
+        # The fixed daily names are read as literals, never supplied to production.
+        daily = set(ast.literal_eval(assignments["EXPECTED_DAILY"].value.args[0].func.value).split())
+        fixed_hashes = ast.literal_eval(assignments["HASHES"].value)
+        cases = ("valid", "missing_dependency", "missing_daily", "network", "process", "write", "private_read",
+                 "swallowed_network", "aab_origin", "qpk_origin", "package_path", "sys_path", "record_hash", "fixed_hash", "numpy_version", "pyc_mismatch", "pyc_link", "qpk_external", "private_listdir", "private_scandir", "secret_exception")
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                candidate = root / "candidate"
+                site = candidate / "lib/python3.12/site-packages"
+                release = root / "release"
+                site.mkdir(parents=True)
+                release.mkdir()
+                for relative in ops.values():
+                    path = release / relative
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text("# actual synthetic module, no module substitution\n")
+                names = daily | {"client", "client.config", "client.gateway_client", "client.errors", "service.provider_scenarios"}
+                for name in sorted(names):
+                    package = name in {"scripts", "service", "service.adapters", "client"}
+                    path = release / (name.replace(".", "/") + ("/__init__.py" if package else ".py"))
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text("# synthetic consumer definition\n")
+                cli = release / "scripts/consume_daily_briefing.py"
+                imported_names = sorted(names - {"scripts.consume_daily_briefing"} - ({"service.autonomy"} if case == "missing_daily" else set()))
+                cli.write_text("\n".join("import " + name for name in imported_names) + "\n")
+                private_dir = root / "private-fixture"
+                private_dir.mkdir()
+                (private_dir / "token_DO_NOT_EMIT").write_text("synthetic")
+                extras = {
+                    "missing_dependency": "import absent_fixture_dependency\n",
+                    "secret_exception": "raise ValueError('token_DO_NOT_EMIT /private/path')\n",
+                    "network": "import socket\nsocket.socket()\n",
+                    "process": "import subprocess\nsubprocess.run(['/bin/false'])\n",
+                    "write": f"open({str(root / 'forbidden-write')!r}, 'w')\n",
+                    "private_read": "open('/private/token_DO_NOT_EMIT')\n",
+                    "private_listdir": f"import os\nos.listdir({str(private_dir)!r})\n",
+                    "private_scandir": f"import os\nlist(os.scandir({str(private_dir)!r}))\n",
+                    "swallowed_network": "import socket\ntry:\n socket.socket()\nexcept RuntimeError:\n pass\n",
+                    "aab_origin": "__file__='/private/token_DO_NOT_EMIT.py'\n",
+                    "package_path": "import service\nservice.__path__.append('/private/token_DO_NOT_EMIT')\n",
+                    "sys_path": "import sys\nsys.path.append('/synthetic/old-shared-mirror')\n",
+                }
+                cli.write_text(cli.read_text() + "print('token_DO_NOT_EMIT /private/path')\nimport os\nos.write(1, b'token_DO_NOT_EMIT')\nos.write(2, b'token_DO_NOT_EMIT')\n" + extras.get(case, ""))
+                qpk_root = site / "quant_platform_kit"
+                (qpk_root / "strategy_lifecycle").mkdir(parents=True)
+                (qpk_root / "__init__.py").write_text("import numpy, pandas\n")
+                (qpk_root / "strategy_lifecycle/__init__.py").write_text("")
+                for name in fixed_hashes:
+                    (qpk_root / "strategy_lifecycle" / name).write_text("VALUE = 1\n")
+                if case == "qpk_origin":
+                    (qpk_root / "strategy_lifecycle/return_collector.py").write_text("__file__='/private/token_DO_NOT_EMIT.py'\n")
+                if case in {"pyc_mismatch", "pyc_link"}:
+                    import py_compile
+                    module_path = qpk_root / "strategy_lifecycle/return_collector.py"
+                    module_path.write_text("VALUE = 9\n")
+                    timestamp = module_path.stat().st_mtime_ns
+                    cache = Path(py_compile.compile(str(module_path), doraise=True))
+                    if case == "pyc_link":
+                        moved_cache = candidate / "existing-cache"
+                        cache.rename(moved_cache)
+                        cache.symlink_to(moved_cache)
+                    module_path.write_text("VALUE = 1\n")
+                    os.utime(module_path, ns=(timestamp, timestamp))
+                    cli.write_text(cli.read_text() + "from quant_platform_kit.strategy_lifecycle import return_collector\nassert return_collector.VALUE == 1\n")
+                if case == "qpk_external":
+                    external_package = release / "external-qpk"
+                    qpk_root.rename(external_package)
+                    qpk_root.symlink_to(external_package, target_is_directory=True)
+                for name, version in (("numpy", "2.5.2"), ("pandas", "3.0.5")):
+                    (site / name).mkdir()
+                    (site / name / "__init__.py").write_text(f"__version__ = {('0.0.0' if case == 'numpy_version' and name == 'numpy' else version)!r}\n")
+                monitor = release / "ops/quant-monitor"
+                shutil.copyfile(ROOT / "requirements-linux-py312.lock", monitor / "requirements-linux-py312.lock")
+                manifest = b""
+                for path in sorted(release.rglob("*")):
+                    if path.is_file():
+                        content = path.read_bytes()
+                        oid = hashlib.sha1(b"blob " + str(len(content)).encode() + b"\0" + content).hexdigest()
+                        manifest += f"100644 blob {oid}\t{path.relative_to(release)}\0".encode()
+                fixture = code.replace('Path("/opt/quant-monitor/releases") / SOURCE_SHA', f'Path({str(release)!r})').replace('/home/ubuntu/quant-monitor-data03-286757-py312-v1', str(candidate))
+                hashes = {name: hashlib.sha256((qpk_root / "strategy_lifecycle" / name).read_bytes()).hexdigest() for name in fixed_hashes}
+                if case == "fixed_hash":
+                    hashes["return_collector.py"] = "0" * 64
+                hash_node = assignments["HASHES"]
+                original_hash_source = "\n".join(code.splitlines()[hash_node.lineno - 1:hash_node.end_lineno])
+                fixture = fixture.replace(original_hash_source, "HASHES = " + repr(hashes))
+                # Simulate only installation metadata. Consumer/QPK modules are real
+                # fixture files, imported in a new isolated process with production guards.
+                prefix = f'''
+import base64, hashlib, importlib.metadata, subprocess, sys
+from pathlib import Path
+from types import SimpleNamespace
+site = Path({str(site)!r})
+sys.prefix = {str(candidate)!r}
+sys.path[:] = [p for p in sys.path if 'site-packages' not in p]
+sys.path.append(str(site))
+fixture_versions = dict(__import__('re').findall(r'(?m)^([A-Za-z0-9_-]+)==([^ ]+)', Path({str(monitor / 'requirements-linux-py312.lock')!r}).read_text()))
+fixture_versions['quant-platform-kit'] = '1.0.0'
+files = []
+for path in (site / 'quant_platform_kit').rglob('*.py'):
+    p = importlib.metadata.PackagePath(str(path.relative_to(site)))
+    value = base64.urlsafe_b64encode(hashlib.sha256(path.read_bytes()).digest()).rstrip(b'=').decode()
+    if {case!r} == 'record_hash' and path.name == '__init__.py': value = 'incorrect'
+    p.hash = SimpleNamespace(mode='sha256', value=value)
+    files.append(p)
+importlib.metadata.distribution = lambda name: SimpleNamespace(version=fixture_versions[name], files=files, locate_file=lambda p: site / p)
+real_run = subprocess.run
+def source_tree(argv, **kwargs):
+    assert argv == ['/usr/bin/git', '-C', 'synthetic-checkout', 'ls-tree', '-rz', '--full-tree', '35ac71176127f07e00fe04dbc793777f3c595bc0']
+    subprocess.run = real_run
+    return SimpleNamespace(stdout={manifest!r}, returncode=0)
+subprocess.run = source_tree
+sys.argv = ['offline-fixture', 'synthetic-checkout']
+'''
+                runner = root / "offline_import_fixture.py"
+                runner.write_text(textwrap.dedent(prefix) + "\n" + fixture)
+                result = subprocess.run([sys.executable, "-I", "-B", str(runner)],
+                                        env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30)
+                self.assertEqual(result.stderr, "")
+                self.assertNotIn("token_DO_NOT_EMIT", result.stdout)
+                self.assertFalse((root / "forbidden-write").exists())
+                if case not in {"pyc_mismatch", "pyc_link"}:
+                    self.assertFalse(list(root.rglob("__pycache__")))
+                else:
+                    self.assertEqual(len(list(root.rglob("*.pyc"))), 1, "existing cache is preserved")
+                if case in {"valid", "pyc_mismatch", "pyc_link"}:
+                    self.assertEqual(result.returncode, 0, result.stdout)
+                    receipt = json.loads(result.stdout)
+                    self.assertEqual(receipt["daily_required_modules_checked"], 30)
+                    self.assertGreaterEqual(receipt["aab_modules_checked"], 38)
+                    self.assertEqual(receipt["guard_attempts"], dict(network=0, process=0, read=0, write=0))
+                    self.assertTrue(receipt["application_import_proof"])
+                    self.assertFalse(receipt["shell_selection_proof"])
+                    self.assertFalse(receipt["runtime_adoption_proof"])
+                else:
+                    self.assertNotEqual(result.returncode, 0)
+                    receipt = json.loads(result.stdout)
+                    self.assertEqual(set(receipt), {"stage", "failure", "import_target", "guard_attempts",
+                                                   "application_import_proof", "runtime_adoption_proof", "residue"})
+                    self.assertEqual(receipt["stage"], "inactive_release_consumer_import_failed")
+                    self.assertFalse(receipt["application_import_proof"])
+                    self.assertFalse(receipt["runtime_adoption_proof"])
+                    self.assertEqual(receipt["residue"], "preserved")
+                    if case in {"network", "process", "write", "private_read", "private_listdir", "private_scandir"}:
+                        kind = "read" if case.startswith("private_") else case
+                        expected_counts = dict(network=0, process=0, write=0, read=0)
+                        expected_counts[kind] = 1
+                        self.assertEqual(receipt["guard_attempts"], expected_counts)
+                        self.assertEqual(receipt["import_target"], "daily_consumer")
+                    if case in {"missing_dependency", "secret_exception"}:
+                        self.assertEqual(receipt["import_target"], "daily_consumer")
+                        self.assertEqual(receipt["guard_attempts"], dict(network=0, process=0, write=0, read=0))
+                    self.assertIn(receipt["failure"], {"candidate_metadata", "source_manifest", "consumer_import", "module_origin"})
+                    self.assertIn(receipt["import_target"], {"not_started", "daily_consumer", "daily_module_presence", "origin_validation"})
+                    self.assertNotIn("_verified", result.stdout)
+
     def _inactive_stage_scripts(self) -> tuple[str, list[str]]:
         workflow = (ROOT.parents[1] / ".github/workflows/vps_codex_service_ops.yml").read_text()
         job = workflow.split("\n  stage-quant-runtime-inactive:\n", 1)[1].split("\n  release-gateway-failure-repairs:\n", 1)[0]

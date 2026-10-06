@@ -773,6 +773,7 @@ class OfflineTests(unittest.TestCase):
             "repair-ssh": "vps-codex-service-ops", "install-org-health-token": "org-health-token",
             "inspect-quant-runtime": "inspect-quant-runtime", "inspect-quant-paths": "inspect-quant-paths",
             "stage-quant-runtime-inactive": "stage-quant-runtime-inactive",
+            "install-quant-release-inactive": "install-quant-release-inactive",
             "inspect-audit-patch": "inspect-audit-patch", "apply-audit-patch": "apply-audit-patch",
             "retry-audit-patch-once": "retry-audit-patch-once",
             "release-gateway-failure-repairs": "release-gateway-failure-repairs",
@@ -804,15 +805,19 @@ class OfflineTests(unittest.TestCase):
 
         self.assertEqual(set(conditions), set(expected.values()))
         for mode, job in expected.items():
-            self.assertEqual(routed(mode, acknowledge_interruption=mode != "stage-quant-runtime-inactive"), [job])
+            self.assertEqual(routed(mode, acknowledge_interruption=mode not in {"stage-quant-runtime-inactive", "install-quant-release-inactive"}), [job])
         self.assertEqual(routed("stage-quant-runtime-inactive", acknowledge_interruption=True), [])
         self.assertEqual(routed("stage-quant-runtime-inactive", acknowledge_interruption=False,
+                                ssh_unban_ip="192.0.2.1"), [])
+        self.assertEqual(routed("install-quant-release-inactive", acknowledge_interruption=True), [])
+        self.assertEqual(routed("install-quant-release-inactive", acknowledge_interruption=False,
                                 ssh_unban_ip="192.0.2.1"), [])
         for changes in ({"event": "push"}, {"ref": "refs/heads/other"}, {"repository": "other/repo"}):
             self.assertEqual(routed("inspect-monitor-failures", **changes), [])
             self.assertEqual(routed("inspect-daily-failure-sample", **changes), [])
             self.assertEqual(routed("inspect-recorded-daily-errors", **changes), [])
             self.assertEqual(routed("stage-quant-runtime-inactive", acknowledge_interruption=False, **changes), [])
+            self.assertEqual(routed("install-quant-release-inactive", acknowledge_interruption=False, **changes), [])
 
     def test_recorded_workflow_is_separate_exact_main_and_fixed_cli(self):
         workflow = (SCRIPT.parents[3] / ".github/workflows/vps_codex_service_ops.yml").read_text()
