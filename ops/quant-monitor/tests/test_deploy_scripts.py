@@ -203,6 +203,241 @@ class DeployScriptTests(unittest.TestCase):
             ],
         )
 
+    def _offline_consumer_scripts(self):
+        workflow = (ROOT.parents[1] / ".github/workflows/vps_codex_service_ops.yml").read_text()
+        self.assertIn("\n  check-quant-consumers-offline:\n", workflow)
+        job = workflow.split("\n  check-quant-consumers-offline:\n", 1)[1].split("\n  install-quant-release-inactive:\n", 1)[0]
+        scripts = [textwrap.dedent(block) for block in re.findall(r"(?m)^        run: \|\n((?:^          .*\n|^\n)*)", job)]
+        return workflow, job, scripts
+
+    def test_offline_consumers_have_an_independent_fixed_mode(self):
+        workflow, job, scripts = self._offline_consumer_scripts()
+        self.assertEqual(len(scripts), 3)
+        self.assertIn("inputs.mode != 'check-quant-consumers-offline'", workflow)
+        self.assertIn("!inputs.acknowledge_interruption", job)
+        self.assertIn("inputs.ssh_unban_ip == ''", job)
+        self.assertIn("ref: 35ac71176127f07e00fe04dbc793777f3c595bc0", job)
+        self.assertNotRegex(job, r"systemctl|sudo|daemon-reload|install_immutable_release|setup_vps_runtime|sync_strategy_repos|FileFinder")
+        self.assertIn("/home/ubuntu/quant-monitor-data03-286757-py312-v1", scripts[2])
+        self.assertIn(" -I -B -", scripts[2])
+
+    def test_offline_snapshot_rejects_unsafe_archives_and_existing_paths(self):
+        import ast
+        import contextlib
+        import hashlib
+        import io
+        import tarfile
+        from types import SimpleNamespace
+
+        _, _, scripts = self._offline_consumer_scripts()
+        code = scripts[1].split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+        files = next(ast.literal_eval(n.value) for n in ast.parse(code).body if isinstance(n, ast.Assign)
+                     and any(isinstance(t, ast.Name) and t.id == "SOURCE_FILES" for t in n.targets))
+        self.assertEqual(len(files), 40)
+        self.assertEqual(sum(name.endswith(".py") for name in files), 38)
+        self.assertFalse(any({".git", ".venv", "data"} & set(Path(name).parts) for name in files))
+        contents = {name: ("# synthetic " + name + "\n").encode() for name in files}
+        contents["ops/quant-monitor/qpk-runtime.sha"] = b"28675796cabbe137a1fa3970b70d1aa98e952c88\n"
+        directories = {str(parent) for name in files for parent in Path(name).parents if str(parent) != "."}
+        size = sum(map(len, contents.values()))
+        tree = b"".join((f"100644 blob " + hashlib.sha1(b"blob " + str(len(content)).encode() + b"\0" + content).hexdigest() + f" {len(content)}\t{name}\0").encode()
+                        for name, content in contents.items())
+        cases = ("valid", "existing", "temporary_overlap", "temporary_alias", "blocked_parent", "bad_run_id",
+                 "manifest_missing", "manifest_link", "archive_timeout", "extra_private", "git_private",
+                 "absolute", "dotdot", "duplicate", "missing", "symlink", "hardlink", "device", "fifo", "sparse",
+                 "wrong_hash", "wrong_size", "wrong_mode", "special_mode", "pax_escape", "write_failure")
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                repo, temporary = root / "checkout", root / "runner-temp"
+                repo.mkdir()
+                temporary.mkdir()
+                snapshot = temporary / "quant-monitor-consumer-imports-35ac-12345"
+                if case == "existing":
+                    snapshot.mkdir()
+                    (snapshot / "preserved").write_text("prior")
+                if case == "temporary_overlap":
+                    temporary = repo
+                if case == "temporary_alias":
+                    alias = root / "temp-alias"
+                    alias.symlink_to(temporary, target_is_directory=True)
+                    temporary = alias
+                if case == "blocked_parent":
+                    temporary = Path("/opt/quant-monitor/fixture-never-read")
+                run_id = "bad-attempt" if case == "bad_run_id" else "12345"
+                archive = io.BytesIO()
+                with tarfile.open(fileobj=archive, mode="w") as bundle:
+                    for name in sorted(directories):
+                        member = tarfile.TarInfo(name)
+                        member.type, member.mode = tarfile.DIRTYPE, 0o775
+                        bundle.addfile(member)
+                    for index, (name, content) in enumerate(contents.items()):
+                        if index == 0 and case == "missing":
+                            continue
+                        member = tarfile.TarInfo(name)
+                        member.size, member.mode = len(content), 0o664
+                        if index == 0:
+                            if case == "absolute":
+                                member.name = "/private/token_DO_NOT_EMIT"
+                            if case == "dotdot":
+                                member.name = "../outside"
+                            if case == "pax_escape":
+                                member.pax_headers = {"path": "../outside"}
+                            type_cases = {"symlink": tarfile.SYMTYPE, "hardlink": tarfile.LNKTYPE,
+                                          "device": tarfile.CHRTYPE, "fifo": tarfile.FIFOTYPE, "sparse": tarfile.GNUTYPE_SPARSE}
+                            if case in type_cases:
+                                member.type = type_cases[case]
+                                member.linkname = "/private/token_DO_NOT_EMIT"
+                                member.size = 0
+                            if case == "wrong_hash":
+                                content = b"x" * len(content)
+                            if case == "wrong_size":
+                                content += b"x"
+                                member.size += 1
+                            if case == "wrong_mode":
+                                member.mode = 0o775
+                            if case == "special_mode":
+                                member.mode = 0o4664
+                        bundle.addfile(member, io.BytesIO(content) if member.isreg() else None)
+                        if index == 0 and case == "duplicate":
+                            bundle.addfile(member, io.BytesIO(content))
+                    if case in {"extra_private", "git_private"}:
+                        name = "ops/quant-monitor/data/private.json" if case == "extra_private" else ".git/config"
+                        member = tarfile.TarInfo(name)
+                        member.size = 17
+                        bundle.addfile(member, io.BytesIO(b"token_DO_NOT_EMIT!"))
+                calls = []
+                def git(argv, **kwargs):
+                    calls.append((argv, kwargs))
+                    if argv[3] == "ls-tree":
+                        value = tree
+                        if case == "manifest_missing":
+                            value = b"\0".join(tree.split(b"\0")[1:])
+                        if case == "manifest_link":
+                            value = tree.replace(b"100644", b"120000", 1)
+                        return SimpleNamespace(stdout=value)
+                    if case == "archive_timeout":
+                        raise subprocess.TimeoutExpired(argv, 30, stderr="token_DO_NOT_EMIT")
+                    return SimpleNamespace(stdout=archive.getvalue())
+                fixture = code.replace("EXPECTED_SOURCE_BYTES = 480370", f"EXPECTED_SOURCE_BYTES = {size}")
+                stdout = io.StringIO()
+                real_fdopen = os.fdopen
+                @contextlib.contextmanager
+                def fail_write(descriptor, mode):
+                    with real_fdopen(descriptor, mode) as stream:
+                        yield SimpleNamespace(fileno=stream.fileno,
+                                              write=mock.Mock(side_effect=OSError("token_DO_NOT_EMIT")))
+                patch_writer = mock.patch.object(os, "fdopen", fail_write) if case == "write_failure" else contextlib.nullcontext()
+                with mock.patch.object(sys, "argv", ["snapshot", str(repo), str(temporary), run_id]), \
+                     mock.patch.object(subprocess, "run", side_effect=git), patch_writer, contextlib.redirect_stdout(stdout):
+                    if case == "valid":
+                        exec(compile(fixture, "<offline-snapshot>", "exec"), {})
+                    else:
+                        with self.assertRaises(SystemExit) as caught:
+                            exec(compile(fixture, "<offline-snapshot>", "exec"), {})
+                        self.assertEqual(caught.exception.code, 1)
+                early = case in {"existing", "temporary_overlap", "temporary_alias", "blocked_parent", "bad_run_id"}
+                self.assertEqual(len(calls), 0 if early else 1 if case in {"manifest_missing", "manifest_link"} else 2)
+                for number, (argv, kwargs) in enumerate(calls):
+                    subcommand = ["ls-tree", "-rlz", "--full-tree"] if number == 0 else ["archive", "--format=tar"]
+                    self.assertEqual(argv, ["/usr/bin/git", "-C", str(repo), *subcommand,
+                                            "35ac71176127f07e00fe04dbc793777f3c595bc0", "--", *files])
+                    self.assertEqual(kwargs["env"]["GIT_NO_REPLACE_OBJECTS"], "1")
+                    self.assertNotIn("GH_TOKEN", kwargs["env"])
+                    self.assertNotIn("HOME", kwargs["env"])
+                    self.assertEqual(kwargs["stderr"], subprocess.DEVNULL)
+                self.assertNotIn("token_DO_NOT_EMIT", stdout.getvalue())
+                self.assertFalse((root / "outside").exists())
+                if case == "valid":
+                    receipt = json.loads(stdout.getvalue())
+                    self.assertEqual(receipt["source_files_checked"], 40)
+                    self.assertFalse(receipt["immutable_release_proof"])
+                    self.assertFalse(receipt["application_import_proof"])
+                    self.assertEqual(snapshot.stat().st_mode & 0o777, 0o700)
+                    self.assertEqual({str(p.relative_to(snapshot)) for p in snapshot.rglob("*") if p.is_file()}, set(files))
+                    self.assertFalse(any(p.is_symlink() for p in snapshot.rglob("*")))
+                else:
+                    self.assertNotIn("_verified", stdout.getvalue())
+                    self.assertRegex(stdout.getvalue(), r"^\[offline-consumers\] failure=[a-z_]+; no reuse or cleanup\n$")
+                    if case == "existing":
+                        self.assertEqual((snapshot / "preserved").read_text(), "prior")
+                    elif case == "write_failure":
+                        self.assertTrue(snapshot.is_dir(), "own partial snapshot must not be silently reused or deleted")
+                    else:
+                        self.assertFalse(snapshot.exists())
+
+    def test_offline_snapshot_accepts_real_local_git_archive_without_installing(self):
+        import ast
+
+        _, _, scripts = self._offline_consumer_scripts()
+        code = scripts[1].split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+        files = next(ast.literal_eval(n.value) for n in ast.parse(code).body if isinstance(n, ast.Assign)
+                     and any(isinstance(t, ast.Name) and t.id == "SOURCE_FILES" for t in n.targets))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, temporary = root / "checkout", root / "runner-temp"
+            repo.mkdir()
+            temporary.mkdir()
+            for name in files:
+                path = repo / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("# synthetic local Git source only\n")
+                if name.endswith("build_dashboard_snapshot.py"):
+                    path.chmod(0o755)
+            (repo / "ops/quant-monitor/qpk-runtime.sha").write_text("28675796cabbe137a1fa3970b70d1aa98e952c88\n")
+            self._git(repo, "init", "-q")
+            self._git(repo, "config", "user.email", "fixture@example.invalid")
+            self._git(repo, "config", "user.name", "Fixture")
+            self._git(repo, "add", ".")
+            self._git(repo, "commit", "-qm", "synthetic consumer source")
+            sha = self._git(repo, "rev-parse", "HEAD")
+            total = sum((repo / name).stat().st_size for name in files)
+            fixture = code.replace("35ac71176127f07e00fe04dbc793777f3c595bc0", sha).replace("EXPECTED_SOURCE_BYTES = 480370", f"EXPECTED_SOURCE_BYTES = {total}")
+            runner = root / "snapshot_prepare_fixture.py"
+            runner.write_text(fixture)
+            result = subprocess.run([sys.executable, "-I", "-B", str(runner), str(repo), str(temporary), "12345"],
+                                    env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}, umask=0o077,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stdout)
+            self.assertEqual(result.stderr, "")
+            receipt = json.loads(result.stdout)
+            self.assertEqual(receipt["source_files_checked"], 40)
+            self.assertFalse(receipt["runtime_adoption_proof"])
+            snapshot = temporary / "quant-monitor-consumer-imports-35ac-12345"
+            for name in files:
+                self.assertEqual((snapshot / name).read_bytes(), (repo / name).read_bytes())
+            self.assertEqual((snapshot / "ops/quant-monitor/scripts/build_dashboard_snapshot.py").stat().st_mode & 0o777, 0o755)
+            self.assertFalse((snapshot / ".git").exists())
+            self.assertFalse((snapshot / "ops/quant-monitor/data").exists())
+            self.assertFalse((snapshot / "ops/quant-monitor/.venv").exists())
+
+    def test_offline_consumers_gate_binds_the_same_fixed_source(self) -> None:
+        _, _, scripts = self._offline_consumer_scripts()
+        sha = "a" * 40
+        env = {"PATH": "/usr/bin:/bin", "HOME": "/tmp", "LANG": "C", "LC_ALL": "C",
+               "GITHUB_WORKSPACE": str(ROOT.parents[1]), "RUN_EVENT_NAME": "workflow_dispatch",
+               "RUN_MODE": "check-quant-consumers-offline", "RUN_REPOSITORY": "QuantStrategyLab/AIAuditBridge",
+               "RUN_REF": "refs/heads/main", "RUN_ACK": "false", "RUN_UNBAN_IP": "",
+               "RUN_SHA": sha, "RUN_WORKFLOW_SHA": sha,
+               "RUN_WORKFLOW_REF": "QuantStrategyLab/AIAuditBridge/.github/workflows/vps_codex_service_ops.yml@refs/heads/main",
+               "FIXTURE_HEAD": "35ac71176127f07e00fe04dbc793777f3c595bc0", "FIXTURE_MAIN": sha, "FIXTURE_DIRTY": ""}
+        stubs = (
+            'git() { case "$*" in "rev-parse HEAD") printf "%s\\n" "$FIXTURE_HEAD" ;; '
+            '"status --porcelain --untracked-files=all") printf %s "$FIXTURE_DIRTY" ;; *) return 90 ;; esac; }\n'
+            'gh() { [[ "$*" == "api repos/QuantStrategyLab/AIAuditBridge/git/ref/heads/main --jq .object.sha" ]] || return 91; '
+            'printf "%s\\n" "$FIXTURE_MAIN"; }\n'
+            'timeout() { [[ "$1" == 30s ]] || return 92; shift; "$@"; }\n'
+        )
+        for overrides in ({}, {"FIXTURE_MAIN": "b" * 40}, {"FIXTURE_HEAD": "b" * 40},
+                          {"RUN_WORKFLOW_SHA": "b" * 40}, {"RUN_EVENT_NAME": "push"},
+                          {"RUN_MODE": "deploy"}, {"RUN_REF": "refs/heads/other"},
+                          {"RUN_ACK": "true"}, {"RUN_UNBAN_IP": "192.0.2.1"},
+                          {"FIXTURE_DIRTY": " M unreviewed"}, {"RUN_SHA": "main"}):
+            with self.subTest(overrides=overrides):
+                result = subprocess.run(["/bin/bash", "-c", stubs + scripts[0]], env={**env, **overrides},
+                                        capture_output=True, text=True, timeout=5, check=False)
+                self.assertEqual(result.returncode == 0, not overrides, result.stderr)
+
     def _inactive_release_scripts(self):
         workflow = (ROOT.parents[1] / ".github/workflows/vps_codex_service_ops.yml").read_text()
         self.assertIn("\n  install-quant-release-inactive:\n", workflow)
@@ -378,10 +613,15 @@ class DeployScriptTests(unittest.TestCase):
             self.assertEqual(os.readlink(release / "ops/quant-monitor/.venv"), str(candidate))
 
     def test_inactive_release_consumer_import_guards_and_all_origins_in_fresh_process(self):
+        self._assert_consumer_import_guards(self._inactive_release_scripts()[2])
+
+    def test_offline_consumer_imports_preserve_the_full_guard_matrix(self):
+        self._assert_consumer_import_guards(self._offline_consumer_scripts()[2], temporary_snapshot=True)
+
+    def _assert_consumer_import_guards(self, scripts, *, temporary_snapshot=False):
         import ast
         import hashlib
 
-        _, _, scripts = self._inactive_release_scripts()
         code = scripts[2].split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
         parsed = ast.parse(code)
         assignments = {n.targets[0].id: n for n in parsed.body if isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Name)}
@@ -389,16 +629,19 @@ class DeployScriptTests(unittest.TestCase):
         # The fixed daily names are read as literals, never supplied to production.
         daily = set(ast.literal_eval(assignments["EXPECTED_DAILY"].value.args[0].func.value).split())
         fixed_hashes = ast.literal_eval(assignments["HASHES"].value)
+        source_files = ast.literal_eval(assignments["SOURCE_FILES"].value) if temporary_snapshot else ()
         cases = ("valid", "missing_dependency", "missing_daily", "network", "process", "write", "private_read",
                  "swallowed_network", "aab_origin", "qpk_origin", "package_path", "sys_path", "record_hash", "fixed_hash", "numpy_version", "pyc_mismatch", "pyc_link", "qpk_external", "private_listdir", "private_scandir", "secret_exception")
+        if temporary_snapshot:
+            cases += ("source_git_read", "source_data_read", "source_ignored_read", "checkout_git_read", "source_hardlink")
         for case in cases:
             with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 candidate = root / "candidate"
                 site = candidate / "lib/python3.12/site-packages"
-                release = root / "release"
+                release = root / ("quant-monitor-consumer-imports-35ac-12345" if temporary_snapshot else "release")
                 site.mkdir(parents=True)
-                release.mkdir()
+                release.mkdir(mode=0o700 if temporary_snapshot else 0o755)
                 for relative in ops.values():
                     path = release / relative
                     path.parent.mkdir(parents=True, exist_ok=True)
@@ -422,6 +665,10 @@ class DeployScriptTests(unittest.TestCase):
                     "process": "import subprocess\nsubprocess.run(['/bin/false'])\n",
                     "write": f"open({str(root / 'forbidden-write')!r}, 'w')\n",
                     "private_read": "open('/private/token_DO_NOT_EMIT')\n",
+                    "source_git_read": f"open({str(release / '.git/config')!r})\n",
+                    "source_data_read": f"open({str(release / 'ops/quant-monitor/data/private')!r})\n",
+                    "source_ignored_read": f"open({str(release / 'ignored.env')!r})\n",
+                    "checkout_git_read": f"open({str(root / 'checkout/.git/config')!r})\n",
                     "private_listdir": f"import os\nos.listdir({str(private_dir)!r})\n",
                     "private_scandir": f"import os\nlist(os.scandir({str(private_dir)!r}))\n",
                     "swallowed_network": "import socket\ntry:\n socket.socket()\nexcept RuntimeError:\n pass\n",
@@ -460,13 +707,22 @@ class DeployScriptTests(unittest.TestCase):
                     (site / name / "__init__.py").write_text(f"__version__ = {('0.0.0' if case == 'numpy_version' and name == 'numpy' else version)!r}\n")
                 monitor = release / "ops/quant-monitor"
                 shutil.copyfile(ROOT / "requirements-linux-py312.lock", monitor / "requirements-linux-py312.lock")
+                if temporary_snapshot:
+                    (monitor / "qpk-runtime.sha").write_text("28675796cabbe137a1fa3970b70d1aa98e952c88\n")
+                    if case == "source_hardlink":
+                        os.link(release / "client/config.py", root / "external-source-copy")
                 manifest = b""
+                source_bytes = 0
                 for path in sorted(release.rglob("*")):
-                    if path.is_file():
+                    if path.is_file() and (not temporary_snapshot or str(path.relative_to(release)) in source_files):
                         content = path.read_bytes()
+                        source_bytes += len(content)
                         oid = hashlib.sha1(b"blob " + str(len(content)).encode() + b"\0" + content).hexdigest()
-                        manifest += f"100644 blob {oid}\t{path.relative_to(release)}\0".encode()
+                        size_field = f" {len(content)}" if temporary_snapshot else ""
+                        manifest += f"100644 blob {oid}{size_field}\t{path.relative_to(release)}\0".encode()
                 fixture = code.replace('Path("/opt/quant-monitor/releases") / SOURCE_SHA', f'Path({str(release)!r})').replace('/home/ubuntu/quant-monitor-data03-286757-py312-v1', str(candidate))
+                if temporary_snapshot:
+                    fixture = fixture.replace("EXPECTED_SOURCE_BYTES = 480370", f"EXPECTED_SOURCE_BYTES = {source_bytes}")
                 hashes = {name: hashlib.sha256((qpk_root / "strategy_lifecycle" / name).read_bytes()).hexdigest() for name in fixed_hashes}
                 if case == "fixed_hash":
                     hashes["return_collector.py"] = "0" * 64
@@ -494,12 +750,16 @@ for path in (site / 'quant_platform_kit').rglob('*.py'):
     files.append(p)
 importlib.metadata.distribution = lambda name: SimpleNamespace(version=fixture_versions[name], files=files, locate_file=lambda p: site / p)
 real_run = subprocess.run
+fixture_source_files = {source_files!r}
 def source_tree(argv, **kwargs):
-    assert argv == ['/usr/bin/git', '-C', 'synthetic-checkout', 'ls-tree', '-rz', '--full-tree', '35ac71176127f07e00fe04dbc793777f3c595bc0']
+    expected = ['/usr/bin/git', '-C', 'synthetic-checkout', 'ls-tree', '-rlz' if {temporary_snapshot!r} else '-rz', '--full-tree', '35ac71176127f07e00fe04dbc793777f3c595bc0']
+    if {temporary_snapshot!r}:
+        expected += ['--', *fixture_source_files]
+    assert argv == expected
     subprocess.run = real_run
     return SimpleNamespace(stdout={manifest!r}, returncode=0)
 subprocess.run = source_tree
-sys.argv = ['offline-fixture', 'synthetic-checkout']
+sys.argv = ['offline-fixture', 'synthetic-checkout'] + ([{str(root)!r}, '12345'] if {temporary_snapshot!r} else [])
 '''
                 runner = root / "offline_import_fixture.py"
                 runner.write_text(textwrap.dedent(prefix) + "\n" + fixture)
@@ -522,17 +782,31 @@ sys.argv = ['offline-fixture', 'synthetic-checkout']
                     self.assertTrue(receipt["application_import_proof"])
                     self.assertFalse(receipt["shell_selection_proof"])
                     self.assertFalse(receipt["runtime_adoption_proof"])
+                    if temporary_snapshot:
+                        self.assertEqual(receipt["stage"], "offline_consumer_imports_verified")
+                        self.assertEqual(receipt["source_kind"], "task_temporary_snapshot")
+                        self.assertEqual(receipt["source_files_checked"], 40)
+                        self.assertTrue(receipt["source_snapshot_reverified"])
+                        self.assertFalse(receipt["immutable_release_proof"])
+                        self.assertFalse(receipt["health_recovery_proof"])
                 else:
                     self.assertNotEqual(result.returncode, 0)
                     receipt = json.loads(result.stdout)
-                    self.assertEqual(set(receipt), {"stage", "failure", "import_target", "guard_attempts",
-                                                   "application_import_proof", "runtime_adoption_proof", "residue"})
-                    self.assertEqual(receipt["stage"], "inactive_release_consumer_import_failed")
+                    expected_fields = {"stage", "failure", "import_target", "guard_attempts",
+                                       "application_import_proof", "runtime_adoption_proof", "residue"}
+                    if temporary_snapshot:
+                        expected_fields |= {"source_kind", "immutable_release_proof", "shell_selection_proof", "health_recovery_proof"}
+                        self.assertEqual(receipt["source_kind"], "task_temporary_snapshot")
+                        self.assertFalse(receipt["immutable_release_proof"])
+                        self.assertFalse(receipt["shell_selection_proof"])
+                        self.assertFalse(receipt["health_recovery_proof"])
+                    self.assertEqual(set(receipt), expected_fields)
+                    self.assertEqual(receipt["stage"], "offline_consumer_import_failed" if temporary_snapshot else "inactive_release_consumer_import_failed")
                     self.assertFalse(receipt["application_import_proof"])
                     self.assertFalse(receipt["runtime_adoption_proof"])
                     self.assertEqual(receipt["residue"], "preserved")
-                    if case in {"network", "process", "write", "private_read", "private_listdir", "private_scandir"}:
-                        kind = "read" if case.startswith("private_") else case
+                    if case in {"network", "process", "write", "private_read", "private_listdir", "private_scandir", "source_git_read", "source_data_read", "source_ignored_read", "checkout_git_read"}:
+                        kind = "read" if case.startswith(("private_", "source_", "checkout_")) else case
                         expected_counts = dict(network=0, process=0, write=0, read=0)
                         expected_counts[kind] = 1
                         self.assertEqual(receipt["guard_attempts"], expected_counts)
