@@ -357,3 +357,50 @@ journal，不读 quant、timer、Gateway 或历史调用。旧模式读集和输
 超过 64 行不分类；字节截断、超时、拒绝、stderr、畸形、错配、未知元数据或前后变化
 都丢弃样本。63 条及以下沿用原分类。上限、原权限和无原文输出边界均不变。
 这不能找回先前已丢弃的 journal 原文；真实调用需要本次限定范围的明确授权。
+
+### Recorded daily invocation error filter / 固定旧日报调用的错误筛选
+
+Manual mode `inspect-recorded-daily-errors` runs the strict no-value flag
+`--inspect-recorded-daily-errors` in its own existing-environment/concurrency job.
+The source binds only `codex-daily-briefing.service` and invocation
+`ff223a65dbf049cc9e9280f49c7519d5`, recorded in both before/after InvocationID
+fields of [the original inspect run](https://github.com/QuantStrategyLab/AIAuditBridge/actions/runs/37414305498)
+(job 112109414839). This binding does not assert that a later bool-only sample
+had the same ID. If the first existing-property systemctl snapshot cannot confirm
+this exact current ID, stop after that one read. Otherwise issue one fixed
+journal query and one after snapshot; changed state/ID discards the result.
+
+The exact allowlisted journal argv adds a static `--grep` alternation for
+`Traceback`, the 18 fixed exception classes in `RECORDED_DAILY_EXCEPTIONS`,
+`report_dir_not_found`, `runtime digest rejected`, `domain_exit=` and
+`runtime_exit=`, with `--case-sensitive=yes` and `--reverse`. It jointly matches
+the fixed unit and ID, with the existing 64-record/64KiB/five-second reader and
+ordinary privileges. [Official journalctl semantics](https://raw.githubusercontent.com/systemd/systemd/v255/man/journalctl.xml)
+filter MESSAGE by regex; grep with lines implies reverse order. This may inspect
+earlier entries within this one invocation. The 64-record cap limits returned
+matches, not the number of records examined internally. The byte bound is on
+returned stdout/stderr, not all internal journal scanning. No priority-only
+filter, extra query, free ID/regex, other unit, or permission expansion is used.
+
+All returned records must be strict JSON and match unit, ID and the reviewed
+grep. Only anchored exception lines, the exact Traceback header, existing
+report-directory/runtime-rejection markers, and complete domain/runtime exit
+pairs with each code in 0..255 enter `filtered_evidence`. It contains only fixed
+class/category/stage counts and legal exit-code pairs. Diagnosis remains unknown;
+`complete` and `absence_proven` stay false. This is selective error evidence,
+not full visibility, a first/root cause, Python damage, or business recovery.
+Empty/unclassified results, exactly 64 or more returned lines, byte truncation,
+timeout, stderr/permission failure, malformed/mismatched records, unknown state,
+or snapshot changes end unknown without expanding words, IDs, history or retries.
+No raw MESSAGE, traceback text, URL, path, account, token or raw ID is emitted or
+saved. Previous modes and default collectors are unchanged. No pipeline, model,
+Gateway, deployment, restart, account, transaction or notification is invoked.
+
+独立模式和严格无值参数 inspect-recorded-daily-errors 只绑定原 run/job 前后共同记录
+的固定旧日报 ID，不把后来的布尔样本当作同 ID 证明。前置快照无法确认即停止；
+确认后仅一次固定 grep 查询和后快照。筛词、unit、ID、命令白名单均固定，不按 err
+优先级替代错误文本，也不允许自由参数。64 条/64KiB 是返回读集上限，内部可在同一
+调用内检查更早记录；不是“只扫描 64 条”。五秒及原权限不变。
+只输出白名单类别/阶段计数和 0..255 的退出码，完整性和错误不存在证明均为 false，
+诊断仍 unknown。空/无有效分类、截断、失败、错配或状态变化就结束，不扩词重试。
+不留原日志或异常文本，不读其他调用，不执行业务或维护动作；旧模式行为不变。

@@ -22,6 +22,7 @@ QUANT = "codex-quant.service"
 DAILY = "codex-daily-briefing.service"
 QID = "a" * 32
 DID = "b" * 32
+RECORDED_DID = "ff223a65dbf049cc9e9280f49c7519d5"
 
 
 class ExternalAttempt(BaseException):
@@ -113,6 +114,164 @@ class OfflineTests(unittest.TestCase):
             return m.ReadResult(data=(journals or {}).get(unit, b""), returncode=0)
 
         return (m.collect(runner=runner, daily_only=True) if daily_only else m.collect(runner=runner)), requests
+
+    def recorded(self, *, messages=None, data=None, flags=None, before_changes=None, after_changes=None):
+        requests = []
+        snapshots = 0
+
+        def runner(argv):
+            nonlocal snapshots
+            requests.append(tuple(argv))
+            if argv[0] == self.m.SYSTEMCTL:
+                snapshots += 1
+                changes = (before_changes or {}) if snapshots == 1 else (after_changes or {})
+                return self.m.ReadResult(data=self.properties(DAILY, RECORDED_DID, **changes), returncode=0)
+            body = self.records(DAILY, messages or [], RECORDED_DID) if data is None else data
+            return self.m.ReadResult(data=body, **{"returncode": 0, **(flags or {})})
+
+        return self.m.collect_recorded_daily_errors(runner=runner), requests
+
+    def test_recorded_exact_command_filter_and_exception_projection(self):
+        result, calls = self.recorded(messages=["Traceback (most recent call last):", "ModuleNotFoundError: " + SECRET,
+                                               "json.decoder.JSONDecodeError: " + SECRET])
+        self.assertEqual(self.m.RECORDED_DAILY_INVOCATION, RECORDED_DID)
+        self.assertEqual(calls, [self.m.systemd_command(DAILY), self.m.RECORDED_DAILY_JOURNAL, self.m.systemd_command(DAILY)])
+        self.assertEqual(calls[1][-2:], ("_SYSTEMD_UNIT=" + DAILY, "_SYSTEMD_INVOCATION_ID=" + RECORDED_DID))
+        self.assertIn("--grep=" + self.m.RECORDED_DAILY_ERROR_GREP, calls[1])
+        self.assertIn("--case-sensitive=yes", calls[1])
+        self.assertIn("--reverse", calls[1])
+        self.assertFalse(any("priority" in item for item in calls[1]))
+        self.assertEqual(set(result["units"]), {DAILY})
+        unit = result["units"][DAILY]
+        self.assertTrue(unit["bound_invocation_current"])
+        self.assertTrue(unit["snapshot_stable"])
+        filtered = unit["filtered_evidence"]
+        self.assertTrue(filtered["available"])
+        self.assertFalse(filtered["complete"])
+        self.assertFalse(filtered["absence_proven"])
+        self.assertEqual(filtered["exception_counts"]["ModuleNotFoundError"], 1)
+        self.assertEqual(filtered["exception_counts"]["JSONDecodeError"], 1)
+        self.assertEqual(filtered["stage_counts"]["python_traceback"], 1)
+        self.assertEqual(unit["diagnosis"], "unknown")
+        self.assertNotIn(SECRET, json.dumps(result))
+        self.assertNotIn(RECORDED_DID, json.dumps(result))
+
+    def test_recorded_pipeline_markers_and_only_legal_exit_codes(self):
+        message = json.dumps({"ok": False, "error": "report_dir_not_found: /private/" + SECRET})
+        result, _ = self.recorded(messages=[message,
+            "[briefing-pipeline] runtime digest rejected: invalid_runtime_timezone",
+            "[briefing-pipeline] domain_exit=1 runtime_exit=2"])
+        filtered = result["units"][DAILY]["filtered_evidence"]
+        self.assertTrue(filtered["available"])
+        self.assertEqual(filtered["stage_counts"]["briefing_directory_check"], 1)
+        self.assertEqual(filtered["stage_counts"]["daily_pipeline"], 2)
+        self.assertEqual(filtered["exit_pairs"], [{"domain_exit": 1, "runtime_exit": 2}])
+        self.assertNotIn(SECRET, json.dumps(result))
+        for line in ("[briefing-pipeline] domain_exit=256 runtime_exit=1",
+                     "[briefing-pipeline] domain_exit=-1 runtime_exit=1",
+                     "[briefing-pipeline] domain_exit=1 runtime_exit=99999999",
+                     "[briefing-pipeline] runtime digest rejected: " + SECRET):
+            result, _ = self.recorded(messages=[line])
+            self.assertFalse(result["units"][DAILY]["filtered_evidence"]["available"])
+            self.assertEqual(result["units"][DAILY]["filtered_evidence"]["exit_pairs"], [])
+            self.assertNotIn(SECRET, json.dumps(result))
+
+    def test_recorded_before_wrong_id_stops_without_journal_or_second_read(self):
+        for identity in ("", DID, "0" * 32, SECRET):
+            result, calls = self.recorded(before_changes={"InvocationID": identity}, messages=["ImportError: " + SECRET])
+            self.assertEqual(calls, [self.m.systemd_command(DAILY)])
+            self.assertFalse(result["units"][DAILY]["bound_invocation_current"])
+            self.assertFalse(result["units"][DAILY]["filtered_evidence"]["available"])
+            self.assertNotIn(SECRET, json.dumps(result))
+
+    def test_recorded_after_race_or_unknown_metadata_discards_all_counts(self):
+        for changes in ({"InvocationID": DID}, {"MainPID": "42"}, {"ExecMainStatus": "3"}, {"ActiveState": SECRET}):
+            result, calls = self.recorded(messages=["PermissionError: " + SECRET], after_changes=changes)
+            self.assertEqual(len(calls), 3)
+            filtered = result["units"][DAILY]["filtered_evidence"]
+            self.assertFalse(filtered["available"])
+            self.assertFalse(any(filtered["exception_counts"].values()))
+            self.assertFalse(any(filtered["stage_counts"].values()))
+            self.assertNotIn(SECRET, json.dumps(result))
+
+    def test_recorded_no_hits_and_unclassified_grep_words_stop_unknown(self):
+        for messages in ([], ["untrusted source mentions RuntimeError with " + SECRET],
+                         ["report_dir_not_found " + SECRET], ["domain_exit=" + SECRET]):
+            result, calls = self.recorded(messages=messages)
+            self.assertEqual(len(calls), 3)
+            unit = result["units"][DAILY]
+            self.assertEqual(unit["diagnosis"], "unknown")
+            self.assertFalse(unit["filtered_evidence"]["available"])
+            self.assertFalse(unit["filtered_evidence"]["absence_proven"])
+            self.assertNotIn(SECRET, json.dumps(result))
+
+    def test_recorded_malformed_wrong_unit_id_or_non_grep_record_rejects_whole_read(self):
+        prefix = self.records(DAILY, ["ImportError: " + SECRET], RECORDED_DID)
+        cases = [prefix + b"{\n", prefix + b"\xff\n", prefix + self.records(QUANT, ["ValueError: " + SECRET], RECORDED_DID),
+                 prefix + self.records(DAILY, ["ValueError: " + SECRET], DID),
+                 prefix + self.records(DAILY, ["no reviewed filter word " + SECRET], RECORDED_DID),
+                 prefix + self.records(DAILY, ["ValueError: " + SECRET], RECORDED_DID).replace(b'"MESSAGE":', b'"bad": NaN, "MESSAGE":'),
+                 prefix + self.records(DAILY, [[SECRET]], RECORDED_DID)]
+        for data in cases:
+            result, _ = self.recorded(data=data)
+            filtered = result["units"][DAILY]["filtered_evidence"]
+            self.assertFalse(filtered["available"])
+            self.assertFalse(any(filtered["exception_counts"].values()))
+            self.assertNotIn(SECRET, json.dumps(result))
+
+    def test_recorded_all_limits_or_permission_failures_discard_instead_of_sampling(self):
+        for count in (64, 65):
+            result, _ = self.recorded(messages=["ImportError: " + SECRET] * count)
+            self.assertTrue(result["units"][DAILY]["journal"]["truncated"])
+            self.assertFalse(result["units"][DAILY]["filtered_evidence"]["available"])
+        for flags in ({"returncode": 1}, {"timed_out": True}, {"stderr_seen": True}, {"truncated": True}):
+            result, _ = self.recorded(messages=["ImportError: " + SECRET], flags=flags)
+            self.assertFalse(result["units"][DAILY]["filtered_evidence"]["available"])
+        result, _ = self.recorded(data=self.records(DAILY, ["ImportError: " + SECRET], RECORDED_DID) + b" " * 65536)
+        self.assertFalse(result["units"][DAILY]["filtered_evidence"]["available"])
+        result, _ = self.recorded(messages=["ImportError: " + SECRET] * 63)
+        self.assertEqual(result["units"][DAILY]["filtered_evidence"]["exception_counts"]["ImportError"], 63)
+
+    def test_recorded_command_validator_accepts_only_reviewed_exact_grep_binding(self):
+        command = self.m.RECORDED_DAILY_JOURNAL
+        self.assertEqual(self.m.command_limit(command), self.m.JOURNAL_BYTES)
+        for before, after in ((RECORDED_DID, DID), (DAILY, QUANT),
+                              (self.m.RECORDED_DAILY_ERROR_GREP, "Error"), ("--case-sensitive=yes", "--case-sensitive=no"),
+                              ("--lines=64", "--lines=65")):
+            changed = tuple(value.replace(before, after) for value in command)
+            self.assertIsNone(self.m.command_limit(changed))
+            self.assertIsNone(self.m.run_bounded(changed).returncode)
+
+    def test_recorded_reader_uses_the_existing_bounded_stream_with_exact_argv(self):
+        data = self.records(DAILY, ["ImportError: " + SECRET], RECORDED_DID)
+        _, popen, sizes = self.fake_process(data)
+        read = self.m.run_bounded(self.m.RECORDED_DAILY_JOURNAL)
+        self.assertEqual(read.returncode, 0)
+        self.assertEqual(sum(sizes), len(data))
+        args, kwargs = popen.call_args
+        self.assertEqual(args[0], self.m.RECORDED_DAILY_JOURNAL)
+        self.assertEqual(kwargs["stdin"], subprocess.DEVNULL)
+        self.assertIs(kwargs["shell"], False)
+        self.assertEqual(kwargs["env"], self.m.CLEAN_ENV)
+
+    def test_recorded_before_metadata_read_failure_stops_at_first_command(self):
+        for flags in ({"returncode": 1}, {"timed_out": True}, {"stderr_seen": True}, {"truncated": True}):
+            calls = []
+            def runner(argv):
+                calls.append(tuple(argv))
+                return self.m.ReadResult(data=self.properties(DAILY, RECORDED_DID), **{"returncode": 0, **flags})
+            result = self.m.collect_recorded_daily_errors(runner=runner)
+            self.assertEqual(calls, [self.m.systemd_command(DAILY)])
+            self.assertFalse(result["units"][DAILY]["filtered_evidence"]["available"])
+
+    def test_recorded_cli_fixed_no_free_invocation_or_combined_modes(self):
+        for argv in (["--inspect-recorded-daily-errors", DID], ["--inspect-recorded-daily-errors", "--inspect"],
+                     ["--inspect-recorded-daily-errors", "--inspect-daily-only"], ["--grep=" + SECRET], []):
+            with mock.patch.object(self.m, "collect_recorded_daily_errors", side_effect=ExternalAttempt("invalid CLI read")), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(self.m.main(argv), 64)
+        with mock.patch.object(self.m, "collect_recorded_daily_errors", return_value={}) as collect, contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self.m.main(["--inspect-recorded-daily-errors"]), 0)
+        collect.assert_called_once_with()
 
     def test_daily_sample_validates_all_64_and_keeps_diagnosis_unknown(self):
         messages = ["unclassified " + SECRET] * 62 + [
@@ -618,6 +777,7 @@ class OfflineTests(unittest.TestCase):
             "release-gateway-failure-repairs": "release-gateway-failure-repairs",
             "inspect-monitor-failures": "inspect-monitor-failures",
             "inspect-daily-failure-sample": "inspect-daily-failure-sample",
+            "inspect-recorded-daily-errors": "inspect-recorded-daily-errors",
         }
 
         def routed(mode, event="workflow_dispatch", ref="refs/heads/main", repository="QuantStrategyLab/AIAuditBridge"):
@@ -645,6 +805,22 @@ class OfflineTests(unittest.TestCase):
         for changes in ({"event": "push"}, {"ref": "refs/heads/other"}, {"repository": "other/repo"}):
             self.assertEqual(routed("inspect-monitor-failures", **changes), [])
             self.assertEqual(routed("inspect-daily-failure-sample", **changes), [])
+            self.assertEqual(routed("inspect-recorded-daily-errors", **changes), [])
+
+    def test_recorded_workflow_is_separate_exact_main_and_fixed_cli(self):
+        workflow = (SCRIPT.parents[3] / ".github/workflows/vps_codex_service_ops.yml").read_text()
+        job = workflow.split("  inspect-recorded-daily-errors:\n", 1)[1].split("\n  inspect-daily-failure-sample:", 1)[0]
+        for text in ("inputs.mode == 'inspect-recorded-daily-errors'", "github.event_name == 'workflow_dispatch'",
+                     "github.repository == 'QuantStrategyLab/AIAuditBridge'", "github.ref == 'refs/heads/main'",
+                     "environment: codex-vps-ops", "persist-credentials: false", '[ "$RUN_MODE" = inspect-recorded-daily-errors ]',
+                     '[ "$RUN_EVENT_NAME" = workflow_dispatch ]', '[ "$RUN_WORKFLOW_SHA" = "$RUN_SHA" ]',
+                     '[ "$current_main" = "$RUN_SHA" ]', 'checkout_status="$(git status --porcelain --untracked-files=all)"',
+                     "env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C", "/usr/bin/python3 -I -B", 'inspect_monitor_failures.py" --inspect-recorded-daily-errors'):
+            self.assertIn(text, job)
+        for text in ("sudo", "secrets.", "OPENAI", "ANTHROPIC", "health_check.sh", "daily_briefing_pipeline.sh",
+                     "acknowledge_interruption", "systemctl", "journalctl", " --inspect\n", " --inspect-daily-only\n"):
+            self.assertNotIn(text, job)
+        self.assertIn("inputs.mode != 'inspect-recorded-daily-errors'", workflow.split("  inspect-recorded-daily-errors:", 1)[0])
 
     def test_daily_workflow_is_exact_manual_gate_and_runs_only_strict_flag(self):
         workflow = (SCRIPT.parents[3] / ".github/workflows/vps_codex_service_ops.yml").read_text()
