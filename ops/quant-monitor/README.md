@@ -348,6 +348,13 @@ ReturnCollector hash 匹配该旧版本；health pin 与 HEAD 匹配，daily 未
 候选 metadata 步骤跳过。该 enum 不区分对象缺失和镜像/读取问题，当前磁盘状态未补读。
 后续源码候选改为在 runner 临时目录准备独立的公共 QPK 精确对象；失败 run 保留且不重发。
 
+修复后的独立 [inactive staging run37504798174](https://github.com/QuantStrategyLab/AIAuditBridge/actions/runs/37504798174)
+以 `35ac71176127f07e00fe04dbc793777f3c595bc0` 在 2026-10-06 17:36:36 UTC 完成
+候选 metadata 验收：27 个锁定 distribution 版本与四项 QPK 文件 hash 匹配，QPK pin 为
+`28675796cabbe137a1fa3970b70d1aa98e952c88`。仅此 job 执行，其余 11 jobs 跳过；
+receipt 明确 `application_import_proof=false` / `runtime_adoption_proof=false`。
+新 venv 已安装，尚未安装 immutable release、验证完整 consumer 导入或切换服务。
+
 采用差异按实际使用边界核对：#287/#289 为 lock/staging 安装路径；#290/#299 为 health
 正常调用的 artifact sync；#301/#306/#314 为 health 及日报 coverage/失败处理；#311
 为日报 wrapper/consumer 结果摘要；#316 为 QPK pin。#307 的 watcher/strategy_watch
@@ -360,13 +367,30 @@ ReturnCollector hash 匹配该旧版本；health pin 与 HEAD 匹配，daily 未
 | --- | --- |
 | 固定元数据 preflight | #318 和上述一次读回已完成静态阶段；保留未知 gate，不追加任意路径读取，也不把 metadata 当 interpreter/import 证明 |
 | inactive 候选 venv | 独立 `stage-quant-runtime-inactive` 入口复用 setup 的显式 staging 分支，以精确 main/干净 checkout、原 27 包 hash lock 和独立获取的公共 QPK 286757 commit 建立固定新 venv；候选检查只执行标准库，核解释器隔离、锁版本及四项 QPK 文件 hash。源码/合成测试阶段不等于真实安装，执行后也不证明 application import 或服务采用 |
-| immutable release 安装 | 候选环境验收后，另用既有 `install_immutable_release.sh` 将精确 source SHA 绑定到已确认的 data/新 venv；保留旧 release/venv/状态。该 installer 只验证 archive/目录，不切换服务。本次 staging 入口不调用它，后续执行接线另行评审 |
+| immutable release 与离线导入 | 本地候选新增 `install-quant-release-inactive`，应用 source 固定上述 35ac，复用原 installer 绑定已验新 venv 与既有 data。目标已存在即拒绝；安装后逐项核完整源码树及两个精确 symlink，不能以 reused 或退出 0 代替验收。再以受守卫的新隔离进程导入实际 health/builder 懒加载依赖和完整 daily CLI。真实运行仍待单独阶段授权/验收 |
 | 双服务采用/回退 | 先绑定 health/daily 各自的原源码根、解释器、QPK 和 timer 状态，再在不触 Gateway/共享 runner 的窗口分别切换并读回。恢复 timer 是可能触发业务的执行边界，不能当纯配置检查。当前没有现成 monitor switch/rollback mode；不得借用 Gateway `deploy` 或会立即运行 health 的完整 monitor deploy |
 | 自然周期验收 | 独立确认新 source/module 采用、真实 account/stream 与保留连续段；短样本仍 unavailable/min10。回退源码根不能撤销既有数据、Issue、通知或送达状态，也不保证共享 QPK/venv 同时回退；保留状态，不删除重试。两个旧 failed 服务不构成恢复健康证明 |
 
-本次源码候选仅改既有 workflow、部署测试和本说明；已审 setup 保持字节不变。独立公共
-源码获取仍待本地夹具、CI 及单独真实阶段验收；不会重发前述失败 run。后续发布/运行、immutable release、双服务采用及回滚绑定分阶段验收，
-不把源码发布、CI 或候选 metadata 成功当作完整 deploy 或健康恢复。
+本次候选只改既有 workflow、部署测试、工作流路由测试和本说明；installer、setup、应用源码和
+lock 不改。安装入口沿原 protected runner/concurrency，main/workflow SHA 为执行控制版本，
+干净 checkout 和被安装应用固定为 35ac，两者明确分开；不取最新 main 作为应用内容。
+不接收自由路径/source 参数，不调用通用 Gateway job。固定 release、新 venv、既有 data
+三者必须精确绑定；现存目标、安装非零、源码/文件模式/链接不符或并发 mv 造成的嵌套目录均
+停止，未知目标和残留保留，不自动重用/覆盖/删除。仅 installer 子进程固定 umask 022，
+使公开源码目录/文件模式确定；不改父进程或系统 umask。原 installer 的 reuse 比对会排除 data/.venv，
+不能据此证明 runtime 绑定；新入口独立验证最终真实目录和两条链接。
+
+导入阶段使用新 venv 的绝对 Python `-I -B` 和干净环境，业务代码导入前禁止外联、进程启动和
+文件写入；open、listdir、scandir 共用受审代码/依赖及标准库读取边界，不枚举私有目录。显式载入 health/builder 的 QPK 懒加载依赖与
+完整 daily CLI，不调用 main 或业务函数，不注入伪模块；核所有实际 AAB/QPK 模块来源，
+拒绝旧共享镜像或其它目录。AAB/QPK 现存 pyc 读取被拒绝，标准 loader 从源码编译；
+缓存保留，QPK 包根还必须位于新 venv 内。失败摘要仅含固定阶段/import_target 枚举、guard_attempts 计数与 false proof；
+不输出异常正文、路径或目录名，不保存凭据/原始日志。
+Python 导入守卫不是 OS 沙箱；候选导入成功也不证明 systemd 实际启动、shell 的 PYTHONPATH
+选择或原生 history 验收。common_env 仍会优先共享 QPK src，daily consumer 则重设 PYTHONPATH；
+后续采用必须把两个服务的 source、venv/PATH、共享 QPK 和两个 timer 原状态一起绑定。
+旧 failed 配置仅供配置回退；恢复 timer 可能立即触发业务。此候选不实现 switch/rollback，
+不调用 Telegram prestart、health/daily 本体、sync、模型、通知或服务/timer 操作。
 
 `stage-quant-runtime-inactive` 只接受 main、该固定 mode、`acknowledge_interruption=false`
 和空 `ssh_unban_ip`，使用原 `codex-vps-ops` environment/runner/concurrency。精确 workflow
