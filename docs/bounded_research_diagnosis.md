@@ -4,6 +4,75 @@
 
 这是 AIAuditBridge 在策略监测之后的一个小闭环，不是策略执行器。
 
+## 2026-10-06 implementation and audit register
+
+本节对照 AAB `16f5d6d037b38c7e417f1aeb88b4b60b9d9dcd1c`、
+QPK `28675796cabbe137a1fa3970b70d1aa98e952c88` 的源码与已有证据；下方带日期的
+历史记录原样保留，不自动延长为当前部署或验收结论。
+[QPK ADR 0005](https://github.com/QuantStrategyLab/QuantPlatformKit/blob/28675796cabbe137a1fa3970b70d1aa98e952c88/docs/adr/0005-research-control-plane.md)
+已经设计参数变更、策略重写、新策略、插件修订和联网辅助研究，状态仍是 accepted policy / staged implementation。
+当前运行权限以 [QRS 主线政策](https://github.com/QuantStrategyLab/QuantRuntimeSettings/blob/d35b2f83f4ebb7bc1c78fdad054534b4dfd1d3f9/docs/QSL_P0_P6_CURRENT_STATE_AND_DRIVER_POLICY.zh-CN.md)
+为准：候选研究与已授权 champion 双轨；P1–P5 在各自有效的预授权范围内推进，
+不因本次审计增加逐次人工点击。AI 不签发或扩大权限，研究采纳不替换 champion，
+P6、资金、杠杆、凭证和硬熔断恢复仍遵循既定授权。
+
+### 设计、实现和验收
+
+`implemented` 表示读到具体入口；`synthetic` 表示现有离线/替身验证记录；
+`real` 必须说明实际执行了哪一步；`blocked`/`unverified` 不推导为缺陷或已完成。
+本次没有运行模型、研究、通知、部署或券商操作。
+
+| 功能 | 既有入口与边界 | 截至本次审计的证据 |
+| --- | --- | --- |
+| 监测 → 诊断 | `service/research_task.py` 与 `scripts/run_research_task_diagnosis.py`：P1/P2/P3、revision、task 摘要绑定，先写 attempt，再作有界 advisory 调用 | implemented；下述自然 run 为 real 安全跳过，未运行模型 |
+| 策略重构 | ADR 的 `strategy_revision` 候选；月审只处理具体低风险缺陷，不允许无关 broad refactor 或直接改策略行为 | design；具体候选入口已实现，通用无人重构链未完成验收 |
+| 联网新研究 | `scripts/run_new_research.py`：固定 SOXL 模板、明确目标、两个固定公开引文；`run_global_etf_research_codegen.py` 当前只复核固定候选 | implemented subset；有界源码/合成检查不证明开放研究工厂或真实 OOS |
+| CN 受控研究 | `scripts/run_cn_index_etf_research.py`：独立受保护策略、冻结输入、持久票据、每日新实验上限、shadow reader 与 console 接续 | implemented / synthetic；[CN 交接](cn-index-etf-research-dispatch-2026-09-09.md)记录默认关闭及真实许可输入、forward 工件和生产周期证据缺口 |
+| 自动修复 | `scripts/run_monthly_codex_audit.py` 的月审小修及单独授权的 LongBridge `platform_bugfix`；后者精确两文件、禁 auto-merge | implemented；[watchdog 演练](watchdog-repair-rehearsal.md)不代表自然故障自动修复/上线验收 |
+| 验证 → shadow → 采纳 | 固定 WFA/OOS 验证入口、QPK 持久恢复与 paired-shadow/console adapters | implemented / synthetic；材料不足停车，真实链逐段 unverified，接受只记意图 |
+
+行为等价整理应保留输出、风控和公开契约并验证回归；改变信号或参数的重构必须登记为
+新候选，不能借“重构”复用旧绩效或晋级证据。候选 ID、strategy profile、revision 与
+展示名称分别处理；显示改名不改写历史候选、输入绑定、champion 或授权。
+
+[2026-10-05 watcher run 37329184178](https://github.com/QuantStrategyLab/AIAuditBridge/actions/runs/37329184178)
+运行 SHA 为 `6ec8dd2cc67b6448524a0b77cf7d1ff481899e3f`。实际日志为 `findings=0`、
+`tasks=[]`、诊断 `skipped / no_pending_verified_research_task`、learning/quality
+`ready=false`；相关研究子 job 被跳过。它验证无待处理任务的路径，不能作为模型、
+优化、严格回测或 shadow 已运行的证据。
+
+### 当前路由与隔离证据
+
+调用规则以 [provider 场景表](provider-call-scenarios-2026-09-17.md)和
+`service/provider_scenarios.py` 为准。本次源码中 watcher 诊断显式选择 Cursor canary；
+优化、新研究、codegen、晋级主审及 bugfix 保留各自 fixed-Codex 场景。
+下方早期“Codex only”诊断说明须结合该后续场景政策阅读，不扩大到 API 自动补位。
+
+QPK `research_factory` 已有 worker/source/publication 合约；角色能力字段校验不等于
+Fetcher、Planner 和 Publisher 的运行身份隔离已验收。固定 SOXL 来源限制重定向、
+大小和时间，未知许可仅 citation/summary，来源保持 untrusted。模型执行器请求受限
+能力、read-only/never，但 `service/ai_gateway_service.py::_codex_tools_disabled`
+明确保留“不能仅凭 CLI 开关证明所有内建工具已移除”的限制。部署采用和实际工具使用
+须按原运行验收读回；不能用本节、提示词、服务 health 或 CI 代替。
+
+### 待修与下一步验收
+
+- **AI-SOXL-CODEGEN-IDEMPOTENCY / 高优先级**：固定 SOXL codegen 的
+  [`run_new_research.py` 调用/落盘顺序](https://github.com/QuantStrategyLab/AIAuditBridge/blob/16f5d6d037b38c7e417f1aeb88b4b60b9d9dcd1c/scripts/run_new_research.py#L1489-L1524)
+  为先调用模型、后保存 input/response。其 workflow 使用 run/attempt 专属目录并清理，
+  gateway 去重也包含 run/attempt；同目录缓存不能证明跨 dispatch 去重或调用中断后的
+  unknown 停车。先在该入口补已有模式的调用前持久 claim、未知结果停放及离线崩溃/重复提交回归，
+  再按原授权验收。不泛称 CN、Global ETF 或 watcher 都缺去重，不新增通用队列。
+- **AI-LB-FROZEN-REGRESSION / 高优先级**：LongBridge bugfix 的
+  [`run_monthly_codex_audit.py` 测试入口](https://github.com/QuantStrategyLab/AIAuditBridge/blob/16f5d6d037b38c7e417f1aeb88b4b60b9d9dcd1c/scripts/run_monthly_codex_audit.py#L1541-L1655)
+  从 patched checkout 复制可被 AI 修改的测试，并只运行该测试文件；尚未见独立冻结安全测试的复跑。
+  应补冻结订单/风险不变量与候选测试分开验收，并覆盖删弱测试的负向案例。这是验证缺口，
+  不是已证明可绕过全部源仓 CI/merge gate 或已发生线上攻击。
+- **既有运行验收继续分层**：沿原 finding 分别记录源码修复、精确消费者采用、实际模型/数值研究、
+  严格 OOS、完整 paired forward、console 决定回收；不重复制造故障、补跑未知结果或改实盘。
+  [QPK 恢复边界](https://github.com/QuantStrategyLab/QuantPlatformKit/blob/28675796cabbe137a1fa3970b70d1aa98e952c88/docs/research_promotion_resume.zh-CN.md)
+  已明确本地目录锁不保证跨主机限额，synthetic 回归不等于真实研究或运行资格。
+
 ## 2026-09-11 SOXL 自然研究接严格验证
 
 本次新增的 `run_watcher_validation` 接续既有 SOXL watcher learning：从原 Issue

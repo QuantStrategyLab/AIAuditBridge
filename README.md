@@ -35,6 +35,29 @@ AIAuditBridge is the QuantStrategyLab AI audit automation bridge. It runs Codex 
 
 It produces research, audit, or orchestration artifacts. It should not submit broker orders or mutate live allocations by itself.
 
+## Automation implementation and evidence status
+
+The original [research control-plane design](https://github.com/QuantStrategyLab/QuantPlatformKit/blob/28675796cabbe137a1fa3970b70d1aa98e952c88/docs/adr/0005-research-control-plane.md)
+already includes strategy revisions, new strategies, network-assisted research,
+and reviewable research changes. Implementation is staged. The
+[2026-10-06 implementation and audit register](docs/bounded_research_diagnosis.md#2026-10-06-implementation-and-audit-register)
+separates implemented paths, synthetic checks, real observations, and open work.
+
+| Capability | Current bounded entry | Evidence boundary |
+| --- | --- | --- |
+| Monitoring and diagnosis | Verified watcher tasks and advisory Issue comments | A successful no-pending run does not prove a model call or optimization |
+| Strategy revision and new research | Fixed SOXL template/codegen, fixed Global ETF candidate review, policy-bound CN research | No general unattended strategy-rewrite or open-web research loop is claimed |
+| Bug repair | Focused monthly-report fixes; separately authorized LongBridge two-file repair | Repair/PR evidence does not establish merge, deployment, or broker recovery |
+| Validation and adoption | Frozen inputs, strict validation, paired-shadow and console adapters | Synthetic checks and a recorded acceptance intent grant no live authority |
+
+Provider selection follows the existing [scenario policy](docs/provider-call-scenarios-2026-09-17.md),
+including the explicitly selected Cursor diagnosis/summary canaries and fixed
+Codex research/codegen/bugfix lanes. No new provider or execution authority is
+introduced by this register.
+
+中文摘要：策略重构、联网研究和自动修复已在原设计中；当前按具体入口分别登记实现与验收。
+无待处理任务的绿灯、合成测试或采纳意图均不能写成真实研究、部署或交易通过。
+
 ## Fixed Global ETF candidate review
 
 `scripts/run_global_etf_research_codegen.py` is plan-only by default. Its explicit
