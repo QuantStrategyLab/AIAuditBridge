@@ -1419,8 +1419,10 @@ class InactiveInstallMetadataTests(unittest.TestCase):
                     label = labels[full]
                     stats[label] = stats.get(label, 0) + 1
                     if label == "target":
-                        if case == "target_absent": raise FileNotFoundError
-                        if case == "target_unreadable": raise PermissionError
+                        if case == "target_absent":
+                            raise FileNotFoundError
+                        if case == "target_unreadable":
+                            raise PermissionError
                     kind = stat.S_IFLNK if label.endswith("link") or (label == "target" and case == "target_symlink") else stat.S_IFDIR
                     mode = kind | (0o777 if kind == stat.S_IFLNK else 0o755)
                     inode = 1
@@ -1435,8 +1437,10 @@ class InactiveInstallMetadataTests(unittest.TestCase):
                     full = (descriptors[dir_fd] + "/" + path).replace("//", "/")
                     self.assertIn(full, {target + MON + "/data", target + MON + "/.venv"})
                     links.append(full)
-                    if case == "link_unreadable": raise PermissionError
-                    if case == "unknown_link": return "/private/" + SECRET
+                    if case == "link_unreadable":
+                        raise PermissionError
+                    if case == "unknown_link":
+                        return "/private/" + SECRET
                     return (RUNTIME + MON + "/data" if path == "data" else
                             "/home/ubuntu/quant-monitor-data03-286757-py312-v1")
                 def effective_access(path, mode, *, dir_fd, effective_ids, follow_symlinks):
@@ -1444,8 +1448,10 @@ class InactiveInstallMetadataTests(unittest.TestCase):
                     self.assertFalse(follow_symlinks)
                     self.assertEqual((descriptors[dir_fd] + "/" + path).replace("//", "/"), m.base.RELEASE_ROOT)
                     self.assertIn(mode, (os.R_OK, os.W_OK, os.X_OK))
-                    if case == "not_implemented": raise NotImplementedError
-                    if case == "access_error": raise PermissionError
+                    if case == "not_implemented":
+                        raise NotImplementedError
+                    if case == "access_error":
+                        raise PermissionError
                     return not (case == "write_denied" and mode == os.W_OK)
                 access = mock.Mock(side_effect=effective_access)
                 stack.enter_context(mock.patch.object(m.os, "open", side_effect=open_entry))
@@ -1498,7 +1504,8 @@ class InactiveInstallMetadataTests(unittest.TestCase):
                 access_result = entries["release_parent"]["effective_access"]
                 if case.startswith("unsupported_") or case == "not_implemented":
                     self.assertEqual(access_result, dict(status="unsupported", read=None, write=None, execute=None))
-                    if case.startswith("unsupported_"): access.assert_not_called()
+                    if case.startswith("unsupported_"):
+                        access.assert_not_called()
                 elif case == "access_error":
                     self.assertEqual(access_result, dict(status="unknown", read=None, write=None, execute=None))
                 else:
