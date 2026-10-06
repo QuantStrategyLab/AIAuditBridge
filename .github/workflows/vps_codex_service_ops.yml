@@ -12,6 +12,7 @@ on:
           - inspect
           - inspect-quant-runtime
           - inspect-quant-paths
+          - inspect-monitor-failures
           - inspect-audit-patch
           - apply-audit-patch
           - retry-audit-patch-once
@@ -94,7 +95,7 @@ jobs:
             "$GITHUB_WORKSPACE/scripts/release_gateway_failure_repairs.py" release --acknowledge-interruption
 
   vps-codex-service-ops:
-    if: inputs.mode != 'install-org-health-token' && inputs.mode != 'inspect-audit-patch' && inputs.mode != 'apply-audit-patch' && inputs.mode != 'retry-audit-patch-once' && inputs.mode != 'inspect-quant-runtime' && inputs.mode != 'release-gateway-failure-repairs' && inputs.mode != 'inspect-quant-paths'
+    if: inputs.mode != 'install-org-health-token' && inputs.mode != 'inspect-audit-patch' && inputs.mode != 'apply-audit-patch' && inputs.mode != 'retry-audit-patch-once' && inputs.mode != 'inspect-quant-runtime' && inputs.mode != 'release-gateway-failure-repairs' && inputs.mode != 'inspect-quant-paths' && inputs.mode != 'inspect-monitor-failures'
     # Bind to a protected environment when available so deploy/repair-ssh requires approval.
     environment: codex-vps-ops
     runs-on:
@@ -149,6 +150,53 @@ jobs:
           ANTHROPIC_ADMIN_KEY: ${{ secrets.ANTHROPIC_ADMIN_KEY }}
           CODEX_AUDIT_SERVICE_TOKEN: ${{ secrets.CODEX_AUDIT_SERVICE_TOKEN }}
         run: bash scripts/deploy_codex_audit_service.sh "${{ inputs.mode }}"
+
+  inspect-monitor-failures:
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'QuantStrategyLab/AIAuditBridge' && github.ref == 'refs/heads/main' && inputs.mode == 'inspect-monitor-failures'
+    environment: codex-vps-ops
+    runs-on:
+      - self-hosted
+      - codex-vps
+    timeout-minutes: 3
+    steps:
+      - name: Checkout exact operation commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Verify exact main workflow and clean checkout before failure evidence read
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_REPOSITORY: ${{ github.repository }}
+          RUN_REF: ${{ github.ref }}
+          RUN_SHA: ${{ github.sha }}
+          RUN_WORKFLOW_REF: ${{ github.workflow_ref }}
+          RUN_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          RUN_EVENT_NAME: ${{ github.event_name }}
+          RUN_MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          [ "$RUN_EVENT_NAME" = workflow_dispatch ]
+          [ "$RUN_MODE" = inspect-monitor-failures ]
+          [ "$RUN_REPOSITORY" = QuantStrategyLab/AIAuditBridge ]
+          [ "$RUN_REF" = refs/heads/main ]
+          [[ "$RUN_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [ "$RUN_WORKFLOW_REF" = QuantStrategyLab/AIAuditBridge/.github/workflows/vps_codex_service_ops.yml@refs/heads/main ]
+          [ "$RUN_WORKFLOW_SHA" = "$RUN_SHA" ]
+          checkout_head="$(git rev-parse HEAD)"
+          [ "$checkout_head" = "$RUN_SHA" ]
+          checkout_status="$(git status --porcelain --untracked-files=all)"
+          [ -z "$checkout_status" ]
+          current_main="$(timeout 30s gh api repos/QuantStrategyLab/AIAuditBridge/git/ref/heads/main --jq '.object.sha')"
+          [ "$current_main" = "$RUN_SHA" ]
+
+      - name: Read bounded current invocation failure evidence only
+        run: |
+          set -euo pipefail
+          env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C \
+            /usr/bin/python3 -I -B \
+            "$GITHUB_WORKSPACE/ops/quant-monitor/scripts/inspect_monitor_failures.py" --inspect
 
   inspect-quant-runtime:
     if: github.event_name == 'workflow_dispatch' && github.repository == 'QuantStrategyLab/AIAuditBridge' && github.ref == 'refs/heads/main' && inputs.mode == 'inspect-quant-runtime'
