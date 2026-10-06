@@ -320,3 +320,40 @@ CLI 的限定 duration 词法另报 `clock: monotonic` 和带单位的 elapsed_t
 证明健康；源码模型不匹配也不是生产故障。本入口不启动 pipeline、不调模型、不
 触任务网关、账户、交易、通知、部署或维护。真实运行须另获本新增读集范围的授权，
 不能复用先前已消费的 inspect 次数；候选源码和离线测试不证明生产恢复或允许部署。
+
+### Daily-only record-limit samples / 仅日报的有界样本
+
+The separate manual mode `inspect-daily-failure-sample` invokes only
+`inspect_monitor_failures.py --inspect-daily-only`. It retains the same protected
+environment, exact-main/workflow-SHA/clean-checkout gate and concurrency group.
+Its host read set is exactly two existing-property systemctl snapshots of
+`codex-daily-briefing.service`, around at most one journal query for that service's
+already-known current InvocationID. It never reads quant, either timer, Gateway,
+or another invocation. No-argument, combined, or arbitrary CLI options are
+rejected. Existing modes, including `--inspect` and default `collect`, keep their
+original read sets and outputs; sample classification is enabled only here.
+
+Limits remain 64 records, 64KiB and five seconds with ordinary runner privileges.
+If the command returned normally within the byte cap and exactly 64 complete
+JSON records were read, every record must first match the fixed unit and current
+InvocationID. Only after all records validate may the independent
+`sampled_evidence` contain fixed stage/error counts. It has `complete: false` and
+`absence_proven: false`; journal remains truncated and diagnosis remains unknown.
+It describes observations in a bounded sample, not a root cause or full log
+visibility. Zero counts never prove the absence of errors. More than 64 lines
+are rejected without classification. Byte truncation, timeout, permission/stderr
+issues, malformed/duplicate JSON, wrong unit/ID, unknown metadata or changed
+before/after snapshots discard all sample counts. With 63 records or fewer,
+the existing normal classification applies and sampled evidence is unavailable.
+Raw MESSAGE, URLs, paths, credentials and exceptions are still never retained
+or emitted. No extra reads, retries, permissions or business actions were added.
+
+独立手动模式 `inspect-daily-failure-sample` 只以严格 `--inspect-daily-only` 参数
+读取 codex-daily-briefing.service 的前后限定状态和当前 InvocationID 对应的一次
+journal，不读 quant、timer、Gateway 或历史调用。旧模式读集和输出保持原样。
+正常返回且未触字节上限、恰有 64 条时，先逐条校验完整 JSON、unit 和 InvocationID，
+全样本通过才输出独立 sampled_evidence 固定阶段/类别计数。complete/absence_proven
+均为 false，诊断仍 unknown；零计数不表示没有错误，也不证明完整可见、根因或恢复。
+超过 64 行不分类；字节截断、超时、拒绝、stderr、畸形、错配、未知元数据或前后变化
+都丢弃样本。63 条及以下沿用原分类。上限、原权限和无原文输出边界均不变。
+这不能找回先前已丢弃的 journal 原文；真实调用需要本次限定范围的明确授权。

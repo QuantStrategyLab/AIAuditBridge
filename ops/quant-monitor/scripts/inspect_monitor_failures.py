@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fixed, bounded, read-only systemd/journal evidence; never emits log text.
 
-No import-time work. Host reads require the explicit --inspect switch. The
+No import-time work. Host reads require --inspect or --inspect-daily-only. The
 --fixture-test switch uses only in-memory fixtures and does not invoke metadata
 commands. Missing evidence is unknown, never a health or deployment clearance.
 """
@@ -340,23 +340,35 @@ def evidence(message, unit, stages, errors):
     fixed_fields(payload)
 
 
-def inspect_journal(result, unit, invocation):
+def empty_sample():
+    return {"available": False, "complete": False, "absence_proven": False, "record_count": 0,
+            "stage_counts": dict.fromkeys(STAGES, 0), "error_counts": dict.fromkeys(ERRORS, 0)}
+
+
+def reject_json_constant(_):
+    raise ValueError("unsupported_json_constant")
+
+
+def inspect_journal(result, unit, invocation, *, allow_sample=False):
     stages = dict.fromkeys(STAGES, 0)
     errors = dict.fromkeys(ERRORS, 0)
     summary = {"visible": False, "current_invocation_matched": False, "record_count": 0,
                "truncated": result.truncated or len(result.data) >= JOURNAL_BYTES,
                "timed_out": result.timed_out, "read_unavailable": not readable(result, JOURNAL_BYTES),
                "malformed": False}
+    if allow_sample:
+        summary["sampled_evidence"] = empty_sample()
     if summary["read_unavailable"]:
         return summary, stages, errors
     try:
         lines = result.data.decode("utf-8", errors="strict").splitlines()
         if len(lines) >= JOURNAL_RECORDS:
             summary["truncated"] = True
-            return summary, stages, errors
+            if not allow_sample or len(lines) > JOURNAL_RECORDS:
+                return summary, stages, errors
         records = []
         for line in lines:
-            record = json.loads(line, object_pairs_hook=no_duplicates)
+            record = json.loads(line, object_pairs_hook=no_duplicates, parse_constant=reject_json_constant) if allow_sample else json.loads(line, object_pairs_hook=no_duplicates)
             if not isinstance(record, dict) or not isinstance(record.get("MESSAGE"), str):
                 raise ValueError("malformed_record")
             if record.get("_SYSTEMD_UNIT") != unit or record.get("_SYSTEMD_INVOCATION_ID") != invocation:
@@ -365,16 +377,24 @@ def inspect_journal(result, unit, invocation):
         summary.update(visible=bool(records), current_invocation_matched=bool(records), record_count=len(records))
         for record in records:
             evidence(record["MESSAGE"], unit, stages, errors)
+        if allow_sample and len(records) == JOURNAL_RECORDS:
+            summary["sampled_evidence"] = {
+                "available": True, "complete": False, "absence_proven": False, "record_count": len(records),
+                "stage_counts": stages, "error_counts": errors,
+            }
+            return summary, dict.fromkeys(STAGES, 0), dict.fromkeys(ERRORS, 0)
     except (UnicodeError, ValueError, RecursionError):
         summary["malformed"] = True
         return summary, dict.fromkeys(STAGES, 0), dict.fromkeys(ERRORS, 0)
     return summary, stages, errors
 
 
-def collect(*, runner=None):
+def collect(*, runner=None, daily_only=False):
+    if type(daily_only) is not bool:
+        raise ValueError("unsupported_scope")
     runner = runner or run_bounded
     units = {}
-    for unit in UNITS:
+    for unit in (SERVICES[1],) if daily_only else UNITS:
         before = parse_systemd(safe_read(runner, systemd_command(unit)), unit)
         journal = None
         if unit in SERVICES and before is not None and known_invocation(before["InvocationID"]):
@@ -391,7 +411,10 @@ def collect(*, runner=None):
                 )
             )
             entry.update(execution_phase="unknown", stage_counts=dict.fromkeys(STAGES, 0), error_counts=dict.fromkeys(ERRORS, 0))
-            summary, stages, errors = inspect_journal(journal or ReadResult(), unit, before["InvocationID"] if before else "")
+            summary, stages, errors = inspect_journal(journal or ReadResult(), unit, before["InvocationID"] if before else "", allow_sample=daily_only)
+            if daily_only:
+                sample = summary.pop("sampled_evidence")
+                entry["sampled_evidence"] = sample if stable and metadata_known else empty_sample()
             entry["journal"] = summary
             if stable and metadata_known and summary["current_invocation_matched"] and not (summary["truncated"] or summary["malformed"] or summary["read_unavailable"]):
                 entry.update(stage_counts=stages, error_counts=errors)
@@ -406,7 +429,8 @@ def collect(*, runner=None):
             if not stable:
                 summary["current_invocation_matched"] = False
         units[unit] = entry
-    return {"schema_version": 1, "scope": "fixed_current_invocation_failure_evidence", "units": units,
+    scope = "daily_current_invocation_failure_sample" if daily_only else "fixed_current_invocation_failure_evidence"
+    return {"schema_version": 1, "scope": scope, "units": units,
             "business_recovery_proven": False, "deployment_authorized": False}
 
 
@@ -428,6 +452,20 @@ def fixture_test():
     result = collect(runner=runner)
     if any(result["units"][unit]["error_counts"]["import_error"] != 1 for unit in SERVICES) or "fixture-private-marker" in json.dumps(result):
         return {"fixture_test": "failed"}
+    requests = []
+
+    def daily_runner(argv):
+        requests.append(argv)
+        result = runner(argv)
+        return ReadResult(data=result.data * JOURNAL_RECORDS, returncode=0) if argv[0] == JOURNALCTL else result
+
+    daily = collect(runner=daily_runner, daily_only=True)
+    entry = daily["units"][SERVICES[1]]
+    if (set(daily["units"]) != {SERVICES[1]} or len(requests) != 3 or entry["diagnosis"] != "unknown"
+            or not entry["sampled_evidence"]["available"] or entry["sampled_evidence"]["complete"]
+            or entry["sampled_evidence"]["error_counts"]["import_error"] != JOURNAL_RECORDS
+            or "fixture-private-marker" in json.dumps(daily)):
+        return {"fixture_test": "failed"}
     return {"fixture_test": "passed", "host_metadata_commands": 0}
 
 
@@ -437,11 +475,11 @@ def main(argv=None):
         result = fixture_test()
         print(json.dumps(result, sort_keys=True))
         return 0 if result["fixture_test"] == "passed" else 1
-    if argv != ["--inspect"]:
+    if argv not in (["--inspect"], ["--inspect-daily-only"]):
         print('{"error":"explicit_mode_required"}')
         return 64
     try:
-        result = collect()
+        result = collect(daily_only=True) if argv == ["--inspect-daily-only"] else collect()
     except KeyboardInterrupt:
         print('{"error":"diagnostic_interrupted","diagnosis":"unknown"}')
         return 130
