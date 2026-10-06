@@ -98,7 +98,6 @@ jobs:
         run: |
           set -euo pipefail
           candidate=/home/ubuntu/quant-monitor-data03-286757-py312-v1
-          runtime=/home/ubuntu/quant-monitor-runtime/AIAuditBridge/ops/quant-monitor
           if [[ -e "$candidate" || -L "$candidate" ]]; then
             echo '[inactive-stage] candidate path already exists; refusing reuse or cleanup' >&2
             exit 1
@@ -108,6 +107,51 @@ jobs:
           for name in HTTPS_PROXY HTTP_PROXY ALL_PROXY NO_PROXY https_proxy http_proxy all_proxy no_proxy REQUESTS_CA_BUNDLE SSL_CERT_FILE SSL_CERT_DIR; do
             if [[ -v "$name" ]]; then transport+=("$name=${!name}"); fi
           done
+          # Anonymous, exact public source in a new directory outside the AAB checkout.
+          qpk_source_sha=28675796cabbe137a1fa3970b70d1aa98e952c88
+          qpk_source_url=https://github.com/QuantStrategyLab/QuantPlatformKit.git
+          if [[ "${RUNNER_TEMP:-}" != /* || "${RUNNER_TEMP:-}" == / || ! "${GITHUB_RUN_ID:-}" =~ ^[0-9]+$ ]]; then
+            echo '[inactive-stage] qpk_source_failure=source_directory; candidate untouched' >&2
+            exit 1
+          fi
+          if ! source_parent="$(cd -P -- "$RUNNER_TEMP" 2>/dev/null && pwd -P 2>/dev/null)"; then
+            echo '[inactive-stage] qpk_source_failure=source_directory; candidate untouched' >&2
+            exit 1
+          fi
+          qpk_source="$source_parent/quant-monitor-data03-qpk-286757-$GITHUB_RUN_ID"
+          if [[ "$qpk_source" == "$GITHUB_WORKSPACE" || "$qpk_source" == "$GITHUB_WORKSPACE/"* ]] || ! mkdir -- "$qpk_source" 2>/dev/null; then
+            echo '[inactive-stage] qpk_source_failure=source_directory; candidate untouched' >&2
+            exit 1
+          fi
+          git_policy=(
+            GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_ALLOW_PROTOCOL=https
+            GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/false GIT_CONFIG_COUNT=5
+            GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null
+            GIT_CONFIG_KEY_1=core.fsmonitor GIT_CONFIG_VALUE_1=false
+            GIT_CONFIG_KEY_2=credential.helper GIT_CONFIG_VALUE_2=
+            GIT_CONFIG_KEY_3=http.sslVerify GIT_CONFIG_VALUE_3=true
+            GIT_CONFIG_KEY_4=http.followRedirects GIT_CONFIG_VALUE_4=false
+          )
+          public_git=(env -i "${transport[@]}" "${git_policy[@]}" PATH=/usr/bin:/bin
+                      HOME="$qpk_source" LANG=C LC_ALL=C timeout --signal=TERM --kill-after=5s 60s git)
+          prepare_public_qpk_source() {
+            qpk_source_stage=git_init
+            "${public_git[@]}" init --template= "$qpk_source" >/dev/null 2>&1 || return "$?"
+            qpk_source_stage=git_fetch
+            "${public_git[@]}" -C "$qpk_source" fetch --depth=1 --no-tags --no-recurse-submodules \
+              "$qpk_source_url" "$qpk_source_sha" >/dev/null 2>&1 || return "$?"
+            qpk_source_stage=git_object
+            object_type="$("${public_git[@]}" -C "$qpk_source" cat-file -t "$qpk_source_sha" 2>/dev/null)" || return "$?"
+            [[ "$object_type" == commit ]]
+          }
+          if prepare_public_qpk_source; then
+            :
+          else
+            source_status=$?
+            if [[ "$source_status" == 124 ]]; then qpk_source_stage=timeout; fi
+            printf '[inactive-stage] qpk_source_failure=%s; candidate untouched\n' "$qpk_source_stage" >&2
+            exit "$source_status"
+          fi
           # Consume output in memory; only complete fixed setup lines set an enum.
           classify_setup_failure() {
             local line
@@ -130,15 +174,13 @@ jobs:
           set +m
           shopt -s lastpipe
           set +e
-          env -i "${transport[@]}" PATH=/usr/bin:/bin HOME=/home/ubuntu LANG=C LC_ALL=C \
+          env -i "${transport[@]}" "${git_policy[@]}" PATH=/usr/bin:/bin HOME=/home/ubuntu LANG=C LC_ALL=C \
             GH_TOKEN="$GH_TOKEN" PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1 \
             PIP_CONFIG_FILE=/dev/null PIP_INDEX_URL=https://pypi.org/simple \
             PIP_NO_CACHE_DIR=1 PIP_RETRIES=0 PIP_TIMEOUT=30 PIP_DISABLE_PIP_VERSION_CHECK=1 \
             QUANT_MONITOR_VENV="$candidate" QUANT_MONITOR_ROOT="$GITHUB_WORKSPACE/ops/quant-monitor" \
             AIAUDIT_BRIDGE_ROOT="$GITHUB_WORKSPACE" \
-            QUANT_PROJECTS_ROOT="$runtime/data/lifecycle-projects" \
-            QUANT_PLATFORM_KIT_ROOT="$runtime/data/lifecycle-projects/QuantPlatformKit" \
-            LIFECYCLE_LOCAL_ROOT="$runtime/data/lifecycle-store" \
+            QUANT_PLATFORM_KIT_ROOT="$qpk_source" \
             /bin/bash --noprofile --norc "$GITHUB_WORKSPACE/ops/quant-monitor/scripts/setup_vps_runtime.sh" \
             "$RUN_SHA" "$GITHUB_WORKSPACE" 2>&1 | classify_setup_failure
           setup_statuses=("${PIPESTATUS[@]}")

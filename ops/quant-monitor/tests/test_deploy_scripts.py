@@ -210,6 +210,138 @@ class DeployScriptTests(unittest.TestCase):
         self.assertEqual(len(scripts), 3)
         return workflow, scripts
 
+    def _public_source_fixture(self, root: Path, script: str, behavior: str = "ok"):
+        """Intercept every new source Git command before executing a workflow fixture."""
+        root.mkdir(parents=True, exist_ok=True)
+        command_bin = root / "command-bin"
+        command_bin.mkdir()
+        runner_temp = root / "runner-temp"
+        runner_temp.mkdir()
+        events = root / "git-events.jsonl"
+        git = command_bin / "git"
+        git.write_text(
+            f"#!{sys.executable}\n"
+            "import json, os, sys\nfrom pathlib import Path\n"
+            f"events = Path({str(events)!r})\n"
+            f"runner_temp = Path({str(runner_temp)!r})\n"
+            f"behavior = {behavior!r}\n"
+            "args = sys.argv[1:]\n"
+            "record = {'argv': args, 'gh_token_present': 'GH_TOKEN' in os.environ,\n"
+            "          'env': {k: v for k, v in os.environ.items() if k.startswith('GIT_') or k in ('HOME', 'HTTPS_PROXY', 'REQUESTS_CA_BUNDLE')}}\n"
+            "with events.open('a') as stream: stream.write(json.dumps(record) + '\\n')\n"
+            "if args[:2] == ['init', '--template='] and len(args) == 3:\n"
+            "    target = Path(args[2])\n"
+            "    assert target.parent == runner_temp\n"
+            "    if behavior == 'init_failure': raise SystemExit(23)\n"
+            "    (target / '.git').mkdir()\n"
+            "    raise SystemExit(0)\n"
+            "assert len(args) >= 4 and args[0] == '-C' and Path(args[1]).parent == runner_temp\n"
+            "pin = '28675796cabbe137a1fa3970b70d1aa98e952c88'\n"
+            "if args[2] == 'fetch':\n"
+            "    assert args[3:] == ['--depth=1', '--no-tags', '--no-recurse-submodules',\n"
+            "                         'https://github.com/QuantStrategyLab/QuantPlatformKit.git', pin]\n"
+            "    if behavior in {'http_403', 'timeout'}:\n"
+            "        print('synthetic HTTP 403 token_DO_NOT_EMIT /private/fixture', file=sys.stderr)\n"
+            "        raise SystemExit(124 if behavior == 'timeout' else 128)\n"
+            "    raise SystemExit(0)\n"
+            "assert args[2:] == ['cat-file', '-t', pin]\n"
+            "if behavior == 'missing_object': raise SystemExit(128)\n"
+            "print('tree' if behavior == 'wrong_object' else 'commit')\n",
+            encoding="utf-8",
+        )
+        git.chmod(0o755)
+        return (script.replace("PATH=/usr/bin:/bin", f"PATH={command_bin}:/usr/bin:/bin"),
+                {"RUNNER_TEMP": str(runner_temp), "GITHUB_RUN_ID": "12345"}, events)
+
+    def test_inactive_stage_public_source_is_anonymous_fixed_and_fails_closed(self) -> None:
+        _, scripts = self._inactive_stage_scripts()
+        for behavior in ("ok", "init_failure", "http_403", "timeout", "missing_object", "wrong_object",
+                         "source_exists", "candidate_exists", "inside_checkout", "invalid_run_id"):
+            with self.subTest(behavior=behavior), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                workspace = root / "checkout"
+                setup = workspace / "ops/quant-monitor/scripts/setup_vps_runtime.sh"
+                setup.parent.mkdir(parents=True)
+                receipt = root / "setup-source"
+                setup.write_text("#!/bin/bash\nset -euo pipefail\n"
+                                 f'printf %s "$QUANT_PLATFORM_KIT_ROOT" > {shlex.quote(str(receipt))}\n')
+                candidate = root / "candidate"
+                stage = scripts[1].replace("/home/ubuntu/quant-monitor-data03-286757-py312-v1", str(candidate))
+                stage = stage.replace("HOME=/home/ubuntu", f"HOME={root}")
+                stage, fixture_env, events = self._public_source_fixture(root / "commands", stage, behavior)
+                if behavior == "inside_checkout":
+                    fixture_env["RUNNER_TEMP"] = str(workspace)
+                if behavior == "invalid_run_id":
+                    fixture_env["GITHUB_RUN_ID"] = "not-a-run-id"
+                source = Path(fixture_env["RUNNER_TEMP"]) / "quant-monitor-data03-qpk-286757-12345"
+                shared = root / "shared-mirror"
+                shared.mkdir()
+                (shared / "HEAD").write_text("preserve-original")
+                (root / ".netrc").write_text("machine github.com login synthetic password DO_NOT_USE\n")
+                if behavior == "source_exists":
+                    source.mkdir()
+                    (source / "residue").write_text("preserve-residue")
+                if behavior == "candidate_exists":
+                    candidate.mkdir()
+                    (candidate / "residue").write_text("preserve-residue")
+                poisoned = "export PYTHONPATH=/synthetic/old\nexport GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.https://unreviewed.invalid/.insteadOf GIT_CONFIG_VALUE_0=https://github.com/\n"
+                result = subprocess.run(
+                    ["/bin/bash", "-c", poisoned + stage],
+                    env={"PATH": "/usr/bin:/bin", "HOME": str(root), "GH_TOKEN": "synthetic-token",
+                         "GITHUB_WORKSPACE": str(workspace), "RUN_SHA": "a" * 40,
+                         "HTTPS_PROXY": "https://proxy.invalid", "REQUESTS_CA_BUNDLE": "/synthetic/ca.pem", **fixture_env},
+                    capture_output=True, text=True, timeout=5, check=False,
+                )
+                records = [json.loads(line) for line in events.read_text().splitlines()] if events.exists() else []
+                calls = [r["argv"][0] if r["argv"][0] == "init" else r["argv"][2] for r in records]
+                expected_calls = (["init", "fetch", "cat-file"] if behavior in {"ok", "missing_object", "wrong_object"}
+                                  else ["init", "fetch"] if behavior in {"http_403", "timeout"}
+                                  else ["init"] if behavior == "init_failure" else [])
+                self.assertEqual(calls, expected_calls, "no fallback, retry, checkout or later phase after failure")
+                self.assertEqual(result.returncode == 0, behavior == "ok", result.stderr)
+                self.assertEqual(receipt.exists(), behavior == "ok")
+                self.assertEqual((shared / "HEAD").read_text(), "preserve-original")
+                self.assertNotIn("token_DO_NOT_EMIT", result.stdout + result.stderr)
+                self.assertNotIn("/private/fixture", result.stdout + result.stderr)
+                self.assertNotIn("inactive_candidate_metadata_verified", result.stdout + result.stderr)
+                expected_failure = {"init_failure": ("git_init", 23), "http_403": ("git_fetch", 128),
+                                    "timeout": ("timeout", 124), "missing_object": ("git_object", 128),
+                                    "wrong_object": ("git_object", 1), "source_exists": ("source_directory", 1)}
+                if behavior in expected_failure:
+                    failure_enum, status = expected_failure[behavior]
+                    self.assertEqual(result.returncode, status)
+                    self.assertEqual(result.stderr,
+                                     f"[inactive-stage] qpk_source_failure={failure_enum}; candidate untouched\n")
+                    self.assertTrue(source.exists(), "new source residue is not automatically removed")
+                if behavior == "ok":
+                    self.assertEqual(receipt.read_text(), str(source))
+                    self.assertFalse((source / "src").exists(), "object preparation never checks out files")
+                if behavior in {"inside_checkout", "invalid_run_id"}:
+                    self.assertEqual(result.stderr, "[inactive-stage] qpk_source_failure=source_directory; candidate untouched\n")
+                    self.assertFalse((workspace / "quant-monitor-data03-qpk-286757-12345").exists())
+                if behavior in {"source_exists", "candidate_exists"}:
+                    self.assertEqual(records, [])
+                    existing = source if behavior == "source_exists" else candidate
+                    self.assertEqual((existing / "residue").read_text(), "preserve-residue")
+                if behavior == "timeout":
+                    self.assertEqual(result.returncode, 124)
+                for record in records:
+                    self.assertEqual(record["argv"][-1] if record["argv"][0] == "init" else record["argv"][1], str(source))
+                    self.assertFalse(record["gh_token_present"])
+                    git_env = record["env"]
+                    self.assertEqual(git_env["HOME"], str(source), "public Git cannot consume the caller's .netrc")
+                    self.assertFalse((source / ".netrc").exists())
+                    self.assertEqual(git_env["GIT_CONFIG_GLOBAL"], "/dev/null")
+                    self.assertEqual(git_env["GIT_CONFIG_NOSYSTEM"], "1")
+                    self.assertEqual(git_env["GIT_ALLOW_PROTOCOL"], "https")
+                    self.assertEqual(git_env["GIT_TERMINAL_PROMPT"], "0")
+                    self.assertEqual(git_env["HTTPS_PROXY"], "https://proxy.invalid")
+                    self.assertEqual(git_env["REQUESTS_CA_BUNDLE"], "/synthetic/ca.pem")
+                    policy = {git_env[f"GIT_CONFIG_KEY_{i}"]: git_env[f"GIT_CONFIG_VALUE_{i}"]
+                              for i in range(int(git_env["GIT_CONFIG_COUNT"]))}
+                    self.assertEqual(policy, {"core.hooksPath": "/dev/null", "core.fsmonitor": "false",
+                                              "credential.helper": "", "http.sslVerify": "true", "http.followRedirects": "false"})
+
     def test_inactive_stage_is_a_separate_fixed_mode_without_service_operations(self) -> None:
         workflow, scripts = self._inactive_stage_scripts()
         job = workflow.split("\n  stage-quant-runtime-inactive:\n", 1)[1].split("\n  release-gateway-failure-repairs:\n", 1)[0]
@@ -221,7 +353,12 @@ class DeployScriptTests(unittest.TestCase):
         self.assertIn("persist-credentials: false", job)
         self.assertIn("ref: ${{ github.sha }}", job)
         self.assertNotRegex(job, r"systemctl|sudo|daemon-reload|health_check\.sh|daily_briefing_pipeline\.sh|deploy_codex|install_immutable_release|sync_strategy_repos")
-        self.assertNotRegex(scripts[1], r"\brm\b|\bchmod\b|\bchown\b|\bgit\b")
+        commands = "\n".join(line for line in scripts[1].splitlines() if not line.lstrip().startswith("#"))
+        self.assertNotRegex(commands, r"\brm\b|\bchmod\b|\bchown\b|\bcheckout\b")
+        self.assertNotIn("/data/lifecycle-projects", scripts[1])
+        self.assertIn("GIT_ALLOW_PROTOCOL=https", scripts[1])
+        self.assertIn("--kill-after=5s 60s git", scripts[1])
+        self.assertIn("qpk_source_sha=" + (ROOT / "qpk-runtime.sha").read_text().strip(), scripts[1])
         self.assertIn('env -i "${transport[@]}"', scripts[1])
         self.assertIn('"$candidate/bin/python" -I -B -', scripts[2])
         self.assertNotIn("import quant_platform_kit", scripts[2])
@@ -269,13 +406,14 @@ class DeployScriptTests(unittest.TestCase):
             stage = scripts[1].replace("/home/ubuntu/quant-monitor-data03-286757-py312-v1", str(candidate))
             stage = stage.replace("/home/ubuntu/quant-monitor-runtime/AIAuditBridge/ops/quant-monitor", str(runtime))
             stage = stage.replace("HOME=/home/ubuntu", f"HOME={root}")
+            stage, source_env, _ = self._public_source_fixture(root / "commands", stage)
             captured_names = ("PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE", "BASH_ENV", "UNRELATED_SECRET",
                               "PYTHONNOUSERSITE", "PIP_CONFIG_FILE", "PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL",
                               "PIP_TRUSTED_HOST", "HTTPS_PROXY", "REQUESTS_CA_BUNDLE", "GH_TOKEN")
             capture = "\n".join(f'printf "%s=%s\\n" {name} "${{{name}-unset}}"' for name in captured_names)
             env = {"PATH": "/usr/bin:/bin", "HOME": str(root), "GITHUB_WORKSPACE": str(workspace),
                    "RUN_SHA": "a" * 40, "GH_TOKEN": "synthetic-token",
-                   "HTTPS_PROXY": "https://proxy.invalid", "REQUESTS_CA_BUNDLE": "/synthetic/ca.pem"}
+                   "HTTPS_PROXY": "https://proxy.invalid", "REQUESTS_CA_BUNDLE": "/synthetic/ca.pem", **source_env}
             # These values are introduced after the fixture shell starts. Only the
             # production env-i boundary, not fixture shell startup, receives them.
             poison = "export PYTHONPATH=/synthetic/old PYTHONHOME=/synthetic/home PYTHONUSERBASE=/synthetic/user BASH_ENV=/synthetic/bash UNRELATED_SECRET=synthetic PIP_EXTRA_INDEX_URL=https://unreviewed.invalid PIP_TRUSTED_HOST=unreviewed.invalid\n"
@@ -310,6 +448,7 @@ class DeployScriptTests(unittest.TestCase):
             # A distinct fresh fixture directory demonstrates successful setup;
             # production has no directory override or automatic retry.
             stage = stage.replace(str(candidate), str(root / "fresh-candidate"))
+            env["GITHUB_RUN_ID"] = "12346"
             self.assertEqual(run_setup(0).returncode, 0)
             self.assertEqual(shared_marker.read_text(), "original")
 
@@ -346,6 +485,7 @@ class DeployScriptTests(unittest.TestCase):
                     if filter_exit:
                         self.assertEqual(stage.count("return 0"), 1)
                         stage = stage.replace("return 0", f"return {filter_exit}")
+                    stage, source_env, _ = self._public_source_fixture(root / f"commands-{number}", stage)
                     # Real setup is not executed: only fixture output and residue.
                     payload = secret_text + "\n" + message + "\n"
                     setup.write_text("#!/bin/bash\nset -euo pipefail\n"
@@ -355,7 +495,7 @@ class DeployScriptTests(unittest.TestCase):
                     result = subprocess.run(
                         ["/bin/bash", "-c", "export PYTHONPATH=/synthetic/old\n" + stage],
                         env={"PATH": "/usr/bin:/bin", "HOME": str(root), "GH_TOKEN": "synthetic-token",
-                             "GITHUB_WORKSPACE": str(workspace), "RUN_SHA": "a" * 40},
+                             "GITHUB_WORKSPACE": str(workspace), "RUN_SHA": "a" * 40, **source_env},
                         capture_output=True, text=True, timeout=5, check=False,
                     )
                     self.assertEqual(result.returncode, exit_code or filter_exit)
