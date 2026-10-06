@@ -91,6 +91,14 @@ def run(values=None, reader=None):
 
 
 class PathInspectionTests(unittest.TestCase):
+    def test_inactive_install_metadata_is_separate_and_does_not_upgrade_old_gates(self):
+        self.assertTrue(hasattr(m.Reader, "inactive_install_metadata"))
+        result = run()
+        self.assertIn("inactive_install_metadata", result)
+        self.assertEqual(result["inactive_install_metadata"]["status"], "unknown")
+        self.assertFalse(result["python_import_root_proof"])
+        self.assertFalse(result["inactive_install_metadata"]["runtime_adoption_proof"])
+
     def test_declaration_only_external_venv_identifies_bounded_next_read(self):
         p = props()
         p["Environment"] = "QUANT_MONITOR_VENV=/opt/quant-monitor/venvs/staged-20261005 PATH=/usr/bin:/bin"
@@ -1363,6 +1371,149 @@ class BoundCandidateMetadataTests(unittest.TestCase):
             self.assertIn(cfg["status"], {"unknown", "missing"})
             self.assertTrue(all(limit in (None, 256, 4096, 2 * 1024 * 1024)
                                 for _, _, limit in reader.metadata_requests))
+
+
+
+
+class InactiveInstallMetadataTests(unittest.TestCase):
+    def test_fixed_metadata_is_bounded_effective_and_fails_unknown(self):
+        import contextlib
+        import os
+        import stat
+        from types import SimpleNamespace
+
+        source_sha = "35ac71176127f07e00fe04dbc793777f3c595bc0"
+        target = m.base.RELEASE_ROOT + "/" + source_sha
+        labels = {m.base.RELEASE_ROOT: "release_parent", target: "target",
+                  target + MON + "/data": "data_link", target + MON + "/.venv": "venv_link"}
+        cases = ("valid", "write_denied", "unsupported_effective_ids", "unsupported_dir_fd", "unsupported_nofollow",
+                 "not_implemented", "access_error", "identity_error", "parent_missing", "parent_denied",
+                 "target_absent", "target_unreadable", "target_symlink", "unknown_link", "link_unreadable",
+                 "entry_changed", "repeated_entry_changed", "identity_changed", "parent_replaced")
+        for case in cases:
+            with self.subTest(case=case), contextlib.ExitStack() as stack:
+                descriptors, opened, links, stats = {}, [], [], {}
+                sequence = 0
+                def open_entry(path, flags, mode=0o777, *, dir_fd=None):
+                    nonlocal sequence
+                    self.assertEqual(flags, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                    self.assertEqual(mode, 0o777)
+                    full = path if dir_fd is None else descriptors[dir_fd] + "/" + path
+                    full = full.replace("//", "/")
+                    self.assertTrue(full == "/" or full == "/opt" or full == "/opt/quant-monitor"
+                                    or full == m.base.RELEASE_ROOT or full == target
+                                    or full in {target + "/ops", target + MON}, full)
+                    if full == "/opt/quant-monitor" and case in {"parent_missing", "parent_denied"}:
+                        raise FileNotFoundError if case == "parent_missing" else PermissionError
+                    sequence += 1
+                    descriptors[sequence] = full
+                    opened.append(full)
+                    return sequence
+                def close_entry(fd):
+                    self.assertIn(fd, descriptors)
+                    del descriptors[fd]
+                def metadata(path, *, dir_fd, follow_symlinks):
+                    self.assertFalse(follow_symlinks)
+                    full = (descriptors[dir_fd] + "/" + path).replace("//", "/")
+                    self.assertIn(full, labels)
+                    label = labels[full]
+                    stats[label] = stats.get(label, 0) + 1
+                    if label == "target":
+                        if case == "target_absent": raise FileNotFoundError
+                        if case == "target_unreadable": raise PermissionError
+                    kind = stat.S_IFLNK if label.endswith("link") or (label == "target" and case == "target_symlink") else stat.S_IFDIR
+                    mode = kind | (0o777 if kind == stat.S_IFLNK else 0o755)
+                    inode = 1
+                    if (case == "entry_changed" and label == "data_link" and stats[label] > 1
+                            or case == "parent_replaced" and label == "release_parent" and stats[label] > 1):
+                        inode = 2
+                    if case == "repeated_entry_changed" and label == "data_link":
+                        inode = 1 + (stats[label] - 1) % 2
+                    return SimpleNamespace(st_dev=1, st_ino=inode, st_mode=mode, st_size=0,
+                                           st_mtime_ns=10, st_ctime_ns=10, st_uid=7654321, st_gid=7654322)
+                def read_link(path, *, dir_fd):
+                    full = (descriptors[dir_fd] + "/" + path).replace("//", "/")
+                    self.assertIn(full, {target + MON + "/data", target + MON + "/.venv"})
+                    links.append(full)
+                    if case == "link_unreadable": raise PermissionError
+                    if case == "unknown_link": return "/private/" + SECRET
+                    return (RUNTIME + MON + "/data" if path == "data" else
+                            "/home/ubuntu/quant-monitor-data03-286757-py312-v1")
+                def effective_access(path, mode, *, dir_fd, effective_ids, follow_symlinks):
+                    self.assertTrue(effective_ids)
+                    self.assertFalse(follow_symlinks)
+                    self.assertEqual((descriptors[dir_fd] + "/" + path).replace("//", "/"), m.base.RELEASE_ROOT)
+                    self.assertIn(mode, (os.R_OK, os.W_OK, os.X_OK))
+                    if case == "not_implemented": raise NotImplementedError
+                    if case == "access_error": raise PermissionError
+                    return not (case == "write_denied" and mode == os.W_OK)
+                access = mock.Mock(side_effect=effective_access)
+                stack.enter_context(mock.patch.object(m.os, "open", side_effect=open_entry))
+                stack.enter_context(mock.patch.object(m.os, "close", side_effect=close_entry))
+                stack.enter_context(mock.patch.object(m.os, "stat", side_effect=metadata))
+                stack.enter_context(mock.patch.object(m.os, "readlink", side_effect=read_link))
+                stack.enter_context(mock.patch.object(m.os, "access", access))
+                for name, unsupported_case in (("supports_effective_ids", "unsupported_effective_ids"),
+                                                ("supports_dir_fd", "unsupported_dir_fd"),
+                                                ("supports_follow_symlinks", "unsupported_nofollow")):
+                    stack.enter_context(mock.patch.object(m.os, name, set() if case == unsupported_case else {access}))
+                stack.enter_context(mock.patch.object(m.os, "geteuid", side_effect=[7654321, 7654399] if case == "identity_changed" else None, return_value=7654321))
+                stack.enter_context(mock.patch.object(m.os, "getegid", return_value=7654300))
+                stack.enter_context(mock.patch.object(m.os, "getgroups", side_effect=OSError if case == "identity_error" else None, return_value=[7654322]))
+                for name in ("getuid", "getgid", "listdir", "scandir"):
+                    stack.enter_context(mock.patch.object(m.os, name, side_effect=AssertionError("forbidden fallback or enumeration")))
+                result = m.Reader().inactive_install_metadata()
+                self.assertEqual(descriptors, {}, "all directory descriptors must be closed")
+                encoded = json.dumps(result)
+                for value in (SECRET, "7654321", "7654322", "7654300", target, RUNTIME):
+                    self.assertNotIn(value, encoded)
+                self.assertFalse(result["application_import_proof"])
+                self.assertFalse(result["runtime_adoption_proof"])
+                self.assertFalse(result["other_residue_proof"])
+                entries = result["entries"]
+                if case in {"entry_changed", "repeated_entry_changed", "identity_changed", "parent_replaced"}:
+                    self.assertIs(result["metadata_snapshot_stable"], False)
+                    self.assertTrue(all(x["status"] == "unknown" for x in entries.values()))
+                    continue
+                if case in {"parent_missing", "parent_denied"}:
+                    self.assertEqual(entries["target"]["status"], "unknown")
+                    self.assertEqual(entries["target"]["reason"], "parent_unreachable")
+                    self.assertIsNone(result["metadata_snapshot_stable"])
+                    access.assert_not_called()
+                    continue
+                if case == "target_absent":
+                    self.assertEqual(entries["target"]["status"], "absent")
+                    self.assertEqual(entries["data_link"]["status"], "not_applicable")
+                    self.assertEqual(links, [])
+                if case == "target_unreadable":
+                    self.assertEqual(entries["target"]["status"], "unknown")
+                    self.assertEqual(links, [])
+                if case == "target_symlink":
+                    self.assertEqual(entries["target"]["kind"], "symlink")
+                    self.assertEqual(links, [])
+                if case == "unknown_link":
+                    self.assertEqual(entries["data_link"]["link_target_class"], "other")
+                if case == "link_unreadable":
+                    self.assertEqual(entries["data_link"]["status"], "unknown")
+                access_result = entries["release_parent"]["effective_access"]
+                if case.startswith("unsupported_") or case == "not_implemented":
+                    self.assertEqual(access_result, dict(status="unsupported", read=None, write=None, execute=None))
+                    if case.startswith("unsupported_"): access.assert_not_called()
+                elif case == "access_error":
+                    self.assertEqual(access_result, dict(status="unknown", read=None, write=None, execute=None))
+                else:
+                    self.assertEqual(access_result, dict(status="known", read=True, write=case != "write_denied", execute=True))
+                if case == "identity_error":
+                    self.assertEqual(result["effective_identity_status"], "unknown")
+                    self.assertIsNone(entries["release_parent"]["owner_matches_effective_uid"])
+                    self.assertIsNone(entries["release_parent"]["group_matches_effective_groups"])
+                else:
+                    self.assertTrue(entries["release_parent"]["owner_matches_effective_uid"])
+                    self.assertTrue(entries["release_parent"]["group_matches_effective_groups"])
+                if case == "valid":
+                    self.assertTrue(result["metadata_snapshot_stable"])
+                    self.assertEqual(entries["venv_link"]["link_target_class"], "expected")
+                    self.assertFalse(entries["venv_link"]["link_target_followed"])
 
 
 if __name__ == "__main__":
