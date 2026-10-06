@@ -323,3 +323,207 @@ def test_domain_quiet_route_is_unchanged(tmp_path, capsys) -> None:
     captured = json.loads(capsys.readouterr().out)
     assert captured["action"] == "quiet"
     assert "runtime_digest" not in captured
+
+
+def _result_receipt(capsys):
+    captured = capsys.readouterr()
+    lines = captured.err.splitlines()
+    assert len(lines) == 1
+    assert lines[0].startswith("[briefing-result:v1] ")
+    assert len(lines[0]) <= 240
+    fields = dict(field.split("=", 1) for field in lines[0].split()[1:])
+    assert set(fields) == {"branch", "stage", "reason", "action", "dispatch_failed", "exit"}
+    return json.loads(captured.out), fields
+
+
+def test_domain_result_receipt_keeps_telegram_success_nonzero(tmp_path, capsys):
+    _write_telegram_report(tmp_path)
+    summary = _complete_dispatch_summary("telegram", telegram_sent=True)
+    with patch("scripts.consume_daily_briefing.dispatch_briefing_result", return_value=summary):
+        code = main(["--report-dir", str(tmp_path), "--dispatch"])
+    payload, receipt = _result_receipt(capsys)
+    assert code == 2
+    assert payload["dispatch"] == summary
+    assert "result_receipt" not in payload
+    assert receipt == {"branch": "domain", "stage": "routing", "reason": "telegram_attention",
+                       "action": "telegram", "dispatch_failed": "false", "exit": "2"}
+
+
+def test_domain_result_receipt_keeps_optimization_exit_rules(tmp_path, capsys):
+    _write_critical_report(tmp_path)
+    for summary, expected_code, reason, failed in [
+        (_complete_dispatch_summary("github_issue", optimization_watch={"errors": 0}), 0, "github_issue_recorded", "false"),
+        ({"errors": ["optimization_record_failed"], "optimization_watch": {"errors": 1}},
+         2, "optimization_record_failed", "true"),
+    ]:
+        with patch("scripts.consume_daily_briefing.dispatch_briefing_result", return_value=summary):
+            assert main(["--report-dir", str(tmp_path), "--dispatch"]) == expected_code
+        payload, receipt = _result_receipt(capsys)
+        assert payload["dispatch"] == summary
+        assert receipt["reason"] == reason
+        assert receipt["dispatch_failed"] == failed
+        assert receipt["exit"] == str(expected_code)
+    assert main(["--report-dir", str(tmp_path)]) == 2
+    _, receipt = _result_receipt(capsys)
+    assert receipt["reason"] == "dispatch_not_requested"
+    assert receipt["dispatch_failed"] == "unknown"
+
+
+def test_runtime_result_receipt_keeps_rejection_stdout_and_no_send(tmp_path, capsys):
+    with patch("scripts.consume_daily_briefing._read_gcs_object") as read, patch(
+        "scripts.consume_daily_briefing.dispatch_runtime_digest",
+    ) as dispatch:
+        assert main(["--runtime-projection-gcs", "gs://private/runtime_daily/longbridge/paper/2026-09-28.json",
+                     "--day", "2026-09-28", "--expected-target-key", "private-service|private-strategy|live",
+                     "--dispatch"]) == 2
+    payload, receipt = _result_receipt(capsys)
+    assert payload == {"ok": False, "error": "runtime_projection_rejected", "reason": "expected_scope_not_paper"}
+    assert receipt == {"branch": "runtime", "stage": "binding_validation", "reason": "expected_scope_not_paper",
+                       "action": "none", "dispatch_failed": "unknown", "exit": "2"}
+    read.assert_not_called()
+    dispatch.assert_not_called()
+    assert "private" not in str(receipt)
+    path = _projection_file(tmp_path)
+    payload = json.loads(path.read_text())
+    payload["records"][0]["fills"]["count"] = 0
+    path.write_text(json.dumps(payload))
+    assert main(["--runtime-projection", str(path)]) == 2
+    payload, receipt = _result_receipt(capsys)
+    assert payload["reason"] == "fills_not_connected"
+    assert receipt["stage"] == "input_validation"
+    assert receipt["reason"] == "fills_not_connected"
+    assert receipt["exit"] == "2"
+
+
+def test_runtime_result_receipt_distinguishes_read_failure(tmp_path, capsys):
+    path = tmp_path / "private-unreadable.json"
+    assert main(["--runtime-projection", str(path)]) == 2
+    payload, receipt = _result_receipt(capsys)
+    assert payload == {"ok": False, "error": "runtime_projection_unreadable"}
+    assert receipt["stage"] == "input_read"
+    assert receipt["reason"] == "runtime_projection_unreadable"
+    assert "private" not in str(receipt)
+
+
+def test_runtime_dispatch_receipt_preserves_unknown_and_legacy_exit(tmp_path, capsys):
+    path = _projection_file(tmp_path)
+    args = ["--runtime-projection", str(path), "--day", "2026-09-28", "--expected-target-key",
+            "lb-svc|rot|paper", "--dispatch"]
+    for summary, code, reason, failed in [
+        (_complete_dispatch_summary("runtime_digest", telegram_sent=True), 0, "dispatch_completed", "false"),
+        ({"errors": ["telegram_missing_env"]}, 2, "telegram_missing_env", "true"),
+        ({"errors": ["private\naccount=https://secret.invalid/token"]}, 2, "unknown", "true"),
+        ({}, 0, "unknown", "unknown"),
+        (None, 0, "unknown", "unknown"),
+    ]:
+        with patch("scripts.consume_daily_briefing.dispatch_runtime_digest", return_value=summary):
+            assert main(args) == code
+        payload, receipt = _result_receipt(capsys)
+        assert payload["dispatch"] == summary
+        assert receipt["reason"] == reason
+        assert receipt["dispatch_failed"] == failed
+        assert receipt["exit"] == str(code)
+        assert "private" not in str(receipt) and "secret" not in str(receipt)
+    assert main(["--runtime-projection", str(path)]) == 0
+    _, receipt = _result_receipt(capsys)
+    assert receipt["stage"] == "routing"
+    assert receipt["reason"] == "dispatch_not_requested"
+    assert receipt["dispatch_failed"] == "unknown"
+
+
+def test_runtime_preparation_unknown_reason_is_not_logged(tmp_path, capsys):
+    path = _projection_file(tmp_path)
+    private_reason = "gs://private/object\naccount=private-token"
+    with patch("scripts.consume_daily_briefing.prepare_runtime_digest", return_value={"ok": False, "reason": private_reason}):
+        assert main(["--runtime-projection", str(path)]) == 2
+    payload, receipt = _result_receipt(capsys)
+    assert payload["reason"] == private_reason
+    assert receipt["reason"] == "unknown"
+    assert receipt["dispatch_failed"] == "unknown"
+    assert "private" not in str(receipt)
+
+
+def _complete_dispatch_summary(action, **overrides):
+    summary = {"action": action, "telegram_sent": False, "github_issue": None,
+               "errors": [], "skipped": []}
+    if action == "runtime_digest":
+        summary.update(business_date="2026-09-28", event_id="synthetic-event")
+    else:
+        summary.update(optimization_watch=None, operational_fallback_sent=False)
+    summary.update(overrides)
+    return summary
+
+
+def test_dispatch_receipt_evidence_requires_complete_typed_result():
+    from scripts.consume_daily_briefing import _dispatch_failure_evidence
+
+    assert _dispatch_failure_evidence({"errors": []}) == "unknown"
+    for action in ["quiet", "github_issue", "telegram", "runtime_digest"]:
+        summary = _complete_dispatch_summary(action)
+        assert _dispatch_failure_evidence(summary) == "false"
+        for field in summary:
+            partial = dict(summary)
+            del partial[field]
+            assert _dispatch_failure_evidence(partial) == "unknown", (action, field)
+        for overrides in [
+            {"telegram_sent": 0}, {"errors": ()}, {"errors": ""}, {"skipped": ()},
+            {"skipped": ""}, {"action": "private\naccount=secret"}, {"github_issue": 0},
+        ]:
+            assert _dispatch_failure_evidence({**summary, **overrides}) == "unknown", (action, overrides)
+        assert _dispatch_failure_evidence({**summary, "errors": ["private-error"]}) == "true"
+    for overrides in [{"optimization_watch": {}}, {"optimization_watch": {"errors": False}},
+                      {"operational_fallback_sent": 0}]:
+        assert _dispatch_failure_evidence(_complete_dispatch_summary("telegram", **overrides)) == "unknown"
+    assert _dispatch_failure_evidence({"errors": ["private-error"]}) == "true"
+    assert _dispatch_failure_evidence(None) == "unknown"
+
+
+def test_partial_runtime_dispatch_receipt_keeps_exit_and_stdout(tmp_path, capsys):
+    path = _projection_file(tmp_path)
+    for summary, failed in [
+        ({"errors": []}, "unknown"),
+        (_complete_dispatch_summary("runtime_digest"), "false"),
+        (_complete_dispatch_summary("runtime_digest", telegram_sent=0), "unknown"),
+        (_complete_dispatch_summary("runtime_digest", errors=()), "unknown"),
+        (_complete_dispatch_summary("runtime_digest", errors=""), "unknown"),
+    ]:
+        with patch("scripts.consume_daily_briefing.dispatch_runtime_digest", return_value=summary):
+            assert main(["--runtime-projection", str(path), "--day", "2026-09-28",
+                         "--expected-target-key", "lb-svc|rot|paper", "--dispatch"]) == 0
+        payload, receipt = _result_receipt(capsys)
+        assert payload["dispatch"] == json.loads(json.dumps(summary))
+        assert receipt["dispatch_failed"] == failed
+        assert receipt["exit"] == "0"
+
+
+def test_quiet_dispatch_receipt_and_no_dispatch_are_distinct(tmp_path, capsys):
+    (tmp_path / "us_equity.json").write_text(json.dumps({
+        "domain": "us_equity", "ok": True, "strategies": [{"status": "healthy", "overall_score": 80}],
+    }))
+    with patch("scripts.consume_daily_briefing.dispatch_briefing_result",
+               return_value=_complete_dispatch_summary("quiet")):
+        assert main(["--report-dir", str(tmp_path), "--dispatch"]) == 0
+    _, receipt = _result_receipt(capsys)
+    assert receipt["reason"] == "quiet" and receipt["dispatch_failed"] == "false"
+    assert main(["--report-dir", str(tmp_path)]) == 0
+    payload, receipt = _result_receipt(capsys)
+    assert "dispatch" not in payload
+    assert receipt["reason"] == "quiet" and receipt["dispatch_failed"] == "unknown"
+
+
+def test_dispatch_receipt_malformed_error_shapes_stay_unknown(tmp_path, capsys):
+    from scripts.consume_daily_briefing import _dispatch_failure_evidence
+
+    path = _projection_file(tmp_path)
+    for errors in [{"bad": "synthetic"}, "synthetic", [False], [0], [{"bad": "synthetic"}]]:
+        summary = _complete_dispatch_summary("runtime_digest", errors=errors)
+        assert _dispatch_failure_evidence(summary) == "unknown"
+        with patch("scripts.consume_daily_briefing.dispatch_runtime_digest", return_value=summary):
+            assert main(["--runtime-projection", str(path), "--day", "2026-09-28",
+                         "--expected-target-key", "lb-svc|rot|paper", "--dispatch"]) == 2
+        payload, receipt = _result_receipt(capsys)
+        assert payload["dispatch"] == summary
+        assert receipt["dispatch_failed"] == "unknown" and receipt["exit"] == "2"
+        assert "synthetic" not in str(receipt)
+    assert _dispatch_failure_evidence({"errors": ["synthetic"]}) == "true"
+    assert _dispatch_failure_evidence({"optimization_watch": {"errors": 1}}) == "true"
