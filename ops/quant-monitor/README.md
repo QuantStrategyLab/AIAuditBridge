@@ -342,6 +342,12 @@ ReturnCollector hash 匹配该旧版本；health pin 与 HEAD 匹配，daily 未
 类别 unknown 不等于损坏。原 interpreter/import gates 仍 unknown，未执行目标解释器或导入。
 这些剩余未知项不阻止先准备独立新环境，仍阻止声称服务已采用或恢复。
 
+随后唯一一次 [inactive staging run37498059845](https://github.com/QuantStrategyLab/AIAuditBridge/actions/runs/37498059845)
+使用已通过 main CI 的 `665f61e437eae65ed802c10caeea7b0effad698f`，在 2026-10-06
+16:44:32 UTC 以 `qpk_commit_unavailable` / exit 1 停止，未到创建 venv 或 pip 阶段；
+候选 metadata 步骤跳过。该 enum 不区分对象缺失和镜像/读取问题，当前磁盘状态未补读。
+后续源码候选改为在 runner 临时目录准备独立的公共 QPK 精确对象；失败 run 保留且不重发。
+
 采用差异按实际使用边界核对：#287/#289 为 lock/staging 安装路径；#290/#299 为 health
 正常调用的 artifact sync；#301/#306/#314 为 health 及日报 coverage/失败处理；#311
 为日报 wrapper/consumer 结果摘要；#316 为 QPK pin。#307 的 watcher/strategy_watch
@@ -353,13 +359,13 @@ ReturnCollector hash 匹配该旧版本；health pin 与 HEAD 匹配，daily 未
 | 顺序 | 有限完成条件与执行边界 |
 | --- | --- |
 | 固定元数据 preflight | #318 和上述一次读回已完成静态阶段；保留未知 gate，不追加任意路径读取，也不把 metadata 当 interpreter/import 证明 |
-| inactive 候选 venv | 独立 `stage-quant-runtime-inactive` 入口复用 setup 的显式 staging 分支，以精确 main/干净 checkout、原 27 包 hash lock 和本地 QPK 286757 commit 建立固定新 venv；候选检查只执行标准库，核解释器隔离、锁版本及四项 QPK 文件 hash。源码/合成测试阶段不等于真实安装，执行后也不证明 application import 或服务采用 |
+| inactive 候选 venv | 独立 `stage-quant-runtime-inactive` 入口复用 setup 的显式 staging 分支，以精确 main/干净 checkout、原 27 包 hash lock 和独立获取的公共 QPK 286757 commit 建立固定新 venv；候选检查只执行标准库，核解释器隔离、锁版本及四项 QPK 文件 hash。源码/合成测试阶段不等于真实安装，执行后也不证明 application import 或服务采用 |
 | immutable release 安装 | 候选环境验收后，另用既有 `install_immutable_release.sh` 将精确 source SHA 绑定到已确认的 data/新 venv；保留旧 release/venv/状态。该 installer 只验证 archive/目录，不切换服务。本次 staging 入口不调用它，后续执行接线另行评审 |
 | 双服务采用/回退 | 先绑定 health/daily 各自的原源码根、解释器、QPK 和 timer 状态，再在不触 Gateway/共享 runner 的窗口分别切换并读回。恢复 timer 是可能触发业务的执行边界，不能当纯配置检查。当前没有现成 monitor switch/rollback mode；不得借用 Gateway `deploy` 或会立即运行 health 的完整 monitor deploy |
 | 自然周期验收 | 独立确认新 source/module 采用、真实 account/stream 与保留连续段；短样本仍 unavailable/min10。回退源码根不能撤销既有数据、Issue、通知或送达状态，也不保证共享 QPK/venv 同时回退；保留状态，不删除重试。两个旧 failed 服务不构成恢复健康证明 |
 
-本阶段仅包含既有 workflow、setup、部署测试和本说明四文件的本地候选；尚未 dispatch
-或真实安装。后续发布/运行、immutable release、双服务采用及回滚绑定分阶段验收，
+本次源码候选仅改既有 workflow、部署测试和本说明；已审 setup 保持字节不变。独立公共
+源码获取仍待本地夹具、CI 及单独真实阶段验收；不会重发前述失败 run。后续发布/运行、immutable release、双服务采用及回滚绑定分阶段验收，
 不把源码发布、CI 或候选 metadata 成功当作完整 deploy 或健康恢复。
 
 `stage-quant-runtime-inactive` 只接受 main、该固定 mode、`acknowledge_interruption=false`
@@ -367,8 +373,16 @@ ReturnCollector hash 匹配该旧版本；health pin 与 HEAD 匹配，daily 未
 SHA、checkout HEAD、当前 main 与干净工作树必须一致，并核 setup/common_env/lock/pin 固定字节。
 它排除通用 Gateway job，没有自由 source/path 参数。候选目录固定为
 `/home/ubuntu/quant-monitor-data03-286757-py312-v1`；任何已存在目录、文件或链接均拒绝，
-失败残留保留为未验收状态，不能自动重用、覆盖或删除。缺本地 QPK commit、平台不支持、
-wheel/hash/版本不符或 pip check/gh status 失败均停止，不 fetch/checkout 共享镜像、降版本或换源。
+失败残留保留为未验收状态，不能自动重用、覆盖或删除。公共 QPK 源仅取官方固定 URL
+`https://github.com/QuantStrategyLab/QuantPlatformKit.git` 的
+`28675796cabbe137a1fa3970b70d1aa98e952c88`，在 AAB checkout 外的 RUNNER_TEMP 中为本次
+run 新建独立目录；只 init/fetch/cat-file 验证 commit，setup 继续 archive 精确 SHA，不 checkout。
+公共获取不接收 GH_TOKEN 或新增凭据，并以新对象目录作为独立 HOME，避免读取旧 `.netrc`；
+隔离 Git global/system config、credential helper、
+URL rewrite、模板及 hooks，只允许 HTTPS 并保持 TLS 验证，保留原获准代理/CA变量且不输出值。
+新目录失败、拒绝/403、超时、错误 object、平台/wheel/hash/版本或 pip check/gh status 失败
+均停止并输出固定失败码，保留未验收残留，不换源/版本、不清理重试。这个 job 不再传入共享
+QPK 镜像路径，不改其 HEAD、refs 或 objects；AAB exact-source/dirty gate 保持原样。
 
 显式 staging 会清除 common_env 导出的 `PYTHONPATH`，平台 preflight、venv 创建与三项 pip
 调用使用 Python `-I`；清除环境路径也保护 pip 的 build backend 子进程。默认 setup 模式
