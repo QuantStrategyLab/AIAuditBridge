@@ -78,6 +78,8 @@ EXPECTED = {
     "daily_briefing_pipeline.sh": {
         "03ea8cbdbbd98ea1e419f6cfd9183787653d8c7c3c6d04366fcc492deda66f9a",
         "def3f6075059c4b3efcebadd320bf7e1a819f236166bd4295c85b6be8b893fef",
+        # Receipt-only revision preserves ROOT/AAB capture and child/consumer call roots.
+        "552efade3039e0223d2f918e2e6af923ba37de15d36abac63b9a3f1ff7cc1345",
     },
     "daily_briefing.sh": {
         "ac7694b5c64650d793779384609c0a236c127333fbd1ea0a2d89ce5acd098530"

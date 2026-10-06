@@ -275,6 +275,48 @@ class PathInspectionTests(unittest.TestCase):
         self.assertEqual(result["static_adoption_identity"]["stop_reason"],
                          "configuration_or_invocation_changed_or_unavailable")
 
+    def test_receipt_pipeline_reviewed_paths_preserve_captured_roots(self):
+        digest = hashlib.sha256((SCRIPT.parent / "daily_briefing_pipeline.sh").read_bytes()).hexdigest()
+        self.assertEqual(digest, "552efade3039e0223d2f918e2e6af923ba37de15d36abac63b9a3f1ff7cc1345")
+        self.assertIn(digest, m.EXPECTED["daily_briefing_pipeline.sh"])
+        self.assertTrue({
+            "03ea8cbdbbd98ea1e419f6cfd9183787653d8c7c3c6d04366fcc492deda66f9a",
+            "def3f6075059c4b3efcebadd320bf7e1a819f236166bd4295c85b6be8b893fef",
+        }.issubset(m.EXPECTED["daily_briefing_pipeline.sh"]))
+        unit = "codex-daily-briefing.service"
+        p = props(unit)
+        p["Environment"] = "AIAUDIT_BRIDGE_ROOT=" + RELEASE + " PATH=/usr/bin:/bin"
+        reader = FakeReader({m.TELEGRAM: (
+            "AIAUDIT_BRIDGE_ROOT=" + RUNTIME + "\nQUANT_MONITOR_ROOT=" + RUNTIME + MON + "\n"
+        ).encode()})
+        service = run({unit: p}, reader)["services"][unit]
+        self.assertTrue(service["helper_model_gate_checks"]["entrypoint_helper_reviewed"])
+        self.assertEqual(service["helper_model_status"], "supported")
+        self.assertEqual(service["selected_call_roots"]["consume_aab"]["root"]["release_sha"], "a" * 40)
+        self.assertEqual(service["selected_call_roots"]["daily_child_monitor"]["root"]["kind"], "runtime_checkout")
+        identity = service["static_adoption_identity"]
+        self.assertEqual(identity["roots"]["consume_aab"]["root"]["release_sha"], "a" * 40)
+        self.assertEqual(identity["import_candidates"]["root_source"], "captured_aab_with_pythonpath_dot")
+        self.assertFalse(identity["import_execution_proof"])
+        self.assertFalse(identity["interpreter_invoked"])
+
+    def test_receipt_pipeline_modified_bytes_remain_unknown(self):
+        class ModifiedReader(FakeReader):
+            def read(self, path, *, environment=False):
+                data = super().read(path, environment=environment)
+                if not environment and path.endswith("/daily_briefing_pipeline.sh"):
+                    return data + b"# synthetic unreviewed byte change\n"
+                return data
+
+        unit = "codex-daily-briefing.service"
+        service = run({unit: props(unit)}, ModifiedReader())["services"][unit]
+        self.assertFalse(service["helper_model_gate_checks"]["entrypoint_helper_reviewed"])
+        self.assertEqual(service["helper_model_status"], "unknown")
+        self.assertEqual(service["selected_call_roots"], {})
+        self.assertEqual(service["static_adoption_identity"]["stop_reason"],
+                         "existing_non_path_precondition_unknown_or_false")
+        self.assertFalse(service["static_adoption_identity"]["import_execution_proof"])
+
     def test_reviewed_helper_hashes_match_public_source(self):
         for name, hashes in m.EXPECTED.items():
             self.assertIn(
