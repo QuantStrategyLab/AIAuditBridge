@@ -68,13 +68,20 @@ Fetcher、Planner 和 Publisher 的运行身份隔离已验收。固定 SOXL 来
   从 patched checkout 复制可被 AI 修改的测试，并只运行该测试文件；尚未见独立冻结安全测试的复跑。
   应补冻结订单/风险不变量与候选测试分开验收，并覆盖删弱测试的负向案例。这是验证缺口，
   不是已证明可绕过全部源仓 CI/merge gate 或已发生线上攻击。
-  2026-10-06 本地修复候选已接入同一完整 source SHA 的单次归档：两个只读视图都加载
+  2026-10-06 修复已通过独立复核并正常合并：
+  [AAB #313](https://github.com/QuantStrategyLab/AIAuditBridge/pull/313) 为
+  `ddd85c80413ee0c1bd0d663fc80e607692c58ef9`，
+  [exact PR CI37452976196](https://github.com/QuantStrategyLab/AIAuditBridge/actions/runs/37452976196)
+  与 [main CI37453537171](https://github.com/QuantStrategyLab/AIAuditBridge/actions/runs/37453537171)
+  均五 job 全部成功。实现接入同一完整 source SHA 的单次归档：两个只读视图都加载
   候选 application，先执行冻结原测试，再用独立 Python 进程执行候选测试；仍为单个
   Docker test run、共享 600 秒上限和原网络/资源限制。新增离线负例先复现删弱/skip
   原断言可被旧入口接受，再验证冻结断言拒绝；合法小修与新增回归可通过。原 monthly
   unittest 文件执行 176 项：175 项通过、1 项既有可选本地 UESP 检查跳过，外部工具/网络
   尝试为零。新增合成用例的 Docker/Git 端口为替身，子进程使用 unittest-backed pytest fixture；
-  未运行真实 Docker、pytest、模型或券商，独立复核、发布及运行采用仍待验证。
+  上述离线阶段未运行真实 Docker、pytest、模型或券商。工程合并/CI 与运行采用分开：
+  既有 LongBridge 历史 fixture 已通过；新增 LongBridge 两阶段真实 Docker 场景与 runtime
+  采用仍未验证，Global/SOXL 既有 Docker fixture 不能替代新增场景演练。
   该门保护已有覆盖的行为；若冻结断言本身与批准修复冲突，应交独立审查，不由 AI
   删除断言、添加豁免或将测试通过表述为全行为等价证明。
 - **既有运行验收继续分层**：沿原 finding 分别记录源码修复、精确消费者采用、实际模型/数值研究、
