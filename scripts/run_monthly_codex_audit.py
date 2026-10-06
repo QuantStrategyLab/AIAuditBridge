@@ -1539,7 +1539,7 @@ def run_bounded_platform_bugfix_tests(repo_dir: Path) -> None:
 
 
 def _run_bounded_platform_bugfix_tests(repo_dir: Path) -> None:
-    """Run the fixed LongBridge regression test in a locked-down Docker job."""
+    """Check frozen and candidate tests against the patch in one bounded job."""
     docker = shutil.which("docker")
     if not docker:
         raise PlatformBugfixFailure("dependency_build", "dependency")
@@ -1548,28 +1548,39 @@ def _run_bounded_platform_bugfix_tests(repo_dir: Path) -> None:
         tmp_root = Path(tmp)
         base = tmp_root / "base"
         sandbox = tmp_root / "source"
-        base.mkdir()
-        for target in (base, sandbox):
-            target.mkdir(exist_ok=True)
-            try:
-                archive = subprocess.run(
-                    ["git", "archive", "--format=tar", "HEAD"],
-                    cwd=repo_dir,
-                    capture_output=True,
-                    check=True,
-                    timeout=60,
-                )
-            except subprocess.TimeoutExpired as exc:
-                raise PlatformBugfixFailure("dependency_build", "timeout") from exc
-            except subprocess.SubprocessError as exc:
-                raise PlatformBugfixFailure("dependency_build", "dependency") from exc
+        frozen = sandbox / "frozen"
+        candidate = sandbox / "candidate"
+        try:
+            baseline_sha = subprocess.run(
+                ["git", "rev-parse", "--verify", "HEAD^{commit}"], cwd=repo_dir,
+                capture_output=True, text=True, check=True, timeout=60,
+            ).stdout.strip()
+            expected_sha = env_value("EXPECTED_SOURCE_SHA")
+            if not re.fullmatch(r"[0-9a-f]{40}", baseline_sha) or (expected_sha and baseline_sha != expected_sha):
+                raise PlatformBugfixFailure("patch_validation", "invalid_edit")
+            archive = subprocess.run(
+                ["git", "archive", "--format=tar", baseline_sha], cwd=repo_dir,
+                capture_output=True, check=True, timeout=60,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise PlatformBugfixFailure("dependency_build", "timeout") from exc
+        except subprocess.SubprocessError as exc:
+            raise PlatformBugfixFailure("dependency_build", "dependency") from exc
+        for target in (base, frozen, candidate):
+            target.mkdir(parents=True)
             subprocess.run(["tar", "-xf", "-", "-C", str(target)], input=archive.stdout, check=True)
+        if not (frozen / "tests/test_rebalance_service.py").is_file():
+            raise PlatformBugfixFailure("patch_validation", "invalid_edit")
         for relative in PLATFORM_BUGFIX_ALLOWED_PATHS:
             source = repo_dir / relative
-            target = sandbox / relative
+            target = candidate / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
-        if any(path.is_symlink() for path in sandbox.rglob("*")):
+        # Both views execute identical patched application bytes. Only the
+        # candidate view receives model-authored tests; frozen assertions remain
+        # from the approved source commit, not from the mutable working tree.
+        shutil.copy2(candidate / "application/rebalance_service.py", frozen / "application/rebalance_service.py")
+        if any(path.is_symlink() for root in (base, sandbox) for path in root.rglob("*")):
             raise BridgeError("platform_bugfix test sandbox contains a symlink")
         def forbidden(path: Path) -> bool:
             name = path.name.lower()
@@ -1616,6 +1627,31 @@ def _run_bounded_platform_bugfix_tests(repo_dir: Path) -> None:
                 raise PlatformBugfixFailure("dependency_build", "timeout") from exc
             if built.returncode != 0:
                 raise PlatformBugfixFailure("dependency_build", "dependency")
+            test_process = (
+                "import importlib.util, pathlib, sys\n"
+                "root = pathlib.Path.cwd().resolve()\n"
+                "expected = root / 'application/rebalance_service.py'\n"
+                "spec = importlib.util.find_spec('application.rebalance_service')\n"
+                "if spec is None or spec.origin is None or pathlib.Path(spec.origin).resolve() != expected:\n"
+                "    raise SystemExit(1)\n"
+                "import pytest\n"
+                "status = pytest.main(['tests/test_rebalance_service.py', '-q', '-p', 'no:cacheprovider'])\n"
+                "module = sys.modules.get('application.rebalance_service')\n"
+                "if module is None or pathlib.Path(getattr(module, '__file__', '')).resolve() != expected:\n"
+                "    raise SystemExit(1)\n"
+                "raise SystemExit(status)\n"
+            )
+            # Separate Python processes prevent a candidate test from changing
+            # the frozen run's modules/assertions. The outer Docker invocation
+            # retains one shared 600-second timeout for both phases together.
+            test_driver = (
+                "import subprocess, sys\n"
+                f"script = {test_process!r}\n"
+                "for root in ('/workspace/frozen', '/workspace/candidate'):\n"
+                "    result = subprocess.run([sys.executable, '-B', '-c', script], cwd=root, check=False)\n"
+                "    if result.returncode != 0:\n"
+                "        raise SystemExit(result.returncode)\n"
+            )
             command = [
                 docker,
                 "run",
@@ -1636,10 +1672,9 @@ def _run_bounded_platform_bugfix_tests(repo_dir: Path) -> None:
                 "/workspace",
                 image,
                 "/opt/longbridge/.venv/bin/python",
-                "-m",
-                "pytest",
-                "tests/test_rebalance_service.py",
-                "-q",
+                "-B",
+                "-c",
+                test_driver,
             ]
             try:
                 tested = subprocess.run(

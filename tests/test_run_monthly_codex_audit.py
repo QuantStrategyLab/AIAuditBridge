@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import hashlib
+import io
 import os
 import subprocess
 import sys
 import tempfile
+import tarfile
 import threading
 import time
 import unittest
@@ -570,11 +572,15 @@ class RunMonthlyCodexAuditTests(unittest.TestCase):
 
     def test_bounded_build_oserror_is_dependency_failure(self) -> None:
         completed = subprocess.CompletedProcess(["git"], 0, stdout=b"")
-        calls = {"count": 0}
 
-        def fake_run(*args, **kwargs):
-            calls["count"] += 1
-            if calls["count"] == 5:
+        def fake_run(argv, **kwargs):
+            if argv[:2] == ["git", "rev-parse"]:
+                return subprocess.CompletedProcess(argv, 0, stdout="a" * 40 + "\n")
+            if argv[:2] == ["tar", "-xf"]:
+                frozen_test = Path(argv[-1]) / "tests/test_rebalance_service.py"
+                frozen_test.parent.mkdir(parents=True, exist_ok=True)
+                frozen_test.write_text("synthetic frozen test\n")
+            if argv[:2] == ["/usr/bin/docker", "build"]:
                 raise OSError("build canary")
             return completed
 
@@ -4498,6 +4504,164 @@ class EngineeringPrReviewProducerTests(unittest.TestCase):
         grant_merge.assert_not_called()
         with self.assertRaises(BridgeError):
             audit.validate_task("monthly_snapshot_audit", self.repository)
+
+
+class PlatformBugfixFrozenRegressionTests(unittest.TestCase):
+    """Exercise real staging and Python checks with synthetic Git/Docker ports."""
+
+    baseline_sha = "a" * 40
+    baseline_application = (
+        "def allowed(blocked):\n    return not blocked\n\n"
+        "def repaired():\n    return 'old'\n"
+    )
+    frozen_tests = (
+        "import unittest\nfrom application import rebalance_service as subject\n"
+        "class ExistingSafety(unittest.TestCase):\n"
+        "    def test_blocked_order(self):\n"
+        "        self.assertFalse(subject.allowed(True))\n"
+    )
+    added_regression = (
+        "\nclass NewRegression(unittest.TestCase):\n"
+        "    def test_corrected_behavior(self):\n"
+        "        self.assertEqual(subject.repaired(), 'fixed')\n"
+    )
+
+    def exercise(self, *, application=None, tests=None, missing_frozen=False,
+                 expected_sha=None, timeout=False, wrong_origin=False):
+        # This unittest-backed shim is only fixture infrastructure. It does not
+        # represent a real pytest/Docker acceptance or install any dependency.
+        pytest_fixture = (
+            "import pathlib, sys, unittest\n"
+            "def main(args):\n"
+            "    print('synthetic_test_view=' + str(pathlib.Path.cwd()), flush=True)\n"
+            "    suite = unittest.defaultTestLoader.discover('tests', pattern='test_rebalance_service.py')\n"
+            "    return 0 if unittest.TextTestRunner().run(suite).wasSuccessful() else 1\n"
+            "if __name__ == '__main__':\n    raise SystemExit(main(sys.argv[1:]))\n"
+        )
+        files = {"application/__init__.py": "", "application/rebalance_service.py": self.baseline_application,
+                 "pytest.py": pytest_fixture, "pyproject.toml": "# synthetic dependency input\n",
+                 "uv.lock": "# synthetic lock\n"}
+        if wrong_origin:
+            files["application/__init__.py"] = (
+                "from pathlib import Path\n"
+                "__path__ = [str(Path(__file__).resolve().parents[1] / 'wrong_application')]\n"
+            )
+            files["wrong_application/rebalance_service.py"] = self.baseline_application.replace("'old'", "'fixed'")
+        if not missing_frozen:
+            files["tests/test_rebalance_service.py"] = self.frozen_tests
+        archive = io.BytesIO()
+        with tarfile.open(fileobj=archive, mode="w") as stream:
+            for name, text in files.items():
+                body = text.encode()
+                info = tarfile.TarInfo(name)
+                info.size = len(body)
+                stream.addfile(info, io.BytesIO(body))
+        archive_bytes = archive.getvalue()
+        real_run = subprocess.run
+        observed = {"calls": [], "output": "", "views": {}, "failure": None}
+
+        def fake_run(argv, **kwargs):
+            observed["calls"].append((list(argv), kwargs.get("timeout")))
+            if argv[:2] == ["git", "rev-parse"]:
+                return subprocess.CompletedProcess(argv, 0, stdout=self.baseline_sha + "\n", stderr="")
+            if argv[:2] == ["git", "archive"]:
+                return subprocess.CompletedProcess(argv, 0, stdout=archive_bytes, stderr=b"")
+            if argv[:2] == ["tar", "-xf"]:
+                with tarfile.open(fileobj=io.BytesIO(kwargs["input"])) as stream:
+                    stream.extractall(argv[-1], filter="data")
+                return subprocess.CompletedProcess(argv, 0)
+            if argv[:2] == ["/usr/bin/docker", "run"]:
+                if timeout:
+                    raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+                mounted = Path(argv[argv.index("-v") + 1].split(":/workspace:ro")[0])
+                for path in mounted.rglob("test_rebalance_service.py"):
+                    observed["views"][str(path.relative_to(mounted))] = path.read_text()
+                image_at = next(i for i, value in enumerate(argv) if value.startswith("qsl-platform-bugfix-test:"))
+                args = [value.replace("/workspace", str(mounted)) for value in argv[image_at + 2:]]
+                cwd = argv[argv.index("-w") + 1].replace("/workspace", str(mounted))
+                completed = real_run([sys.executable, *args], cwd=cwd, capture_output=True, text=True,
+                                     timeout=10, env={"PATH": os.environ.get("PATH", ""), "PYTHONDONTWRITEBYTECODE": "1"})
+                observed["output"] = completed.stdout + completed.stderr
+                return subprocess.CompletedProcess(argv, completed.returncode, stdout=completed.stdout, stderr=completed.stderr)
+            if argv[0] == "/usr/bin/docker" and argv[1] in {"build", "rm", "rmi"}:
+                return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+            raise AssertionError(f"unexpected external command: {argv!r}")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            _platform_sources(repo,
+                application=(application or self.baseline_application.replace("'old'", "'fixed'")).encode(),
+                tests=(tests if tests is not None else self.frozen_tests + self.added_regression).encode())
+            with patch("scripts.run_monthly_codex_audit.shutil.which", return_value="/usr/bin/docker"), \
+                 patch("scripts.run_monthly_codex_audit.subprocess.run", side_effect=fake_run), \
+                 patch("scripts.run_monthly_codex_audit.subprocess.check_output", return_value="synthetic-docker-host"), \
+                 patch.dict(os.environ, {"EXPECTED_SOURCE_SHA": expected_sha or self.baseline_sha}):
+                try:
+                    run_bounded_platform_bugfix_tests(repo)
+                except BridgeError as exc:
+                    observed["failure"] = str(exc)
+        return observed
+
+    def test_frozen_assertions_reject_candidate_that_weakens_or_skips_tests(self):
+        broken = self.baseline_application.replace("return not blocked", "return True")
+        weak_tests = (
+            self.frozen_tests.replace("self.assertFalse(subject.allowed(True))", "self.assertTrue(True)"),
+            self.frozen_tests.replace("    def test_blocked_order", "    @unittest.skip('candidate waiver')\n    def test_blocked_order"),
+            "import unittest\nclass Placeholder(unittest.TestCase):\n    def test_placeholder(self):\n        self.assertTrue(True)\n",
+        )
+        for weak in weak_tests:
+            with self.subTest(weak=weak):
+                result = self.exercise(application=broken, tests=weak)
+                self.assertEqual(result["failure"], "platform_bugfix_failure:isolated_regression:regression")
+                self.assertIn("/frozen", result["output"])
+                self.assertNotIn("/candidate", result["output"])
+
+    def test_legal_fix_and_new_regression_pass_both_candidate_application_views(self):
+        result = self.exercise()
+        self.assertIsNone(result["failure"], result["output"])
+        self.assertIn("/frozen", result["output"])
+        self.assertIn("/candidate", result["output"])
+        self.assertEqual(result["views"]["frozen/tests/test_rebalance_service.py"], self.frozen_tests)
+        self.assertEqual(result["views"]["candidate/tests/test_rebalance_service.py"], self.frozen_tests + self.added_regression)
+        archives = [argv for argv, _ in result["calls"] if argv[:2] == ["git", "archive"]]
+        self.assertEqual(archives, [["git", "archive", "--format=tar", self.baseline_sha]])
+        runs = [(argv, duration) for argv, duration in result["calls"] if argv[:2] == ["/usr/bin/docker", "run"]]
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0][1], 600)
+        for flag in ("--network=none", "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges",
+                     "--pids-limit=256", "--memory=2g", "--cpus=2", "--tmpfs=/tmp:rw,noexec,nosuid,size=64m"):
+            self.assertIn(flag, runs[0][0])
+        self.assertTrue(runs[0][0][runs[0][0].index("-v") + 1].endswith(":/workspace:ro"))
+
+    def test_candidate_regression_failure_remains_blocking_after_frozen_tests_pass(self):
+        result = self.exercise(application=self.baseline_application)
+        self.assertEqual(result["failure"], "platform_bugfix_failure:isolated_regression:regression")
+        self.assertIn("/frozen", result["output"])
+        self.assertIn("/candidate", result["output"])
+
+    def test_missing_frozen_test_is_rejected_before_image_build(self):
+        result = self.exercise(missing_frozen=True)
+        self.assertIsNotNone(result["failure"])
+        self.assertFalse(any(argv[:2] == ["/usr/bin/docker", "build"] for argv, _ in result["calls"]))
+
+    def test_non_candidate_application_import_is_rejected_before_pytest(self):
+        result = self.exercise(wrong_origin=True)
+        self.assertEqual(result["failure"], "platform_bugfix_failure:isolated_regression:regression")
+        self.assertNotIn("synthetic_test_view=", result["output"])
+
+    def test_mismatched_approved_source_is_rejected_before_archive_or_build(self):
+        result = self.exercise(expected_sha="b" * 40)
+        self.assertIsNotNone(result["failure"])
+        self.assertFalse(any(argv[:2] in (["git", "archive"], ["/usr/bin/docker", "build"]) for argv, _ in result["calls"]))
+
+    def test_shared_test_timeout_remains_600_seconds_and_cleans_up(self):
+        result = self.exercise(timeout=True)
+        self.assertEqual(result["failure"], "platform_bugfix_failure:isolated_regression:timeout")
+        runs = [(argv, duration) for argv, duration in result["calls"] if argv[:2] == ["/usr/bin/docker", "run"]]
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0][1], 600)
+        self.assertTrue(any(argv[:3] == ["/usr/bin/docker", "rm", "--force"] for argv, _ in result["calls"]))
+        self.assertTrue(any(argv[:3] == ["/usr/bin/docker", "rmi", "--force"] for argv, _ in result["calls"]))
 
 
 if __name__ == "__main__":
