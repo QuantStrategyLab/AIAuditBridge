@@ -288,6 +288,7 @@ jobs:
           import stat
           import sys
           import sysconfig
+          import tempfile
 
           SOURCE_SHA = "35ac71176127f07e00fe04dbc793777f3c595bc0"
           QPK_PIN = "28675796cabbe137a1fa3970b70d1aa98e952c88"
@@ -486,6 +487,9 @@ jobs:
                   if kind:
                       counts[kind] += 1
                       raise RuntimeError("blocked candidate import side effect")
+              # Use the verified task directory without tempfile probing writes.
+              # This sets only the isolated process default; the guard denies all file creation.
+              tempfile.tempdir = str(RELEASE)
               sys.addaudithook(audit)
               failure = "consumer_import"
               sys.path.insert(0, str(RELEASE))
