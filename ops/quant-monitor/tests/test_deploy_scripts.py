@@ -633,7 +633,8 @@ class DeployScriptTests(unittest.TestCase):
         cases = ("valid", "missing_dependency", "missing_daily", "network", "process", "write", "private_read",
                  "swallowed_network", "aab_origin", "qpk_origin", "package_path", "sys_path", "record_hash", "fixed_hash", "numpy_version", "pyc_mismatch", "pyc_link", "qpk_external", "private_listdir", "private_scandir", "secret_exception")
         if temporary_snapshot:
-            cases += ("source_git_read", "source_data_read", "source_ignored_read", "checkout_git_read", "source_hardlink")
+            cases += ("source_git_read", "source_data_read", "source_ignored_read", "checkout_git_read", "source_hardlink",
+                      "tempdir_constant", "tempdir_mkstemp", "tempdir_mkdir", "tempdir_private_read")
         for case in cases:
             with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
@@ -683,6 +684,18 @@ class DeployScriptTests(unittest.TestCase):
                 (qpk_root / "strategy_lifecycle/__init__.py").write_text("")
                 for name in fixed_hashes:
                     (qpk_root / "strategy_lifecycle" / name).write_text("VALUE = 1\n")
+                if case.startswith("tempdir_"):
+                    initialization = (
+                        "import tempfile\nfrom pathlib import Path\n"
+                        f"assert Path(tempfile.gettempdir()) == Path({str(release)!r})\n"
+                        "CACHE_ROOT = Path(tempfile.gettempdir()) / 'synthetic_cache'\n"
+                    )
+                    initialization += {
+                        "tempdir_mkstemp": "tempfile.mkstemp()\n",
+                        "tempdir_mkdir": "CACHE_ROOT.mkdir()\n",
+                        "tempdir_private_read": "(Path(tempfile.gettempdir()) / 'private_token_DO_NOT_EMIT').read_text()\n",
+                    }.get(case, "")
+                    (qpk_root / "strategy_lifecycle/drift_detector.py").write_text(initialization)
                 if case == "qpk_origin":
                     (qpk_root / "strategy_lifecycle/return_collector.py").write_text("__file__='/private/token_DO_NOT_EMIT.py'\n")
                 if case in {"pyc_mismatch", "pyc_link"}:
@@ -762,6 +775,10 @@ subprocess.run = source_tree
 sys.argv = ['offline-fixture', 'synthetic-checkout'] + ([{str(root)!r}, '12345'] if {temporary_snapshot!r} else [])
 '''
                 runner = root / "offline_import_fixture.py"
+                if case.startswith("tempdir_"):
+                    prefix += "\nimport tempfile\ntempfile.tempdir = None\n"
+                    snapshot_before = {str(p.relative_to(release)): p.read_bytes()
+                                       for p in release.rglob("*") if p.is_file()}
                 runner.write_text(textwrap.dedent(prefix) + "\n" + fixture)
                 result = subprocess.run([sys.executable, "-I", "-B", str(runner)],
                                         env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
@@ -769,11 +786,15 @@ sys.argv = ['offline-fixture', 'synthetic-checkout'] + ([{str(root)!r}, '12345']
                 self.assertEqual(result.stderr, "")
                 self.assertNotIn("token_DO_NOT_EMIT", result.stdout)
                 self.assertFalse((root / "forbidden-write").exists())
+                if case.startswith("tempdir_"):
+                    self.assertEqual({str(p.relative_to(release)): p.read_bytes()
+                                      for p in release.rglob("*") if p.is_file()}, snapshot_before)
+                    self.assertFalse((release / "synthetic_cache").exists())
                 if case not in {"pyc_mismatch", "pyc_link"}:
                     self.assertFalse(list(root.rglob("__pycache__")))
                 else:
                     self.assertEqual(len(list(root.rglob("*.pyc"))), 1, "existing cache is preserved")
-                if case in {"valid", "pyc_mismatch", "pyc_link"}:
+                if case in {"valid", "pyc_mismatch", "pyc_link", "tempdir_constant"}:
                     self.assertEqual(result.returncode, 0, result.stdout)
                     receipt = json.loads(result.stdout)
                     self.assertEqual(receipt["daily_required_modules_checked"], 30)
@@ -811,11 +832,19 @@ sys.argv = ['offline-fixture', 'synthetic-checkout'] + ([{str(root)!r}, '12345']
                         expected_counts[kind] = 1
                         self.assertEqual(receipt["guard_attempts"], expected_counts)
                         self.assertEqual(receipt["import_target"], "daily_consumer")
+                    if case in {"tempdir_mkstemp", "tempdir_mkdir", "tempdir_private_read"}:
+                        expected_counts = dict(network=0, process=0, write=0, read=0)
+                        expected_counts["read" if case == "tempdir_private_read" else "write"] = 1
+                        self.assertEqual(receipt["guard_attempts"], expected_counts)
+                        self.assertEqual(receipt["import_target"], "qpk_drift")
                     if case in {"missing_dependency", "secret_exception"}:
                         self.assertEqual(receipt["import_target"], "daily_consumer")
                         self.assertEqual(receipt["guard_attempts"], dict(network=0, process=0, write=0, read=0))
                     self.assertIn(receipt["failure"], {"candidate_metadata", "source_manifest", "consumer_import", "module_origin"})
-                    self.assertIn(receipt["import_target"], {"not_started", "daily_consumer", "daily_module_presence", "origin_validation"})
+                    expected_targets = {"not_started", "daily_consumer", "daily_module_presence", "origin_validation"}
+                    if case.startswith("tempdir_"):
+                        expected_targets = {"qpk_drift"}
+                    self.assertIn(receipt["import_target"], expected_targets)
                     self.assertNotIn("_verified", result.stdout)
 
     def _inactive_stage_scripts(self) -> tuple[str, list[str]]:

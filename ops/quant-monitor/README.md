@@ -383,7 +383,7 @@ unsupported，系统调用不可达为 unknown，不退回 real uid 检查，不
 write=false，owner/group 匹配均 false；固定35ac target 为 absent。其它残留未枚举；原安装
 child exit 仍 unknown。原 /opt 安装路线保持 blocked，不改权限/身份、不重跑安装。
 
-consumer 依赖导入不必等待 /opt 安装。本批四文件候选新增独立 `check-quant-consumers-offline`
+consumer 依赖导入不必等待 /opt 安装。PR #324 新增独立 `check-quant-consumers-offline`
 模式，沿既有 protected workflow/runner、main gate 和固定35ac checkout，只在 RUNNER_TEMP
 本次 run 独占的新目录创建临时纯源码快照。Git archive 严格选择已审38个.py及lock/pin，共40文件，
 不包含 .git、ignored文件、运行data、.venv、工作流或测试。先核规范相对路径、普通blob、
@@ -394,8 +394,27 @@ tar完整清单/大小/hash，拒绝重复、缺失、额外、链接/设备/稀
 RECORD/固定hash、pyc和副作用守卫；应用根只指向这份40文件快照，.git/data/.venv仍禁止。
 不加入自定义加载器或FileFinder行为。输出只证明 temporary-source consumer dependency/import
 readiness；immutable-release、shell-selection、runtime-adoption和health-recovery proof均为false。
-这不是将被拒绝的部署改址。真实imports-only运行仍待source CI及独立执行验收；原两个旧服务
-在上述观察时仍failed，不是healthy LKG。快照是临时验证副本，runner清理后的保留状态不作保证。
+这不是将被拒绝的部署改址。原两个旧服务在上述观察时仍failed，不是healthy LKG。
+快照是临时验证副本，runner清理后的保留状态不作保证。
+
+PR #324 合并并通过 main CI 后，唯一 imports-only
+[run37533618835](https://github.com/QuantStrategyLab/AIAuditBridge/actions/runs/37533618835)
+（controller `1131116e3d405ed3dca56f5c7406df2c6d3af190`、job112508913937）在
+2026-10-06 21:24:20 UTC 验证固定35ac快照成功：40文件、480370字节、无runtime links。
+随后导入在 `qpk_drift` 停止，固定回执为 `failure=consumer_import`、write=1，
+network/process/read=0；导入期写入被守卫拒绝。没有实际写入路径、事件细分或异常正文，
+不能据此把某个依赖认定为已证实的主机根因。其余13 jobs skipped；所有完整应用导入、
+immutable-release、shell-selection、runtime-adoption、health-recovery proof均为false。
+失败保留临时残留、不重跑；本次未安装release、改权限或切换服务，/opt部署路线仍blocked。
+
+离线 Python 3.12 夹具复现固定 QPK286757 的两个模块常量初始化：
+`common/strategy_plugins.py:34` 和 `strategy_lifecycle/performance_store.py:53` 调用
+`tempfile.gettempdir()`；冷态标准库会创建、写入并删除探测文件，原守卫在创建前拒绝。
+这只是与主机固定分类一致的本地机制证据。最小初始化修正是在完整快照/目录绑定验证后、
+应用导入和守卫生效前，将本隔离进程的 `tempfile.tempdir` 显式设为已验证的本run任务目录，
+仅选择临时目录名称，不调用探测函数、不修改全局环境或应用源码。其余守卫保持原样，
+实际 `mkstemp`、`mkdir` 和非白名单读取仍必须失败；没有新增允许写入或读取的路径。
+修正后的真实完整导入结果仍待独立 source CI、评审及新运行验收，旧失败run不重发。
 
 采用差异按实际使用边界核对：#287/#289 为 lock/staging 安装路径；#290/#299 为 health
 正常调用的 artifact sync；#301/#306/#314 为 health 及日报 coverage/失败处理；#311
