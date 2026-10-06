@@ -240,7 +240,7 @@ class DeployScriptTests(unittest.TestCase):
         contents["ops/quant-monitor/qpk-runtime.sha"] = b"28675796cabbe137a1fa3970b70d1aa98e952c88\n"
         directories = {str(parent) for name in files for parent in Path(name).parents if str(parent) != "."}
         size = sum(map(len, contents.values()))
-        tree = b"".join((f"100644 blob " + hashlib.sha1(b"blob " + str(len(content)).encode() + b"\0" + content).hexdigest() + f" {len(content)}\t{name}\0").encode()
+        tree = b"".join(("100644 blob " + hashlib.sha1(b"blob " + str(len(content)).encode() + b"\0" + content).hexdigest() + f" {len(content)}\t{name}\0").encode()
                         for name, content in contents.items())
         cases = ("valid", "existing", "temporary_overlap", "temporary_alias", "blocked_parent", "bad_run_id",
                  "manifest_missing", "manifest_link", "archive_timeout", "extra_private", "git_private",
