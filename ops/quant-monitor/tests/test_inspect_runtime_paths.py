@@ -1085,5 +1085,285 @@ class PathInspectionTests(unittest.TestCase):
             self.assertNotIn(SECRET, str(raised.exception))
 
 
+class BoundCandidateReader(FakeReader):
+    """Synthetic metadata transport; no real host paths are opened."""
+
+    def __init__(self, files=None):
+        super().__init__(files)
+        self.metadata_requests = []
+        self.stable = True
+        self.metadata_values = {}
+
+    def begin_metadata_collection(self):
+        m.Reader.begin_metadata_collection(self)
+
+    def metadata_snapshot_stable(self):
+        return self.stable
+
+    def declared_candidate_metadata(self, unit, roles, qpk):
+        return m.Reader.declared_candidate_metadata(self, unit, roles, qpk)
+
+    def _metadata_file(self, path, limit):
+        self.metadata_requests.append(("file", path, limit))
+        value = self.metadata_values.get(path)
+        if value is None:
+            value = b"d" * 40 + b"\n" if path.endswith("/.git/HEAD") else b"synthetic metadata"
+        if isinstance(value, Exception):
+            raise value
+        if len(value) > limit:
+            raise OSError("oversized synthetic leaf")
+        return value
+
+    def _metadata_entry(self, path):
+        self.metadata_requests.append(("entry", path, None))
+        return self.metadata_values.get(path, {"kind": "symlink", "executable_mode": True,
+                                               "accepted_link_target": None})
+
+    def identity_entry(self, path):
+        if path.endswith(MON + "/data"):
+            return {"kind": "symlink", "accepted_link_target": RUNTIME + MON + "/data"}
+        return {"kind": "missing", "executable_mode": False, "accepted_link_target": None}
+
+
+class BoundCandidateMetadataTests(unittest.TestCase):
+    VENV = "/opt/quant-monitor/venvs/fixture"
+    PREFIX = "/home/ubuntu/fixture-command/bin"
+
+    def health(self, reader=None, **changes):
+        p = props()
+        p["Environment"] = "QUANT_MONITOR_VENV=" + self.VENV + " PATH=/usr/bin:/bin"
+        p.update(changes)
+        reader = reader or BoundCandidateReader()
+        value = run({"codex-quant.service": p}, reader)["services"]["codex-quant.service"]
+        return value, reader
+
+    def test_same_snapshot_external_venv_metadata_keeps_old_unknown_gates(self):
+        value, reader = self.health()
+        original = value["static_adoption_identity"]
+        extra = original["declared_candidate_metadata"]
+        self.assertEqual(original["interpreter"]["stop_reason"], "unclassified_venv")
+        self.assertFalse(original["interpreter_invoked"])
+        self.assertFalse(extra["interpreter_execution_proof"])
+        self.assertFalse(extra["import_execution_proof"])
+        candidate = extra["roles"]["consumer"]["venv"]
+        self.assertEqual(candidate["pyvenv_cfg"]["sha256"], hashlib.sha256(b"synthetic metadata").hexdigest())
+        self.assertEqual(set(candidate["python_links"]), {"python", "python3"})
+        self.assertEqual({p for _, p, _ in reader.metadata_requests if p.startswith(self.VENV)},
+                         {self.VENV + "/pyvenv.cfg", self.VENV + "/bin/python", self.VENV + "/bin/python3"})
+        self.assertNotIn(self.VENV, json.dumps(extra))
+
+    def test_daily_parent_first_prefix_is_separate_from_builder_venv(self):
+        unit = "codex-daily-briefing.service"
+        p = props(unit)
+        p["Environment"] = f"AIAUDIT_BRIDGE_ROOT={RELEASE} QUANT_MONITOR_VENV={self.VENV} PATH={self.PREFIX}:/usr/bin:/bin"
+        reader = BoundCandidateReader()
+        extra = run({unit: p}, reader)["services"][unit]["static_adoption_identity"]
+        metadata = extra["declared_candidate_metadata"]
+        self.assertEqual(extra["interpreter"]["stop_reason"], "unclassified_path_prefix")
+        self.assertEqual(extra["builder_interpreter"]["stop_reason"], "unclassified_venv")
+        self.assertEqual(metadata["roles"]["consumer"]["path_prefix"]["path_sha256"],
+                         hashlib.sha256((self.PREFIX + "/python3").encode()).hexdigest())
+        self.assertNotIn("venv", metadata["roles"]["consumer"])
+        self.assertIn("venv", metadata["roles"]["builder"])
+        self.assertNotIn("path_prefix", metadata["roles"]["builder"])
+        self.assertEqual(sum(path == self.PREFIX + "/python3" for _, path, _ in reader.metadata_requests), 1)
+
+    def test_qpk_head_and_collector_are_metadata_without_import(self):
+        value, reader = self.health()
+        qpk = value["static_adoption_identity"]["declared_candidate_metadata"]["qpk"]
+        self.assertEqual(qpk["head"]["commit"], "d" * 40)
+        self.assertIsNone(qpk["clean_checkout_proof"])
+        self.assertEqual(qpk["return_collector"]["sha256"], hashlib.sha256(b"synthetic metadata").hexdigest())
+        self.assertFalse(any("packed-refs" in path or "/refs/" in path for _, path, _ in reader.metadata_requests))
+
+    def test_symbolic_and_malformed_qpk_head_never_follow_refs(self):
+        head = RUNTIME + MON + "/data/lifecycle-projects/QuantPlatformKit/.git/HEAD"
+        for raw in (b"ref: refs/heads/main\n", b"gitdir: /private/" + SECRET.encode(), b"a" * 39, b" " + b"a" * 40):
+            with self.subTest(raw_type=raw[:4]):
+                reader = BoundCandidateReader()
+                reader.metadata_values[head] = raw
+                value, _ = self.health(reader)
+                result = value["static_adoption_identity"]["declared_candidate_metadata"]["qpk"]["head"]
+                self.assertIsNone(result["commit"])
+                self.assertFalse(any("/refs/" in path or "packed-refs" in path or SECRET in path
+                                     for _, path, _ in reader.metadata_requests))
+                self.assertNotIn(SECRET, json.dumps(result))
+
+    def test_bad_declarations_and_existing_rejections_admit_no_extra_path(self):
+        for environment in ("QUANT_MONITOR_VENV=/private/" + SECRET,
+                            "QUANT_MONITOR_VENV=/opt/quant-monitor/../" + SECRET,
+                            "QUANT_MONITOR_VENV=" + self.VENV + " BASH_ENV=/private/" + SECRET):
+            value, reader = self.health(Environment=environment)
+            self.assertFalse(any(self.VENV in path or SECRET in path for _, path, _ in reader.metadata_requests))
+            self.assertNotIn(SECRET, json.dumps(value))
+
+    def test_known_earlier_interpreter_prevents_later_prefix_probe(self):
+        unit = "codex-daily-briefing.service"
+        p = props(unit)
+        p["Environment"] = f"AIAUDIT_BRIDGE_ROOT={RELEASE} PATH=/usr/bin:{self.PREFIX}"
+        reader = BoundCandidateReader()
+        original = reader.identity_entry
+        reader.identity_entry = lambda path: {"kind": "regular", "executable_mode": True} if path == "/usr/bin/python3" else original(path)
+        extra = run({unit: p}, reader)["services"][unit]["static_adoption_identity"]["declared_candidate_metadata"]
+        self.assertNotIn("path_prefix", extra["roles"]["consumer"])
+        self.assertFalse(any(path == self.PREFIX + "/python3" for _, path, _ in reader.metadata_requests))
+
+    def test_changed_configuration_or_invocation_clears_all_supplementary_leaves(self):
+        for field in ("Environment", "InvocationID"):
+            before = props()
+            before["Environment"] = f"QUANT_MONITOR_VENV={self.VENV} PATH=/usr/bin:/bin"
+            after = dict(before)
+            after[field] = "changed"
+            snapshots = iter((before, after))
+            reader = BoundCandidateReader()
+            result = m.collect(query=lambda unit: next(snapshots) if unit == "codex-quant.service" else None,
+                               reader=reader)["services"]["codex-quant.service"]["static_adoption_identity"]
+            self.assertEqual(result["status"], "unknown")
+            metadata = result["declared_candidate_metadata"]
+            self.assertEqual(metadata["status"], "unknown")
+            self.assertEqual(metadata["roles"], {})
+            self.assertIsNone(metadata["qpk"])
+
+    def test_file_snapshot_change_clears_new_metadata(self):
+        reader = BoundCandidateReader()
+        reader.stable = False
+        value, _ = self.health(reader)
+        extra = value["static_adoption_identity"]["declared_candidate_metadata"]
+        self.assertEqual(extra["status"], "unknown")
+        self.assertEqual(extra["roles"], {})
+        self.assertIsNone(extra["qpk"])
+
+    def test_shared_qpk_reads_are_deduplicated_and_collection_cache_is_not_reused(self):
+        reader = BoundCandidateReader()
+        mapping = {unit: props(unit) for unit in m.base.SERVICES}
+        for p in mapping.values():
+            p["Environment"] = f"AIAUDIT_BRIDGE_ROOT={RELEASE} QUANT_MONITOR_VENV={self.VENV} PATH=/usr/bin:/bin"
+        run(mapping, reader)
+        self.assertEqual(sum(path.endswith("/.git/HEAD") for _, path, _ in reader.metadata_requests), 1)
+        run(mapping, reader)
+        self.assertEqual(sum(path.endswith("/.git/HEAD") for _, path, _ in reader.metadata_requests), 2)
+
+    def test_reader_metadata_methods_reject_unbound_reads_before_open(self):
+        reader = m.Reader()
+        reader.begin_metadata_collection()
+        with mock.patch.object(m.os, "open", side_effect=AssertionError("no open")):
+            with self.assertRaises(ValueError):
+                reader._metadata_file(self.VENV + "/pyvenv.cfg", 4096)
+            with self.assertRaises(ValueError):
+                reader._metadata_entry(self.PREFIX + "/python3")
+
+    def real_case(self, root):
+        """Bind one temporary fixture as the already-declared synthetic venv."""
+        original = m.interpreter_declaration_path
+
+        def declaration(value, *, venv=False):
+            if value == str(root) and venv:
+                return {"category": "external_venv_candidate", "location_family": "opt_quant_monitor",
+                        "path_sha256": hashlib.sha256(str(root).encode()).hexdigest(),
+                        "installer_qualification_proof": False}
+            return original(value, venv=venv)
+
+        reader = m.Reader()
+        reader.begin_metadata_collection()
+        with mock.patch.object(m, "interpreter_declaration_path", side_effect=declaration):
+            env = {"PATH": "/usr/bin:/bin"}
+            record = m.interpreter_declarations(env, {}, str(root), str(root), "systemd_environment",
+                                              "/usr/bin:/bin", "systemd_environment", common_applies=True)
+            roles = {"consumer": {"venv": str(root), "path": env["PATH"], "declaration": record,
+                                   "interpreter": {"stop_reason": "unclassified_venv"}}}
+            result = reader.declared_candidate_metadata("codex-quant.service", roles, None)
+        return reader, result
+
+    def test_real_cfg_hash_and_unknown_links_never_read_targets_or_echo_contents(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "bin").mkdir()
+            (root / "pyvenv.cfg").write_text("fixture=" + SECRET)
+            (root / "bin/python").symlink_to("/private/" + SECRET)
+            (root / "bin/python3").symlink_to("python")
+            reader, result = self.real_case(root)
+            leaf = result["roles"]["consumer"]["venv"]
+            self.assertEqual(leaf["pyvenv_cfg"]["status"], "readable")
+            self.assertEqual(leaf["python_links"]["python"]["link_target_kind"], "unknown")
+            self.assertEqual(leaf["python_links"]["python3"]["link_target_kind"], "unknown")
+            self.assertNotIn(SECRET, json.dumps(result))
+            self.assertNotIn(str(root), json.dumps(result))
+            self.assertTrue(reader.metadata_snapshot_stable())
+            with self.assertRaises(ValueError):
+                reader._metadata_file(str(root / "pyvenv.cfg"), 4096)
+
+    def test_real_cfg_rejects_symlinks_nonregular_and_oversize(self):
+        for variant in ("link", "directory", "oversize"):
+            with self.subTest(variant=variant), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                (root / "bin").mkdir()
+                cfg = root / "pyvenv.cfg"
+                if variant == "link":
+                    target = root / "target"
+                    target.write_text(SECRET)
+                    cfg.symlink_to(target)
+                elif variant == "directory":
+                    cfg.mkdir()
+                else:
+                    cfg.write_bytes(b"x" * 4097)
+                _, result = self.real_case(root)
+                self.assertEqual(result["roles"]["consumer"]["venv"]["pyvenv_cfg"]["status"], "unknown")
+                self.assertNotIn(SECRET, json.dumps(result))
+
+    def test_real_symlink_parent_is_not_traversed(self):
+        with tempfile.TemporaryDirectory() as folder:
+            parent = Path(folder)
+            target = parent / "actual"
+            target.mkdir()
+            (target / "pyvenv.cfg").write_text(SECRET)
+            alias = parent / "alias"
+            alias.symlink_to(target, target_is_directory=True)
+            _, result = self.real_case(alias)
+            self.assertEqual(result["roles"]["consumer"]["venv"]["pyvenv_cfg"]["status"], "unknown")
+            self.assertNotIn(SECRET, json.dumps(result))
+
+    def test_real_file_change_and_missing_to_present_are_detected(self):
+        for initially_present in (False, True):
+            with self.subTest(initially_present=initially_present), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                (root / "bin").mkdir()
+                cfg = root / "pyvenv.cfg"
+                if initially_present:
+                    cfg.write_text("first")
+                reader, _ = self.real_case(root)
+                self.assertTrue(reader.metadata_snapshot_stable())
+                cfg.write_text("changed fixture bytes")
+                self.assertFalse(reader.metadata_snapshot_stable())
+
+    def test_forged_declaration_or_role_admits_no_read(self):
+        reader = BoundCandidateReader()
+        reader.begin_metadata_collection()
+        record = m.interpreter_declarations({"PATH": self.PREFIX}, {}, self.VENV, self.VENV,
+                                          "systemd_environment", self.PREFIX, "systemd_environment", common_applies=True)
+        record["venv"]["declaration"]["path_sha256"] = "0" * 64
+        record["path"]["first_unrecognized_declared_prefix"]["path_sha256"] = "0" * 64
+        roles = {"consumer": {"venv": self.VENV, "path": self.PREFIX, "declaration": record,
+                               "interpreter": {"stop_reason": "unclassified_path_prefix"}}}
+        result = reader.declared_candidate_metadata("codex-quant.service", roles, None)
+        self.assertEqual(result["roles"]["consumer"], {})
+        self.assertEqual(reader.metadata_requests, [])
+        reader.declared_candidate_metadata("codex-quant.service", {"builder": roles["consumer"]}, None)
+        self.assertEqual(reader.metadata_requests, [])
+
+    def test_bounded_failures_and_private_link_values_are_sanitized(self):
+        for failure in (PermissionError(SECRET), FileNotFoundError(SECRET), b"x" * 4097):
+            reader = BoundCandidateReader()
+            reader.metadata_values[self.VENV + "/pyvenv.cfg"] = failure
+            reader.metadata_values[self.VENV + "/bin/python"] = {
+                "kind": "symlink", "accepted_link_target": "/private/" + SECRET,
+                "executable_mode": True}
+            value, _ = self.health(reader)
+            self.assertNotIn(SECRET, json.dumps(value))
+            cfg = value["static_adoption_identity"]["declared_candidate_metadata"]["roles"]["consumer"]["venv"]["pyvenv_cfg"]
+            self.assertIn(cfg["status"], {"unknown", "missing"})
+            self.assertTrue(all(limit in (None, 256, 4096, 2 * 1024 * 1024)
+                                for _, _, limit in reader.metadata_requests))
+
+
 if __name__ == "__main__":
     unittest.main()

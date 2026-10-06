@@ -55,7 +55,7 @@ CODE_NAMES = (
     "daily_briefing_builder.py",
     "load_telegram_env.sh",
 )
-QPK_NAMES = ("drift_detector.py", "health_dashboard.py", "performance_monitor.py")
+QPK_NAMES = ("drift_detector.py", "health_dashboard.py", "performance_monitor.py", "return_collector.py")
 DAILY_IMPORT_FILES = (
     "service/__init__.py", "service/briefing_consumer.py",
     "service/briefing_dispatch.py", "service/runtime_digest.py",
@@ -188,6 +188,62 @@ def code_allowed(path):
 class Reader:
     """Fixed absolute files only; no symlink traversal or directory enumeration."""
 
+    def __init__(self):
+        self._metadata_active = False
+
+    def begin_metadata_collection(self):
+        self._metadata_active = True
+        self._metadata_bindings = {}
+        self._metadata_cache = {}
+        self._metadata_qpk = {}
+        self._metadata_stamps = {}
+        self._metadata_changed = False
+
+    def end_metadata_collection(self):
+        self._metadata_active = False
+        self._metadata_bindings = {}
+        self._metadata_cache = {}
+        self._metadata_qpk = {}
+        self._metadata_stamps = {}
+
+    @staticmethod
+    def _stamp(info):
+        return (info.st_dev, info.st_ino, info.st_mode, info.st_size,
+                info.st_mtime_ns, info.st_ctime_ns)
+
+    def _remember_metadata(self, path, info):
+        if not getattr(self, "_metadata_active", False):
+            return
+        stamp = self._stamp(info) if info is not None else None
+        previous = self._metadata_stamps.setdefault(path, stamp)
+        if previous != stamp:
+            self._metadata_changed = True
+
+    def metadata_snapshot_stable(self):
+        if self._metadata_changed:
+            return False
+        for path, expected in self._metadata_stamps.items():
+            parent = None
+            try:
+                parts = path.split("/")
+                parent = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                for part in parts[1:-1]:
+                    child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+                    os.close(parent)
+                    parent = child
+                actual = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
+                if self._stamp(actual) != expected:
+                    return False
+            except FileNotFoundError:
+                if expected is not None:
+                    return False
+            except OSError:
+                return False
+            finally:
+                if parent is not None:
+                    os.close(parent)
+        return True
+
     def path_metadata(self, path):
         if classify(path)["status"] != "known" or classify(path)["category"].startswith(
             "legacy"
@@ -228,6 +284,18 @@ class Reader:
             if path.endswith("/qpk-runtime.sha")
             else 2 * 1024 * 1024
         )
+        try:
+            if getattr(self, "_metadata_active", False) and path.endswith("/strategy_lifecycle/return_collector.py"):
+                key = ("file", path)
+                if key not in self._metadata_cache:
+                    self._metadata_cache[key] = self._read_regular(path, limit)
+                return self._metadata_cache[key]
+            return self._read_regular(path, limit)
+        except FileNotFoundError:
+            self._remember_metadata(path, None)
+            raise
+
+    def _read_regular(self, path, limit):
         parts = path.split("/")
         parent = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
@@ -252,6 +320,8 @@ class Reader:
                 or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
                 or opened.st_size > limit
             ):
+                if getattr(self, "_metadata_active", False):
+                    self._metadata_changed = True
                 raise OSError("unstable file")
             data = stream.read(limit + 1)
             after = os.fstat(stream.fileno())
@@ -260,7 +330,10 @@ class Reader:
                 opened.st_mtime_ns,
                 opened.st_ctime_ns,
             ) != (after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+                if getattr(self, "_metadata_active", False):
+                    self._metadata_changed = True
                 raise OSError("unstable file")
+            self._remember_metadata(path, after)
             return data
 
     def identity_entry(self, path):
@@ -272,6 +345,13 @@ class Reader:
             allowed = allowed or path.endswith(suffix) and base.classify_root(path[: -len(suffix)]) is not None
         if not allowed:
             raise ValueError("outside fixed identity metadata readset")
+        try:
+            return self._identity_entry(path)
+        except FileNotFoundError:
+            self._remember_metadata(path, None)
+            raise
+
+    def _identity_entry(self, path):
         parts = path.split("/")
         parent = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
@@ -288,6 +368,8 @@ class Reader:
                 target = os.path.normpath(os.path.join(os.path.dirname(path), raw))
                 after = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
                 if (before.st_ino, before.st_mtime_ns, before.st_ctime_ns) != (after.st_ino, after.st_mtime_ns, after.st_ctime_ns):
+                    if getattr(self, "_metadata_active", False):
+                        self._metadata_changed = True
                     raise OSError("unstable identity metadata")
                 fixed = (base.RUNTIME_ROOT + "/" + base.MONITOR + "/.venv",
                          base.RUNTIME_ROOT + "/" + base.MONITOR + "/data",
@@ -295,9 +377,137 @@ class Reader:
                 # Return only fixed public targets; never return an unrecognized link value.
                 if target in fixed:
                     result["accepted_link_target"] = target
+            self._remember_metadata(path, before)
             return result
         finally:
             os.close(parent)
+
+    def _metadata_file(self, path, limit):
+        if not self._metadata_active or self._metadata_bindings.get(path) != ("file", limit):
+            raise ValueError("unbound metadata leaf")
+        key = ("file", path)
+        if key not in self._metadata_cache:
+            try:
+                self._metadata_cache[key] = self._read_regular(path, limit)
+            except FileNotFoundError:
+                self._remember_metadata(path, None)
+                raise
+        return self._metadata_cache[key]
+
+    def _metadata_entry(self, path):
+        if not self._metadata_active or self._metadata_bindings.get(path) != ("entry", None):
+            raise ValueError("unbound metadata leaf")
+        key = ("entry", path)
+        if key not in self._metadata_cache:
+            try:
+                self._metadata_cache[key] = self._identity_entry(path)
+            except FileNotFoundError:
+                self._remember_metadata(path, None)
+                raise
+        return self._metadata_cache[key]
+
+    def declared_candidate_metadata(self, unit, roles, qpk):
+        """Bind only this invocation's selected declarations, then read fixed leaves."""
+        result = declared_metadata_output()
+        allowed_roles = {"consumer"} if unit == "codex-quant.service" else {"consumer", "builder"}
+        if not self._metadata_active or unit not in base.SERVICES or not set(roles) <= allowed_roles:
+            return result
+        self._metadata_bindings = {}
+        selected = {}
+        for role, values in roles.items():
+            selected[role] = {}
+            declaration = values["declaration"]
+            venv = values["venv"]
+            actual = interpreter_declaration_path(venv, venv=True)
+            if (role == "builder" or unit == "codex-quant.service") and (
+                actual["category"] == "external_venv_candidate"
+                and declaration["venv"]["selection"] == "explicit"
+                and declaration["venv"]["declaration"] == actual
+            ):
+                selected[role]["venv"] = venv
+                self._metadata_bindings[venv + "/pyvenv.cfg"] = ("file", 4096)
+                for name in ("python", "python3"):
+                    self._metadata_bindings[venv + "/bin/" + name] = ("entry", None)
+            first = declaration["path"]["first_unrecognized_declared_prefix"]
+            path = values["path"]
+            if first and isinstance(path, str) and values["interpreter"].get("stop_reason") == "unclassified_path_prefix":
+                prefixes = path.split(":")
+                index = first["index"]
+                if 0 <= index < len(prefixes) <= 16:
+                    prefix = prefixes[index]
+                    actual = interpreter_declaration_path(prefix)
+                    if (actual["path_sha256"] and actual == {k: v for k, v in first.items() if k != "index"}
+                        and all(p in ("/usr/bin", "/bin") for p in prefixes[:index])):
+                        selected[role]["prefix"] = prefix
+                        self._metadata_bindings[prefix + "/python3"] = ("entry", None)
+        if isinstance(qpk, str) and classify(qpk)["category"] == "qpk_mirror":
+            self._metadata_bindings[qpk + "/.git/HEAD"] = ("file", 256)
+            self._metadata_bindings[qpk + "/src/quant_platform_kit/strategy_lifecycle/return_collector.py"] = ("file", 2 * 1024 * 1024)
+        else:
+            qpk = None
+        try:
+            for role, paths in selected.items():
+                item = {}
+                if "venv" in paths:
+                    venv = paths["venv"]
+                    item["venv"] = {"path_sha256": base.digest(venv),
+                        "pyvenv_cfg": metadata_file_result(self, venv + "/pyvenv.cfg", 4096),
+                        "python_links": {name: metadata_entry_result(self, venv + "/bin/" + name)
+                                         for name in ("python", "python3")}}
+                if "prefix" in paths:
+                    path = paths["prefix"] + "/python3"
+                    item["path_prefix"] = {"path_sha256": base.digest(path), **metadata_entry_result(self, path)}
+                result["roles"][role] = item
+            if qpk is not None:
+                if qpk not in self._metadata_qpk:
+                    self._metadata_qpk[qpk] = {"root_path_sha256": base.digest(qpk),
+                        "head": metadata_file_result(self, qpk + "/.git/HEAD", 256, head=True),
+                        "return_collector": metadata_file_result(self, qpk + "/src/quant_platform_kit/strategy_lifecycle/return_collector.py", 2 * 1024 * 1024),
+                        "clean_checkout_proof": None}
+                result["qpk"] = dict(self._metadata_qpk[qpk])
+            result.update(status="metadata_only", reason=None)
+            return result
+        finally:
+            self._metadata_bindings = {}
+
+
+def declared_metadata_output(reason="metadata_unavailable"):
+    return {"scope": "same_snapshot_declared_candidate_metadata", "status": "unknown",
+            "reason": reason, "interpreter_execution_proof": False, "import_execution_proof": False,
+            "roles": {}, "qpk": None}
+
+
+def metadata_file_result(reader, path, limit, *, head=False):
+    result = {"status": "unknown", "sha256": None}
+    if head:
+        result["commit"] = None
+    try:
+        raw = reader._metadata_file(path, limit)
+        result.update(status="readable", sha256=base.digest(raw))
+        if head and re.fullmatch(rb"[0-9a-f]{40}\n?", raw):
+            result["commit"] = raw.decode("ascii").strip()
+    except FileNotFoundError:
+        result["status"] = "missing"
+    except (OSError, ValueError):
+        pass
+    return result
+
+
+def metadata_entry_result(reader, path):
+    result = {"status": "unknown", "kind": "unknown", "executable_mode": None,
+              "link_target_kind": "unknown"}
+    try:
+        entry = reader._metadata_entry(path)
+        kind = entry.get("kind")
+        if kind in {"regular", "symlink", "missing"}:
+            result.update(status="metadata_only", kind=kind,
+                          executable_mode=entry.get("executable_mode") if isinstance(entry.get("executable_mode"), bool) else None)
+            result["link_target_kind"] = {"/usr/bin/python3": "system_python3", "/usr/bin/python3.12": "system_python312"}.get(entry.get("accepted_link_target"), "unknown")
+    except FileNotFoundError:
+        result.update(status="missing", kind="missing")
+    except (OSError, ValueError):
+        pass
+    return result
 
 
 def query_systemd(unit):
@@ -927,7 +1137,8 @@ def static_identity_output():
               "status": "unknown", "stop_reason": None, "interpreter_invoked": False,
               "import_execution_proof": False, "import_resolution_proof": False,
               "roots": {}, "files": {}, "import_candidates": None, "interpreter": None,
-              "interpreter_declarations": None}
+              "interpreter_declarations": None,
+              "declared_candidate_metadata": declared_metadata_output()}
 
 
 def static_adoption_identity(unit, env, origins, reader, monitor, entry, checks):
@@ -958,6 +1169,7 @@ def static_adoption_identity(unit, env, origins, reader, monitor, entry, checks)
     result["interpreter_declarations"] = {"consumer": interpreter_declarations(
         env, origins, venv if unit == "codex-quant.service" else None, configured_venv, venv_origin,
         path_before, path_origin_before, common_applies=unit == "codex-quant.service")}
+    consumer_venv = venv if unit == "codex-quant.service" else None
     if unit == "codex-daily-briefing.service":
         aab = captured_aab
         result["roots"]["consume_aab"] = classify(aab)
@@ -1008,12 +1220,25 @@ def static_adoption_identity(unit, env, origins, reader, monitor, entry, checks)
     actual_qpk = identity_alias(reader, qpk, "qpk_mirror")
     result["qpk_import_candidates"] = {name: public_hash(reader, actual_qpk + "/src/quant_platform_kit/strategy_lifecycle/" + name)
                                        for name in QPK_NAMES} if actual_qpk else None
+    collect_metadata = getattr(reader, "declared_candidate_metadata", None)
+    if collect_metadata is not None:
+        roles = {"consumer": {"venv": consumer_venv, "path": env.get("PATH"),
+                              "declaration": result["interpreter_declarations"]["consumer"],
+                              "interpreter": result["interpreter"]}}
+        if unit == "codex-daily-briefing.service":
+            roles["builder"] = {"venv": venv, "path": childenv.get("PATH"),
+                                "declaration": result["interpreter_declarations"]["builder"],
+                                "interpreter": result["builder_interpreter"]}
+        result["declared_candidate_metadata"] = collect_metadata(unit, roles, actual_qpk)
     result["status"] = "static_candidates_only"
     return result
 
 
 def collect(*, query=query_systemd, reader=None):
     reader = reader or Reader()
+    begin_metadata = getattr(reader, "begin_metadata_collection", None)
+    if begin_metadata is not None:
+        begin_metadata()
     output = {
         "schema_version": 1,
         "scope": "fixed_path_override_snapshot",
@@ -1085,6 +1310,12 @@ def collect(*, query=query_systemd, reader=None):
                 unit, env, origins, reader, initial_monitor, entry,
                 result["helper_model_gate_checks"],
             )
+            supplemental_qpk = result["static_adoption_identity"]["declared_candidate_metadata"]["qpk"]
+            if supplemental_qpk is not None:
+                declared_pin = rootfiles.get("qpk-runtime.sha", {}).get("pin")
+                head = supplemental_qpk["head"]["commit"]
+                supplemental_qpk["head_matches_declared_pin"] = (
+                    head == declared_pin if head is not None and declared_pin is not None else None)
             if unit == "codex-quant.service":
                 if safe:
                     result["common_selected_paths"] = common(
@@ -1220,6 +1451,16 @@ def collect(*, query=query_systemd, reader=None):
         if result["invocation_snapshot_stable"] is not True or result["configuration_snapshot_stable"] is not True:
             result["static_adoption_identity"]["status"] = "unknown"
             result["static_adoption_identity"]["stop_reason"] = "configuration_or_invocation_changed_or_unavailable"
+            result["static_adoption_identity"]["declared_candidate_metadata"] = declared_metadata_output(
+                "configuration_or_invocation_changed_or_unavailable")
+    metadata_stable = getattr(reader, "metadata_snapshot_stable", None)
+    if metadata_stable is not None and not metadata_stable():
+        for result in output["services"].values():
+            result["static_adoption_identity"]["declared_candidate_metadata"] = declared_metadata_output(
+                "metadata_file_snapshot_changed_or_unavailable")
+    end_metadata = getattr(reader, "end_metadata_collection", None)
+    if end_metadata is not None:
+        end_metadata()
     # Dependency identifiers contain only roots already accepted by classify_root.
     return output
 
