@@ -323,6 +323,34 @@ selection are unchanged. The current QRS aggregate receiver clears rows
 when unavailable; valid AAB measurements remain local, and partial-row UI display is
 not claimed. Standalone dashboard refresh is a separate, unqualified rebuild path.
 
+#### DATA-03 下一步：有界运行采用计划（待独立评审/执行）
+
+[既有只读 run37471802240](https://github.com/QuantStrategyLab/AIAuditBridge/actions/runs/37471802240)
+使用 `a9de1f359c9545c45c69c456b5b753b8a1c6e987`，读回 health 静态根
+`38d172262ed60be3eb9579256649f5a1aa31f45a` / pin `086166...`，daily 静态根
+`1d06c4a2687a14545280855faf2cf854e524f8c7`；两者均 `failed/exit-code`，前后配置和
+invocation 稳定。venv/解释器仍 unknown；三项 QPK 候选文件 hash 不证明镜像 commit
+或真实 import。旧 release 是已观测回退配置，不是已知健康版本；不重发已用的一次诊断。
+
+采用差异按实际使用边界核对：#287/#289 为 lock/staging 安装路径；#290/#299 为 health
+正常调用的 artifact sync；#301/#306/#314 为 health 及日报 coverage/失败处理；#311
+为日报 wrapper/consumer 结果摘要；#316 为 QPK pin。#307 的 watcher/strategy_watch
+会被导入，但 health 直接调用 finding dispatch，不执行 watcher `run_watcher/main`；
+日报 builder 仅复用 health 的 coverage helper。日报 consumer 还经 dual-review imports
+加载 adapters 包及 CodexAdapter 定义，不能把这些依赖误归为仅 archive；常规 pipeline
+未因此调用 adapter 执行方法。Gateway 服务与 monthly audit 入口不由这条启动链运行。
+
+| 顺序 | 有限完成条件与执行边界 |
+| --- | --- |
+| 只读 preflight | 复用已有 `interpreter_declarations`、静态 roots、pin 与前后稳定字段；先把已声明的外部 venv/首个未知 PATH 前缀绑定为精确读集，再核 `pyvenv.cfg`、两个 Python 链接及共享 QPK 来源。现有 helper 不读取该外部根、QPK HEAD 或 ReturnCollector；若需扩展，只评审既有 helper/test 的固定读集，不接受自由路径。真实解释器执行、包/import 验证属于新增执行能力，须另行评审，不能藏入静态只读模式 |
+| inactive 安装 | 在真实 venv/数据绑定已确认后，仅用既有 `install_immutable_release.sh` 安装固定 source SHA；保留旧 release/venv/状态。脚本只验证 archive/目录，不代替依赖验证，也不切换服务。当前 workflow 尚无这条安装入口，所需执行接线须单独评审 |
+| 双服务采用/回退 | 先绑定 health/daily 各自的原源码根、解释器、QPK 和 timer 状态，再在不触 Gateway/共享 runner 的窗口分别切换并读回。恢复 timer 是可能触发业务的执行边界，不能当纯配置检查。当前没有现成 monitor switch/rollback mode；不得借用 Gateway `deploy` 或会立即运行 health 的完整 monitor deploy |
+| 自然周期验收 | 独立确认新 source/module 采用、真实 account/stream 与保留连续段；短样本仍 unavailable/min10。回退源码根不能撤销既有数据、Issue、通知或送达状态，也不保证共享 QPK/venv 同时回退；保留状态，不删除重试。两个旧 failed 服务不构成恢复健康证明 |
+
+本阶段仓库候选仅本 README 计划；不写 rollout 代码、不 dispatch、不改服务。后续如需
+补固定只读能力，先限定 `inspect_runtime_paths.py` 与其现有测试的独立候选；安装/切换
+能力及其准确写集、回滚绑定和执行验收另行审定，不把源码发布授权当作完整 deploy 验收。
+
 ## Fixed read-only runtime path snapshot / 限定只读路径快照
 
 The separate `VPS Codex Service Ops` mode `inspect-quant-paths` runs only
