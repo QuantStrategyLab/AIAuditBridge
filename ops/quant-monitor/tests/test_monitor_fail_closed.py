@@ -1814,6 +1814,7 @@ class TrustedProfileCoverageTests(unittest.TestCase):
 
     def _check_main_profile_coverage(self, *, missing_current_drift=False) -> None:
         from scripts import run_strategy_optimization_watcher as watcher
+        normalizer = _load_script("build_dashboard_snapshot")
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             profiles = {domain: [f"{domain}_profile"] for domain in HEALTH_CYCLE.DOMAINS}
@@ -1856,6 +1857,7 @@ class TrustedProfileCoverageTests(unittest.TestCase):
                 mock.patch.dict(sys.modules, {
                     "quant_platform_kit": qpk, "quant_platform_kit.strategy_lifecycle": lifecycle,
                     monitor.__name__: monitor, drift.__name__: drift, dashboard.__name__: dashboard,
+                    "build_dashboard_snapshot": normalizer,
                 }),
                 mock.patch.object(watcher, "dispatch_strategy_watch_findings", return_value={"errors": 0, "issues": []}) as dispatch,
                 mock.patch.object(HEALTH_CYCLE, "_run_operational_diagnosis", return_value={"status": "skipped"}),
