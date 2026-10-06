@@ -772,6 +772,7 @@ class OfflineTests(unittest.TestCase):
             "inspect": "vps-codex-service-ops", "deploy": "vps-codex-service-ops",
             "repair-ssh": "vps-codex-service-ops", "install-org-health-token": "org-health-token",
             "inspect-quant-runtime": "inspect-quant-runtime", "inspect-quant-paths": "inspect-quant-paths",
+            "stage-quant-runtime-inactive": "stage-quant-runtime-inactive",
             "inspect-audit-patch": "inspect-audit-patch", "apply-audit-patch": "apply-audit-patch",
             "retry-audit-patch-once": "retry-audit-patch-once",
             "release-gateway-failure-repairs": "release-gateway-failure-repairs",
@@ -780,32 +781,38 @@ class OfflineTests(unittest.TestCase):
             "inspect-recorded-daily-errors": "inspect-recorded-daily-errors",
         }
 
-        def routed(mode, event="workflow_dispatch", ref="refs/heads/main", repository="QuantStrategyLab/AIAuditBridge"):
+        def routed(mode, event="workflow_dispatch", ref="refs/heads/main", repository="QuantStrategyLab/AIAuditBridge",
+                   acknowledge_interruption=True, ssh_unban_ip=""):
             values = {"inputs.mode": mode, "github.event_name": event, "github.ref": ref,
-                      "github.repository": repository, "inputs.acknowledge_interruption": True}
+                      "github.repository": repository, "inputs.acknowledge_interruption": acknowledge_interruption,
+                      "inputs.ssh_unban_ip": ssh_unban_ip}
             jobs = []
             for job, condition in conditions.items():
                 terms = []
                 for term in condition.split(" && "):
-                    comparison = re.fullmatch(r"([a-z_.]+) (==|!=) '([^']+)'", term)
+                    comparison = re.fullmatch(r"([a-z_.]+) (==|!=) '([^']*)'", term)
                     if comparison:
                         key, operator, value = comparison.groups()
                         self.assertIn(key, values)
                         terms.append((values[key] == value) if operator == "==" else (values[key] != value))
                     else:
-                        self.assertEqual(term, "inputs.acknowledge_interruption")
-                        terms.append(values[term])
+                        self.assertIn(term, ("inputs.acknowledge_interruption", "!inputs.acknowledge_interruption"))
+                        terms.append(not acknowledge_interruption if term.startswith("!") else acknowledge_interruption)
                 if all(terms):
                     jobs.append(job)
             return jobs
 
         self.assertEqual(set(conditions), set(expected.values()))
         for mode, job in expected.items():
-            self.assertEqual(routed(mode), [job])
+            self.assertEqual(routed(mode, acknowledge_interruption=mode != "stage-quant-runtime-inactive"), [job])
+        self.assertEqual(routed("stage-quant-runtime-inactive", acknowledge_interruption=True), [])
+        self.assertEqual(routed("stage-quant-runtime-inactive", acknowledge_interruption=False,
+                                ssh_unban_ip="192.0.2.1"), [])
         for changes in ({"event": "push"}, {"ref": "refs/heads/other"}, {"repository": "other/repo"}):
             self.assertEqual(routed("inspect-monitor-failures", **changes), [])
             self.assertEqual(routed("inspect-daily-failure-sample", **changes), [])
             self.assertEqual(routed("inspect-recorded-daily-errors", **changes), [])
+            self.assertEqual(routed("stage-quant-runtime-inactive", acknowledge_interruption=False, **changes), [])
 
     def test_recorded_workflow_is_separate_exact_main_and_fixed_cli(self):
         workflow = (SCRIPT.parents[3] / ".github/workflows/vps_codex_service_ops.yml").read_text()
