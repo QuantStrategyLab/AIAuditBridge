@@ -86,7 +86,33 @@ def _collect_drift_results(run_drift_detection, *, domains=DOMAINS):
     return results, errors
 
 
-def _refresh_and_collect_drift(run_monitor, run_drift_detection, *, domains=DOMAINS):
+def _qualified_profile_rows(rows, domain, expected_profiles):
+    """Keep each current expected identity once; reject unrelated/duplicate rows."""
+    grouped: dict[str, list[Any]] = {}
+    unexpected = False
+    for row in rows:
+        profile = getattr(row, "strategy_profile", None)
+        # Older lifecycle objects may omit domain; their collecting call owns it.
+        if (
+            not isinstance(profile, str)
+            or profile not in expected_profiles
+            or getattr(row, "domain", domain) != domain
+        ):
+            unexpected = True
+            continue
+        grouped.setdefault(profile, []).append(row)
+    qualified = []
+    for profile, records in grouped.items():
+        if len(records) != 1:
+            unexpected = True
+            continue
+        qualified.append(records[0])
+    return qualified, {row.strategy_profile for row in qualified}, unexpected
+
+
+def _refresh_and_collect_drift(
+    run_monitor, run_drift_detection, *, domains=DOMAINS, expected_profiles_by_domain=None,
+):
     snapshots: dict[str, list[Any]] = {}
     results: dict[str, list[Any]] = {}
     errors: list[dict[str, str]] = []
@@ -95,6 +121,19 @@ def _refresh_and_collect_drift(run_monitor, run_drift_detection, *, domains=DOMA
             domain_snapshots = list(run_monitor(domain))
             if not domain_snapshots:
                 raise RuntimeError("monitor produced no snapshots")
+            if expected_profiles_by_domain is not None:
+                expected = set(expected_profiles_by_domain.get(domain, ()))
+                domain_snapshots, observed, unexpected = _qualified_profile_rows(
+                    domain_snapshots, domain, expected,
+                )
+                missing = expected - observed
+                if missing or unexpected:
+                    errors.append(_artifact_status_error(
+                        domain, code="monitor_data_unavailable",
+                        reason_code="profile_coverage_incomplete" if missing else "profile_coverage_unexpected",
+                    ))
+                if not domain_snapshots:
+                    continue
             snapshots[domain] = domain_snapshots
         except Exception as exc:
             errors.append(
@@ -106,7 +145,20 @@ def _refresh_and_collect_drift(run_monitor, run_drift_detection, *, domains=DOMA
             )
             continue
         try:
-            results[domain] = list(run_drift_detection(domain))
+            domain_drifts = list(run_drift_detection(domain))
+            if expected_profiles_by_domain is not None:
+                # Prior store evidence for a missing refresh cannot become a new
+                # degradation signal. Qualified current profiles remain usable.
+                domain_drifts, observed_drifts, unexpected = _qualified_profile_rows(
+                    domain_drifts, domain, observed,
+                )
+                missing = expected - observed_drifts
+                if missing or unexpected:
+                    errors.append(_artifact_status_error(
+                        domain, code="drift_data_unavailable",
+                        reason_code="profile_coverage_incomplete" if missing else "profile_coverage_unexpected",
+                    ))
+            results[domain] = domain_drifts
         except Exception as exc:
             errors.append(
                 {
@@ -146,13 +198,16 @@ def _artifact_status_error(
     return error
 
 
-def _load_lifecycle_artifact_status(
+def _load_expected_coverage(
     root: Path,
     *,
     domains=DOMAINS,
     now: datetime | None = None,
     max_age: timedelta = timedelta(hours=2),
-) -> tuple[tuple[str, ...], dict[str, str], list[dict[str, Any]]]:
+) -> tuple[
+    dict[str, list[str]], dict[str, str], str | None, dict[str, dict[str, Any]], set[str],
+]:
+    """Read trusted profile coverage and provenance from one validated payload."""
     path = root / _ARTIFACT_STATUS_RELATIVE_PATH
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -171,10 +226,10 @@ def _load_lifecycle_artifact_status(
         ):
             raise ValueError("artifact status is invalid or stale")
     except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-        return (), {}, [
-            _artifact_status_error(domain, error_type=type(exc).__name__)
+        return {}, {}, None, {
+            domain: _artifact_status_error(domain, error_type=type(exc).__name__)
             for domain in domains
-        ]
+        }, set()
 
     shared_upstream = payload.get("shared_upstream")
     shared_reason = None
@@ -183,15 +238,19 @@ def _load_lifecycle_artifact_status(
         if candidate in _GITHUB_UPSTREAM_CODES:
             shared_reason = candidate
 
-    ready: list[str] = []
+    expected_profiles: dict[str, list[str]] = {}
+    not_configured: set[str] = set()
     source_revisions: dict[str, str] = {}
-    errors: list[dict[str, Any]] = []
+    errors: dict[str, dict[str, Any]] = {}
     for domain in domains:
         status = domain_statuses.get(domain)
         if not isinstance(status, dict):
-            errors.append(_artifact_status_error(domain))
+            errors[domain] = _artifact_status_error(domain)
             continue
         profiles = status.get("profiles")
+        if status.get("status") == "not_configured" and profiles in (None, []):
+            not_configured.add(domain)
+            continue
         head_sha = str(status.get("head_sha") or "")
         valid_ready = (
             status.get("status") == "ready"
@@ -205,7 +264,7 @@ def _load_lifecycle_artifact_status(
             and all(isinstance(profile, str) and profile for profile in profiles)
         )
         if valid_ready:
-            ready.append(domain)
+            expected_profiles[domain] = list(profiles)
             source_revisions[domain] = head_sha
             continue
         domain_shared = status.get("shared_root_cause")
@@ -219,27 +278,39 @@ def _load_lifecycle_artifact_status(
         else:
             shared_for_domain = None
         reason = status.get("reason_code")
-        errors.append(
-            _artifact_status_error(
-                domain,
-                code=str(status.get("code") or "artifact_sync_status_unavailable"),
-                error_type=str(status.get("error_type") or "RuntimeError"),
-                reason_code=str(reason) if reason is not None else None,
-                shared_root_cause=shared_for_domain,
-                http_status=status.get("http_status")
-                if isinstance(status.get("http_status"), int)
-                else None,
-                rate_limit_reset_at=str(status["rate_limit_reset_at"])
-                if isinstance(status.get("rate_limit_reset_at"), str)
-                else (
-                    str(shared_upstream.get("rate_limit_reset_at"))
-                    if isinstance(shared_upstream, dict)
-                    and isinstance(shared_upstream.get("rate_limit_reset_at"), str)
-                    else None
-                ),
-            )
+        errors[domain] = _artifact_status_error(
+            domain,
+            code=str(status.get("code") or "artifact_sync_status_unavailable"),
+            error_type=str(status.get("error_type") or "RuntimeError"),
+            reason_code=str(reason) if reason is not None else None,
+            shared_root_cause=shared_for_domain,
+            http_status=status.get("http_status")
+            if isinstance(status.get("http_status"), int)
+            else None,
+            rate_limit_reset_at=str(status["rate_limit_reset_at"])
+            if isinstance(status.get("rate_limit_reset_at"), str)
+            else (
+                str(shared_upstream.get("rate_limit_reset_at"))
+                if isinstance(shared_upstream, dict)
+                and isinstance(shared_upstream.get("rate_limit_reset_at"), str)
+                else None
+            ),
         )
-    return tuple(ready), source_revisions, errors
+    return expected_profiles, source_revisions, str(payload["as_of"]), errors, not_configured
+
+
+def _load_lifecycle_artifact_status(
+    root: Path, *, domains=DOMAINS, now: datetime | None = None,
+    max_age: timedelta = timedelta(hours=2),
+) -> tuple[tuple[str, ...], dict[str, str], list[dict[str, Any]]]:
+    """Preserve the existing three-part status API and legacy error behavior."""
+    expected, revisions, _as_of, errors, not_configured = _load_expected_coverage(
+        root, domains=domains, now=now, max_age=max_age,
+    )
+    return tuple(expected), revisions, [
+        errors[domain] if domain in errors else _artifact_status_error(domain)
+        for domain in domains if domain in errors or domain in not_configured
+    ]
 
 
 def _format_data_error_alerts(
@@ -1221,7 +1292,9 @@ def main() -> int:
     from quant_platform_kit.strategy_lifecycle.performance_monitor import run_monitor
     from scripts.run_strategy_optimization_watcher import dispatch_strategy_watch_findings
 
-    ready_domains, source_revisions, artifact_errors = _load_lifecycle_artifact_status(root)
+    expected_profiles, source_revisions, _source_as_of, artifact_errors_by_domain, _not_configured = _load_expected_coverage(root)
+    ready_domains = tuple(expected_profiles)
+    artifact_errors = list(artifact_errors_by_domain.values())
 
     def run_monitor_with_revision(domain: str):
         # QPK #615 requires observation provenance; use the trusted artifact head_sha.
@@ -1231,6 +1304,7 @@ def main() -> int:
         run_monitor_with_revision,
         run_drift_detection,
         domains=ready_domains,
+        expected_profiles_by_domain=expected_profiles,
     )
     data_errors = artifact_errors + lifecycle_errors
     build_dashboard(output_dir=str(dash_dir), output_format="json")
@@ -1246,6 +1320,34 @@ def main() -> int:
         health_file=json_path,
         review_dir=review_dir,
     )
+    collector_payload_invalid = (
+        normalized_payload.get("data_status") != "ready"
+        or bool(normalized_payload.get("errors"))
+    )
+    refreshed_identities = {
+        (domain, snapshot.strategy_profile)
+        for domain, snapshots in snapshot_results.items()
+        for snapshot in snapshots
+    }
+    # A prior store row cannot repair an expected profile's missing refresh.
+    # Keep other current rows locally; QRS's aggregate unavailable contract
+    # intentionally clears its display rows at the receiver.
+    normalized_rows = [
+        row for row in normalized_payload.get("strategies", [])
+        if (row.get("domain"), row.get("profile")) in refreshed_identities
+    ]
+    normalized_payload["strategies"] = normalized_rows
+    normalized_payload["summary"] = {
+        "strategy_count": len(normalized_rows),
+        **{status: sum(row.get("status") == status for row in normalized_rows)
+           for status in ("healthy", "watch", "review", "critical")},
+    }
+    if data_errors:
+        normalized_payload["data_status"] = "unavailable"
+        normalized_payload["errors"] = list(dict.fromkeys([
+            *normalized_payload.get("errors", []),
+            *(error["code"] for error in data_errors),
+        ]))
     normalized_path.parent.mkdir(parents=True, exist_ok=True)
     temp_name: str | None = None
     try:
@@ -1269,10 +1371,6 @@ def main() -> int:
                 Path(temp_name).unlink()
             except FileNotFoundError:
                 pass
-    collector_payload_invalid = (
-        normalized_payload.get("data_status") != "ready"
-        or bool(normalized_payload.get("errors"))
-    )
     if not collector_payload_invalid and json_path.is_file():
         try:
             payload = json.loads(json_path.read_text(encoding="utf-8"))
@@ -1280,13 +1378,24 @@ def main() -> int:
             payload = {}
             collector_payload_invalid = True
         if isinstance(payload.get("strategies"), list):
-            strategies = [row for row in payload["strategies"] if isinstance(row, dict)]
+            strategies = [
+                row for row in payload["strategies"] if isinstance(row, dict)
+                and (row.get("domain"), row.get("strategy_profile")) in refreshed_identities
+            ]
     elif not json_path.is_file():
         collector_payload_invalid = True
 
     data_error_lines, data_alert_identities = _format_data_error_alerts(data_errors)
     alert_identities: list[str] = list(data_alert_identities)
-    monitoring_findings = _build_monitoring_findings(strategies, drift_results)
+    current_drift_identities = {
+        (domain, drift.strategy_profile)
+        for domain, drifts in drift_results.items()
+        for drift in drifts
+    }
+    monitoring_findings = _build_monitoring_findings([
+        row for row in strategies
+        if (row.get("domain"), row.get("strategy_profile")) in current_drift_identities
+    ], drift_results)
     optimization_watch = dispatch_strategy_watch_findings(
         monitoring_findings,
         dry_run=False,

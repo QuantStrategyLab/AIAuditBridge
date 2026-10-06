@@ -53,45 +53,7 @@ def _load_expected_coverage(root: Path):
     health_cycle = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(health_cycle)
 
-    ready_domains, source_revisions, errors = health_cycle._load_lifecycle_artifact_status(root)
-    errors_by_domain = {error["domain"]: error for error in errors}
-    not_configured: set[str] = set()
-    try:
-        payload = json.loads((root / _STATUS_RELATIVE_PATH).read_text(encoding="utf-8"))
-        source_as_of = str(payload["as_of"])
-        domains = payload["domains"]
-        parsed_as_of = datetime.fromisoformat(source_as_of.replace("Z", "+00:00"))
-        age = datetime.now(timezone.utc) - parsed_as_of.astimezone(timezone.utc)
-        source_is_fresh = (
-            payload.get("schema_version") == "quant_monitor_lifecycle_artifact_status.v1"
-            and parsed_as_of.tzinfo is not None
-            and age <= health_cycle.timedelta(hours=2)
-            and age >= -health_cycle.timedelta(minutes=5)
-            and isinstance(domains, dict)
-        )
-        if source_is_fresh:
-            for domain in DOMAINS:
-                status = domains.get(domain)
-                if (
-                    isinstance(status, dict)
-                    and status.get("status") == "not_configured"
-                    and status.get("profiles", []) in (None, [])
-                ):
-                    not_configured.add(domain)
-                    errors_by_domain.pop(domain, None)
-        expected_profiles = {
-            domain: list(domains[domain]["profiles"])
-            for domain in ready_domains
-        }
-    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
-        source_as_of = None
-        expected_profiles = {}
-        for domain in DOMAINS:
-            errors_by_domain.setdefault(
-                domain,
-                {"domain": domain, "code": "artifact_sync_status_unavailable", "error_type": "ValueError"},
-            )
-    return expected_profiles, source_revisions, source_as_of, errors_by_domain, not_configured
+    return health_cycle._load_expected_coverage(root, domains=DOMAINS)
 
 
 def _valid_dashboard_rows(
