@@ -94,7 +94,7 @@ class OfflineTests(unittest.TestCase):
         return b"".join((json.dumps({"_SYSTEMD_UNIT": unit, "_SYSTEMD_INVOCATION_ID": invocation,
                                      "MESSAGE": message}) + "\n").encode() for message in messages)
 
-    def collect(self, *, journals=None, override=None):
+    def collect(self, *, journals=None, override=None, daily_only=False):
         m = self.m
         requests = []
         counts = {}
@@ -112,7 +112,138 @@ class OfflineTests(unittest.TestCase):
             unit = argv[-2].split("=", 1)[1]
             return m.ReadResult(data=(journals or {}).get(unit, b""), returncode=0)
 
-        return m.collect(runner=runner), requests
+        return (m.collect(runner=runner, daily_only=True) if daily_only else m.collect(runner=runner)), requests
+
+    def test_daily_sample_validates_all_64_and_keeps_diagnosis_unknown(self):
+        messages = ["unclassified " + SECRET] * 62 + [
+            '  "failure_stage": "briefing_input_processing",', '  "failure_category": "io_error",',
+        ]
+        result, calls = self.collect(daily_only=True, journals={DAILY: self.records(DAILY, messages)})
+        self.assertEqual(set(result["units"]), {DAILY})
+        self.assertEqual(calls, [self.m.systemd_command(DAILY), self.m.journal_command(DAILY, DID), self.m.systemd_command(DAILY)])
+        unit = result["units"][DAILY]
+        self.assertEqual(unit["diagnosis"], "unknown")
+        self.assertTrue(unit["journal"]["truncated"])
+        self.assertTrue(unit["journal"]["current_invocation_matched"])
+        sample = unit["sampled_evidence"]
+        self.assertTrue(sample["available"])
+        self.assertFalse(sample["complete"])
+        self.assertFalse(sample["absence_proven"])
+        self.assertEqual(sample["record_count"], 64)
+        self.assertEqual(sample["stage_counts"]["briefing_input_processing"], 1)
+        self.assertEqual(sample["error_counts"]["io_error"], 1)
+        self.assertFalse(any(unit["stage_counts"].values()))
+        self.assertFalse(any(unit["error_counts"].values()))
+        self.assertNotIn(SECRET, json.dumps(result))
+
+    def test_daily_63_records_keep_normal_classification_and_no_partial_sample(self):
+        messages = ["unclassified"] * 62 + ["ImportError: " + SECRET]
+        result, calls = self.collect(daily_only=True, journals={DAILY: self.records(DAILY, messages)})
+        unit = result["units"][DAILY]
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(unit["diagnosis"], "observed_error")
+        self.assertFalse(unit["journal"]["truncated"])
+        self.assertEqual(unit["error_counts"]["import_error"], 1)
+        self.assertFalse(unit["sampled_evidence"]["available"])
+        self.assertNotIn(SECRET, json.dumps(result))
+
+    def test_daily_64_zero_counts_never_prove_error_absence(self):
+        result, _ = self.collect(daily_only=True, journals={DAILY: self.records(DAILY, [SECRET] * 64)})
+        sample = result["units"][DAILY]["sampled_evidence"]
+        self.assertTrue(sample["available"])
+        self.assertFalse(sample["absence_proven"])
+        self.assertFalse(sample["complete"])
+        self.assertFalse(any(sample["stage_counts"].values()))
+        self.assertFalse(any(sample["error_counts"].values()))
+        self.assertEqual(result["units"][DAILY]["diagnosis"], "unknown")
+        self.assertNotIn(SECRET, json.dumps(result))
+
+    def test_daily_sample_rejects_any_malformed_or_mismatched_record(self):
+        prefix = self.records(DAILY, ["ImportError: " + SECRET] * 63)
+        cases = [prefix + b"{\n", prefix + b"[]\n", prefix + b"\xff\n",
+                 prefix + self.records(QUANT, ["ImportError: " + SECRET], DID),
+                 prefix + self.records(DAILY, ["ImportError: " + SECRET], QID),
+                 prefix + self.records(DAILY, [[SECRET]]),
+                 prefix + self.records(DAILY, [None]),
+                 prefix + self.records(DAILY, ["ImportError: " + SECRET]).replace(b'"MESSAGE":', b'"MESSAGE": "a", "MESSAGE":'),
+                 prefix + self.records(DAILY, ["ImportError: " + SECRET]).replace(b'"MESSAGE":', b'"untrusted": NaN, "MESSAGE":'),
+                 prefix + self.records(DAILY, ["ImportError: " + SECRET]).replace(b'"MESSAGE":', b'"untrusted": Infinity, "MESSAGE":')]
+        for data in cases:
+            result, _ = self.collect(daily_only=True, journals={DAILY: data})
+            unit = result["units"][DAILY]
+            self.assertEqual(unit["diagnosis"], "unknown")
+            self.assertFalse(unit["sampled_evidence"]["available"])
+            self.assertFalse(any(unit["sampled_evidence"]["error_counts"].values()))
+            self.assertNotIn(SECRET, json.dumps(result))
+
+    def test_daily_sample_never_parses_more_than_64_or_byte_capped_input(self):
+        for data in (self.records(DAILY, ["ImportError: " + SECRET] * 65),
+                     self.records(DAILY, ["ImportError: " + SECRET] * 64) + b" " * 65536):
+            with mock.patch.object(self.m, "evidence", side_effect=ExternalAttempt("sample over budget")):
+                result, _ = self.collect(daily_only=True, journals={DAILY: data})
+            self.assertFalse(result["units"][DAILY]["sampled_evidence"]["available"])
+            self.assertNotIn(SECRET, json.dumps(result))
+
+    def test_daily_sample_timeout_stderr_permission_and_byte_truncation_discard_counts(self):
+        data = self.records(DAILY, ["ImportError: " + SECRET] * 64)
+        for flags in ({"timed_out": True}, {"stderr_seen": True}, {"returncode": 1}, {"truncated": True}):
+            result, _ = self.collect(daily_only=True, override=lambda args, _: self.m.ReadResult(
+                data=data, **{"returncode": 0, **flags}
+            ) if args[0] == self.m.JOURNALCTL else None)
+            unit = result["units"][DAILY]
+            self.assertFalse(unit["sampled_evidence"]["available"])
+            self.assertFalse(any(unit["sampled_evidence"]["error_counts"].values()))
+            self.assertEqual(unit["diagnosis"], "unknown")
+            self.assertNotIn(SECRET, json.dumps(result))
+
+    def test_daily_sample_race_or_unknown_systemd_metadata_discards_counts(self):
+        for changes, changed_read in (({"InvocationID": QID}, 2), ({"MainPID": "42"}, 2),
+                                      ({"ExecMainStatus": "3"}, 2), ({"ActiveState": SECRET}, None)):
+            result, _ = self.collect(daily_only=True,
+                journals={DAILY: self.records(DAILY, ["ImportError: " + SECRET] * 64)},
+                override=lambda args, count: self.m.ReadResult(data=self.properties(DAILY, **changes), returncode=0)
+                if args[0] == self.m.SYSTEMCTL and (changed_read is None or count == changed_read) else None)
+            unit = result["units"][DAILY]
+            self.assertFalse(unit["sampled_evidence"]["available"])
+            self.assertFalse(any(unit["sampled_evidence"]["stage_counts"].values()))
+            self.assertFalse(any(unit["sampled_evidence"]["error_counts"].values()))
+            self.assertEqual(unit["diagnosis"], "unknown")
+            self.assertNotIn(SECRET, json.dumps(result))
+
+    def test_daily_only_unknown_invocation_never_reads_any_other_unit(self):
+        result, calls = self.collect(daily_only=True, override=lambda args, _: self.m.ReadResult(
+            data=self.properties(DAILY, InvocationID=""), returncode=0
+        ))
+        self.assertEqual(calls, [self.m.systemd_command(DAILY), self.m.systemd_command(DAILY)])
+        self.assertEqual(set(result["units"]), {DAILY})
+        self.assertFalse(result["units"][DAILY]["sampled_evidence"]["available"])
+        for unsupported in (DAILY, [DAILY], 1, None):
+            with self.assertRaises(ValueError):
+                self.m.collect(daily_only=unsupported)
+
+    def test_daily_only_cli_is_strict_and_old_inspect_route_stays_unchanged(self):
+        for argv in ([], ["--daily-only"], ["--inspect", "--inspect-daily-only"],
+                     ["--inspect-daily-only", SECRET], ["--inspect-daily-only", "--fixture-test"]):
+            with mock.patch.object(self.m, "collect", side_effect=ExternalAttempt("invalid CLI read")), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(self.m.main(argv), 64)
+        for argv, expected in ((["--inspect"], {}), (["--inspect-daily-only"], {"daily_only": True})):
+            with mock.patch.object(self.m, "collect", return_value={}) as collect, contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(self.m.main(argv), 0)
+            collect.assert_called_once_with(**expected)
+        result, _ = self.collect(journals={DAILY: self.records(DAILY, ["ImportError: " + SECRET] * 64)})
+        self.assertNotIn("sampled_evidence", result["units"][DAILY])
+        self.assertEqual(result["units"][DAILY]["diagnosis"], "unknown")
+
+    def test_daily_sample_malicious_message_cannot_escape_fixed_enums(self):
+        messages = [json.dumps({"failure_stage": SECRET, "failure_category": SECRET,
+                               "instructions": "restart " + QUANT, "path": SECRET})] * 64
+        result, calls = self.collect(daily_only=True, journals={DAILY: self.records(DAILY, messages)})
+        unit = result["units"][DAILY]
+        self.assertTrue(unit["sampled_evidence"]["available"])
+        self.assertFalse(any(unit["sampled_evidence"]["stage_counts"].values()))
+        self.assertFalse(any(unit["sampled_evidence"]["error_counts"].values()))
+        self.assertNotIn(SECRET, json.dumps(result))
+        self.assertEqual(len(calls), 3)
 
     def test_monitor_alert_exit_two_is_evidence_not_python_damage(self):
         message = json.dumps({"ok": False, "telegram_alerts": [SECRET], "data_errors": [],
@@ -486,6 +617,7 @@ class OfflineTests(unittest.TestCase):
             "retry-audit-patch-once": "retry-audit-patch-once",
             "release-gateway-failure-repairs": "release-gateway-failure-repairs",
             "inspect-monitor-failures": "inspect-monitor-failures",
+            "inspect-daily-failure-sample": "inspect-daily-failure-sample",
         }
 
         def routed(mode, event="workflow_dispatch", ref="refs/heads/main", repository="QuantStrategyLab/AIAuditBridge"):
@@ -512,6 +644,25 @@ class OfflineTests(unittest.TestCase):
             self.assertEqual(routed(mode), [job])
         for changes in ({"event": "push"}, {"ref": "refs/heads/other"}, {"repository": "other/repo"}):
             self.assertEqual(routed("inspect-monitor-failures", **changes), [])
+            self.assertEqual(routed("inspect-daily-failure-sample", **changes), [])
+
+    def test_daily_workflow_is_exact_manual_gate_and_runs_only_strict_flag(self):
+        workflow = (SCRIPT.parents[3] / ".github/workflows/vps_codex_service_ops.yml").read_text()
+        job = workflow.split("  inspect-daily-failure-sample:\n", 1)[1].split("\n  inspect-monitor-failures:", 1)[0]
+        for text in ("inputs.mode == 'inspect-daily-failure-sample'", "github.event_name == 'workflow_dispatch'",
+                     "github.repository == 'QuantStrategyLab/AIAuditBridge'", "github.ref == 'refs/heads/main'",
+                     "environment: codex-vps-ops", "persist-credentials: false", '[ "$RUN_MODE" = inspect-daily-failure-sample ]',
+                     '[ "$RUN_EVENT_NAME" = workflow_dispatch ]', '[ "$RUN_WORKFLOW_SHA" = "$RUN_SHA" ]',
+                     '[ "$current_main" = "$RUN_SHA" ]', 'checkout_status="$(git status --porcelain --untracked-files=all)"',
+                     "env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C", "/usr/bin/python3 -I -B", 'inspect_monitor_failures.py" --inspect-daily-only'):
+            self.assertIn(text, job)
+        for text in ("sudo", "secrets.", "OPENAI", "ANTHROPIC", "health_check.sh", "daily_briefing_pipeline.sh",
+                     "acknowledge_interruption", " --inspect\n", "systemctl", "journalctl"):
+            self.assertNotIn(text, job)
+        self.assertIn("inputs.mode != 'inspect-daily-failure-sample'", workflow.split("  inspect-daily-failure-sample:", 1)[0])
+        self.assertIn("default: inspect\n", workflow)
+        self.assertNotIn("  schedule:", workflow)
+        self.assertNotIn("  push:", workflow)
 
 
 if __name__ == "__main__":
