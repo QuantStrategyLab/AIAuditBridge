@@ -271,6 +271,12 @@ normalized 文件后，其 SHA256 未变；curl/远端发送未执行。所有�
 及拟采用 `286757...` 分别记录，不能把 CI 通过当作精确 runtime lock 或生产采用证明。
 [main CI 安装日志](https://github.com/QuantStrategyLab/AIAuditBridge/actions/runs/37465133758/job/112274151998)
 为 pandas 3.0.6 / numpy 2.5.3，ops lock 为 3.0.5 / 2.5.2；该 CI 未验证精确 runtime lock。
+新增独立精确 lock 阶段已通过：官方原 hash 锁定的 27 包下载后在隔离 venv 离线安装，
+实际 pandas 3.0.5 / numpy 2.5.2，`pip check` 成功。已合 test `065152df...` 的 64/64、
+QPK `086166...` 与 `286757...` 的实际消费者 synthetic 路径各 13/13，均无失败或 skip；
+导入的相关 AAB 路径匹配 `59cc6dde...`。产品测试进程的外部尝试均为 0，官方 wheel
+下载有真实网络，不能将全任务表述为零网络。这关闭有界精确依赖兼容阶段；pin/部署、
+实际记录覆盖和运行采用仍未验，不把旧 QPK characterization 当 live 收益资格。
 旧 QPK 仍体现旧 research/CSV 行为，不因此取得 live 收益资格。
 
 现有 publish 脚本直接发送 health cycle 的 normalized 文件，只检查 schema，不二次
@@ -290,8 +296,10 @@ consumer run passed 13, including real health/daily entrypoints. Exact PR CI3746
 and main CI37465133758 each passed all five jobs; Python reported 2110 passed,
 15 skipped and 941 subtests passed. The initial fixture-loader CI failure was fixed
 without changing production imports. CI installed pandas 3.0.6 / numpy 2.5.3 while
-the ops lock pins 3.0.5 / 2.5.2. Exact locked dependencies and runtime adoption remain
-pending; the runtime QPK pin file still selects 086166.
+the ops lock pins 3.0.5 / 2.5.2. A separate exact 27-package lock venv now passed
+pip check, merged regression 64/64 and each fixed QPK consumer run 13/13, with
+zero product-test external attempts; official wheel acquisition used network.
+Runtime adoption remains unverified; the runtime QPK pin file still selects 086166.
 Sample thresholds, QPK return algorithms and the runtime pin
 remain separate adoption decisions. The current QRS aggregate receiver clears rows
 when unavailable; valid AAB measurements remain local, and partial-row UI display is
