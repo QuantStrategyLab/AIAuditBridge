@@ -111,10 +111,13 @@ POST /v1/ai/analyze
   → return {output, model, latency}
 ```
 
-`Strategy Optimization Watcher` may use this endpoint for one bounded,
-text-only diagnosis of an already verified `qsl.research_task.v1`.  The
-diagnosis is an Issue comment, not a code change or experiment: it does not
-receive raw bars or credentials and cannot activate P4--P6.
+`Strategy Optimization Watcher` diagnosis uses the Execute route through
+`service/provider_scenarios.py`, not this Analyze endpoint. It consumes a
+verified `qsl.research_task.v1` and produces an advisory Issue comment without
+raw bars, credentials, or P4--P6 authority. Provider eligibility and fallback
+rules remain in the [scenario policy](provider-call-scenarios-2026-09-17.md).
+The [implementation and audit register](bounded_research_diagnosis.md#2026-10-06-implementation-and-audit-register)
+distinguishes that diagnosis from candidate generation and real validation.
 
 ### Execute (async)
 ```
