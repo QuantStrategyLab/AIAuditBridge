@@ -377,6 +377,26 @@ unsupported，系统调用不可达为 unknown，不退回 real uid 检查，不
 未枚举的其它残留保持 unknown。此组不会升级旧 interpreter/import/adoption gates，也不能
 恢复已经丢弃的 installer 原生退出信息。
 
+随后独立只读 [run37521955303](https://github.com/QuantStrategyLab/AIAuditBridge/actions/runs/37521955303)
+（main `b7651526b6d03cc9cb0d25055326763f20939d78`）在 2026-10-06 19:51:14–15 UTC
+取得稳定 metadata：release parent 为 0755 目录，当前 runner effective read/execute=true、
+write=false，owner/group 匹配均 false；固定35ac target 为 absent。其它残留未枚举；原安装
+child exit 仍 unknown。原 /opt 安装路线保持 blocked，不改权限/身份、不重跑安装。
+
+consumer 依赖导入不必等待 /opt 安装。本批四文件候选新增独立 `check-quant-consumers-offline`
+模式，沿既有 protected workflow/runner、main gate 和固定35ac checkout，只在 RUNNER_TEMP
+本次 run 独占的新目录创建临时纯源码快照。Git archive 严格选择已审38个.py及lock/pin，共40文件，
+不包含 .git、ignored文件、运行data、.venv、工作流或测试。先核规范相对路径、普通blob、
+tar完整清单/大小/hash，拒绝重复、缺失、额外、链接/设备/稀疏条目，再安全写入新目录并复核
+整个快照。既有目录拒绝覆盖或重用；失败不清理未知残留，不写 /opt、旧data/venv或shared镜像。
+
+后续新隔离进程使用已验DATA03 venv和普通Python导入，复用既有源码manifest、QPK origin/
+RECORD/固定hash、pyc和副作用守卫；应用根只指向这份40文件快照，.git/data/.venv仍禁止。
+不加入自定义加载器或FileFinder行为。输出只证明 temporary-source consumer dependency/import
+readiness；immutable-release、shell-selection、runtime-adoption和health-recovery proof均为false。
+这不是将被拒绝的部署改址。真实imports-only运行仍待source CI及独立执行验收；原两个旧服务
+在上述观察时仍failed，不是healthy LKG。快照是临时验证副本，runner清理后的保留状态不作保证。
+
 采用差异按实际使用边界核对：#287/#289 为 lock/staging 安装路径；#290/#299 为 health
 正常调用的 artifact sync；#301/#306/#314 为 health 及日报 coverage/失败处理；#311
 为日报 wrapper/consumer 结果摘要；#316 为 QPK pin。#307 的 watcher/strategy_watch

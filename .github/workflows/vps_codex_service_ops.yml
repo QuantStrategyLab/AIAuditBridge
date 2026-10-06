@@ -14,6 +14,7 @@ on:
           - inspect-quant-paths
           - stage-quant-runtime-inactive
           - install-quant-release-inactive
+          - check-quant-consumers-offline
           - inspect-monitor-failures
           - inspect-daily-failure-sample
           - inspect-recorded-daily-errors
@@ -42,6 +43,521 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  check-quant-consumers-offline:
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'QuantStrategyLab/AIAuditBridge' && github.ref == 'refs/heads/main' && inputs.mode == 'check-quant-consumers-offline' && !inputs.acknowledge_interruption && inputs.ssh_unban_ip == ''
+    environment: codex-vps-ops
+    runs-on:
+      - self-hosted
+      - codex-vps
+    timeout-minutes: 10
+    steps:
+      - name: Checkout fixed consumer application source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: 35ac71176127f07e00fe04dbc793777f3c595bc0
+          persist-credentials: false
+
+      - name: Verify exact main controller and fixed clean application source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_REPOSITORY: ${{ github.repository }}
+          RUN_REF: ${{ github.ref }}
+          RUN_SHA: ${{ github.sha }}
+          RUN_WORKFLOW_REF: ${{ github.workflow_ref }}
+          RUN_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          RUN_EVENT_NAME: ${{ github.event_name }}
+          RUN_MODE: ${{ inputs.mode }}
+          RUN_ACK: ${{ inputs.acknowledge_interruption }}
+          RUN_UNBAN_IP: ${{ inputs.ssh_unban_ip }}
+        run: |
+          set -euo pipefail
+          [ "$RUN_EVENT_NAME" = workflow_dispatch ]
+          [ "$RUN_MODE" = check-quant-consumers-offline ]
+          [ "$RUN_REPOSITORY" = QuantStrategyLab/AIAuditBridge ]
+          [ "$RUN_REF" = refs/heads/main ]
+          [ "$RUN_ACK" = false ]
+          [ -z "$RUN_UNBAN_IP" ]
+          [[ "$RUN_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [ "$RUN_WORKFLOW_REF" = QuantStrategyLab/AIAuditBridge/.github/workflows/vps_codex_service_ops.yml@refs/heads/main ]
+          [ "$RUN_WORKFLOW_SHA" = "$RUN_SHA" ]
+          cd "$GITHUB_WORKSPACE"
+          [ "$(pwd -P)" = "$GITHUB_WORKSPACE" ]
+          [ "$(git rev-parse HEAD)" = 35ac71176127f07e00fe04dbc793777f3c595bc0 ]
+          [ -z "$(git status --porcelain --untracked-files=all)" ]
+          current_main="$(timeout 30s gh api repos/QuantStrategyLab/AIAuditBridge/git/ref/heads/main --jq '.object.sha')"
+          [ "$current_main" = "$RUN_SHA" ]
+          sha256sum --check --status <<'SHA256'
+          23d7349718fb61cd8e841641f2197dddf90ae04f1b8b9e5ccd9ac3417eb0165f  ops/quant-monitor/scripts/common_env.sh
+          e8d4ffe8c5d89347dd4790ce02b0d5867fb8ee922b0c11aa4d680cd31a73f644  ops/quant-monitor/requirements-linux-py312.lock
+          bd5f3531aeb52dd77e4d6a08ad2bc1cb6adec7223c25abb572586d982ec968e9  ops/quant-monitor/qpk-runtime.sha
+          SHA256
+
+      - name: Prepare one tracked temporary consumer source snapshot
+        run: |
+          set -euo pipefail
+          env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C /usr/bin/python3 -I -B - \
+            "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$GITHUB_RUN_ID" <<'PY'
+          import hashlib
+          import io
+          import json
+          import os
+          from pathlib import Path, PurePosixPath
+          import re
+          import stat
+          import subprocess
+          import sys
+          import tarfile
+
+          SOURCE_SHA = "35ac71176127f07e00fe04dbc793777f3c595bc0"
+          EXPECTED_SOURCE_BYTES = 480370
+          SOURCE_FILES = (
+              'client/__init__.py',
+              'client/config.py',
+              'client/errors.py',
+              'client/gateway_client.py',
+              'ops/quant-monitor/qpk-runtime.sha',
+              'ops/quant-monitor/requirements-linux-py312.lock',
+              'ops/quant-monitor/scripts/build_dashboard_snapshot.py',
+              'ops/quant-monitor/scripts/daily_briefing_builder.py',
+              'ops/quant-monitor/scripts/health_cycle.py',
+              'scripts/__init__.py',
+              'scripts/consume_daily_briefing.py',
+              'scripts/run_strategy_optimization_watcher.py',
+              'service/__init__.py',
+              'service/adapters/__init__.py',
+              'service/adapters/codex_adapter.py',
+              'service/adapters/cursor_adapter.py',
+              'service/adapters/execution.py',
+              'service/adapters/llm_adapter.py',
+              'service/automation_contracts.py',
+              'service/autonomy.py',
+              'service/briefing_consumer.py',
+              'service/briefing_dispatch.py',
+              'service/contracts.py',
+              'service/dual_review.py',
+              'service/dual_review_briefing.py',
+              'service/dual_review_dispatch.py',
+              'service/dual_review_gateway.py',
+              'service/dual_review_orchestrator.py',
+              'service/dual_review_secondary.py',
+              'service/dual_review_triggers.py',
+              'service/model_catalog.py',
+              'service/model_catalog_sync.py',
+              'service/model_resolver.py',
+              'service/model_router.py',
+              'service/provider_scenarios.py',
+              'service/research_task.py',
+              'service/runtime_digest.py',
+              'service/strategy_automation_registry.py',
+              'service/strategy_optimization_policy.py',
+              'service/strategy_watch.py',
+          )
+          ENV = {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C", "GIT_CONFIG_NOSYSTEM": "1",
+                 "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_NO_REPLACE_OBJECTS": "1", "GIT_CONFIG_COUNT": "2",
+                 "GIT_CONFIG_KEY_0": "core.hooksPath", "GIT_CONFIG_VALUE_0": "/dev/null",
+                 "GIT_CONFIG_KEY_1": "core.fsmonitor", "GIT_CONFIG_VALUE_1": "false"}
+          failure = "source_directory"
+
+          def check(condition):
+              if not condition:
+                  raise ValueError("temporary source validation failed")
+
+          def git(repo, *args):
+              return subprocess.run(["/usr/bin/git", "-C", str(repo), *args], env=ENV,
+                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=30, check=True).stdout
+
+          def blob_hash(content):
+              return hashlib.sha1(b"blob " + str(len(content)).encode() + b"\0" + content).hexdigest()
+
+          def verify_snapshot(root, manifest, directories):
+              expected = set(manifest) | directories
+              seen = set()
+              check(root.is_dir() and not root.is_symlink() and root.resolve() == root)
+              check(stat.S_IMODE(root.stat().st_mode) == 0o700)
+              def visit(directory):
+                  for path in directory.iterdir():
+                      relative = str(path.relative_to(root))
+                      check(relative in expected and relative not in seen)
+                      seen.add(relative)
+                      info = path.lstat()
+                      mode = info.st_mode
+                      if relative in directories:
+                          check(stat.S_ISDIR(mode) and stat.S_IMODE(mode) == 0o755)
+                          visit(path)
+                      else:
+                          expected_mode, oid, size = manifest[relative]
+                          check(stat.S_ISREG(mode) and info.st_nlink == 1 and stat.S_IMODE(mode) == int(expected_mode, 8) & 0o777)
+                          content = path.read_bytes()
+                          check(len(content) == size and blob_hash(content) == oid)
+              visit(root)
+              check(seen == expected)
+
+          try:
+              check(len(sys.argv) == 4 and re.fullmatch(r"[1-9][0-9]*", sys.argv[3]) is not None)
+              repo, temporary = Path(sys.argv[1]), Path(sys.argv[2])
+              blocked = (Path("/opt/quant-monitor"), Path("/home/ubuntu/quant-monitor-runtime"),
+                         Path("/home/ubuntu/quant-monitor-data03-286757-py312-v1"))
+              check(repo.is_absolute() and temporary.is_absolute() and temporary != Path("/"))
+              check(not any(temporary == p or temporary.is_relative_to(p) or p.is_relative_to(temporary) for p in (*blocked, repo)))
+              check(repo.is_dir() and temporary.is_dir() and repo.resolve() == repo and temporary.resolve() == temporary)
+              snapshot = temporary / ("quant-monitor-consumer-imports-35ac-" + sys.argv[3])
+              check(not os.path.lexists(snapshot))
+              failure = "source_manifest"
+              manifest = {}
+              for entry in git(repo, "ls-tree", "-rlz", "--full-tree", SOURCE_SHA, "--", *SOURCE_FILES).split(b"\0"):
+                  if not entry:
+                      continue
+                  metadata, path_bytes = entry.split(b"\t", 1)
+                  mode, kind, oid, size = metadata.decode().split()
+                  path = path_bytes.decode()
+                  check(path in SOURCE_FILES and path not in manifest and kind == "blob" and mode in {"100644", "100755"})
+                  check(re.fullmatch(r"[0-9a-f]{40}", oid) is not None and size.isdecimal())
+                  manifest[path] = (mode, oid, int(size))
+              check(set(manifest) == set(SOURCE_FILES) and len(manifest) == 40)
+              check(sum(item[2] for item in manifest.values()) == EXPECTED_SOURCE_BYTES)
+              directories = {str(parent) for name in manifest for parent in PurePosixPath(name).parents if str(parent) != "."}
+              failure = "archive_command"
+              archive = git(repo, "archive", "--format=tar", SOURCE_SHA, "--", *SOURCE_FILES)
+              check(len(archive) <= 2 * 1024 * 1024)
+              failure = "archive_validation"
+              contents, seen = {}, set()
+              with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as bundle:
+                  for member in bundle.getmembers():
+                      name = member.name.rstrip("/")
+                      path = PurePosixPath(name)
+                      check(name and not path.is_absolute() and ".." not in path.parts and str(path) == name)
+                      check(not {".git", ".venv", "data"} & set(path.parts))
+                      check(name not in seen and name in set(manifest) | directories)
+                      seen.add(name)
+                      check(member.sparse is None and not member.mode & 0o7000)
+                      if name in directories:
+                          check(member.type == tarfile.DIRTYPE)
+                          continue
+                      expected_mode, oid, size = manifest[name]
+                      check(member.type in {tarfile.REGTYPE, tarfile.AREGTYPE} and member.size == size)
+                      check(member.mode & 0o111 == int(expected_mode, 8) & 0o111)
+                      stream = bundle.extractfile(member)
+                      check(stream is not None)
+                      content = stream.read(size + 1)
+                      check(len(content) == size and blob_hash(content) == oid)
+                      contents[name] = content
+              check(seen == set(manifest) | directories and set(contents) == set(manifest))
+              check(contents["ops/quant-monitor/qpk-runtime.sha"] == b"28675796cabbe137a1fa3970b70d1aa98e952c88\n")
+              failure = "snapshot_creation"
+              snapshot.mkdir(mode=0o700)
+              snapshot.chmod(0o700, follow_symlinks=False)
+              # All modes apply only to newly created task-owned paths, never existing runtime paths.
+              for name in sorted(directories, key=lambda value: (len(PurePosixPath(value).parts), value)):
+                  directory = snapshot / name
+                  directory.mkdir(mode=0o755)
+                  directory.chmod(0o755, follow_symlinks=False)
+              for name, content in contents.items():
+                  mode = int(manifest[name][0], 8) & 0o777
+                  descriptor = os.open(snapshot / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
+                  with os.fdopen(descriptor, "wb") as stream:
+                      os.fchmod(stream.fileno(), mode)
+                      stream.write(content)
+              failure = "snapshot_verification"
+              verify_snapshot(snapshot, manifest, directories)
+              print(json.dumps({"stage": "temporary_consumer_source_verified", "source_sha": SOURCE_SHA,
+                                "source_files_checked": 40, "source_bytes_checked": EXPECTED_SOURCE_BYTES,
+                                "source_kind": "task_temporary_snapshot", "runtime_links_created": 0,
+                                "immutable_release_proof": False, "application_import_proof": False,
+                                "runtime_adoption_proof": False}))
+          except BaseException:
+              print("[offline-consumers] failure=" + failure + "; no reuse or cleanup")
+              raise SystemExit(1) from None
+          PY
+
+      - name: Import consumers from the temporary source without runtime adoption
+        run: |
+          set -euo pipefail
+          candidate=/home/ubuntu/quant-monitor-data03-286757-py312-v1
+          env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C "$candidate/bin/python" -I -B - \
+            "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$GITHUB_RUN_ID" 2>/dev/null <<'PY'
+          import base64
+          import hashlib
+          import importlib
+          import importlib.metadata
+          import importlib.util
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import subprocess
+          import stat
+          import sys
+          import sysconfig
+
+          SOURCE_SHA = "35ac71176127f07e00fe04dbc793777f3c595bc0"
+          QPK_PIN = "28675796cabbe137a1fa3970b70d1aa98e952c88"
+          RELEASE = Path(sys.argv[2]) / ("quant-monitor-consumer-imports-35ac-" + sys.argv[3])
+          CANDIDATE = Path("/home/ubuntu/quant-monitor-data03-286757-py312-v1")
+          OPS_IMPORTS = {"health_cycle": "ops/quant-monitor/scripts/health_cycle.py",
+                         "daily_briefing_builder": "ops/quant-monitor/scripts/daily_briefing_builder.py",
+                         "build_dashboard_snapshot": "ops/quant-monitor/scripts/build_dashboard_snapshot.py"}
+          TARGETS = ("quant_platform_kit.strategy_lifecycle.drift_detector",
+                     "quant_platform_kit.strategy_lifecycle.health_dashboard",
+                     "quant_platform_kit.strategy_lifecycle.performance_monitor",
+                     "quant_platform_kit.strategy_lifecycle.return_collector",
+                     "scripts.consume_daily_briefing", "client.config", "client.gateway_client", "service.provider_scenarios")
+          EXPECTED_DAILY = set("scripts scripts.consume_daily_briefing scripts.run_strategy_optimization_watcher service service.adapters service.adapters.codex_adapter service.adapters.cursor_adapter service.adapters.execution service.adapters.llm_adapter service.automation_contracts service.autonomy service.briefing_consumer service.briefing_dispatch service.contracts service.dual_review service.dual_review_briefing service.dual_review_dispatch service.dual_review_gateway service.dual_review_orchestrator service.dual_review_secondary service.dual_review_triggers service.model_catalog service.model_catalog_sync service.model_resolver service.model_router service.research_task service.runtime_digest service.strategy_automation_registry service.strategy_optimization_policy service.strategy_watch".split())
+          HASHES = {"drift_detector.py": "82d3d992ac0390ed45aae627e363720d120402a2321e33d9fe458c73cb1171d3",
+                    "health_dashboard.py": "d23f400705b7970d7d33a115f06f15bd4c0c7ad614493dde84559be5f4dbc62e",
+                    "performance_monitor.py": "bba42a051bc2bddaea0b548f425209ecabd904e88ea6b551ba52b810c35b964b",
+                    "return_collector.py": "ad6c3b61ff668e5c540326b96cc1be0da20d14855fc71701bd805c0299ab890a"}
+          EXPECTED_SOURCE_BYTES = 480370
+
+          SOURCE_FILES = (
+              'client/__init__.py',
+              'client/config.py',
+              'client/errors.py',
+              'client/gateway_client.py',
+              'ops/quant-monitor/qpk-runtime.sha',
+              'ops/quant-monitor/requirements-linux-py312.lock',
+              'ops/quant-monitor/scripts/build_dashboard_snapshot.py',
+              'ops/quant-monitor/scripts/daily_briefing_builder.py',
+              'ops/quant-monitor/scripts/health_cycle.py',
+              'scripts/__init__.py',
+              'scripts/consume_daily_briefing.py',
+              'scripts/run_strategy_optimization_watcher.py',
+              'service/__init__.py',
+              'service/adapters/__init__.py',
+              'service/adapters/codex_adapter.py',
+              'service/adapters/cursor_adapter.py',
+              'service/adapters/execution.py',
+              'service/adapters/llm_adapter.py',
+              'service/automation_contracts.py',
+              'service/autonomy.py',
+              'service/briefing_consumer.py',
+              'service/briefing_dispatch.py',
+              'service/contracts.py',
+              'service/dual_review.py',
+              'service/dual_review_briefing.py',
+              'service/dual_review_dispatch.py',
+              'service/dual_review_gateway.py',
+              'service/dual_review_orchestrator.py',
+              'service/dual_review_secondary.py',
+              'service/dual_review_triggers.py',
+              'service/model_catalog.py',
+              'service/model_catalog_sync.py',
+              'service/model_resolver.py',
+              'service/model_router.py',
+              'service/provider_scenarios.py',
+              'service/research_task.py',
+              'service/runtime_digest.py',
+              'service/strategy_automation_registry.py',
+              'service/strategy_optimization_policy.py',
+              'service/strategy_watch.py',
+          )
+
+          def blob_hash(content):
+              return hashlib.sha1(b"blob " + str(len(content)).encode() + b"\0" + content).hexdigest()
+
+          def verify_snapshot(root, manifest, directories):
+              expected = set(manifest) | directories
+              seen = set()
+              check(root.is_dir() and not root.is_symlink() and root.resolve() == root)
+              check(stat.S_IMODE(root.stat().st_mode) == 0o700)
+              def visit(directory):
+                  for path in directory.iterdir():
+                      relative = str(path.relative_to(root))
+                      check(relative in expected and relative not in seen)
+                      seen.add(relative)
+                      info = path.lstat()
+                      mode = info.st_mode
+                      if relative in directories:
+                          check(stat.S_ISDIR(mode) and stat.S_IMODE(mode) == 0o755)
+                          visit(path)
+                      else:
+                          expected_mode, oid, size = manifest[relative]
+                          check(stat.S_ISREG(mode) and info.st_nlink == 1 and stat.S_IMODE(mode) == int(expected_mode, 8) & 0o777)
+                          content = path.read_bytes()
+                          check(len(content) == size and blob_hash(content) == oid)
+              visit(root)
+              check(seen == expected)
+
+          failure = "candidate_metadata"
+          import_target = "not_started"
+          target_enums = dict(zip(TARGETS, ("qpk_drift", "qpk_dashboard", "qpk_performance", "qpk_returns",
+                                            "daily_consumer", "client_config", "client_gateway", "provider_scenarios")))
+          counts = {"network": 0, "process": 0, "write": 0, "read": 0}
+
+          def check(condition):
+              if not condition:
+                  raise ValueError("candidate import check failed")
+
+          def beneath(path, root):
+              return path == root or path.is_relative_to(root)
+
+          def category(name):
+              if name in OPS_IMPORTS or name.split(".")[0] in {"scripts", "service", "client"}:
+                  return "aab"
+              if name.split(".")[0] == "quant_platform_kit":
+                  return "qpk"
+              return None
+
+          # Suppress native and Python import output alike; only the final whitelist is emitted.
+          original_stdout = os.dup(1)
+          original_stderr = os.dup(2)
+          sink = os.open(os.devnull, os.O_WRONLY)
+          os.dup2(sink, 1)
+          os.dup2(sink, 2)
+          try:
+              check(Path(sys.prefix).resolve() == CANDIDATE and sys.prefix != sys.base_prefix)
+              check(sys.version_info[:2] == (3, 12) and sys.flags.isolated and sys.flags.no_user_site and sys.dont_write_bytecode)
+              check(len(sys.argv) == 4 and re.fullmatch(r"[1-9][0-9]*", sys.argv[3]) is not None)
+              check(RELEASE.is_absolute() and RELEASE.is_dir() and not RELEASE.is_symlink())
+              check(stat.S_IMODE(RELEASE.stat().st_mode) == 0o700)
+              check(CANDIDATE.resolve() == CANDIDATE and RELEASE.resolve() == RELEASE)
+              failure = "source_manifest"
+              result = subprocess.run(["/usr/bin/git", "-C", sys.argv[1], "ls-tree", "-rlz", "--full-tree", SOURCE_SHA, "--", *SOURCE_FILES],
+                                      env={"PATH": "/usr/bin:/bin", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_NO_REPLACE_OBJECTS": "1"},
+                                      stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=30, check=True)
+              manifest = {}
+              for entry in result.stdout.split(b"\0"):
+                  if entry:
+                      metadata, path = entry.split(b"\t", 1)
+                      mode, kind, oid, size = metadata.decode().split()
+                      name = path.decode()
+                      check(name in SOURCE_FILES and name not in manifest and kind == "blob" and mode in {"100644", "100755"})
+                      check(re.fullmatch(r"[0-9a-f]{40}", oid) is not None and size.isdecimal())
+                      manifest[name] = (mode, oid, int(size))
+              check(set(manifest) == set(SOURCE_FILES) and len(manifest) == 40)
+              check(sum(item[2] for item in manifest.values()) == EXPECTED_SOURCE_BYTES)
+              directories = {str(parent) for name in manifest for parent in Path(name).parents if str(parent) != "."}
+              verify_snapshot(RELEASE, manifest, directories)
+              public_source_files = {RELEASE / name for name in manifest}
+              public_source_directories = {RELEASE} | {RELEASE / name for name in directories}
+              failure = "candidate_metadata"
+              versions = {}
+              for line in (RELEASE / "ops/quant-monitor/requirements-linux-py312.lock").read_text().splitlines():
+                  if not line or line.startswith("#") or line == "--only-binary=:all:":
+                      continue
+                  match = re.fullmatch(r"([A-Za-z0-9_-]+)==([^ ]+) --hash=sha256:[0-9a-f]{64}", line)
+                  check(match is not None and match[1] not in versions)
+                  versions[match[1]] = match[2]
+              check(len(versions) == 27)
+              for name, version in {**versions, "quant-platform-kit": "1.0.0"}.items():
+                  dist = importlib.metadata.distribution(name)
+                  check(dist.version == version and beneath(Path(dist.locate_file("")).resolve(), CANDIDATE))
+              qpk = importlib.metadata.distribution("quant-platform-kit")
+              qpk_root = Path(qpk.locate_file("quant_platform_kit")).resolve()
+              check(beneath(qpk_root, CANDIDATE))
+              qpk_records = {Path(qpk.locate_file(p)).resolve(): p.hash for p in qpk.files or [] if str(p).startswith("quant_platform_kit/")}
+              for name, digest in HASHES.items():
+                  check(hashlib.sha256((qpk_root / "strategy_lifecycle" / name).read_bytes()).hexdigest() == digest)
+              check(bool(manifest) and not any(category(name) for name in sys.modules))
+              stdlib = Path(sysconfig.get_path("stdlib")).resolve()
+              initial_paths = [Path(p).resolve() for p in sys.path]
+              check(all(p in {stdlib, stdlib / "lib-dynload", stdlib.parent / "python312.zip"} or beneath(p, CANDIDATE) for p in initial_paths))
+              allowed_reads = (stdlib, CANDIDATE, Path("/usr/share/zoneinfo"))
+              runtime_leaves = (RELEASE / ".git", RELEASE / "ops/quant-monitor/data", RELEASE / "ops/quant-monitor/.venv")
+              def audit(event, args):
+                  kind = None
+                  if event.startswith("socket."):
+                      kind = "network"
+                  elif event in {"subprocess.Popen", "os.system", "os.exec", "os.posix_spawn", "os.spawn", "os.fork", "os.forkpty"}:
+                      kind = "process"
+                  elif event in {"os.remove", "os.rename", "os.rmdir", "os.mkdir", "os.link", "os.symlink", "os.chmod", "os.chown", "os.truncate", "os.utime"}:
+                      kind = "write"
+                  elif event in {"open", "os.listdir", "os.scandir"}:
+                      path = args[0]
+                      mode, flags = args[1:] if event == "open" else (None, 0)
+                      if (mode and any(c in mode for c in "wax+")) or flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND):
+                          kind = "write"
+                      elif not isinstance(path, (str, bytes)):
+                          kind = "read"
+                      else:
+                          lexical = Path(os.fsdecode(path)).absolute()
+                          resolved = lexical.resolve()
+                          # -B prevents writes, not reads. Make SourceFileLoader use
+                          # verified source bytes without deleting existing caches.
+                          if event == "open" and any(p.suffix == ".pyc" and (beneath(p, RELEASE) or beneath(p, qpk_root)) for p in (lexical, resolved)):
+                              raise FileNotFoundError("application bytecode cache disabled")
+                          if any(beneath(lexical, p) for p in runtime_leaves):
+                              kind = "read"
+                          elif beneath(lexical, RELEASE) or beneath(resolved, RELEASE):
+                              allowed_source = public_source_files if event == "open" else public_source_directories
+                              if lexical != resolved or resolved not in allowed_source:
+                                  kind = "read"
+                          elif not (any(beneath(resolved, p) for p in allowed_reads) or resolved == Path("/etc/localtime")):
+                              kind = "read"
+                  if kind:
+                      counts[kind] += 1
+                      raise RuntimeError("blocked candidate import side effect")
+              sys.addaudithook(audit)
+              failure = "consumer_import"
+              sys.path.insert(0, str(RELEASE))
+              for name, relative in OPS_IMPORTS.items():
+                  import_target = name
+                  spec = importlib.util.spec_from_file_location(name, RELEASE / relative)
+                  check(spec is not None and spec.loader is not None and name not in sys.modules)
+                  module = importlib.util.module_from_spec(spec)
+                  sys.modules[name] = module
+                  spec.loader.exec_module(module)
+              for name in TARGETS:
+                  import_target = target_enums[name]
+                  importlib.import_module(name)
+              import_target = "daily_module_presence"
+              check(EXPECTED_DAILY <= sys.modules.keys())
+              failure = "module_origin"
+              import_target = "origin_validation"
+              checked = {"aab": 0, "qpk": 0}
+              for name, module in tuple(sys.modules.items()):
+                  group = category(name)
+                  if group is None:
+                      continue
+                  origin = Path(module.__file__).resolve()
+                  check(origin == Path(module.__spec__.origin).resolve())
+                  root = RELEASE if group == "aab" else qpk_root
+                  check(beneath(origin, root))
+                  for package_path in getattr(module, "__path__", ()):
+                      check(beneath(Path(package_path).resolve(), root))
+                  content = origin.read_bytes()
+                  if group == "aab":
+                      relative = str(origin.relative_to(RELEASE))
+                      check(relative == OPS_IMPORTS.get(name, relative))
+                      check(manifest.get(relative, (None,))[0] in {"100644", "100755"})
+                      check(hashlib.sha1(b"blob " + str(len(content)).encode() + b"\0" + content).hexdigest() == manifest[relative][1])
+                  else:
+                      record = qpk_records.get(origin)
+                      check(record is not None and record.mode == "sha256")
+                      check(base64.urlsafe_b64encode(hashlib.sha256(content).digest()).rstrip(b"=").decode() == record.value)
+                  checked[group] += 1
+              for name in ("numpy", "pandas"):
+                  module = sys.modules[name]
+                  check(module.__version__ == versions[name] and beneath(Path(module.__file__).resolve(), CANDIDATE))
+              check(all(Path(p).resolve() in initial_paths or Path(p).resolve() == RELEASE for p in sys.path))
+              check(not any(counts.values()) and checked["qpk"] > 0)
+              receipt = {"stage": "offline_consumer_imports_verified", "source_sha": SOURCE_SHA,
+                         "qpk_pin": QPK_PIN, "locked_versions_checked": 27, "qpk_fixed_hashes_checked": 4,
+                         "aab_modules_checked": checked["aab"], "qpk_modules_checked": checked["qpk"],
+                         "daily_required_modules_checked": len(EXPECTED_DAILY), "guard_attempts": counts,
+                         "application_import_proof": True, "application_bytecode_cache": "disabled",
+                         "source_kind": "task_temporary_snapshot", "source_files_checked": 40,
+                         "source_snapshot_reverified": True, "immutable_release_proof": False,
+                         "health_recovery_proof": False,
+                         "shell_selection_proof": False,
+                         "runtime_adoption_proof": False}
+          except BaseException:
+              receipt = None
+          finally:
+              sys.stdout.flush()
+              sys.stderr.flush()
+              os.dup2(original_stdout, 1)
+              os.dup2(original_stderr, 2)
+          if receipt is None:
+              print(json.dumps({"stage": "offline_consumer_import_failed", "failure": failure,
+                                "import_target": import_target, "guard_attempts": counts,
+                                "application_import_proof": False, "runtime_adoption_proof": False,
+                                "source_kind": "task_temporary_snapshot", "immutable_release_proof": False,
+                                "shell_selection_proof": False, "health_recovery_proof": False,
+                                "residue": "preserved"}, sort_keys=True))
+              raise SystemExit(1)
+          print(json.dumps(receipt, sort_keys=True))
+          PY
+
   install-quant-release-inactive:
     if: github.event_name == 'workflow_dispatch' && github.repository == 'QuantStrategyLab/AIAuditBridge' && github.ref == 'refs/heads/main' && inputs.mode == 'install-quant-release-inactive' && !inputs.acknowledge_interruption && inputs.ssh_unban_ip == ''
     environment: codex-vps-ops
@@ -651,7 +1167,7 @@ jobs:
             "$GITHUB_WORKSPACE/scripts/release_gateway_failure_repairs.py" release --acknowledge-interruption
 
   vps-codex-service-ops:
-    if: inputs.mode != 'install-org-health-token' && inputs.mode != 'inspect-audit-patch' && inputs.mode != 'apply-audit-patch' && inputs.mode != 'retry-audit-patch-once' && inputs.mode != 'inspect-quant-runtime' && inputs.mode != 'release-gateway-failure-repairs' && inputs.mode != 'inspect-quant-paths' && inputs.mode != 'inspect-monitor-failures' && inputs.mode != 'inspect-daily-failure-sample' && inputs.mode != 'inspect-recorded-daily-errors' && inputs.mode != 'stage-quant-runtime-inactive' && inputs.mode != 'install-quant-release-inactive'
+    if: inputs.mode != 'install-org-health-token' && inputs.mode != 'inspect-audit-patch' && inputs.mode != 'apply-audit-patch' && inputs.mode != 'retry-audit-patch-once' && inputs.mode != 'inspect-quant-runtime' && inputs.mode != 'release-gateway-failure-repairs' && inputs.mode != 'inspect-quant-paths' && inputs.mode != 'inspect-monitor-failures' && inputs.mode != 'inspect-daily-failure-sample' && inputs.mode != 'inspect-recorded-daily-errors' && inputs.mode != 'stage-quant-runtime-inactive' && inputs.mode != 'install-quant-release-inactive' && inputs.mode != 'check-quant-consumers-offline'
     # Bind to a protected environment when available so deploy/repair-ssh requires approval.
     environment: codex-vps-ops
     runs-on:
