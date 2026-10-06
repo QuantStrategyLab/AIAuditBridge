@@ -355,6 +355,28 @@ ReturnCollector hash 匹配该旧版本；health pin 与 HEAD 匹配，daily 未
 receipt 明确 `application_import_proof=false` / `runtime_adoption_proof=false`。
 新 venv 已安装，尚未安装 immutable release、验证完整 consumer 导入或切换服务。
 
+PR #322 合并并通过 main CI 后，唯一 inactive release run37516689700
+（head `fa4e2b0a430254368f5198cb9a8b6da89a6e1d57`、job112451294961）
+在 installer 阶段失败。checkout/main/固定35ac source gate 已通过；白名单仅有
+`failure=installer` 和 wrapper 外层 exit1，原生 installer 退出码/异常/stdout marker
+没有输出，不能据此推断权限原因。未出现 final tree/link 成功回执，consumer import
+步骤 skipped，其余12 jobs skipped；残留与最终 target 状态 unknown，不重跑或清理。
+
+固定35ac Git tree 不含 tracked data/.venv 或其子项，已排除此 archive 源冲突。
+两次运行的 GitHub runner 标识一致不证明 Unix euid/gid 或 release parent 写权限。
+下一步拟在既有 inspect-quant-paths 内补固定元数据读集：release parent 的有效访问条件、
+固定 target 类型和两条 runtime link 匹配类别；无目录枚举、数据内容、写探针或自由路径。
+本次三文件候选在既有入口新增 `inactive_install_metadata`，仍待源码评审与独立只读运行，
+当前不能声称 release 安装、真实导入或服务恢复。固定读集仅为 release parent、35ac target
+及其 data/.venv 两个叶子；逐层 NoFollow，不枚举目录、不读文件内容或未知链接目标。
+进程 euid/egid/groups 仅在内存参与目录 owner/group 匹配，输出布尔值，不输出身份或组列表。
+只有平台同时支持 dir_fd、effective_ids 和 no-follow 时才读取 effective R/W/X；不支持为
+unsupported，系统调用不可达为 unknown，不退回 real uid 检查，不创建写探针。
+两个元数据快照及有效身份须一致；变化使整组 unknown。缺失父目录或权限不可达不等于
+目标不存在；仅直接固定叶子的缺失才能记 absent。链接只分类 expected/other，不跟随目标，
+未枚举的其它残留保持 unknown。此组不会升级旧 interpreter/import/adoption gates，也不能
+恢复已经丢弃的 installer 原生退出信息。
+
 采用差异按实际使用边界核对：#287/#289 为 lock/staging 安装路径；#290/#299 为 health
 正常调用的 artifact sync；#301/#306/#314 为 health 及日报 coverage/失败处理；#311
 为日报 wrapper/consumer 结果摘要；#316 为 QPK pin。#307 的 watcher/strategy_watch
@@ -371,7 +393,7 @@ receipt 明确 `application_import_proof=false` / `runtime_adoption_proof=false`
 | 双服务采用/回退 | 先绑定 health/daily 各自的原源码根、解释器、QPK 和 timer 状态，再在不触 Gateway/共享 runner 的窗口分别切换并读回。恢复 timer 是可能触发业务的执行边界，不能当纯配置检查。当前没有现成 monitor switch/rollback mode；不得借用 Gateway `deploy` 或会立即运行 health 的完整 monitor deploy |
 | 自然周期验收 | 独立确认新 source/module 采用、真实 account/stream 与保留连续段；短样本仍 unavailable/min10。回退源码根不能撤销既有数据、Issue、通知或送达状态，也不保证共享 QPK/venv 同时回退；保留状态，不删除重试。两个旧 failed 服务不构成恢复健康证明 |
 
-本次候选只改既有 workflow、部署测试、工作流路由测试和本说明；installer、setup、应用源码和
+PR #322 的候选只改既有 workflow、部署测试、工作流路由测试和本说明；installer、setup、应用源码和
 lock 不改。安装入口沿原 protected runner/concurrency，main/workflow SHA 为执行控制版本，
 干净 checkout 和被安装应用固定为 35ac，两者明确分开；不取最新 main 作为应用内容。
 不接收自由路径/source 参数，不调用通用 Gateway job。固定 release、新 venv、既有 data

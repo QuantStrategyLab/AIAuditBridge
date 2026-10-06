@@ -191,6 +191,107 @@ class Reader:
     def __init__(self):
         self._metadata_active = False
 
+    def inactive_install_metadata(self):
+        """Fixed lstat/access/link evidence only; never enumerate or test a write."""
+        source_sha = "35ac71176127f07e00fe04dbc793777f3c595bc0"
+        target = base.RELEASE_ROOT + "/" + source_sha
+        paths = {"release_parent": base.RELEASE_ROOT, "target": target,
+                 "data_link": target + "/" + base.MONITOR + "/data",
+                 "venv_link": target + "/" + base.MONITOR + "/.venv"}
+        expected_links = {"data_link": base.RUNTIME_ROOT + "/" + base.MONITOR + "/data",
+                          "venv_link": "/home/ubuntu/quant-monitor-data03-286757-py312-v1"}
+        changed_during_read = False
+
+        def identity():
+            try:
+                return os.geteuid(), frozenset((os.getegid(), *os.getgroups()))
+            except (AttributeError, OSError):
+                return None
+
+        def entry(label, who):
+            nonlocal changed_during_read
+            parent = None
+            try:
+                parts = paths[label].split("/")
+                try:
+                    parent = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                    for part in parts[1:-1]:
+                        child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+                        os.close(parent)
+                        parent = child
+                except OSError:
+                    return {"status": "unknown", "reason": "parent_unreachable"}, None
+                try:
+                    info = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
+                except FileNotFoundError:
+                    return {"status": "absent", "kind": "absent"}, ("absent",)
+                except OSError:
+                    return {"status": "unknown", "reason": "entry_unreadable"}, None
+                kind = ("directory" if stat.S_ISDIR(info.st_mode) else "symlink" if stat.S_ISLNK(info.st_mode)
+                        else "regular" if stat.S_ISREG(info.st_mode) else "other")
+                item = {"status": "present", "kind": kind, "mode": format(stat.S_IMODE(info.st_mode), "04o"),
+                        "owner_matches_effective_uid": info.st_uid == who[0] if who is not None else None,
+                        "group_matches_effective_groups": info.st_gid in who[1] if who is not None else None}
+                stamp = self._stamp(info) + (info.st_uid, info.st_gid)
+                if label == "release_parent":
+                    access = {"status": "unknown", "read": None, "write": None, "execute": None}
+                    supported = all(os.access in getattr(os, name, ()) for name in
+                                    ("supports_effective_ids", "supports_dir_fd", "supports_follow_symlinks"))
+                    if not supported:
+                        access["status"] = "unsupported"
+                    elif kind == "directory":
+                        try:
+                            values = {name: os.access(parts[-1], mode, dir_fd=parent, effective_ids=True, follow_symlinks=False)
+                                      for name, mode in (("read", os.R_OK), ("write", os.W_OK), ("execute", os.X_OK))}
+                            access.update(status="known", **values)
+                        except (NotImplementedError, TypeError):
+                            access["status"] = "unsupported"
+                        except OSError:
+                            pass
+                    item["effective_access"] = access
+                if label in expected_links:
+                    item["link_target_class"] = "not_symlink" if kind != "symlink" else "unknown"
+                    if kind == "symlink":
+                        try:
+                            raw = os.readlink(parts[-1], dir_fd=parent)
+                            after = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
+                            if self._stamp(after) + (after.st_uid, after.st_gid) != stamp:
+                                changed_during_read = True
+                                return {"status": "unknown", "reason": "entry_changed"}, None
+                            item["link_target_class"] = "expected" if raw == expected_links[label] else "other"
+                        except OSError:
+                            return {"status": "unknown", "reason": "link_unreadable"}, None
+                    item["link_target_followed"] = False
+                return item, stamp
+            finally:
+                if parent is not None:
+                    os.close(parent)
+
+        def snapshot(who):
+            entries, stamps = {}, {}
+            for label in paths:
+                if label in expected_links and entries["target"].get("kind") != "directory":
+                    absent = entries["target"]["status"] == "absent"
+                    entries[label] = {"status": "not_applicable" if absent else "unknown",
+                                      "reason": "target_absent" if absent else "target_unavailable_or_not_directory"}
+                    stamps[label] = ("target_absent",) if absent else None
+                else:
+                    entries[label], stamps[label] = entry(label, who)
+            return entries, stamps
+
+        before_identity = identity()
+        before, first_stamps = snapshot(before_identity)
+        after, last_stamps = snapshot(before_identity)
+        after_identity = identity()
+        changed = changed_during_read or before_identity != after_identity or before != after or first_stamps != last_stamps
+        stable = False if changed else None if any(value is None for value in first_stamps.values()) else True
+        return {"status": "known" if stable is True else "unknown", "application_source_sha": source_sha,
+                "effective_identity_status": "known" if before_identity is not None and not changed else "unknown",
+                "metadata_snapshot_stable": stable,
+                "entries": after if not changed else {label: {"status": "unknown", "reason": "snapshot_changed"} for label in paths},
+                "installer_child_exit_recovered": False, "other_residue_proof": False,
+                "application_import_proof": False, "runtime_adoption_proof": False}
+
     def begin_metadata_collection(self):
         self._metadata_active = True
         self._metadata_bindings = {}
@@ -1461,6 +1562,11 @@ def collect(*, query=query_systemd, reader=None):
     end_metadata = getattr(reader, "end_metadata_collection", None)
     if end_metadata is not None:
         end_metadata()
+    install_metadata = getattr(reader, "inactive_install_metadata", None)
+    output["inactive_install_metadata"] = install_metadata() if install_metadata is not None else {
+        "status": "unknown", "reason": "reader_unavailable", "metadata_snapshot_stable": None,
+        "installer_child_exit_recovered": False, "other_residue_proof": False,
+        "application_import_proof": False, "runtime_adoption_proof": False}
     # Dependency identifiers contain only roots already accepted by classify_root.
     return output
 
