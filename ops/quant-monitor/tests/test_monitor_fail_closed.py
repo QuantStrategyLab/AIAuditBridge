@@ -901,7 +901,9 @@ class MonitorFailClosedTests(unittest.TestCase):
                     baseline_available=False, alert_suppressed=True,
                 )
                 before = vars(drift).copy()
-                drift_detector.run_drift_detection = lambda domain: [drift] if domain == "us_equity" else []
+                drift_detector.run_drift_detection = lambda domain: [drift] if domain == "us_equity" else [
+                    types.SimpleNamespace(strategy_profile=f"{domain}_profile", drift_score=0.0),
+                ]
 
                 def run_monitor(domain, *, source_revision):
                     self.assertRegex(source_revision, r"^[0-9a-f]{40}$")
@@ -1691,6 +1693,186 @@ class MonitorFailClosedTests(unittest.TestCase):
                 root, unknown, ("chat-unknown",),
                 lambda chat_id: (_ for _ in ()).throw(AssertionError("unknown resent")),
             )
+
+
+class TrustedProfileCoverageTests(unittest.TestCase):
+    def test_shared_expected_profiles_and_provenance_use_one_validated_read(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            as_of = _write_fresh_lifecycle_status(root, profiles_by_domain={"crypto": ["native", "research"]})
+            first = (root / "data/lifecycle-artifacts/status.json").read_text()
+            changed = json.loads(first)
+            changed["domains"]["crypto"]["profiles"] = ["label_that_appeared_later"]
+            changed["domains"]["crypto"]["head_sha"] = "e" * 40
+            with mock.patch.object(Path, "read_text", side_effect=[first, json.dumps(changed)]) as read:
+                expected, revisions, source_as_of, errors, not_configured = HEALTH_CYCLE._load_expected_coverage(
+                    root, domains=("crypto",),
+                )
+            self.assertEqual(read.call_count, 1)
+            self.assertEqual(expected, {"crypto": ["native", "research"]})
+            self.assertEqual(revisions, {"crypto": f"{1:040x}"})
+            self.assertEqual(source_as_of, as_of)
+            self.assertEqual(errors, {})
+            self.assertEqual(not_configured, set())
+
+    def test_daily_expected_coverage_delegates_the_same_single_read(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_fresh_lifecycle_status(root)
+            original = Path.read_text
+            status_reads = []
+            def read(path, *args, **kwargs):
+                if path.name == "status.json":
+                    status_reads.append(path)
+                return original(path, *args, **kwargs)
+            with mock.patch.object(Path, "read_text", read):
+                expected, revisions, _as_of, errors, _not_configured = DAILY_BRIEFING._load_expected_coverage(root)
+            self.assertEqual(len(status_reads), 1)
+            self.assertEqual(set(expected), set(HEALTH_CYCLE.DOMAINS))
+            self.assertEqual(set(revisions), set(expected))
+            self.assertEqual(errors, {})
+
+    def test_partial_refresh_keeps_valid_profile_and_drops_old_missing_drift(self) -> None:
+        valid = types.SimpleNamespace(domain="crypto", strategy_profile="research")
+        current_drift = types.SimpleNamespace(domain="crypto", strategy_profile="research", drift_score=0.0)
+        old_missing_drift = types.SimpleNamespace(domain="crypto", strategy_profile="native", drift_score=0.9)
+        snapshots, drifts, errors = HEALTH_CYCLE._refresh_and_collect_drift(
+            lambda _domain: [valid], lambda _domain: [current_drift, old_missing_drift], domains=("crypto",),
+            expected_profiles_by_domain={"crypto": ["native", "research"]},
+        )
+        self.assertEqual(snapshots, {"crypto": [valid]})
+        self.assertEqual(drifts, {"crypto": [current_drift]})
+        self.assertEqual({row["code"] for row in errors}, {"monitor_data_unavailable", "drift_data_unavailable"})
+        self.assertTrue(all(row["reason_code"] == "profile_coverage_incomplete" for row in errors))
+        lines, identities = HEALTH_CYCLE._format_data_error_alerts(errors)
+        self.assertTrue(all("profile_coverage_incomplete" in row for row in lines))
+        self.assertEqual(len(identities), 2)
+
+    def test_unexpected_and_wrong_domain_records_do_not_satisfy_coverage(self) -> None:
+        wrong = types.SimpleNamespace(domain="us_equity", strategy_profile="native")
+        unexpected = types.SimpleNamespace(domain="crypto", strategy_profile="unknown_label")
+        drift_calls = []
+        snapshots, drifts, errors = HEALTH_CYCLE._refresh_and_collect_drift(
+            lambda _domain: [wrong, unexpected], lambda domain: drift_calls.append(domain) or [], domains=("crypto",),
+            expected_profiles_by_domain={"crypto": ["native"]},
+        )
+        self.assertEqual(snapshots, {})
+        self.assertEqual(drifts, {})
+        self.assertEqual(drift_calls, [])
+        self.assertEqual(errors[0]["code"], "monitor_data_unavailable")
+
+    def test_missing_current_drift_keeps_snapshot_and_marks_data_unavailable(self) -> None:
+        snapshot = types.SimpleNamespace(domain="crypto", strategy_profile="research")
+        snapshots, drifts, errors = HEALTH_CYCLE._refresh_and_collect_drift(
+            lambda _domain: [snapshot], lambda _domain: [], domains=("crypto",),
+            expected_profiles_by_domain={"crypto": ["research"]},
+        )
+        self.assertEqual(snapshots, {"crypto": [snapshot]})
+        self.assertEqual(drifts, {"crypto": []})
+        self.assertEqual(errors, [{"domain": "crypto", "code": "drift_data_unavailable",
+                                  "error_type": "RuntimeError", "reason_code": "profile_coverage_incomplete"}])
+
+    def test_complete_trusted_refresh_preserves_independent_qualified_evidence(self) -> None:
+        snapshot = types.SimpleNamespace(domain="crypto", strategy_profile="research")
+        drift = types.SimpleNamespace(domain="crypto", strategy_profile="research", drift_score=0.9)
+        snapshots, drifts, errors = HEALTH_CYCLE._refresh_and_collect_drift(
+            lambda _domain: [snapshot], lambda _domain: [drift], domains=("crypto",),
+            expected_profiles_by_domain={"crypto": ["research"]},
+        )
+        self.assertEqual(snapshots, {"crypto": [snapshot]})
+        self.assertEqual(errors, [])
+        findings = HEALTH_CYCLE._build_monitoring_findings([], drifts)
+        self.assertEqual([finding.snapshot.profile for finding in findings], ["research"])
+
+    def test_fresh_not_configured_is_distinct_and_legacy_status_wrapper_compatible(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_fresh_lifecycle_status(root, profiles_by_domain={"us_equity": ["research"]})
+            path = root / "data/lifecycle-artifacts/status.json"
+            payload = json.loads(path.read_text())
+            payload["domains"]["crypto"] = {"status": "not_configured", "profiles": []}
+            path.write_text(json.dumps(payload))
+            expected, revisions, _as_of, errors, not_configured = HEALTH_CYCLE._load_expected_coverage(
+                root, domains=("us_equity", "crypto"),
+            )
+            self.assertEqual(expected, {"us_equity": ["research"]})
+            self.assertEqual(set(revisions), {"us_equity"})
+            self.assertEqual(errors, {})
+            self.assertEqual(not_configured, {"crypto"})
+            ready, old_revisions, old_errors = HEALTH_CYCLE._load_lifecycle_artifact_status(
+                root, domains=("us_equity", "crypto"),
+            )
+            self.assertEqual(ready, ("us_equity",))
+            self.assertEqual(old_revisions, revisions)
+            self.assertEqual(old_errors, [{"domain": "crypto", "code": "artifact_sync_status_unavailable", "error_type": "RuntimeError"}])
+
+    def test_main_writes_unavailable_keeps_valid_results_and_never_optimizes_missing_profile(self) -> None:
+        self._check_main_profile_coverage()
+
+    def test_main_missing_current_drift_low_dashboard_score_remains_operational_only(self) -> None:
+        self._check_main_profile_coverage(missing_current_drift=True)
+
+    def _check_main_profile_coverage(self, *, missing_current_drift=False) -> None:
+        from scripts import run_strategy_optimization_watcher as watcher
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            profiles = {domain: [f"{domain}_profile"] for domain in HEALTH_CYCLE.DOMAINS}
+            profiles["crypto"] = ["native", "research"]
+            _write_fresh_lifecycle_status(root, profiles_by_domain=profiles)
+            qpk = types.ModuleType("quant_platform_kit")
+            lifecycle = types.ModuleType("quant_platform_kit.strategy_lifecycle")
+            monitor = types.ModuleType("quant_platform_kit.strategy_lifecycle.performance_monitor")
+            drift = types.ModuleType("quant_platform_kit.strategy_lifecycle.drift_detector")
+            dashboard = types.ModuleType("quant_platform_kit.strategy_lifecycle.health_dashboard")
+            monitor.run_monitor = lambda domain, **kwargs: [types.SimpleNamespace(
+                domain=domain, strategy_profile="research" if domain == "crypto" else f"{domain}_profile",
+            )]
+            def detect(domain):
+                rows = [types.SimpleNamespace(domain=domain, strategy_profile="research" if domain == "crypto" else f"{domain}_profile", drift_score=0.0)]
+                if domain == "crypto":
+                    if missing_current_drift:
+                        rows = []
+                    rows.append(types.SimpleNamespace(domain=domain, strategy_profile="native", drift_score=0.9))
+                return rows
+            drift.run_drift_detection = detect
+            def build(*, output_dir, **kwargs):
+                directory = Path(output_dir)
+                directory.mkdir(parents=True, exist_ok=True)
+                rows = [{"domain": domain, "strategy_profile": "research" if domain == "crypto" else f"{domain}_profile",
+                         "status": "healthy", "overall_score": 95.0,
+                         "as_of": HEALTH_CYCLE.datetime.now(HEALTH_CYCLE.timezone.utc).date().isoformat()}
+                        for domain in HEALTH_CYCLE.DOMAINS]
+                rows.append({"domain": "crypto", "strategy_profile": "native", "status": "critical", "overall_score": 15.0,
+                             "as_of": HEALTH_CYCLE.datetime.now(HEALTH_CYCLE.timezone.utc).date().isoformat()})
+                if missing_current_drift:
+                    research_row = next(row for row in rows if row["strategy_profile"] == "research")
+                    research_row.update(status="critical", overall_score=35.0)
+                (directory / "strategy_health_dashboard.json").write_text(json.dumps({"strategies": rows}))
+            dashboard.build_dashboard = build
+            # Stub only outbound dispatch/model seams; use the real AAB normalizer,
+            # shared validator, refresh qualification and atomic output code.
+            with (
+                mock.patch.dict(os.environ, {"QUANT_MONITOR_ROOT": str(root)}, clear=True),
+                mock.patch.dict(sys.modules, {
+                    "quant_platform_kit": qpk, "quant_platform_kit.strategy_lifecycle": lifecycle,
+                    monitor.__name__: monitor, drift.__name__: drift, dashboard.__name__: dashboard,
+                }),
+                mock.patch.object(watcher, "dispatch_strategy_watch_findings", return_value={"errors": 0, "issues": []}) as dispatch,
+                mock.patch.object(HEALTH_CYCLE, "_run_operational_diagnosis", return_value={"status": "skipped"}),
+                mock.patch("builtins.print"),
+            ):
+                self.assertEqual(HEALTH_CYCLE.main(), 2)
+            dispatch.assert_called_once_with([], dry_run=False, comment_existing=False)
+            output = json.loads((root / "data/health/strategy_health_dashboard.v1.json").read_text())
+            summary = json.loads(next((root / "data/health").glob("cycle_*.json")).read_text())
+            self.assertEqual(output["data_status"], "unavailable")
+            self.assertIn("monitor_data_unavailable", output["errors"])
+            self.assertEqual(len(output["strategies"]), 4)
+            self.assertNotIn("native", {row["profile"] for row in output["strategies"]})
+            self.assertEqual(summary["snapshot_count"], 4)
+            self.assertEqual(summary["strategy_count"], 4)
+            self.assertEqual(summary["optimization_findings"], 0)
+            self.assertEqual({row["code"] for row in summary["data_errors"]}, {"monitor_data_unavailable", "drift_data_unavailable"})
 
 
 if __name__ == "__main__":

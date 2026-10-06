@@ -213,6 +213,73 @@ checkout 或改写共享镜像；本地缺少该 commit 时会在创建 venv 前
 
 生产 venv 是否已按此 lock 迁移须另做安装/读回；本说明不声称生产已切换。
 
+### QPK 采用兼容验证与 profile 缺数（DATA-03，2026-10-06）
+
+设计/实现：QPK [#647](https://github.com/QuantStrategyLab/QuantPlatformKit/pull/647)
+已合为 `28675796cabbe137a1fa3970b70d1aa98e952c88`，显式 live 选择不能用 research
+CSV 补空或拼接。AAB 源码基线 `ddd85c80413ee0c1bd0d663fc80e607692c58ef9` 仍固定
+QPK `086166458d4e3f61bb8937054cf7e69ff6ef914a`。两版之间 12 commit / 26 file
+的静态比较及有界离线消费者验证，不表示 pin 已升级或生产采用已验收。
+
+本阶段：固定 old/new QPK 的 218 个 package blobs 和上述 AAB 必要源码，分别用
+同一组明确 synthetic fixture 走实际 sync ZIP 校验、local PerformanceStore、
+ReturnCollector、monitor/drift/dashboard、日报 builder 与规则分类。两侧各 12 项通过；
+research 默认指标和普通 snapshot 格式一致。它们包括成功复现缺陷的 characterization，
+不是 adoption PASS。普通兼容测试的网络、进程、云、模型和通知尝试均为 0；独立 guard
+自测有 2 次网络、2 次云尝试被阻断，实际外部 IO 为 0。没有真实账户取数、模型调用或
+部署。当前验证环境 pandas 2.2.3 / numpy 2.3.5，不代替本节上方的精确 lock 验证。
+
+Binance 单次同步最多近 7 日。7 个日 checkpoint 只有 6 个有效日收益，低于 monitor
+原有 `min_observations=10`，这是正常 warm-up 缺样本。两次重叠同步在本地保留并去重，
+导入计数 7、0、4、0 后积累 11 个不同 checkpoint / 10 个日收益。未知屏障后的新连续段
+须重新满足样本数；达到 10 仍保留截断状态，不能冒充完整期间或可比较 drift。
+实际 store 的保留量、连续段、account/stream 绑定及有效运行 source 尚未读回。
+
+当前源码缺口：当 crypto 域同时有一条不足样本的 live profile 和另一条可用 research
+profile，health 的 domain 非空检查不报缺数，normalized dashboard 仍为 `ready`；
+同周期日报按可信 `status.json` 的 expected profiles 检查，正确标记缺 live profile /
+`unavailable`，规则路由为数据不可用 Telegram。这个差异是源码复现，不证明线上曾发生。
+
+本地候选实施完成，最终 review/发布待定：复用已有 artifact-status 校验，从一次已验证
+读取取得同一 expected-profile 集合及 provenance，供 health 与日报消费。配置内缺 profile
+进入运营数据不可用告警，保留其它有效 profile 的结果；缺 profile 的旧 snapshot/drift
+不能成为新的策略劣化或 AI optimization evidence。本周期缺 drift 时，dashboard 低分也
+不能绕过该资格检查。完整 coverage 保持原路径，fresh
+`not_configured` 与 stale/invalid status 分别处理；复用既有送达状态验证去重、未知投递和恢复。
+不从用户标签或已出现样本反推 expected 集合，不降 min10，不借 CSV 凑样本，也不把整个
+dashboard 统一标为 research。AAB caller/规则修复、精确 lock 兼容、pin 采用、运行读回和
+真实业务周期分阶段验收。
+
+实施验证：原源码 RED 保留一次读取与缺 profile 的真实失败，新合同尚未实现的错误亦保留；
+补充 RED 复现“缺当前 drift 但 dashboard 低分仍产生 optimization finding”，候选修复后
+既有 monitor fail-closed suite 为 64/64、无 skip。固定 old/new QPK 的实际路径各 13/13
+通过，包含未 mock 产品计算/collector/store/normalizer/dispatcher 的真实 health main
+及 daily main；新版 QPK 下，两者均标缺 live profile / 数据不可用，valid profile 本地结果
+保留，optimization findings/issues 为 0。publisher 的实际 schema-check 代码块读取同一
+normalized 文件后，其 SHA256 未变；curl/远端发送未执行。所有本阶段普通测试的 guard
+计数均为 0。当前环境未装 ruff，未运行 lint、整仓 suite 或精确 lock 验证；这不是已发布
+或生产采用证明。旧 QPK 仍体现旧 research/CSV 行为，不因此取得 live 收益资格。
+
+现有 publish 脚本直接发送 health cycle 的 normalized 文件，只检查 schema，不二次
+normalize。QRS 当前 `strategy_health_dashboard.v1` receiver 对整体 `unavailable`
+会清空展示行并重算 summary，保留安全 error codes；因此本阶段“保留其它有效 profile”
+是指 AAB 本地 store、周期结果和日报，不承诺当前看板保留部分行。单独
+`refresh_strategy_health.sh` 的重建路径尚未采用 expected-profile 校验，不能代替本阶段
+health→publish 接线验收；本次不改变 QRS/UI 合同。
+
+English summary: the fixed old/new source consumer fixtures passed 12 checks per
+version, including reproduction of the current partial-domain coverage defect.
+This is synthetic compatibility evidence, not pin adoption or production acceptance.
+The local candidate now shares trusted artifact-status expected profiles between
+health and daily reporting, preserves valid measurements and routes missing data as an
+operational condition. The monitor suite passed 64 checks and each actual old/new QPK
+consumer run passed 13, including real health/daily entrypoints; source review,
+publication, exact locked dependencies and runtime adoption remain pending.
+Sample thresholds, QPK return algorithms and the runtime pin
+remain separate adoption decisions. The current QRS aggregate receiver clears rows
+when unavailable; valid AAB measurements remain local, and partial-row UI display is
+not claimed. Standalone dashboard refresh is a separate, unqualified rebuild path.
+
 ## Fixed read-only runtime path snapshot / 限定只读路径快照
 
 The separate `VPS Codex Service Ops` mode `inspect-quant-paths` runs only
