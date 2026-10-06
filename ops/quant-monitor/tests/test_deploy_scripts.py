@@ -1,9 +1,14 @@
+import json
 import os
+import re
+import shlex
+import textwrap
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -11,6 +16,152 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class DeployScriptTests(unittest.TestCase):
+    def test_staging_preflight_ignores_shared_mirror_python_startup(self) -> None:
+        """A clean caller must not execute Python startup code from the old mirror."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            aab = root / "AIAuditBridge"
+            (aab / ".git").mkdir(parents=True)
+            monitor = aab / "ops" / "quant-monitor"
+            (monitor / "scripts").mkdir(parents=True)
+            shutil.copyfile(ROOT / "scripts" / "common_env.sh", monitor / "scripts" / "common_env.sh")
+            shutil.copyfile(ROOT / "requirements-linux-py312.lock", monitor / "requirements-linux-py312.lock")
+            shutil.copyfile(ROOT / "qpk-runtime.sha", monitor / "qpk-runtime.sha")
+            mirror = root / "mirrors" / "QuantPlatformKit"
+            (mirror / ".git").mkdir(parents=True)
+            (mirror / "src").mkdir()
+            marker = root / "old-mirror-startup-executed"
+            (mirror / "src" / "sitecustomize.py").write_text(
+                f"from pathlib import Path\nPath({str(marker)!r}).write_text('synthetic startup only')\n",
+                encoding="utf-8",
+            )
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            source_sha = "a" * 40
+            git = fake_bin / "git"
+            git.write_text(
+                "#!/bin/bash\nset -euo pipefail\n"
+                '[[ "$1" == -C ]] || exit 90\nshift 2\n'
+                'case "$1" in\n'
+                "status) exit 0 ;;\n"
+                f"rev-parse) printf '%s\\n' '{source_sha}' ;;\n"
+                'show) cat "$QUANT_MONITOR_ROOT/requirements-linux-py312.lock" ;;\n'
+                "cat-file) exit 1 ;;\n"
+                "*) exit 91 ;;\nesac\n",
+                encoding="utf-8",
+            )
+            git.chmod(0o755)
+            python = fake_bin / "python3"
+            # Execute only setup's standard-library platform preflight. No venv/pip.
+            python.write_text(
+                "#!/bin/bash\nset -euo pipefail\n"
+                '[[ "$*" == - || "$*" == "-I -" ]] || exit 92\n'
+                f'exec "{sys.executable}" "$@"\n',
+                encoding="utf-8",
+            )
+            python.chmod(0o755)
+            stage = root / "new-candidate-venv"
+            result = subprocess.run(
+                ["/bin/bash", str(ROOT / "scripts" / "setup_vps_runtime.sh"), source_sha, str(aab)],
+                env={
+                    "HOME": str(root), "PATH": f"{fake_bin}:/usr/bin:/bin",
+                    "LANG": "C", "LC_ALL": "C", "PYTHONNOUSERSITE": "1",
+                    "PYTHONDONTWRITEBYTECODE": "1", "PYTHONPATH": "",
+                    "QUANT_MONITOR_ROOT": str(monitor), "AIAUDIT_BRIDGE_ROOT": str(aab),
+                    "QUANT_PLATFORM_KIT_ROOT": str(mirror),
+                    "QUANT_PROJECTS_ROOT": str(mirror.parent),
+                    "LIFECYCLE_LOCAL_ROOT": str(root / "lifecycle-store"),
+                    "QUANT_MONITOR_VENV": str(stage),
+                },
+                capture_output=True, text=True, timeout=10, check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("pinned QuantPlatformKit commit is unavailable", result.stderr)
+            self.assertFalse(stage.exists(), "fixture must stop before creating any venv")
+            self.assertFalse(marker.exists(), "shared mirror startup ran before the missing-commit refusal")
+
+
+    def test_staging_pip_and_backend_environment_ignore_shared_mirror(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            aab = root / "AIAuditBridge"
+            (aab / ".git").mkdir(parents=True)
+            monitor = aab / "ops/quant-monitor"
+            (monitor / "scripts").mkdir(parents=True)
+            for rel in ("scripts/common_env.sh", "requirements-linux-py312.lock", "qpk-runtime.sha"):
+                shutil.copyfile(ROOT / rel, monitor / rel)
+            mirror = root / "mirrors/QuantPlatformKit"
+            (mirror / ".git").mkdir(parents=True)
+            (mirror / "src/pip").mkdir(parents=True)
+            (mirror / "src/pip/__init__.py").write_text("")
+            (mirror / "src/pip/__main__.py").write_text("raise SystemExit('must not execute')\n")
+            marker = root / "startup"
+            (mirror / "src/sitecustomize.py").write_text(
+                f"from pathlib import Path\nPath({str(marker)!r}).touch()\n"
+            )
+            receipt = root / "pip-selection.json"
+            probe = (
+                "import importlib.util, json, os, sys\nfrom pathlib import Path\n"
+                "spec = importlib.util.find_spec('pip')\n"
+                f"old = bool(spec and Path(spec.origin).is_relative_to({str(mirror)!r}))\n"
+                f"Path({str(receipt)!r}).write_text(json.dumps({{"
+                "'old_mirror_pip': old, 'isolated': sys.flags.isolated, "
+                "'pythonpath_in_child_env': 'PYTHONPATH' in os.environ, "
+                "'argv': sys.argv[1:]}))\n"
+                "raise SystemExit(17)\n"
+            )
+            pip_probe = (
+                "#!/bin/bash\nset -euo pipefail\nargs=()\n"
+                'if [[ "${1:-}" == -I ]]; then args=(-I); shift; fi\n'
+                '[[ "$1" == -m && "$2" == pip && "$3" == install ]] || exit 93\n'
+                f'exec {shlex.quote(sys.executable)} "${{args[@]}}" -c {shlex.quote(probe)} "$@"\n'
+            )
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            sha = "a" * 40
+            git = fake_bin / "git"
+            git.write_text(
+                "#!/bin/bash\nset -euo pipefail\n"
+                '[[ "$1" == -C ]] || exit 90\nshift 2\ncase "$1" in\n'
+                "status|cat-file) exit 0 ;;\n"
+                f"rev-parse) printf '%s\\n' '{sha}' ;;\n"
+                'show) cat "$QUANT_MONITOR_ROOT/requirements-linux-py312.lock" ;;\n'
+                "*) exit 91 ;;\nesac\n"
+            )
+            git.chmod(0o755)
+            python = fake_bin / "python3"
+            python.write_text(
+                "#!/bin/bash\nset -euo pipefail\nargs=()\n"
+                'if [[ "${1:-}" == -I ]]; then args=(-I); shift; fi\n'
+                f'if [[ "$*" == - ]]; then exec {shlex.quote(sys.executable)} "${{args[@]}}" -; fi\n'
+                '[[ "$#" == 3 && "$1" == -m && "$2" == venv ]] || exit 92\n'
+                'mkdir "$3/bin"\n'
+                f'printf %s {shlex.quote(pip_probe)} > "$3/bin/python"\n'
+                'chmod 755 "$3/bin/python"\n'
+            )
+            python.chmod(0o755)
+            stage = root / "candidate-placeholder"
+            result = subprocess.run(
+                ["/bin/bash", str(ROOT / "scripts/setup_vps_runtime.sh"), sha, str(aab)],
+                env={
+                    "HOME": str(root), "PATH": f"{fake_bin}:/usr/bin:/bin", "LANG": "C", "LC_ALL": "C",
+                    "PYTHONNOUSERSITE": "1", "PYTHONDONTWRITEBYTECODE": "1", "PYTHONPATH": "",
+                    "QUANT_MONITOR_ROOT": str(monitor), "AIAUDIT_BRIDGE_ROOT": str(aab),
+                    "QUANT_PLATFORM_KIT_ROOT": str(mirror), "QUANT_PROJECTS_ROOT": str(mirror.parent),
+                    "LIFECYCLE_LOCAL_ROOT": str(root / "lifecycle-store"), "QUANT_MONITOR_VENV": str(stage),
+                },
+                capture_output=True, text=True, timeout=10, check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("locked dependency install failed", result.stderr)
+            self.assertNotIn("[setup] ok", result.stdout)
+            observed = json.loads(receipt.read_text())
+            self.assertEqual(observed["argv"][:-1], ["-m", "pip", "install", "--require-hashes", "--only-binary=:all:", "-r"])
+            self.assertEqual(observed["isolated"], 1)
+            self.assertFalse(observed["old_mirror_pip"])
+            self.assertFalse(observed["pythonpath_in_child_env"])
+            self.assertFalse(marker.exists())
+
     def test_common_env_separates_code_and_lifecycle_data_roots(self) -> None:
         with tempfile.TemporaryDirectory() as home:
             env = os.environ.copy()
@@ -51,6 +202,235 @@ class DeployScriptTests(unittest.TestCase):
                 str(monitor_root / "data" / "lifecycle-projects" / "QuantPlatformKit"),
             ],
         )
+
+    def _inactive_stage_scripts(self) -> tuple[str, list[str]]:
+        workflow = (ROOT.parents[1] / ".github/workflows/vps_codex_service_ops.yml").read_text()
+        job = workflow.split("\n  stage-quant-runtime-inactive:\n", 1)[1].split("\n  release-gateway-failure-repairs:\n", 1)[0]
+        scripts = [textwrap.dedent(block) for block in re.findall(r"(?m)^        run: \|\n((?:^          .*\n|^\n)*)", job)]
+        self.assertEqual(len(scripts), 3)
+        return workflow, scripts
+
+    def test_inactive_stage_is_a_separate_fixed_mode_without_service_operations(self) -> None:
+        workflow, scripts = self._inactive_stage_scripts()
+        job = workflow.split("\n  stage-quant-runtime-inactive:\n", 1)[1].split("\n  release-gateway-failure-repairs:\n", 1)[0]
+        generic = workflow.split("\n  vps-codex-service-ops:\n", 1)[1].split("\n  inspect-recorded-daily-errors:\n", 1)[0]
+        self.assertIn("inputs.mode != 'stage-quant-runtime-inactive'", generic)
+        self.assertIn("inputs.mode == 'stage-quant-runtime-inactive'", job)
+        self.assertIn("!inputs.acknowledge_interruption && inputs.ssh_unban_ip == ''", job)
+        self.assertIn("environment: codex-vps-ops", job)
+        self.assertIn("persist-credentials: false", job)
+        self.assertIn("ref: ${{ github.sha }}", job)
+        self.assertNotRegex(job, r"systemctl|sudo|daemon-reload|health_check\.sh|daily_briefing_pipeline\.sh|deploy_codex|install_immutable_release|sync_strategy_repos")
+        self.assertNotRegex(scripts[1], r"\brm\b|\bchmod\b|\bchown\b|\bgit\b")
+        self.assertIn('env -i "${transport[@]}"', scripts[1])
+        self.assertIn('"$candidate/bin/python" -I -B -', scripts[2])
+        self.assertNotIn("import quant_platform_kit", scripts[2])
+
+    def test_inactive_stage_gate_rejects_wrong_source_event_or_inputs(self) -> None:
+        _, scripts = self._inactive_stage_scripts()
+        sha = "a" * 40
+        env = {"PATH": "/usr/bin:/bin", "HOME": "/tmp", "LANG": "C", "LC_ALL": "C",
+               "GITHUB_WORKSPACE": str(ROOT.parents[1]), "RUN_EVENT_NAME": "workflow_dispatch",
+               "RUN_MODE": "stage-quant-runtime-inactive", "RUN_REPOSITORY": "QuantStrategyLab/AIAuditBridge",
+               "RUN_REF": "refs/heads/main", "RUN_ACK": "false", "RUN_UNBAN_IP": "",
+               "RUN_SHA": sha, "RUN_WORKFLOW_SHA": sha,
+               "RUN_WORKFLOW_REF": "QuantStrategyLab/AIAuditBridge/.github/workflows/vps_codex_service_ops.yml@refs/heads/main",
+               "FIXTURE_HEAD": sha, "FIXTURE_MAIN": sha, "FIXTURE_DIRTY": ""}
+        stubs = (
+            'git() { case "$*" in "rev-parse HEAD") printf "%s\\n" "$FIXTURE_HEAD" ;; '
+            '"status --porcelain --untracked-files=all") printf %s "$FIXTURE_DIRTY" ;; *) return 90 ;; esac; }\n'
+            'gh() { [[ "$*" == "api repos/QuantStrategyLab/AIAuditBridge/git/ref/heads/main --jq .object.sha" ]] || return 91; '
+            'printf "%s\\n" "$FIXTURE_MAIN"; }\n'
+            'timeout() { [[ "$1" == 30s ]] || return 92; shift; "$@"; }\n'
+        )
+        for overrides in ({}, {"FIXTURE_MAIN": "b" * 40}, {"FIXTURE_HEAD": "b" * 40},
+                          {"RUN_WORKFLOW_SHA": "b" * 40}, {"RUN_EVENT_NAME": "push"},
+                          {"RUN_MODE": "deploy"}, {"RUN_REF": "refs/heads/other"},
+                          {"RUN_ACK": "true"}, {"RUN_UNBAN_IP": "192.0.2.1"},
+                          {"FIXTURE_DIRTY": " M unreviewed"}, {"RUN_SHA": "main"}):
+            with self.subTest(overrides=overrides):
+                result = subprocess.run(["/bin/bash", "-c", stubs + scripts[0]], env={**env, **overrides},
+                                        capture_output=True, text=True, timeout=5, check=False)
+                self.assertEqual(result.returncode == 0, not overrides, result.stderr)
+
+    def test_inactive_stage_clean_environment_residue_and_setup_failure(self) -> None:
+        _, scripts = self._inactive_stage_scripts()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "checkout"
+            setup = workspace / "ops/quant-monitor/scripts/setup_vps_runtime.sh"
+            setup.parent.mkdir(parents=True)
+            candidate = root / "new-candidate"
+            runtime = root / "shared-runtime"
+            runtime.mkdir()
+            shared_marker = runtime / "preserved"
+            shared_marker.write_text("original")
+            receipt = root / "received-env"
+            stage = scripts[1].replace("/home/ubuntu/quant-monitor-data03-286757-py312-v1", str(candidate))
+            stage = stage.replace("/home/ubuntu/quant-monitor-runtime/AIAuditBridge/ops/quant-monitor", str(runtime))
+            stage = stage.replace("HOME=/home/ubuntu", f"HOME={root}")
+            captured_names = ("PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE", "BASH_ENV", "UNRELATED_SECRET",
+                              "PYTHONNOUSERSITE", "PIP_CONFIG_FILE", "PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL",
+                              "PIP_TRUSTED_HOST", "HTTPS_PROXY", "REQUESTS_CA_BUNDLE", "GH_TOKEN")
+            capture = "\n".join(f'printf "%s=%s\\n" {name} "${{{name}-unset}}"' for name in captured_names)
+            env = {"PATH": "/usr/bin:/bin", "HOME": str(root), "GITHUB_WORKSPACE": str(workspace),
+                   "RUN_SHA": "a" * 40, "GH_TOKEN": "synthetic-token",
+                   "HTTPS_PROXY": "https://proxy.invalid", "REQUESTS_CA_BUNDLE": "/synthetic/ca.pem"}
+            # These values are introduced after the fixture shell starts. Only the
+            # production env-i boundary, not fixture shell startup, receives them.
+            poison = "export PYTHONPATH=/synthetic/old PYTHONHOME=/synthetic/home PYTHONUSERBASE=/synthetic/user BASH_ENV=/synthetic/bash UNRELATED_SECRET=synthetic PIP_EXTRA_INDEX_URL=https://unreviewed.invalid PIP_TRUSTED_HOST=unreviewed.invalid\n"
+
+            def run_setup(exit_code: int) -> subprocess.CompletedProcess:
+                setup.write_text("#!/bin/bash\nset -euo pipefail\n{\n" + capture +
+                                 f"\n}} > {shlex.quote(str(receipt))}\n" +
+                                 'mkdir "$QUANT_MONITOR_VENV"\n' +
+                                 f'printf partial > "$QUANT_MONITOR_VENV/residue"\nexit {exit_code}\n')
+                return subprocess.run(["/bin/bash", "-c", poison + stage], env=env,
+                                      capture_output=True, text=True, timeout=5, check=False)
+
+            failed = run_setup(17)
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertIn("residue is unaccepted and preserved", failed.stderr)
+            values = dict(line.split("=", 1) for line in receipt.read_text().splitlines())
+            for name in ("PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE", "BASH_ENV", "UNRELATED_SECRET",
+                         "PIP_EXTRA_INDEX_URL", "PIP_TRUSTED_HOST"):
+                self.assertEqual(values[name], "unset")
+            self.assertEqual(values["PYTHONNOUSERSITE"], "1")
+            self.assertEqual(values["PIP_CONFIG_FILE"], "/dev/null")
+            self.assertEqual(values["PIP_INDEX_URL"], "https://pypi.org/simple")
+            self.assertEqual(values["HTTPS_PROXY"], env["HTTPS_PROXY"])
+            self.assertEqual(values["REQUESTS_CA_BUNDLE"], env["REQUESTS_CA_BUNDLE"])
+            self.assertEqual(values["GH_TOKEN"], "synthetic-token")
+            receipt.unlink()
+            refused = run_setup(0)
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertFalse(receipt.exists())
+            self.assertEqual((candidate / "residue").read_text(), "partial")
+            self.assertEqual(shared_marker.read_text(), "original")
+            # A distinct fresh fixture directory demonstrates successful setup;
+            # production has no directory override or automatic retry.
+            stage = stage.replace(str(candidate), str(root / "fresh-candidate"))
+            self.assertEqual(run_setup(0).returncode, 0)
+            self.assertEqual(shared_marker.read_text(), "original")
+
+    def test_inactive_stage_failure_codes_preserve_status_and_never_emit_raw_output(self) -> None:
+        _, scripts = self._inactive_stage_scripts()
+        known = {
+            "[setup] pinned QuantPlatformKit commit is unavailable in the existing mirror; staging refused without mirror changes": "qpk_commit_unavailable",
+            "[setup] requirements-linux-py312.lock only covers CPython 3.12 on Linux x86_64 with glibc >= 2.34; refusing unsupported environment (no silent fallback)": "unsupported_platform",
+            "[setup] locked dependency install failed": "locked_dependency_install_failed",
+            "[setup] QuantPlatformKit install failed": "qpk_install_failed",
+            "[setup] pip check failed after locked install": "pip_check_failed",
+            "[setup] gh CLI is required for trusted lifecycle artifact synchronization": "gh_unavailable",
+            "[setup] gh CLI authentication is required for lifecycle artifacts": "gh_auth_unavailable",
+        }
+        secret_text = "synthetic-secret-DO-NOT-EMIT https://proxy.invalid/password /private/fixture/path"
+        cases = [(message, reason, 17) for message, reason in known.items()]
+        cases.extend([
+            (secret_text, "unknown", 42),
+            ("[setup] locked dependency install failed " + secret_text, "unknown", 9),
+            ("[setup] pip check failed after locked install", None, 0),
+        ])
+        cases = [(*case, 0) for case in cases]
+        cases.append(("[setup] pip check failed after locked install", "unknown", 0, 23))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "checkout"
+            setup = workspace / "ops/quant-monitor/scripts/setup_vps_runtime.sh"
+            setup.parent.mkdir(parents=True)
+            for number, (message, reason, exit_code, filter_exit) in enumerate(cases):
+                with self.subTest(reason=reason, exit_code=exit_code, filter_exit=filter_exit):
+                    candidate = root / f"candidate-{number}"
+                    stage = scripts[1].replace("/home/ubuntu/quant-monitor-data03-286757-py312-v1", str(candidate))
+                    stage = stage.replace("HOME=/home/ubuntu", f"HOME={root}")
+                    if filter_exit:
+                        self.assertEqual(stage.count("return 0"), 1)
+                        stage = stage.replace("return 0", f"return {filter_exit}")
+                    # Real setup is not executed: only fixture output and residue.
+                    payload = secret_text + "\n" + message + "\n"
+                    setup.write_text("#!/bin/bash\nset -euo pipefail\n"
+                                     'mkdir "$QUANT_MONITOR_VENV"\n'
+                                     'printf original > "$QUANT_MONITOR_VENV/residue"\n'
+                                     f"printf %s {shlex.quote(payload)} >&2\nexit {exit_code}\n")
+                    result = subprocess.run(
+                        ["/bin/bash", "-c", "export PYTHONPATH=/synthetic/old\n" + stage],
+                        env={"PATH": "/usr/bin:/bin", "HOME": str(root), "GH_TOKEN": "synthetic-token",
+                             "GITHUB_WORKSPACE": str(workspace), "RUN_SHA": "a" * 40},
+                        capture_output=True, text=True, timeout=5, check=False,
+                    )
+                    self.assertEqual(result.returncode, exit_code or filter_exit)
+                    self.assertEqual(result.stdout, "")
+                    self.assertNotIn(secret_text, result.stderr)
+                    self.assertNotIn("proxy.invalid", result.stderr)
+                    self.assertNotIn("/private/", result.stderr)
+                    self.assertNotIn("[setup]", result.stderr)
+                    self.assertNotIn("inactive_candidate_metadata_verified", result.stdout + result.stderr)
+                    self.assertEqual((candidate / "residue").read_text(), "original")
+                    if reason:
+                        self.assertEqual(result.stderr,
+                                         f"[inactive-stage] setup_failure={reason}; candidate residue is unaccepted and preserved\n")
+                    else:
+                        self.assertEqual(result.stderr, "")
+
+    def test_inactive_stage_metadata_rejects_wrong_version_path_hash_and_interpreter(self) -> None:
+        import ast
+        import contextlib
+        import hashlib
+        import importlib.metadata
+        import io
+        from types import SimpleNamespace
+
+        _, scripts = self._inactive_stage_scripts()
+        code = scripts[2].split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+        hashes = next(ast.literal_eval(node.value) for node in ast.walk(ast.parse(code))
+                      if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "hashes" for t in node.targets))
+        self.assertEqual(set(hashes), {"drift_detector.py", "health_dashboard.py", "performance_monitor.py", "return_collector.py"})
+        versions = dict(re.findall(r"(?m)^([A-Za-z0-9_-]+)==([^ ]+)", (ROOT / "requirements-linux-py312.lock").read_text()))
+        versions["quant-platform-kit"] = "1.0.0"
+        with tempfile.TemporaryDirectory() as tmp:
+            prefix = Path(tmp) / "candidate"
+            site = prefix / "lib/python3.12/site-packages"
+            package = site / "quant_platform_kit/strategy_lifecycle"
+            package.mkdir(parents=True)
+            for name in hashes:
+                (package / name).write_text(name)
+
+            def fixture_hash(data):
+                # Synthetic package bytes, with the production four-hash comparison
+                # intact. Unrecognized bytes deliberately never match.
+                return SimpleNamespace(hexdigest=lambda: hashes.get(data.decode(), "0" * 64))
+
+            for scenario in ("valid", "wrong_version", "outside_prefix", "wrong_hash", "not_isolated", "wrong_prefix"):
+                with self.subTest(scenario=scenario):
+                    def distribution(name):
+                        version = versions[name]
+                        if scenario == "wrong_version" and name == "pandas":
+                            version = "0.0.0"
+                        location = Path(tmp) / "old-mirror" if scenario == "outside_prefix" and name == "quant-platform-kit" else site
+                        return SimpleNamespace(version=version, locate_file=lambda rel: location / rel)
+
+                    (package / "return_collector.py").write_text("mismatch" if scenario == "wrong_hash" else "return_collector.py")
+                    stdout = io.StringIO()
+                    argv = ["candidate-check", str(prefix), str(ROOT / "requirements-linux-py312.lock"), "a" * 40]
+                    flags = SimpleNamespace(isolated=0 if scenario == "not_isolated" else 1, no_user_site=1)
+                    with mock.patch.object(sys, "argv", argv), mock.patch.object(sys, "prefix", str(prefix if scenario != "wrong_prefix" else Path(tmp) / "old-venv")), \
+                         mock.patch.object(sys, "base_prefix", "/synthetic/base"), mock.patch.object(sys, "flags", flags), \
+                         mock.patch.object(sys, "version_info", (3, 12, 0)), \
+                         mock.patch.object(importlib.metadata, "distribution", distribution), \
+                         mock.patch.object(hashlib, "sha256", fixture_hash), contextlib.redirect_stdout(stdout):
+                        if scenario == "valid":
+                            exec(compile(code, "<inactive-candidate-check>", "exec"), {})
+                        else:
+                            with self.assertRaisesRegex(SystemExit, "candidate metadata check failed; residue preserved"):
+                                exec(compile(code, "<inactive-candidate-check>", "exec"), {})
+                    if scenario == "valid":
+                        result = json.loads(stdout.getvalue())
+                        self.assertEqual(result["locked_versions_checked"], 27)
+                        self.assertEqual(result["qpk_module_hashes_checked"], 4)
+                        self.assertFalse(result["application_import_proof"])
+                        self.assertFalse(result["runtime_adoption_proof"])
+                    else:
+                        self.assertEqual(stdout.getvalue(), "")
 
     def test_strategy_sync_uses_dedicated_mirrors(self) -> None:
         script = (ROOT / "scripts" / "sync_strategy_repos.sh").read_text(encoding="utf-8")
@@ -149,7 +529,7 @@ class DeployScriptTests(unittest.TestCase):
         self.assertNotIn("install numpy pandas google-cloud-storage", script)
         self.assertLess(
             script.index("requirements-linux-py312.lock only covers"),
-            script.index('python3 -m venv "$VENV"'),
+            script.index('python3 "${PYTHON_ISOLATION_ARGS[@]}" -m venv "$VENV"'),
         )
         self.assertLess(
             script.index("requirements-linux-py312.lock only covers"),
@@ -428,6 +808,10 @@ class DeployScriptTests(unittest.TestCase):
                 "import sys\n"
                 "from pathlib import Path\n"
                 "args = sys.argv[1:]\n"
+                "if args[:1] == ['-I']:\n"
+                "    import os\n"
+                "    assert 'PYTHONPATH' not in os.environ\n"
+                "    args = args[1:]\n"
                 "if args[:2] == ['-m', 'pip']:\n"
                 "    raise SystemExit(subprocess.call([str(Path(__file__).with_name('pip')), *args[2:]]))\n"
                 "raise SystemExit(f'unexpected venv python: {args!r}')\n"
@@ -438,6 +822,10 @@ class DeployScriptTests(unittest.TestCase):
                 "from pathlib import Path\n"
                 "import sys\n"
                 "args = sys.argv[1:]\n"
+                "if args[:1] == ['-I']:\n"
+                "    import os\n"
+                "    assert 'PYTHONPATH' not in os.environ\n"
+                "    args = args[1:]\n"
                 "if args == ['-']:\n"
                 "    code = sys.stdin.read()\n"
                 "    if 'glibc' in code and 'need 3.12' in code:\n"
@@ -678,10 +1066,15 @@ class DeployScriptTests(unittest.TestCase):
                 f"#!{sys.executable}\n"
                 "import os, sys\n"
                 "args = sys.argv[1:]\n"
+                "if args[:1] == ['-I']:\n"
+                "    assert 'PYTHONPATH' not in os.environ\n"
+                "    args = args[1:]\n"
                 "if args == ['-']:\n"
                 "    code = sys.stdin.read()\n"
                 "    import platform\n"
-                "    sys.version_info = (3, 12, 0, 'final', 0)\n"
+                "    from collections import namedtuple\n"
+                "    minor = 11 if os.environ.get('SETUP_WRONG_VERSION') == '1' else 12\n"
+                "    sys.version_info = namedtuple('Version', 'major minor micro releaselevel serial')(3, minor, 0, 'final', 0)\n"
                 "    platform.system = lambda: 'Linux'\n"
                 "    platform.machine = lambda: 'x86_64'\n"
                 "    platform.python_implementation = lambda: 'PyPy'\n"
@@ -745,6 +1138,20 @@ class DeployScriptTests(unittest.TestCase):
             self.assertNotIn("MUTATION:", result.stderr)
             self.assertFalse(qpk.exists())
             self.assertFalse((monitor / ".venv").exists())
+            for extra, expected_error in (({}, "unsupported Python implementation 'PyPy'"),
+                                          ({"SETUP_WRONG_VERSION": "1"}, "unsupported Python 3.11")):
+                with self.subTest(staging_platform=expected_error):
+                    staged = root / "new-staged-venv"
+                    refused = subprocess.run(
+                        ["bash", str(ROOT / "scripts/setup_vps_runtime.sh"), aab_sha, str(aab)],
+                        env={**env, "QUANT_MONITOR_VENV": str(staged), **extra},
+                        capture_output=True, text=True, timeout=5, check=False,
+                    )
+                    self.assertNotEqual(refused.returncode, 0)
+                    self.assertIn(expected_error, refused.stderr)
+                    self.assertNotIn("MUTATION:", refused.stderr)
+                    self.assertFalse(staged.exists())
+                    self.assertFalse(qpk.exists())
 
     def test_setup_reports_failure_when_locked_pip_install_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

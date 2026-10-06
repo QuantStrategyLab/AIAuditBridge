@@ -12,6 +12,7 @@ on:
           - inspect
           - inspect-quant-runtime
           - inspect-quant-paths
+          - stage-quant-runtime-inactive
           - inspect-monitor-failures
           - inspect-daily-failure-sample
           - inspect-recorded-daily-errors
@@ -40,6 +41,171 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  stage-quant-runtime-inactive:
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'QuantStrategyLab/AIAuditBridge' && github.ref == 'refs/heads/main' && inputs.mode == 'stage-quant-runtime-inactive' && !inputs.acknowledge_interruption && inputs.ssh_unban_ip == ''
+    environment: codex-vps-ops
+    runs-on:
+      - self-hosted
+      - codex-vps
+    timeout-minutes: 15
+    steps:
+      - name: Checkout exact operation commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Verify exact main and reviewed inactive setup bytes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_REPOSITORY: ${{ github.repository }}
+          RUN_REF: ${{ github.ref }}
+          RUN_SHA: ${{ github.sha }}
+          RUN_WORKFLOW_REF: ${{ github.workflow_ref }}
+          RUN_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          RUN_EVENT_NAME: ${{ github.event_name }}
+          RUN_MODE: ${{ inputs.mode }}
+          RUN_ACK: ${{ inputs.acknowledge_interruption }}
+          RUN_UNBAN_IP: ${{ inputs.ssh_unban_ip }}
+        run: |
+          set -euo pipefail
+          [ "$RUN_EVENT_NAME" = workflow_dispatch ]
+          [ "$RUN_MODE" = stage-quant-runtime-inactive ]
+          [ "$RUN_REPOSITORY" = QuantStrategyLab/AIAuditBridge ]
+          [ "$RUN_REF" = refs/heads/main ]
+          [ "$RUN_ACK" = false ]
+          [ -z "$RUN_UNBAN_IP" ]
+          [[ "$RUN_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [ "$RUN_WORKFLOW_REF" = QuantStrategyLab/AIAuditBridge/.github/workflows/vps_codex_service_ops.yml@refs/heads/main ]
+          [ "$RUN_WORKFLOW_SHA" = "$RUN_SHA" ]
+          cd "$GITHUB_WORKSPACE"
+          [ "$(pwd -P)" = "$GITHUB_WORKSPACE" ]
+          [ "$(git rev-parse HEAD)" = "$RUN_SHA" ]
+          [ -z "$(git status --porcelain --untracked-files=all)" ]
+          current_main="$(timeout 30s gh api repos/QuantStrategyLab/AIAuditBridge/git/ref/heads/main --jq '.object.sha')"
+          [ "$current_main" = "$RUN_SHA" ]
+          sha256sum --check --status <<'SHA256'
+          c7880e3b10ab8f9421b0506aa928f5861ccbce4a9b6486a4a42c6e4c2813c3d0  ops/quant-monitor/scripts/setup_vps_runtime.sh
+          23d7349718fb61cd8e841641f2197dddf90ae04f1b8b9e5ccd9ac3417eb0165f  ops/quant-monitor/scripts/common_env.sh
+          e8d4ffe8c5d89347dd4790ce02b0d5867fb8ee922b0c11aa4d680cd31a73f644  ops/quant-monitor/requirements-linux-py312.lock
+          bd5f3531aeb52dd77e4d6a08ad2bc1cb6adec7223c25abb572586d982ec968e9  ops/quant-monitor/qpk-runtime.sha
+          SHA256
+
+      - name: Prepare one new inactive venv without shared runtime changes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          candidate=/home/ubuntu/quant-monitor-data03-286757-py312-v1
+          runtime=/home/ubuntu/quant-monitor-runtime/AIAuditBridge/ops/quant-monitor
+          if [[ -e "$candidate" || -L "$candidate" ]]; then
+            echo '[inactive-stage] candidate path already exists; refusing reuse or cleanup' >&2
+            exit 1
+          fi
+          # Preserve only existing transport settings; never print their values.
+          transport=()
+          for name in HTTPS_PROXY HTTP_PROXY ALL_PROXY NO_PROXY https_proxy http_proxy all_proxy no_proxy REQUESTS_CA_BUNDLE SSL_CERT_FILE SSL_CERT_DIR; do
+            if [[ -v "$name" ]]; then transport+=("$name=${!name}"); fi
+          done
+          # Consume output in memory; only complete fixed setup lines set an enum.
+          classify_setup_failure() {
+            local line
+            setup_failure=unknown
+            while IFS= read -r line || [[ -n "$line" ]]; do
+              case "$line" in
+                '[setup] pinned QuantPlatformKit commit is unavailable in the existing mirror; staging refused without mirror changes') setup_failure=qpk_commit_unavailable ;;
+                '[setup] requirements-linux-py312.lock only covers CPython 3.12 on Linux x86_64 with glibc >= 2.34; refusing unsupported environment (no silent fallback)') setup_failure=unsupported_platform ;;
+                '[setup] locked dependency install failed') setup_failure=locked_dependency_install_failed ;;
+                '[setup] QuantPlatformKit install failed') setup_failure=qpk_install_failed ;;
+                '[setup] pip check failed after locked install') setup_failure=pip_check_failed ;;
+                '[setup] gh CLI is required for trusted lifecycle artifact synchronization') setup_failure=gh_unavailable ;;
+                '[setup] gh CLI authentication is required for lifecycle artifacts') setup_failure=gh_auth_unavailable ;;
+              esac
+            done
+            return 0
+          }
+          # lastpipe retains only the enum in this non-interactive shell. Preserve
+          # both statuses immediately: a successful filter cannot hide setup failure.
+          set +m
+          shopt -s lastpipe
+          set +e
+          env -i "${transport[@]}" PATH=/usr/bin:/bin HOME=/home/ubuntu LANG=C LC_ALL=C \
+            GH_TOKEN="$GH_TOKEN" PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1 \
+            PIP_CONFIG_FILE=/dev/null PIP_INDEX_URL=https://pypi.org/simple \
+            PIP_NO_CACHE_DIR=1 PIP_RETRIES=0 PIP_TIMEOUT=30 PIP_DISABLE_PIP_VERSION_CHECK=1 \
+            QUANT_MONITOR_VENV="$candidate" QUANT_MONITOR_ROOT="$GITHUB_WORKSPACE/ops/quant-monitor" \
+            AIAUDIT_BRIDGE_ROOT="$GITHUB_WORKSPACE" \
+            QUANT_PROJECTS_ROOT="$runtime/data/lifecycle-projects" \
+            QUANT_PLATFORM_KIT_ROOT="$runtime/data/lifecycle-projects/QuantPlatformKit" \
+            LIFECYCLE_LOCAL_ROOT="$runtime/data/lifecycle-store" \
+            /bin/bash --noprofile --norc "$GITHUB_WORKSPACE/ops/quant-monitor/scripts/setup_vps_runtime.sh" \
+            "$RUN_SHA" "$GITHUB_WORKSPACE" 2>&1 | classify_setup_failure
+          setup_statuses=("${PIPESTATUS[@]}")
+          set -e
+          if (( setup_statuses[0] != 0 || setup_statuses[1] != 0 )); then
+            if (( setup_statuses[1] != 0 )); then setup_failure=unknown; fi
+            printf '[inactive-stage] setup_failure=%s; candidate residue is unaccepted and preserved\n' "$setup_failure" >&2
+            if (( setup_statuses[0] != 0 )); then exit "${setup_statuses[0]}"; fi
+            exit "${setup_statuses[1]}"
+          fi
+
+      - name: Check isolated candidate metadata without importing application code
+        env:
+          RUN_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          candidate=/home/ubuntu/quant-monitor-data03-286757-py312-v1
+          env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C "$candidate/bin/python" -I -B - \
+            "$candidate" "$GITHUB_WORKSPACE/ops/quant-monitor/requirements-linux-py312.lock" "$RUN_SHA" <<'PY'
+          import hashlib
+          import importlib.metadata
+          import json
+          import re
+          import sys
+          from pathlib import Path
+
+          def check(condition):
+              if not condition:
+                  raise ValueError("candidate metadata mismatch")
+
+          def verify():
+              prefix = Path(sys.argv[1]).resolve()
+              check(Path(sys.prefix).resolve() == prefix and sys.prefix != sys.base_prefix)
+              check(sys.version_info[:2] == (3, 12) and sys.flags.isolated and sys.flags.no_user_site)
+              expected = {}
+              for line in Path(sys.argv[2]).read_text().splitlines():
+                  if not line or line.startswith("#") or line == "--only-binary=:all:":
+                      continue
+                  match = re.fullmatch(r"([A-Za-z0-9_-]+)==([^ ]+) --hash=sha256:[0-9a-f]{64}", line)
+                  check(match is not None and match[1] not in expected)
+                  expected[match[1]] = match[2]
+              check(len(expected) == 27)
+              for name, version in {**expected, "quant-platform-kit": "1.0.0"}.items():
+                  dist = importlib.metadata.distribution(name)
+                  check(dist.version == version)
+                  check(Path(dist.locate_file("")).resolve().is_relative_to(prefix))
+              qpk = importlib.metadata.distribution("quant-platform-kit")
+              hashes = {
+                  "drift_detector.py": "82d3d992ac0390ed45aae627e363720d120402a2321e33d9fe458c73cb1171d3",
+                  "health_dashboard.py": "d23f400705b7970d7d33a115f06f15bd4c0c7ad614493dde84559be5f4dbc62e",
+                  "performance_monitor.py": "bba42a051bc2bddaea0b548f425209ecabd904e88ea6b551ba52b810c35b964b",
+                  "return_collector.py": "ad6c3b61ff668e5c540326b96cc1be0da20d14855fc71701bd805c0299ab890a",
+              }
+              for name, expected_hash in hashes.items():
+                  path = Path(qpk.locate_file("quant_platform_kit/strategy_lifecycle/" + name)).resolve()
+                  check(path.is_relative_to(prefix) and hashlib.sha256(path.read_bytes()).hexdigest() == expected_hash)
+              print(json.dumps({"stage": "inactive_candidate_metadata_verified", "source_sha": sys.argv[3],
+                                "qpk_pin": "28675796cabbe137a1fa3970b70d1aa98e952c88",
+                                "locked_versions_checked": 27, "qpk_module_hashes_checked": 4,
+                                "application_import_proof": False, "runtime_adoption_proof": False}))
+
+          try:
+              verify()
+          except Exception:
+              raise SystemExit("[inactive-stage] candidate metadata check failed; residue preserved") from None
+          PY
+
   release-gateway-failure-repairs:
     if: github.event_name == 'workflow_dispatch' && github.repository == 'QuantStrategyLab/AIAuditBridge' && github.ref == 'refs/heads/main' && inputs.mode == 'release-gateway-failure-repairs' && inputs.acknowledge_interruption
     environment: codex-vps-ops
@@ -97,7 +263,7 @@ jobs:
             "$GITHUB_WORKSPACE/scripts/release_gateway_failure_repairs.py" release --acknowledge-interruption
 
   vps-codex-service-ops:
-    if: inputs.mode != 'install-org-health-token' && inputs.mode != 'inspect-audit-patch' && inputs.mode != 'apply-audit-patch' && inputs.mode != 'retry-audit-patch-once' && inputs.mode != 'inspect-quant-runtime' && inputs.mode != 'release-gateway-failure-repairs' && inputs.mode != 'inspect-quant-paths' && inputs.mode != 'inspect-monitor-failures' && inputs.mode != 'inspect-daily-failure-sample' && inputs.mode != 'inspect-recorded-daily-errors'
+    if: inputs.mode != 'install-org-health-token' && inputs.mode != 'inspect-audit-patch' && inputs.mode != 'apply-audit-patch' && inputs.mode != 'retry-audit-patch-once' && inputs.mode != 'inspect-quant-runtime' && inputs.mode != 'release-gateway-failure-repairs' && inputs.mode != 'inspect-quant-paths' && inputs.mode != 'inspect-monitor-failures' && inputs.mode != 'inspect-daily-failure-sample' && inputs.mode != 'inspect-recorded-daily-errors' && inputs.mode != 'stage-quant-runtime-inactive'
     # Bind to a protected environment when available so deploy/repair-ssh requires approval.
     environment: codex-vps-ops
     runs-on:

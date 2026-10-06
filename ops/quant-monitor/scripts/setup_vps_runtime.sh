@@ -6,6 +6,14 @@ ROOT="${QUANT_MONITOR_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 # shellcheck source=scripts/common_env.sh
 source "$ROOT/scripts/common_env.sh"
 
+# Staging must not execute Python startup/build code from the live source mirror.
+# Clear the inherited path for pip backend children as well as isolating Python.
+PYTHON_ISOLATION_ARGS=()
+if [[ "${QUANT_MONITOR_VENV+x}" == x ]]; then
+  unset PYTHONPATH
+  PYTHON_ISOLATION_ARGS=(-I)
+fi
+
 SOURCE_SHA="${1:-}"
 EXPECTED_AAB_ROOT="${2:-}"
 if [[ ! "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ || -z "$EXPECTED_AAB_ROOT" ]]; then
@@ -65,7 +73,7 @@ if [[ "$ACTUAL_LOCK" != "$EXPECTED_LOCK" ]]; then
 fi
 
 # Refuse unsupported hosts before any mirror/venv mutation.
-python3 - <<'PY'
+python3 "${PYTHON_ISOLATION_ARGS[@]}" - <<'PY'
 import os
 import platform
 import re
@@ -228,10 +236,10 @@ if [[ "${QUANT_MONITOR_VENV+x}" == x ]] && ! mkdir -- "$VENV"; then
   echo "[setup] unable to claim the staging venv path" >&2
   exit 1
 fi
-python3 -m venv "$VENV"
+python3 "${PYTHON_ISOLATION_ARGS[@]}" -m venv "$VENV"
 # Locked third-party tree only; no unbounded pip/wheel upgrade and no free-floating
 # numpy/pandas/google-cloud-storage installs.
-if ! "$VENV/bin/python" -m pip install --require-hashes --only-binary=:all: -r "$LOCK_FILE"; then
+if ! "$VENV/bin/python" "${PYTHON_ISOLATION_ARGS[@]}" -m pip install --require-hashes --only-binary=:all: -r "$LOCK_FILE"; then
   echo "[setup] locked dependency install failed" >&2
   exit 1
 fi
@@ -241,11 +249,11 @@ fi
 build_root=$(mktemp -d "${TMPDIR:-/tmp}/quant-monitor-qpk.XXXXXX")
 trap 'rm -rf -- "$build_root"' EXIT
 git -C "$QPK_ROOT" archive "$QPK_ARCHIVE_REF" | tar -x -C "$build_root"
-if ! "$VENV/bin/python" -m pip install --no-deps --no-build-isolation "$build_root"; then
+if ! "$VENV/bin/python" "${PYTHON_ISOLATION_ARGS[@]}" -m pip install --no-deps --no-build-isolation "$build_root"; then
   echo "[setup] QuantPlatformKit install failed" >&2
   exit 1
 fi
-if ! "$VENV/bin/python" -m pip check; then
+if ! "$VENV/bin/python" "${PYTHON_ISOLATION_ARGS[@]}" -m pip check; then
   echo "[setup] pip check failed after locked install" >&2
   exit 1
 fi

@@ -332,6 +332,16 @@ not claimed. Standalone dashboard refresh is a separate, unqualified rebuild pat
 invocation 稳定。venv/解释器仍 unknown；三项 QPK 候选文件 hash 不证明镜像 commit
 或真实 import。旧 release 是已观测回退配置，不是已知健康版本；不重发已用的一次诊断。
 
+PR #318 合并后的独立扩展读回
+[run37486273513](https://github.com/QuantStrategyLab/AIAuditBridge/actions/runs/37486273513)
+基于 `28a85ff022e77623d90cd05eef1a70448cba3c39`，在 **2026-10-06 15:18:00 UTC**
+观察到上述两个旧根仍 `failed/exit-code`（health 2、daily 1），配置和 invocation 前后稳定；
+这不是故障首次发生时间。固定 QPK HEAD 为 `086166458d4e3f61bb8937054cf7e69ff6ef914a`，
+ReturnCollector hash 匹配该旧版本；health pin 与 HEAD 匹配，daily 未读取 pin，不能代填。
+已取得声明 venv 的 cfg hash、两个 Python 链接类别及同次 PATH 候选元数据；`python` 链接
+类别 unknown 不等于损坏。原 interpreter/import gates 仍 unknown，未执行目标解释器或导入。
+这些剩余未知项不阻止先准备独立新环境，仍阻止声称服务已采用或恢复。
+
 采用差异按实际使用边界核对：#287/#289 为 lock/staging 安装路径；#290/#299 为 health
 正常调用的 artifact sync；#301/#306/#314 为 health 及日报 coverage/失败处理；#311
 为日报 wrapper/consumer 结果摘要；#316 为 QPK pin。#307 的 watcher/strategy_watch
@@ -342,14 +352,38 @@ invocation 稳定。venv/解释器仍 unknown；三项 QPK 候选文件 hash 不
 
 | 顺序 | 有限完成条件与执行边界 |
 | --- | --- |
-| 只读 preflight | 复用已有 `interpreter_declarations`、静态 roots、pin 与前后稳定字段；先把已声明的外部 venv/首个未知 PATH 前缀绑定为精确读集，再核 `pyvenv.cfg`、两个 Python 链接及共享 QPK 来源。现有 helper 不读取该外部根、QPK HEAD 或 ReturnCollector；若需扩展，只评审既有 helper/test 的固定读集，不接受自由路径。真实解释器执行、包/import 验证属于新增执行能力，须另行评审，不能藏入静态只读模式 |
-| inactive 安装 | 在真实 venv/数据绑定已确认后，仅用既有 `install_immutable_release.sh` 安装固定 source SHA；保留旧 release/venv/状态。脚本只验证 archive/目录，不代替依赖验证，也不切换服务。当前 workflow 尚无这条安装入口，所需执行接线须单独评审 |
+| 固定元数据 preflight | #318 和上述一次读回已完成静态阶段；保留未知 gate，不追加任意路径读取，也不把 metadata 当 interpreter/import 证明 |
+| inactive 候选 venv | 独立 `stage-quant-runtime-inactive` 入口复用 setup 的显式 staging 分支，以精确 main/干净 checkout、原 27 包 hash lock 和本地 QPK 286757 commit 建立固定新 venv；候选检查只执行标准库，核解释器隔离、锁版本及四项 QPK 文件 hash。源码/合成测试阶段不等于真实安装，执行后也不证明 application import 或服务采用 |
+| immutable release 安装 | 候选环境验收后，另用既有 `install_immutable_release.sh` 将精确 source SHA 绑定到已确认的 data/新 venv；保留旧 release/venv/状态。该 installer 只验证 archive/目录，不切换服务。本次 staging 入口不调用它，后续执行接线另行评审 |
 | 双服务采用/回退 | 先绑定 health/daily 各自的原源码根、解释器、QPK 和 timer 状态，再在不触 Gateway/共享 runner 的窗口分别切换并读回。恢复 timer 是可能触发业务的执行边界，不能当纯配置检查。当前没有现成 monitor switch/rollback mode；不得借用 Gateway `deploy` 或会立即运行 health 的完整 monitor deploy |
 | 自然周期验收 | 独立确认新 source/module 采用、真实 account/stream 与保留连续段；短样本仍 unavailable/min10。回退源码根不能撤销既有数据、Issue、通知或送达状态，也不保证共享 QPK/venv 同时回退；保留状态，不删除重试。两个旧 failed 服务不构成恢复健康证明 |
 
-本阶段仓库候选仅本 README 计划；不写 rollout 代码、不 dispatch、不改服务。后续如需
-补固定只读能力，先限定 `inspect_runtime_paths.py` 与其现有测试的独立候选；安装/切换
-能力及其准确写集、回滚绑定和执行验收另行审定，不把源码发布授权当作完整 deploy 验收。
+本阶段仅包含既有 workflow、setup、部署测试和本说明四文件的本地候选；尚未 dispatch
+或真实安装。后续发布/运行、immutable release、双服务采用及回滚绑定分阶段验收，
+不把源码发布、CI 或候选 metadata 成功当作完整 deploy 或健康恢复。
+
+`stage-quant-runtime-inactive` 只接受 main、该固定 mode、`acknowledge_interruption=false`
+和空 `ssh_unban_ip`，使用原 `codex-vps-ops` environment/runner/concurrency。精确 workflow
+SHA、checkout HEAD、当前 main 与干净工作树必须一致，并核 setup/common_env/lock/pin 固定字节。
+它排除通用 Gateway job，没有自由 source/path 参数。候选目录固定为
+`/home/ubuntu/quant-monitor-data03-286757-py312-v1`；任何已存在目录、文件或链接均拒绝，
+失败残留保留为未验收状态，不能自动重用、覆盖或删除。缺本地 QPK commit、平台不支持、
+wheel/hash/版本不符或 pip check/gh status 失败均停止，不 fetch/checkout 共享镜像、降版本或换源。
+
+显式 staging 会清除 common_env 导出的 `PYTHONPATH`，平台 preflight、venv 创建与三项 pip
+调用使用 Python `-I`；清除环境路径也保护 pip 的 build backend 子进程。默认 setup 模式
+保持原 argv/行为。新增 startup/pip 回归只用临时合成镜像，证明路径隔离缺口及修复，
+不表示生产存在这些测试文件或遭受攻击。入口以干净环境运行，仅传固定 HOME/PATH、已有
+workflow token、必要配置及 runner 已有的代理/CA 变量，值不输出；官方 PyPI、原 lock/hash/
+binary 限制和 TLS 验证保留，不增加凭据、不修改代理策略。安装阶段可访问官方包源；
+后置检查以清空环境的候选 Python `-I -B` 执行标准库，核 27 项 distribution 版本、候选
+prefix 下的 QPK distribution 和 drift_detector/health_dashboard/performance_monitor/
+return_collector 四个固定文件 hash，不导入 QPK/AAB 业务代码，不声称全包或业务验证。
+本入口不调用 health/daily、模型、通知、sync、服务或 timer 操作，也不安装 immutable release。
+安装输出仅在内存中按完整固定短语映射为有界 failure enum，区分缺 QPK commit、平台不支持、
+锁依赖安装、QPK 安装、pip check、gh 缺失或认证失败；其余为 `unknown`。不保存或透传原始
+pip/代理/路径/凭据/异常正文。过滤器成功不能吞掉 setup 的非零退出状态；过滤器失败也拒绝成功，
+失败没有候选成功摘要，残留继续保持未验收状态。
 
 ## Fixed read-only runtime path snapshot / 限定只读路径快照
 
