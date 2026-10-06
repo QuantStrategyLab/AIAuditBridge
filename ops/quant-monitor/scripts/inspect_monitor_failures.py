@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fixed, bounded, read-only systemd/journal evidence; never emits log text.
 
-No import-time work. Host reads require --inspect or --inspect-daily-only. The
+No import-time work. Host reads require an exact explicit inspection switch. The
 --fixture-test switch uses only in-memory fixtures and does not invoke metadata
 commands. Missing evidence is unknown, never a health or deployment clearance.
 """
@@ -38,6 +38,19 @@ TIMER_PROPERTIES = COMMON_PROPERTIES + (
 JOURNAL_PREFIX = (
     JOURNALCTL, "--no-pager", "--quiet", "--output=json",
     "--output-fields=_SYSTEMD_UNIT,_SYSTEMD_INVOCATION_ID,MESSAGE", "--all", "--lines=64",
+)
+RECORDED_DAILY_INVOCATION = "ff223a65dbf049cc9e9280f49c7519d5"
+RECORDED_DAILY_EXCEPTIONS = (
+    "ModuleNotFoundError", "ImportError", "FileNotFoundError", "PermissionError", "IsADirectoryError",
+    "NotADirectoryError", "OSError", "TimeoutError", "JSONDecodeError", "ValueError", "TypeError",
+    "KeyError", "AttributeError", "RuntimeError", "OverflowError", "SyntaxError", "NameError", "AssertionError",
+)
+RECORDED_DAILY_ERROR_GREP = "|".join(("Traceback",) + RECORDED_DAILY_EXCEPTIONS + (
+    "report_dir_not_found", "runtime digest rejected", "domain_exit=", "runtime_exit=",
+))
+RECORDED_DAILY_JOURNAL = JOURNAL_PREFIX + (
+    "--grep=" + RECORDED_DAILY_ERROR_GREP, "--case-sensitive=yes", "--reverse",
+    "_SYSTEMD_UNIT=" + SERVICES[1], "_SYSTEMD_INVOCATION_ID=" + RECORDED_DAILY_INVOCATION,
 )
 STAGES = (
     "python_import", "process_start", "python_io", "health_cycle", "daily_pipeline",
@@ -89,6 +102,8 @@ def journal_command(unit, invocation):
 
 
 def command_limit(argv):
+    if argv == RECORDED_DAILY_JOURNAL:
+        return JOURNAL_BYTES
     if any(argv == systemd_command(unit) for unit in UNITS):
         return SYSTEMD_BYTES
     if len(argv) == len(JOURNAL_PREFIX) + 2 and argv[:len(JOURNAL_PREFIX)] == JOURNAL_PREFIX:
@@ -349,7 +364,48 @@ def reject_json_constant(_):
     raise ValueError("unsupported_json_constant")
 
 
-def inspect_journal(result, unit, invocation, *, allow_sample=False):
+def empty_filtered_evidence():
+    return {"available": False, "complete": False, "absence_proven": False, "record_count": 0,
+            "exception_counts": dict.fromkeys(RECORDED_DAILY_EXCEPTIONS, 0),
+            "stage_counts": dict.fromkeys(("python_traceback", "python_import", "python_io", "briefing_directory_check", "daily_pipeline"), 0),
+            "category_counts": dict.fromkeys(("input_unavailable", "configuration_unavailable", "data_or_artifact_unavailable"), 0),
+            "exit_pairs": []}
+
+
+def recorded_error_evidence(message, output):
+    """Classify fixed old-pipeline markers; never infer a frame or private cause."""
+    if message == "Traceback (most recent call last):":
+        output["stage_counts"]["python_traceback"] += 1
+    exception = re.match(r"^(?:[A-Za-z_][A-Za-z0-9_]*\.)*(" + "|".join(RECORDED_DAILY_EXCEPTIONS) + r"):", message)
+    if exception:
+        name = exception[1]
+        output["exception_counts"][name] += 1
+        if name in ("ModuleNotFoundError", "ImportError"):
+            output["stage_counts"]["python_import"] += 1
+        elif name in ("FileNotFoundError", "PermissionError", "IsADirectoryError", "NotADirectoryError", "OSError", "TimeoutError"):
+            output["stage_counts"]["python_io"] += 1
+    reason = message.removeprefix("[briefing-pipeline] runtime digest rejected: ")
+    if message.startswith("[briefing-pipeline] runtime digest rejected: ") and reason in (
+        "runtime_projection_config_invalid", "invalid_runtime_timezone", "runtime_consumer_unavailable",
+    ):
+        output["stage_counts"]["daily_pipeline"] += 1
+        output["category_counts"]["data_or_artifact_unavailable" if reason == "runtime_consumer_unavailable" else "configuration_unavailable"] += 1
+    exits = re.fullmatch(r"\[briefing-pipeline\] domain_exit=([0-9]{1,3}) runtime_exit=([0-9]{1,3})", message)
+    if exits and int(exits[1]) <= 255 and int(exits[2]) <= 255:
+        output["stage_counts"]["daily_pipeline"] += 1
+        output["exit_pairs"].append({"domain_exit": int(exits[1]), "runtime_exit": int(exits[2])})
+    try:
+        payload = json.loads(message, object_pairs_hook=no_duplicates, parse_constant=reject_json_constant)
+    except (ValueError, RecursionError):
+        return
+    if isinstance(payload, dict) and payload.get("ok") is False and isinstance(payload.get("error"), str) and payload["error"].startswith("report_dir_not_found: "):
+        output["stage_counts"]["briefing_directory_check"] += 1
+        output["category_counts"]["input_unavailable"] += 1
+
+
+def inspect_journal(result, unit, invocation, *, allow_sample=False, fixed_error_filter=False):
+    if allow_sample and fixed_error_filter:
+        raise ValueError("incompatible_evidence_scope")
     stages = dict.fromkeys(STAGES, 0)
     errors = dict.fromkeys(ERRORS, 0)
     summary = {"visible": False, "current_invocation_matched": False, "record_count": 0,
@@ -358,6 +414,8 @@ def inspect_journal(result, unit, invocation, *, allow_sample=False):
                "malformed": False}
     if allow_sample:
         summary["sampled_evidence"] = empty_sample()
+    if fixed_error_filter:
+        summary["filtered_evidence"] = empty_filtered_evidence()
     if summary["read_unavailable"]:
         return summary, stages, errors
     try:
@@ -368,15 +426,24 @@ def inspect_journal(result, unit, invocation, *, allow_sample=False):
                 return summary, stages, errors
         records = []
         for line in lines:
-            record = json.loads(line, object_pairs_hook=no_duplicates, parse_constant=reject_json_constant) if allow_sample else json.loads(line, object_pairs_hook=no_duplicates)
+            record = json.loads(line, object_pairs_hook=no_duplicates, parse_constant=reject_json_constant) if allow_sample or fixed_error_filter else json.loads(line, object_pairs_hook=no_duplicates)
             if not isinstance(record, dict) or not isinstance(record.get("MESSAGE"), str):
                 raise ValueError("malformed_record")
             if record.get("_SYSTEMD_UNIT") != unit or record.get("_SYSTEMD_INVOCATION_ID") != invocation:
                 return summary, stages, errors
+            if fixed_error_filter and re.search(RECORDED_DAILY_ERROR_GREP, record["MESSAGE"]) is None:
+                return summary, stages, errors
             records.append(record)
         summary.update(visible=bool(records), current_invocation_matched=bool(records), record_count=len(records))
         for record in records:
-            evidence(record["MESSAGE"], unit, stages, errors)
+            if fixed_error_filter:
+                recorded_error_evidence(record["MESSAGE"], summary["filtered_evidence"])
+            else:
+                evidence(record["MESSAGE"], unit, stages, errors)
+        if fixed_error_filter:
+            filtered = summary["filtered_evidence"]
+            filtered["record_count"] = len(records)
+            filtered["available"] = bool(any(filtered["exception_counts"].values()) or any(filtered["stage_counts"].values()) or any(filtered["category_counts"].values()) or filtered["exit_pairs"])
         if allow_sample and len(records) == JOURNAL_RECORDS:
             summary["sampled_evidence"] = {
                 "available": True, "complete": False, "absence_proven": False, "record_count": len(records),
@@ -385,6 +452,8 @@ def inspect_journal(result, unit, invocation, *, allow_sample=False):
             return summary, dict.fromkeys(STAGES, 0), dict.fromkeys(ERRORS, 0)
     except (UnicodeError, ValueError, RecursionError):
         summary["malformed"] = True
+        if fixed_error_filter:
+            summary["filtered_evidence"] = empty_filtered_evidence()
         return summary, dict.fromkeys(STAGES, 0), dict.fromkeys(ERRORS, 0)
     return summary, stages, errors
 
@@ -434,6 +503,38 @@ def collect(*, runner=None, daily_only=False):
             "business_recovery_proven": False, "deployment_authorized": False}
 
 
+def collect_recorded_daily_errors(*, runner=None):
+    """One fixed old invocation, one grep query; mismatch ends this scope."""
+    runner = runner or run_bounded
+    unit = SERVICES[1]
+    before = parse_systemd(safe_read(runner, systemd_command(unit)), unit)
+    summary, _, _ = inspect_journal(ReadResult(), unit, RECORDED_DAILY_INVOCATION, fixed_error_filter=True)
+    entry = {"systemd": project_systemd(before, unit), "snapshot_stable": False, "bound_invocation_current": False,
+             "diagnosis": "unknown", "journal": summary, "filtered_evidence": summary.pop("filtered_evidence")}
+    result = {"schema_version": 1, "scope": "recorded_daily_invocation_error_filter", "units": {unit: entry},
+              "business_recovery_proven": False, "deployment_authorized": False}
+    if before is None or before["InvocationID"] != RECORDED_DAILY_INVOCATION:
+        return result
+    journal = safe_read(runner, RECORDED_DAILY_JOURNAL)
+    after = parse_systemd(safe_read(runner, systemd_command(unit)), unit)
+    stable = before == after
+    projected = project_systemd(after, unit)
+    metadata_known = projected.get("available") and all(
+        projected.get(key) not in (None, "unknown") for key in (
+            "active_state", "sub_state", "unit_file_state", "result", "main_pid_present",
+            "exit_code", "exit_status", "main_started", "main_exited",
+        )
+    )
+    summary, _, _ = inspect_journal(journal, unit, RECORDED_DAILY_INVOCATION, fixed_error_filter=True)
+    filtered = summary.pop("filtered_evidence")
+    entry.update(systemd=projected, snapshot_stable=stable,
+                 bound_invocation_current=after is not None and after["InvocationID"] == RECORDED_DAILY_INVOCATION,
+                 journal=summary, filtered_evidence=filtered if stable and metadata_known else empty_filtered_evidence())
+    if not stable:
+        summary["current_invocation_matched"] = False
+    return result
+
+
 def fixture_test():
     """Exercise the real CLI/collector with a tiny fake runner, never host reads."""
     invocation = "a" * 32
@@ -466,6 +567,19 @@ def fixture_test():
             or entry["sampled_evidence"]["error_counts"]["import_error"] != JOURNAL_RECORDS
             or "fixture-private-marker" in json.dumps(daily)):
         return {"fixture_test": "failed"}
+    requests.clear()
+
+    def recorded_runner(argv):
+        requests.append(argv)
+        value = runner(argv)
+        return ReadResult(data=value.data.replace(invocation.encode(), RECORDED_DAILY_INVOCATION.encode()), returncode=0)
+
+    recorded = collect_recorded_daily_errors(runner=recorded_runner)
+    filtered = recorded["units"][SERVICES[1]]["filtered_evidence"]
+    if (requests != [systemd_command(SERVICES[1]), RECORDED_DAILY_JOURNAL, systemd_command(SERVICES[1])]
+            or not filtered["available"] or filtered["exception_counts"]["ModuleNotFoundError"] != 1
+            or "fixture-private-marker" in json.dumps(recorded)):
+        return {"fixture_test": "failed"}
     return {"fixture_test": "passed", "host_metadata_commands": 0}
 
 
@@ -475,11 +589,14 @@ def main(argv=None):
         result = fixture_test()
         print(json.dumps(result, sort_keys=True))
         return 0 if result["fixture_test"] == "passed" else 1
-    if argv not in (["--inspect"], ["--inspect-daily-only"]):
+    if argv not in (["--inspect"], ["--inspect-daily-only"], ["--inspect-recorded-daily-errors"]):
         print('{"error":"explicit_mode_required"}')
         return 64
     try:
-        result = collect(daily_only=True) if argv == ["--inspect-daily-only"] else collect()
+        if argv == ["--inspect-recorded-daily-errors"]:
+            result = collect_recorded_daily_errors()
+        else:
+            result = collect(daily_only=True) if argv == ["--inspect-daily-only"] else collect()
     except KeyboardInterrupt:
         print('{"error":"diagnostic_interrupted","diagnosis":"unknown"}')
         return 130
