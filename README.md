@@ -17,14 +17,6 @@ or backtest. Missing configuration is not successful delivery; verify the
 publication result and the console's original source/run/time before closing it.
 
 
-## QSL architecture role
-
-- **Layer**: `ops-tooling`.
-- **Responsibility**: AI audit and review automation bridge.
-- **Owns**: audit prompts, service policy, workflow health terminology.
-- **Consumes**: QuantStrategyLab repositories, PR/workflow metadata, Codex/API providers.
-- **Must not**: submit broker orders or mutate live allocations.
-
 [Chinese README](README.zh-CN.md)
 
 > Investing involves risk. This project does not provide investment advice and is for education, research, and engineering review only.
@@ -34,6 +26,14 @@ publication result and the console's original source/run/time before closing it.
 AIAuditBridge is the QuantStrategyLab AI audit automation bridge. It runs Codex VPS/service-backed monthly audit workflows. Direct OpenAI/Anthropic audit fallback is disabled because it bypassed authenticated service budgets; API analysis/review remains available through the budgeted service.
 
 It produces research, audit, or orchestration artifacts. It should not submit broker orders or mutate live allocations by itself.
+
+## QSL architecture role
+
+- **Layer**: `ops-tooling`.
+- **Responsibility**: AI audit and review automation bridge.
+- **Owns**: audit prompts, service policy, workflow health terminology.
+- **Consumes**: QuantStrategyLab repositories, PR/workflow metadata, Codex/API providers.
+- **Must not**: submit broker orders or mutate live allocations.
 
 ## Automation implementation and evidence status
 
