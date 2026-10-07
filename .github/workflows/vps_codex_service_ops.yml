@@ -12,6 +12,8 @@ on:
           - inspect
           - inspect-quant-runtime
           - inspect-quant-paths
+          - preview-longbridge-paper-once
+          - send-longbridge-paper-once
           - stage-quant-runtime-inactive
           - install-quant-release-inactive
           - check-quant-consumers-offline
@@ -25,6 +27,10 @@ on:
           - deploy
           - repair-ssh
           - install-org-health-token
+      runtime_business_day:
+        description: "Exact business day for the notification-only modes"
+        required: false
+        default: ""
       acknowledge_interruption:
         description: "Accept possible interruption of sync/async AI requests; snapshot is not a drain"
         type: boolean
@@ -1696,3 +1702,71 @@ jobs:
           env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C \
             /usr/bin/python3 -I -B \
             "$GITHUB_WORKSPACE/ops/quant-monitor/scripts/inspect_runtime_paths.py"
+
+  longbridge-paper-once:
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'QuantStrategyLab/AIAuditBridge' && github.ref == 'refs/heads/main' && (inputs.mode == 'preview-longbridge-paper-once' || inputs.mode == 'send-longbridge-paper-once') && !inputs.acknowledge_interruption && inputs.ssh_unban_ip == ''
+    environment: codex-vps-ops
+    runs-on:
+      - self-hosted
+      - codex-vps
+    timeout-minutes: 5
+    steps:
+      - name: Checkout exact operation commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Verify exact main workflow and clean operation checkout
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_REPOSITORY: ${{ github.repository }}
+          RUN_REF: ${{ github.ref }}
+          RUN_SHA: ${{ github.sha }}
+          RUN_WORKFLOW_REF: ${{ github.workflow_ref }}
+          RUN_WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          [ "$RUN_REPOSITORY" = QuantStrategyLab/AIAuditBridge ]
+          [ "$RUN_REF" = refs/heads/main ]
+          [[ "$RUN_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [ "$RUN_WORKFLOW_REF" = QuantStrategyLab/AIAuditBridge/.github/workflows/vps_codex_service_ops.yml@refs/heads/main ]
+          [ "$RUN_WORKFLOW_SHA" = "$RUN_SHA" ]
+          [ "$(git rev-parse HEAD)" = "$RUN_SHA" ]
+          [ -z "$(git status --porcelain --untracked-files=all)" ]
+          current_main="$(timeout 30s gh api repos/QuantStrategyLab/AIAuditBridge/git/ref/heads/main --jq '.object.sha')"
+          [ "$current_main" = "$RUN_SHA" ]
+
+      - name: Checkout published C-only notification application
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: 823ba856af49d8799506afe476aec9d07ab1c63d
+          path: notification-source
+          persist-credentials: false
+
+      - name: Run only the paper runtime consumer with the original persistent ledger
+        env:
+          RUN_MODE: ${{ inputs.mode }}
+          # Keep object identity and deployment-bound targets in the protected
+          # codex-vps-ops environment, never in ordinary dispatch inputs.
+          QUANT_MONITOR_RUNTIME_PROJECTION_OBJECT: ${{ secrets.RUNTIME_DIGEST_ONCE_PROJECTION_OBJECT }}
+          QUANT_MONITOR_RUNTIME_BUSINESS_DAY: ${{ inputs.runtime_business_day }}
+          QUANT_MONITOR_RUNTIME_EXPECTED_TARGET_KEY: ${{ secrets.RUNTIME_DIGEST_ONCE_TARGET_KEYS }}
+        run: |
+          set -euo pipefail
+          [ "$(git -C notification-source rev-parse HEAD)" = 823ba856af49d8799506afe476aec9d07ab1c63d ]
+          [ -z "$(git -C notification-source status --porcelain --untracked-files=all)" ]
+          [ -x /usr/bin/gcloud ]
+          export NOTIFICATION_SOURCE="$GITHUB_WORKSPACE/notification-source"
+          export NOTIFICATION_HELPER="$GITHUB_WORKSPACE/ops/quant-monitor/scripts/run_runtime_digest_once.py"
+          /usr/bin/sudo -n -u ubuntu --preserve-env=RUN_MODE,NOTIFICATION_SOURCE,NOTIFICATION_HELPER,QUANT_MONITOR_RUNTIME_PROJECTION_OBJECT,QUANT_MONITOR_RUNTIME_BUSINESS_DAY,QUANT_MONITOR_RUNTIME_EXPECTED_TARGET_KEY \
+            /usr/bin/python3 -I -B - <<'PY'
+          import os, runpy, sys
+          mode = {'preview-longbridge-paper-once': 'preview', 'send-longbridge-paper-once': 'send'}[os.environ['RUN_MODE']]
+          keys = os.environ.get('QUANT_MONITOR_RUNTIME_EXPECTED_TARGET_KEY', '').splitlines()
+          sys.argv = [os.environ['NOTIFICATION_HELPER'], '--source-root', os.environ['NOTIFICATION_SOURCE'],
+                      '--mode', mode, '--object', os.environ.get('QUANT_MONITOR_RUNTIME_PROJECTION_OBJECT', ''),
+                      '--day', os.environ.get('QUANT_MONITOR_RUNTIME_BUSINESS_DAY', ''),
+                      *[item for key in keys for item in ('--expected-target-key', key)]]
+          runpy.run_path(sys.argv[0], run_name='__main__')
+          PY
