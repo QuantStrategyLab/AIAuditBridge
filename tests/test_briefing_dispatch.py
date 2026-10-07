@@ -7,13 +7,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from service.briefing_consumer import (
+from quant_monitor_domain.briefing_consumer import (
     BriefingAction,
     BriefingConsumptionResult,
     BriefingFinding,
     consume_briefing_report,
 )
-from service.briefing_dispatch import (
+from quant_monitor_domain.briefing_dispatch import (
     create_github_issue,
     dispatch_briefing_result,
     dispatch_runtime_digest,
@@ -55,7 +55,7 @@ class BriefingDispatchTests(unittest.TestCase):
             self.assertIn("demo", summary["telegram_dry_run"])
             self.assertFalse((Path(tmp) / "data" / "alert-state" / "health_cycle.json").exists())
 
-    @patch("service.briefing_dispatch.dispatch_strategy_watch_findings")
+    @patch("quant_monitor_domain.briefing_dispatch.dispatch_strategy_watch_findings")
     def test_strategy_health_dispatches_to_issue_only_watcher(self, dispatch_findings) -> None:
         dispatch_findings.return_value = {
             "status": "ok",
@@ -88,7 +88,7 @@ class BriefingDispatchTests(unittest.TestCase):
         self.assertEqual(dispatched[0].finding_type, "monitoring_trigger")
         self.assertEqual(summary["errors"], [])
 
-    @patch("service.briefing_dispatch.dispatch_strategy_watch_findings")
+    @patch("quant_monitor_domain.briefing_dispatch.dispatch_strategy_watch_findings")
     def test_strategy_record_failure_falls_back_to_operational_telegram(
         self,
         dispatch_findings,
@@ -122,7 +122,7 @@ class BriefingDispatchTests(unittest.TestCase):
             },
             clear=True,
         ), patch(
-            "service.briefing_dispatch.telegram_target_outcome",
+            "quant_monitor_domain.briefing_dispatch.telegram_target_outcome",
             return_value="sent",
         ) as send_target:
             summary = dispatch_briefing_result(result)
@@ -136,7 +136,7 @@ class BriefingDispatchTests(unittest.TestCase):
             self.assertNotIn("123", state)
             self.assertNotIn("token", state)
 
-    @patch("service.briefing_dispatch.urllib.request.urlopen")
+    @patch("quant_monitor_domain.briefing_dispatch.urllib.request.urlopen")
     def test_send_telegram_alert_success(self, mock_urlopen) -> None:
         class _Resp:
             def read(self):
@@ -159,14 +159,14 @@ class BriefingDispatchTests(unittest.TestCase):
             calls.append(chat_id)
             return "failed" if chat_id == "first" else "sent"
 
-        with patch("service.briefing_dispatch.telegram_target_outcome", side_effect=outcome):
+        with patch("quant_monitor_domain.briefing_dispatch.telegram_target_outcome", side_effect=outcome):
             ok = send_telegram_alert(text="hello", token="tok", chat_ids=("first", "second"))
 
         self.assertFalse(ok)
         self.assertEqual(calls, ["first", "second"])
 
-    @patch("service.briefing_dispatch.subprocess.check_output", return_value="https://example.test/issues/1\n")
-    @patch("service.briefing_dispatch.shutil_which", return_value="/usr/bin/gh")
+    @patch("quant_monitor_domain.briefing_dispatch.subprocess.check_output", return_value="https://example.test/issues/1\n")
+    @patch("quant_monitor_domain.briefing_dispatch.shutil_which", return_value="/usr/bin/gh")
     def test_create_github_issue_uses_actions_repository(self, _which, check_output) -> None:
         with patch.dict(os.environ, {"GITHUB_REPOSITORY": "QuantStrategyLab/CryptoStrategies"}, clear=True):
             issue = create_github_issue(title="review unavailable", body="details", labels=())
@@ -175,13 +175,13 @@ class BriefingDispatchTests(unittest.TestCase):
         self.assertIn("QuantStrategyLab/CryptoStrategies", check_output.call_args.args[0])
 
     @patch(
-        "service.briefing_dispatch.subprocess.check_output",
+        "quant_monitor_domain.briefing_dispatch.subprocess.check_output",
         side_effect=[
             subprocess.CalledProcessError(1, ["gh"], output="label not found"),
             "https://example.test/issues/2\n",
         ],
     )
-    @patch("service.briefing_dispatch.shutil_which", return_value="/usr/bin/gh")
+    @patch("quant_monitor_domain.briefing_dispatch.shutil_which", return_value="/usr/bin/gh")
     def test_create_github_issue_retries_without_missing_labels(self, _which, check_output) -> None:
         with patch.dict(os.environ, {"GITHUB_REPOSITORY": "QuantStrategyLab/CryptoStrategies"}, clear=True):
             issue = create_github_issue(
@@ -194,8 +194,8 @@ class BriefingDispatchTests(unittest.TestCase):
         self.assertIn("--label", check_output.call_args_list[0].args[0])
         self.assertNotIn("--label", check_output.call_args_list[1].args[0])
 
-    @patch("service.briefing_dispatch.subprocess.check_output")
-    @patch("service.briefing_dispatch.shutil_which", return_value="/usr/bin/gh")
+    @patch("quant_monitor_domain.briefing_dispatch.subprocess.check_output")
+    @patch("quant_monitor_domain.briefing_dispatch.shutil_which", return_value="/usr/bin/gh")
     def test_create_github_issue_rejects_invalid_repository(self, _which, check_output) -> None:
         for repository in ("bad/repo --assignee admin", "QuantStrategyLab/..", ".hidden/repo"):
             with patch.dict(os.environ, {"GITHUB_REPOSITORY": repository}, clear=True):
@@ -215,7 +215,7 @@ class BriefingDispatchTests(unittest.TestCase):
                 },
                 clear=True,
             ),
-            patch("service.briefing_dispatch.shutil_which", return_value="/usr/bin/gh"),
+            patch("quant_monitor_domain.briefing_dispatch.shutil_which", return_value="/usr/bin/gh"),
         ):
             prereqs = sender_prerequisites()
         self.assertEqual(
@@ -234,11 +234,10 @@ class BriefingDispatchTests(unittest.TestCase):
     def test_send_dry_run_quiet_preserves_success_without_side_effects(self) -> None:
         result = BriefingConsumptionResult(day="2026-07-08", report_dir="/tmp", findings=[])
         with (
-            patch("service.briefing_dispatch.urllib.request.urlopen") as urlopen,
-            patch("service.briefing_dispatch.subprocess.check_output") as check_output,
-            patch("service.briefing_dispatch.create_github_issue") as create_issue,
-            patch("service.briefing_dispatch.send_telegram_alert") as send_tg,
-            patch("service.automation_run_ledger.get_automation_run_ledger") as get_ledger,
+            patch("quant_monitor_domain.briefing_dispatch.urllib.request.urlopen") as urlopen,
+            patch("quant_monitor_domain.briefing_dispatch.subprocess.check_output") as check_output,
+            patch("quant_monitor_domain.briefing_dispatch.create_github_issue") as create_issue,
+            patch("quant_monitor_domain.briefing_dispatch.send_telegram_alert") as send_tg,
         ):
             summary = dispatch_briefing_result(result, send_dry_run=True)
         self.assertEqual(summary["action"], "quiet")
@@ -251,7 +250,6 @@ class BriefingDispatchTests(unittest.TestCase):
         check_output.assert_not_called()
         create_issue.assert_not_called()
         send_tg.assert_not_called()
-        get_ledger.assert_not_called()
 
     def test_send_dry_run_telegram_configured_redacts_preview_and_skips_network(self) -> None:
         result = BriefingConsumptionResult(
@@ -276,12 +274,11 @@ class BriefingDispatchTests(unittest.TestCase):
                 },
                 clear=True,
             ),
-            patch("service.briefing_dispatch.shutil_which", return_value="/usr/bin/gh"),
-            patch("service.briefing_dispatch.urllib.request.urlopen") as urlopen,
-            patch("service.briefing_dispatch.subprocess.check_output") as check_output,
-            patch("service.briefing_dispatch.create_github_issue") as create_issue,
-            patch("service.briefing_dispatch.send_telegram_alert") as send_tg,
-            patch("service.automation_run_ledger.get_automation_run_ledger") as get_ledger,
+            patch("quant_monitor_domain.briefing_dispatch.shutil_which", return_value="/usr/bin/gh"),
+            patch("quant_monitor_domain.briefing_dispatch.urllib.request.urlopen") as urlopen,
+            patch("quant_monitor_domain.briefing_dispatch.subprocess.check_output") as check_output,
+            patch("quant_monitor_domain.briefing_dispatch.create_github_issue") as create_issue,
+            patch("quant_monitor_domain.briefing_dispatch.send_telegram_alert") as send_tg,
         ):
             summary = dispatch_briefing_result(result, send_dry_run=True)
 
@@ -304,7 +301,6 @@ class BriefingDispatchTests(unittest.TestCase):
         check_output.assert_not_called()
         create_issue.assert_not_called()
         send_tg.assert_not_called()
-        get_ledger.assert_not_called()
 
     def test_send_dry_run_telegram_missing_env_fail_closed(self) -> None:
         result = BriefingConsumptionResult(
@@ -320,9 +316,9 @@ class BriefingDispatchTests(unittest.TestCase):
         )
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch("service.briefing_dispatch.shutil_which", return_value="/usr/bin/gh"),
-            patch("service.briefing_dispatch.urllib.request.urlopen") as urlopen,
-            patch("service.briefing_dispatch.send_telegram_alert") as send_tg,
+            patch("quant_monitor_domain.briefing_dispatch.shutil_which", return_value="/usr/bin/gh"),
+            patch("quant_monitor_domain.briefing_dispatch.urllib.request.urlopen") as urlopen,
+            patch("quant_monitor_domain.briefing_dispatch.send_telegram_alert") as send_tg,
         ):
             summary = dispatch_briefing_result(result, send_dry_run=True)
 
@@ -355,10 +351,10 @@ class BriefingDispatchTests(unittest.TestCase):
                 {"QSL_GITHUB_REPO": "QuantStrategyLab/AIAuditBridge"},
                 clear=True,
             ),
-            patch("service.briefing_dispatch.shutil_which", return_value=None),
-            patch("service.briefing_dispatch.subprocess.check_output") as check_output,
-            patch("service.briefing_dispatch.create_github_issue") as create_issue,
-            patch("service.briefing_dispatch.urllib.request.urlopen") as urlopen,
+            patch("quant_monitor_domain.briefing_dispatch.shutil_which", return_value=None),
+            patch("quant_monitor_domain.briefing_dispatch.subprocess.check_output") as check_output,
+            patch("quant_monitor_domain.briefing_dispatch.create_github_issue") as create_issue,
+            patch("quant_monitor_domain.briefing_dispatch.urllib.request.urlopen") as urlopen,
         ):
             summary = dispatch_briefing_result(result, send_dry_run=True)
 
@@ -395,8 +391,8 @@ class BriefingDispatchTests(unittest.TestCase):
                 {"QSL_GITHUB_REPO": "bad/repo --assignee admin"},
                 clear=True,
             ),
-            patch("service.briefing_dispatch.shutil_which", return_value="/usr/bin/gh"),
-            patch("service.briefing_dispatch.create_github_issue") as create_issue,
+            patch("quant_monitor_domain.briefing_dispatch.shutil_which", return_value="/usr/bin/gh"),
+            patch("quant_monitor_domain.briefing_dispatch.create_github_issue") as create_issue,
         ):
             summary = dispatch_briefing_result(result, send_dry_run=True)
 
@@ -442,7 +438,7 @@ class BriefingDispatchTests(unittest.TestCase):
             os.environ,
             {"TELEGRAM_TOKEN": "token", "GLOBAL_TELEGRAM_CHAT_ID": "123"},
             clear=True,
-        ), patch("service.briefing_dispatch.telegram_target_outcome") as send_target:
+        ), patch("quant_monitor_domain.briefing_dispatch.telegram_target_outcome") as send_target:
             summary = dispatch_briefing_result(result)
         self.assertFalse(summary["telegram_sent"])
         self.assertIn("alert_state_root_unavailable", summary["errors"])
@@ -474,7 +470,7 @@ class BriefingDispatchTests(unittest.TestCase):
                 "QUANT_MONITOR_ROOT": tmp,
             },
             clear=True,
-        ), patch("service.briefing_dispatch.telegram_target_outcome", side_effect=send_target):
+        ), patch("quant_monitor_domain.briefing_dispatch.telegram_target_outcome", side_effect=send_target):
             first = dispatch_briefing_result(result)
             second_calls: list[str] = []
 
@@ -482,7 +478,7 @@ class BriefingDispatchTests(unittest.TestCase):
                 second_calls.append(chat_id)
                 return "sent"
 
-            with patch("service.briefing_dispatch.telegram_target_outcome", side_effect=retry):
+            with patch("quant_monitor_domain.briefing_dispatch.telegram_target_outcome", side_effect=retry):
                 second = dispatch_briefing_result(result)
         self.assertFalse(first["telegram_sent"])
         self.assertEqual(calls, ["ok-chat", "bad-chat"])
@@ -526,7 +522,7 @@ class BriefingDispatchTests(unittest.TestCase):
                 "QUANT_MONITOR_ROOT": tmp,
             },
             clear=True,
-        ), patch("service.briefing_dispatch.telegram_target_outcome", side_effect=send_target):
+        ), patch("quant_monitor_domain.briefing_dispatch.telegram_target_outcome", side_effect=send_target):
             first = dispatch_runtime_digest(projection)
             calls.clear()
 
@@ -534,7 +530,7 @@ class BriefingDispatchTests(unittest.TestCase):
                 calls.append(chat_id)
                 return "sent"
 
-            with patch("service.briefing_dispatch.telegram_target_outcome", side_effect=retry):
+            with patch("quant_monitor_domain.briefing_dispatch.telegram_target_outcome", side_effect=retry):
                 second = dispatch_runtime_digest(projection)
             later = dict(projection)
             later["observed_at"] = "2026-09-28T12:00:00+00:00"
@@ -561,7 +557,7 @@ class BriefingDispatchTests(unittest.TestCase):
                 "QUANT_MONITOR_ROOT": tmp,
             },
             clear=True,
-        ), patch("service.briefing_dispatch.telegram_target_outcome", side_effect=unknown):
+        ), patch("quant_monitor_domain.briefing_dispatch.telegram_target_outcome", side_effect=unknown):
             first_unknown = dispatch_runtime_digest(unknown_projection)
             unknown_calls.clear()
             second_unknown = dispatch_runtime_digest(unknown_projection)
@@ -592,7 +588,7 @@ class BriefingDispatchTests(unittest.TestCase):
                 "conflicts": [],
                 "fills": {"source": "not_connected", "records": [], "count": None},
             })
-        with patch("service.briefing_dispatch.telegram_target_outcome") as send_target:
+        with patch("quant_monitor_domain.briefing_dispatch.telegram_target_outcome") as send_target:
             too_long = dispatch_runtime_digest(projection)
         self.assertIn("runtime_digest_too_long", too_long["errors"])
         self.assertIn("到期缺报告", too_long["telegram_preview"])
@@ -606,13 +602,13 @@ class BriefingDispatchTests(unittest.TestCase):
             "unmatched_reports": [],
             "records": [projection["records"][1]],
         }
-        module = __import__("service.briefing_dispatch", fromlist=["_health_cycle_module"])._health_cycle_module()
+        module = __import__("quant_monitor_domain.briefing_dispatch", fromlist=["_health_cycle_module"])._health_cycle_module()
         with tempfile.TemporaryDirectory() as tmp, patch.dict(
             os.environ,
             {"TELEGRAM_TOKEN": "token", "GLOBAL_TELEGRAM_CHAT_ID": "chat", "QUANT_MONITOR_ROOT": tmp},
             clear=True,
         ), patch.object(module, "_write_alert_state", side_effect=OSError("disk")), patch(
-            "service.briefing_dispatch.telegram_target_outcome",
+            "quant_monitor_domain.briefing_dispatch.telegram_target_outcome",
         ) as send_target:
             failed = dispatch_runtime_digest(short)
         self.assertEqual(failed["errors"], ["alert_state_write_failed"])

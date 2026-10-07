@@ -17,6 +17,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 DOMAINS = ("cn_equity", "hk_equity", "us_equity", "crypto")
 SCORE_ALERT = 60.0
 DRIFT_REVIEW = 0.50
@@ -937,42 +939,27 @@ def run_historical_diagnosis_rehearsal(
         return {"status": "rejected", "reason": "non_oidc_credentials_rejected"}
     try:
         if config_loader is None:
-            from client.config import GatewayConfig
+            from quant_platform_kit.strategy_lifecycle.ai_provider import AiProviderConfig, AiServiceConfig
 
-            config_loader = GatewayConfig.from_env
+            config_loader = lambda: AiServiceConfig.reliability(primary=AiProviderConfig.from_env(label="monitor-diagnosis"))
         if client_factory is None:
-            from client.gateway_client import AiGatewayClient
+            from quant_platform_kit.strategy_lifecycle.ai_provider import AiServiceClient
 
-            client_factory = AiGatewayClient
+            client_factory = AiServiceClient
         client = client_factory(config_loader())
     except (ImportError, OSError, RuntimeError, ValueError):
-        return {"status": "deferred", "reason": "ai_gateway_not_configured"}
+        return {"status": "deferred", "reason": "ai_task_service_not_configured"}
     try:
-        from service.provider_scenarios import (
-            SCENARIO_RESEARCH_TASK_DIAGNOSIS,
-            resolve_execute_kwargs,
-        )
-
-        result = client.execute(
-            _historical_diagnosis_rehearsal_prompt(),
-            task=_HISTORICAL_DIAGNOSIS_REHEARSAL_TASK,
-            **resolve_execute_kwargs(
-                SCENARIO_RESEARCH_TASK_DIAGNOSIS,
-                allowed_providers=["codex"],
-            ),
-            sandbox="read-only",
-            source_repository=_OPERATIONAL_DIAGNOSIS_SOURCE_REPOSITORY,
-            source_ref="main",
-            timeout=600,
-        )
+        prompt = _historical_diagnosis_rehearsal_prompt()
+        result = client.execute(prompt, idempotency_key="monitor-rehearsal:" + hashlib.sha256(prompt.encode()).hexdigest(), timeout=600)
     except Exception:
-        return {"status": "unavailable", "reason": "codex_outcome_unknown"}
+        return {"status": "unavailable", "reason": "ai_outcome_unknown"}
     raw = result.raw if isinstance(getattr(result, "raw", None), dict) else {}
-    if raw.get("status") == "deferred":
-        return {"status": "deferred", "reason": "capacity_unavailable"}
-    if result.success is True and raw.get("status") == "succeeded" and raw.get("job_id"):
-        return {"status": "succeeded", "job_id": str(raw["job_id"])}
-    return {"status": "unavailable", "reason": "codex_result_unavailable"}
+    if raw.get("status") in {"queued", "running", "submitting", "outcome_unknown"}:
+        return {"status": "deferred", "reason": "ai_task_pending"}
+    if _valid_diagnosis_result(result, raw):
+        return {"status": "succeeded", "job_id": str(raw["id"])}
+    return {"status": "unavailable", "reason": "ai_result_unavailable"}
 
 
 def _run_operational_diagnosis(
@@ -990,11 +977,19 @@ def _run_operational_diagnosis(
     if not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
         return {"status": "rejected", "reason": "invalid_fingerprint"}
     try:
-        last_date = _load_operational_diagnosis_state(root).get("operational_diagnosis_last_attempt_date")
-        if attempt_date is not None and last_date is not None and last_date >= attempt_date:
-            return {"status": "skipped", "reason": "daily_attempt_limit"}
-        if _operational_diagnosis_attempted(root, fingerprint):
-            return {"status": "skipped", "reason": "already_attempted"}
+        state = _load_operational_diagnosis_state(root)
+        pending = state.get("operational_diagnosis_pending", {})
+        if not isinstance(pending, dict):
+            raise OSError("invalid diagnosis state")
+        resume_task_id = pending.get(fingerprint)
+        if resume_task_id is not None and (not isinstance(resume_task_id, str) or not resume_task_id):
+            raise OSError("invalid diagnosis task identity")
+        last_date = state.get("operational_diagnosis_last_attempt_date")
+        if resume_task_id is None:
+            if attempt_date is not None and last_date is not None and last_date >= attempt_date:
+                return {"status": "skipped", "reason": "daily_attempt_limit"}
+            if _operational_diagnosis_attempted(root, fingerprint):
+                return {"status": "skipped", "reason": "already_attempted"}
     except OSError as exc:
         return {
             "status": "deferred", "reason": "dedupe_state_unavailable",
@@ -1004,20 +999,20 @@ def _run_operational_diagnosis(
     if config_loader is None and not (
         os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL") and os.environ.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
     ):
-        return {"status": "deferred", "reason": "ai_gateway_not_configured"}
+        return {"status": "deferred", "reason": "ai_task_service_not_configured"}
     try:
         if config_loader is None:
-            from client.config import GatewayConfig
+            from quant_platform_kit.strategy_lifecycle.ai_provider import AiProviderConfig, AiServiceConfig
 
-            config_loader = GatewayConfig.from_env
+            config_loader = lambda: AiServiceConfig.reliability(primary=AiProviderConfig.from_env(label="monitor-diagnosis"))
         if client_factory is None:
-            from client.gateway_client import AiGatewayClient
+            from quant_platform_kit.strategy_lifecycle.ai_provider import AiServiceClient
 
-            client_factory = AiGatewayClient
+            client_factory = AiServiceClient
         config = config_loader()
         client = client_factory(config)
     except (ImportError, OSError, RuntimeError, ValueError):
-        return {"status": "deferred", "reason": "ai_gateway_not_configured"}
+        return {"status": "deferred", "reason": "ai_task_service_not_configured"}
     try:
         _record_operational_diagnosis_attempt(root, fingerprint, attempt_date=attempt_date)
     except OSError as exc:
@@ -1026,42 +1021,56 @@ def _run_operational_diagnosis(
             "failure_stage": "diagnosis_attempt_persistence", "failure_category": _diagnosis_failure_category(exc),
         }
     try:
-        from service.provider_scenarios import (
-            SCENARIO_ACCOUNT_OPERATIONAL_DIAGNOSIS,
-            resolve_execute_kwargs,
-        )
-
-        result = client.execute(
-            _operational_diagnosis_prompt(data_errors, observation=observation),
-            task="operational_data_diagnosis",
-            **resolve_execute_kwargs(SCENARIO_ACCOUNT_OPERATIONAL_DIAGNOSIS),
-            sandbox="read-only",
-            source_repository=_OPERATIONAL_DIAGNOSIS_SOURCE_REPOSITORY,
-            source_ref="main",
-            timeout=600,
-        )
+        prompt = _operational_diagnosis_prompt(data_errors, observation=observation)
+        result = client.execute(prompt, timeout=600, idempotency_key="monitor-diagnosis:" + fingerprint,
+                                resume_task_id=resume_task_id)
     except Exception as exc:
         return {
-            "status": "unavailable", "reason": "codex_outcome_unknown",
+            "status": "unavailable", "reason": "ai_outcome_unknown",
             "failure_stage": "diagnosis_execution", "failure_category": _diagnosis_failure_category(exc),
         }
 
     raw = result.raw if isinstance(getattr(result, "raw", None), dict) else {}
-    if raw.get("status") == "deferred":
+    task_id = raw.get("id")
+    if raw.get("status") in {"queued", "running", "submitting", "outcome_unknown"}:
+        if not isinstance(task_id, str) or not task_id or (resume_task_id is not None and task_id != resume_task_id):
+            return {"status": "unavailable", "reason": "ai_task_identity_unavailable"}
         try:
-            _forget_operational_diagnosis_attempt(root, fingerprint)
-        except OSError as exc:
-            return {
-                "status": "unavailable", "reason": "dedupe_state_unavailable",
-                "failure_stage": "diagnosis_deferred_state_update", "failure_category": _diagnosis_failure_category(exc),
-            }
-        return {"status": "deferred", "reason": "capacity_unavailable"}
-    if result.success is True and raw.get("status") == "succeeded" and raw.get("job_id"):
-        return {"status": "succeeded", "job_id": str(raw["job_id"])}
+            _store_diagnosis_pending(root, fingerprint, task_id)
+        except OSError:
+            return {"status": "unavailable", "reason": "diagnosis_state_unavailable"}
+        return {"status": "deferred", "reason": "ai_task_pending", "job_id": task_id}
+    if _valid_diagnosis_result(result, raw) and (resume_task_id is None or task_id == resume_task_id):
+        try:
+            _store_diagnosis_pending(root, fingerprint, None)
+        except OSError:
+            return {"status": "unavailable", "reason": "diagnosis_state_unavailable"}
+        return {"status": "succeeded", "job_id": task_id}
     return {
-        "status": "unavailable", "reason": "codex_result_unavailable",
+        "status": "unavailable", "reason": "ai_result_unavailable",
         "failure_stage": "diagnosis_result_processing", "failure_category": "result_unavailable",
     }
+
+
+def _valid_diagnosis_result(result, raw):
+    return (getattr(result, "success", False) is True and raw.get("status") == "completed"
+            and isinstance(raw.get("id"), str) and bool(raw["id"])
+            and raw.get("result_kind") == "advisory"
+            and raw.get("model_verification") in {"provider_reported", "unavailable"})
+
+
+def _store_diagnosis_pending(root, fingerprint, task_id):
+    with _alert_state_exclusive(root):
+        state = _load_operational_diagnosis_state(root)
+        pending = state.get("operational_diagnosis_pending", {})
+        if not isinstance(pending, dict):
+            raise OSError("invalid diagnosis state")
+        if task_id is None:
+            pending.pop(fingerprint, None)
+        else:
+            pending[fingerprint] = task_id
+        state["operational_diagnosis_pending"] = pending
+        _write_alert_state(root, state)
 
 
 def _diagnosis_failure_category(error: Exception) -> str:
@@ -1188,7 +1197,7 @@ def _build_monitoring_findings(
     strategies: list[dict[str, Any]],
     drift_results: dict[str, list[Any]],
 ) -> list[Any]:
-    from service.strategy_watch import build_strategy_monitoring_finding
+    from quant_platform_kit.strategy_lifecycle.watch.strategy_watch import build_strategy_monitoring_finding
 
     unqualified_profiles = {
         (domain, str(drift.strategy_profile or "").strip())
@@ -1276,7 +1285,7 @@ def _build_monitoring_findings(
 
 
 def _send_health_telegram_target(text: str, token: str, chat_id: str) -> str:
-    from service.briefing_dispatch import telegram_target_outcome
+    from quant_monitor_domain.briefing_dispatch import telegram_target_outcome
 
     return telegram_target_outcome(text=text, token=token, chat_id=chat_id)
 
@@ -1290,7 +1299,7 @@ def main() -> int:
     from quant_platform_kit.strategy_lifecycle.drift_detector import run_drift_detection
     from quant_platform_kit.strategy_lifecycle.health_dashboard import build_dashboard
     from quant_platform_kit.strategy_lifecycle.performance_monitor import run_monitor
-    from scripts.run_strategy_optimization_watcher import dispatch_strategy_watch_findings
+    from quant_platform_kit.strategy_lifecycle.watch.runner import dispatch_strategy_watch_findings
 
     expected_profiles, source_revisions, _source_as_of, artifact_errors_by_domain, _not_configured = _load_expected_coverage(root)
     ready_domains = tuple(expected_profiles)

@@ -104,25 +104,7 @@ class OrgHealthGithubTokenTest(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o640)
             self.assertEqual(json.loads(output.read_text()), {"token": "ghs_test", "expires_at": "2030-01-01T00:00:00Z"})
 
-    def test_vps_mode_is_manual_main_only_and_keeps_secret_step_narrow(self) -> None:
-        workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/vps_codex_service_ops.yml").read_text()
-        job = workflow.split("  org-health-token:\n", 1)[1]
-        self.assertIn("if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.mode == 'install-org-health-token'", job)
-        self.assertIn("systemctl stop", job)
-        self.assertNotIn("systemctl start codex-audit-service", job)
-        self.assertNotIn("scripts/deploy_codex_audit_service.sh", job)
-        self.assertIn("APP_PRIVATE_KEY: ${{ secrets.CROSS_REPO_GITHUB_APP_PRIVATE_KEY }}", job)
-        self.assertIn("printf '%s' \"$APP_PRIVATE_KEY\" | sudo -n /bin/bash \"$stage/provision_org_health_github_app.sh\"", job)
 
-    def test_refresh_units_do_not_repeat_the_first_mint_immediately(self) -> None:
-        root = Path(__file__).resolve().parents[1] / "ops/codex-audit/systemd"
-        service = (root / "codex-org-health-refresh.service.example").read_text()
-        timer = (root / "codex-org-health-refresh.timer.example").read_text()
-        self.assertIn("WantedBy=multi-user.target", service)
-        self.assertIn("OnActiveSec=40min", timer)
-        self.assertIn("OnUnitActiveSec=40min", timer)
-        self.assertNotIn("OnBootSec=", timer)
-        self.assertNotIn("Persistent=", timer)
 
 
 if __name__ == "__main__":

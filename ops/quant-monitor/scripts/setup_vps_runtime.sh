@@ -14,6 +14,10 @@ if [[ "${QUANT_MONITOR_VENV+x}" == x ]]; then
   PYTHON_ISOLATION_ARGS=(-I)
 fi
 
+if [[ "${QUANT_MONITOR_V2_RUNTIME_READY:-false}" != "true" ]]; then
+  echo "[setup] approved V2 client, QPK source and dependency lock must be qualified before deployment" >&2
+  exit 2
+fi
 SOURCE_SHA="${1:-}"
 EXPECTED_AAB_ROOT="${2:-}"
 if [[ ! "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ || -z "$EXPECTED_AAB_ROOT" ]]; then
@@ -45,9 +49,9 @@ case "$(cd "$(dirname "$LOCK_FILE")" && pwd -P)/$(basename "$LOCK_FILE")" in
 esac
 
 DIRTY_PATHSPEC=(
-  client
+  src
   scripts
-  service
+  ops/quant-monitor/quant_monitor_domain
   ops/quant-monitor/scripts
   ops/quant-monitor/systemd
   ops/quant-monitor/qpk-runtime.sha
@@ -251,6 +255,10 @@ trap 'rm -rf -- "$build_root"' EXIT
 git -C "$QPK_ROOT" archive "$QPK_ARCHIVE_REF" | tar -x -C "$build_root"
 if ! "$VENV/bin/python" "${PYTHON_ISOLATION_ARGS[@]}" -m pip install --no-deps --no-build-isolation "$build_root"; then
   echo "[setup] QuantPlatformKit install failed" >&2
+  exit 1
+fi
+if ! "$VENV/bin/python" "${PYTHON_ISOLATION_ARGS[@]}" -c 'from quant_platform_kit.strategy_lifecycle.watch.runner import run_watcher; from ai_service.client import TaskClient'; then
+  echo "[setup] approved V2 runtime packages are unavailable; deployment refused" >&2
   exit 1
 fi
 if ! "$VENV/bin/python" "${PYTHON_ISOLATION_ARGS[@]}" -m pip check; then
