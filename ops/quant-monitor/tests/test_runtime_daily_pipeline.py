@@ -526,6 +526,8 @@ def profile(frame, event, arg):
     if event == 'call' and frame.f_code.co_filename.endswith(('gateway_client.py','llm_adapter.py','codex_adapter.py','cursor_adapter.py')) and frame.f_code.co_name in {'execute','analyze','review','complete','parallel_review','run'}:
         raise PermissionError('synthetic child model boundary')
 ROOT = Path(ROOT_VALUE)
+import tempfile
+tempfile.tempdir = str(ROOT)
 sys.addaudithook(guard)
 sys.setprofile(profile)
 source = Path(SOURCE_VALUE)
@@ -615,9 +617,9 @@ def test_once_home_and_original_ledger_alias_are_not_replaced(tmp_path, monkeypa
     assert code == 2 and not result["ok"] and process.call_count == 1
     assert state.read_bytes() == before
 
-def test_once_workflow_keeps_fixed35_and_separate_exact_c_source():
+def test_once_workflow_keeps_exact_controller_and_separate_c_source():
     text = (SCRIPT.parents[3] / ".github/workflows/monitor-runtime-digest-once.yml").read_text()
-    assert "ref: 35ac71176127f07e00fe04dbc793777f3c595bc0" in text
+    assert "ref: ${{ github.sha }}" in text
     job = text.split("  longbridge-paper-once:\n", 1)[1]
     assert "ref: 823ba856af49d8799506afe476aec9d07ab1c63d" in job
     assert "persist-credentials: false" in job and '"$current_main" = "$RUN_SHA"' in job
