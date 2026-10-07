@@ -54,6 +54,12 @@ _ANOMALIES = frozenset({
     "insufficient",
 })
 _DRILLS = frozenset({"dry_run", "shadow", "validation"})
+# The existing daily producer has no account snapshot/currency contract.
+# Refuse attached money rather than validating or silently reusing another lane.
+_UNCONNECTED_FUNDS = frozenset({
+    "funds", "account_snapshot", "currency", "broker_reported_balances", "cash",
+    "net_assets", "total_cash", "equity", "financing",
+})
 # Run activities come from the LongBridge projection, and are not record statuses.
 _ACTIVITIES = frozenset({
     "no_submission",
@@ -125,7 +131,7 @@ def prepare_runtime_digest(payload: Mapping[str, Any]) -> dict[str, Any]:
     assert isinstance(records, list)
     business_date = str(records[0]["business_date"])
     timezone_name = str(records[0]["timezone"])
-    accounts = [_account_view(record) for record in records]
+    accounts = sorted((_account_view(record) for record in records), key=lambda account: account["target_key"])
     text = _render(payload, accounts, business_date=business_date)
     if _unsafe_text(text):
         return _refused("unsafe_text")
@@ -136,6 +142,7 @@ def prepare_runtime_digest(payload: Mapping[str, Any]) -> dict[str, Any]:
         "platform": _PLATFORM,
         "business_date": business_date,
         "timezone": timezone_name,
+        "observed_at": payload["observed_at"],
         "completeness": payload.get("completeness"),
         "target_scope": target_scope,
         "event_id": runtime_digest_event_id(_PLATFORM, business_date, target_scope),
@@ -151,7 +158,10 @@ def _reject(payload: Mapping[str, Any]) -> dict[str, Any] | None:
         return _refused("malformed")
     if payload.get("platform") != _PLATFORM:
         return _refused("unsupported_platform")
-    if _parse_observed_at(payload.get("observed_at")) is None:
+    if _UNCONNECTED_FUNDS.intersection(payload):
+        return _refused("funds_not_connected")
+    observed = _parse_observed_at(payload.get("observed_at"))
+    if observed is None:
         return _refused("invalid_observed_at")
     if payload.get("completeness") not in {"complete", "incomplete"}:
         return _refused("invalid_completeness")
@@ -170,6 +180,18 @@ def _reject(payload: Mapping[str, Any]) -> dict[str, Any] | None:
         if problem is not None:
             return _refused(problem)
         assert isinstance(record, Mapping)
+        if record.get("observed_at") is not None and _parse_observed_at(record["observed_at"]) != observed:
+            return _refused("observation_mismatch")
+        latest = _parse_observed_at((record.get("schedule") or {}).get("latest_due_at"))
+        if latest and latest > observed:
+            return _refused("invalid_schedule")
+        for run in record["runs"]:
+            started = _parse_observed_at(run.get("started_at"))
+            finished = _parse_observed_at(run.get("finished_at"))
+            if (started and finished and finished < started) or any(
+                moment and moment > observed for moment in (started, finished)
+            ):
+                return _refused("invalid_run_time")
         dates.add(str(record["business_date"]))
         zones.add(str(record["timezone"]))
     if len(dates) != 1:
@@ -184,6 +206,8 @@ def _record_problem(record: Any, seen: set[str]) -> str | None:
         return "malformed"
     if record.get("platform") not in {None, _PLATFORM}:
         return "unsupported_platform"
+    if _UNCONNECTED_FUNDS.intersection(record):
+        return "funds_not_connected"
     target_key = record.get("target_key")
     if not isinstance(target_key, str) or _SAFE_TOKEN.fullmatch(target_key) is None:
         return "invalid_target"
@@ -200,6 +224,10 @@ def _record_problem(record: Any, seen: set[str]) -> str | None:
         value = target.get(key)
         if not isinstance(value, str) or _OPTIONAL_TOKEN.fullmatch(value) is None:
             return "invalid_target"
+    identity = "|".join(str(target[key]).strip().lower() or "*"
+                        for key in ("service", "strategy_profile", "account_scope"))
+    if target_key != identity:
+        return "target_identity_mismatch"
     if _parse_business_date(record.get("business_date")) is None:
         return "invalid_business_date"
     timezone_name = record.get("timezone")
@@ -230,6 +258,8 @@ def _record_problem(record: Any, seen: set[str]) -> str | None:
         return "malformed"
     if status in _SCHEDULE_ONLY and (_run_anomaly(runs) or conflicts):
         return "schedule_hides_anomaly"
+    if status not in _ANOMALIES and (_run_anomaly(runs) or conflicts):
+        return "status_hides_anomaly"
     for run in runs:
         if not isinstance(run, Mapping) or run.get("activity") not in _ACTIVITIES:
             return "invalid_run"
@@ -242,6 +272,23 @@ def _record_problem(record: Any, seen: set[str]) -> str | None:
     lane = record.get("execution_lane")
     if lane not in _LANE_ZH:
         return "invalid_lane"
+    schedule = record.get("schedule")
+    if schedule is not None:
+        if not isinstance(schedule, Mapping):
+            return "invalid_schedule"
+        for key in ("business_date", "timezone"):
+            if schedule.get(key) is not None and schedule[key] != record[key]:
+                return "schedule_identity_mismatch"
+        times = {}
+        for key in ("latest_due_at", "next_due_at", "grace_ends_at"):
+            raw = schedule.get(key)
+            times[key] = _parse_observed_at(raw)
+            if raw is not None and times[key] is None:
+                return "invalid_schedule"
+        latest = times["latest_due_at"]
+        if latest and ((times["grace_ends_at"] and times["grace_ends_at"] < latest)
+                       or (times["next_due_at"] and times["next_due_at"] <= latest)):
+            return "invalid_schedule"
     return None
 
 
@@ -292,8 +339,23 @@ def _account_view(record: Mapping[str, Any]) -> dict[str, Any]:
         "lane_zh": _LANE_ZH[lane],
         "completeness": record["completeness"],
         "fills_note": "成交明细暂缺",
+        "fills": {"source": "not_connected", "count": None, "records": []},
+        "funds": {"source": "not_connected", "currency": None, "cash": None, "equity": None},
+        "schedule": {key: (record.get("schedule") or {}).get(key)
+                     for key in ("latest_due_at", "next_due_at", "grace_ends_at")},
+        "attention": _attention(record),
         "runs": runs,
     }
+
+
+def _attention(record: Mapping[str, Any]) -> list[str]:
+    statuses = {record["status"]} | {run["activity"] for run in record["runs"]}
+    notes = [_STATUS_ZH[status] for status in sorted(statuses & _ANOMALIES)]
+    if record["conflicts"] and "记录冲突" not in notes:
+        notes.append("记录冲突")
+    if record["completeness"] != "complete":
+        notes.append("运行资料不完整")
+    return notes
 
 
 def _run_view(run: Mapping[str, Any]) -> dict[str, Any]:
@@ -316,7 +378,10 @@ def _render(
     *,
     business_date: str,
 ) -> str:
-    lines = [f"{business_date} {_PLATFORM}", "成交明细暂缺。"]
+    timezone_name = str(payload["records"][0]["timezone"])
+    zone = ZoneInfo(timezone_name)
+    lines = [f"业务日 {business_date} · {_PLATFORM} · 时区 {timezone_name}",
+             f"观察时间 {_local_time(payload['observed_at'], zone)}", "", "运行"]
     read_errors = payload.get("read_errors") or []
     unmatched = payload.get("unmatched_reports") or []
     if isinstance(read_errors, list) and read_errors:
@@ -327,10 +392,38 @@ def _render(
         status = account["status_zh"]
         if account["execution_lane"] in _DRILLS and account["status"] not in _DRILLS:
             status = f"{status}（演练）"
+        if account["execution_lane"] in _DRILLS:
+            status = f"只读演练：{status}"
+        elif account["completeness"] == "complete" and account["status"] in {"no_submission", "no_signal", "no_rebalance"}:
+            status = f"{status}（完整无单周期）"
         if account["completeness"] != "complete" and account["status"] not in _ANOMALIES:
             status = f"{status}；资料不完整"
-        lines.append(f"• {account['service']} / {account['account_scope']}：{status}")
+        lines.append(f"• {account['service']} / {account['strategy_profile'] or '*'} / {account['account_scope'] or '*'}：{status}")
+        latest = account["schedule"]["latest_due_at"]
+        lines.append(f"  到期周期：{_local_time(latest, zone) if latest else '未核实'}")
+        for key, label in (("next_due_at", "下次周期"), ("grace_ends_at", "报告宽限截至")):
+            if account["schedule"][key]:
+                lines.append(f"  {label}：{_local_time(account['schedule'][key], zone)}")
+        if account["runs"]:
+            for run in account["runs"]:
+                lines.append(f"  运行起止：{_local_time(run['started_at'], zone)} → {_local_time(run['finished_at'], zone)}")
+        else:
+            lines.append("  运行起止：无周期报告" if account["status"] in _SCHEDULE_ONLY else "  运行起止：未核实")
+    lines.extend(["", "成交覆盖", "成交明细暂缺，笔数未核实。", "", "资金覆盖",
+                  "现金、账户权益及币种未核实；资金记录未接通。", "", "人工事项"])
+    attention = [f"• {account['service']} / {account['strategy_profile'] or '*'} / {account['account_scope'] or '*'}：待核查 {'；'.join(account['attention'])}"
+                 for account in accounts if account["attention"]]
+    if read_errors or unmatched:
+        attention.append("• 待核查读取失败或未匹配的报告。")
+    if payload["completeness"] != "complete":
+        attention.append("• 待核查日报资料不完整。")
+    lines.extend(attention or ["未见投影中的运行异常；成交及资金覆盖仍未核实。"])
     return "\n".join(lines)
+
+
+def _local_time(raw: Any, zone: ZoneInfo) -> str:
+    moment = _parse_observed_at(raw)
+    return moment.astimezone(zone).strftime("%Y-%m-%d %H:%M:%S") if moment else "未核实"
 
 
 def _refused(reason: str) -> dict[str, Any]:
