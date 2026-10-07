@@ -80,6 +80,8 @@ EXPECTED = {
         "def3f6075059c4b3efcebadd320bf7e1a819f236166bd4295c85b6be8b893fef",
         # Receipt-only revision preserves ROOT/AAB capture and child/consumer call roots.
         "552efade3039e0223d2f918e2e6af923ba37de15d36abac63b9a3f1ff7cc1345",
+        # Runtime digest selector revision preserves the reviewed parent/child path model.
+        "220b93478f7b4bf7028cc5587d4607604236999587a3908ba11b751d3f1ee837",
     },
     "daily_briefing.sh": {
         "ac7694b5c64650d793779384609c0a236c127333fbd1ea0a2d89ce5acd098530"

@@ -6,7 +6,7 @@ on:
 permissions:
   contents: read
 jobs:
-  package:
+  test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -25,6 +25,12 @@ jobs:
         with:
           name: quant-ai-service-v2-unpublished
           path: dist/*.whl
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Validate workflows
+        uses: docker://rhysd/actionlint:1.7.12
   admitted-service:
     if: vars.AI_SERVICE_RELEASE_READY == 'true'
     runs-on: ubuntu-latest

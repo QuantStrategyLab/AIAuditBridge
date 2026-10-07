@@ -17,7 +17,7 @@ from quant_monitor_domain.runtime_digest import prepare_runtime_digest, runtime_
 def _record(status: str, *, service: str = "lb-svc", scope: str = "paper", day: str = "2026-09-28", lane: str = "paper", completeness: str = "complete", runs: list | None = None, conflicts: list | None = None) -> dict:
     return {
         "platform": "longbridge",
-        "target_key": f"{service}|rot|*{scope}",
+        "target_key": f"{service}|rot|{scope}",
         "target": {"service": service, "strategy_profile": "rot", "account_scope": scope},
         "business_date": day,
         "timezone": "Asia/Hong_Kong",
@@ -53,6 +53,103 @@ def test_closed_not_due_and_outside_window_stay_distinct() -> None:
     assert "0 笔" not in closed["text"]
     assert "complete" not in closed["text"]
     assert "确定性" not in closed["text"]
+
+
+def test_multiple_strategies_have_distinct_labels_and_stable_report_order() -> None:
+    first = _record("market_closed")
+    second = _record("unknown")
+    second["target"]["strategy_profile"] = "alpha"
+    second["target_key"] = "lb-svc|alpha|paper"
+    forward = prepare_runtime_digest(_projection(first, second))
+    reverse = prepare_runtime_digest(_projection(second, first))
+    assert forward["ok"] and reverse["ok"]
+    assert forward["text"] == reverse["text"]
+    assert forward["accounts"] == reverse["accounts"]
+    assert forward["event_id"] == reverse["event_id"]
+    assert "lb-svc / alpha / paper：未知" in forward["text"]
+    assert "lb-svc / rot / paper：休市" in forward["text"]
+    assert "lb-svc / alpha / paper：待核查 未知" in forward["text"]
+    assert forward["text"].count("业务日") == 1
+    assert forward["text"].count("成交覆盖") == 1
+
+
+def test_daily_sections_use_producer_times_and_keep_money_unverified() -> None:
+    record = _record("no_submission", runs=[{
+        "run_id": "synthetic-run", "activity": "no_submission", "execution_lane": "paper",
+        "started_at": "2026-09-28T08:10:00Z", "finished_at": "2026-09-28T08:12:00Z",
+    }])
+    record["schedule"] = {
+        "business_date": record["business_date"], "timezone": record["timezone"],
+        "latest_due_at": "2026-09-28T08:00:00Z", "next_due_at": "2026-09-29T08:00:00Z",
+        "grace_ends_at": "2026-09-28T08:30:00Z",
+    }
+    prepared = prepare_runtime_digest(_projection(record))
+    text = prepared["text"]
+    assert prepared["ok"]
+    for section in ("业务日", "Asia/Hong_Kong", "运行", "成交覆盖", "资金覆盖", "人工事项"):
+        assert section in text
+    assert "2026-09-28 16:00:00" in text
+    assert "下次周期：2026-09-29 16:00:00" in text
+    assert "报告宽限截至：2026-09-28 16:30:00" in text
+    assert "2026-09-28 16:10:00" in text and "2026-09-28 16:12:00" in text
+    assert "完整无单周期" in text and "运行正常" not in text
+    account = prepared["accounts"][0]
+    assert account["fills"]["count"] is None
+    assert account["funds"] == {"source": "not_connected", "currency": None, "cash": None, "equity": None}
+    assert "现金、账户权益及币种未核实" in text and "0 笔" not in text
+    assert prepared["event_id"] == runtime_digest_event_id("longbridge", record["business_date"], [record["target_key"]])
+
+
+def test_anomalies_and_incomplete_records_have_deterministic_attention() -> None:
+    for status in ("unknown", "reconciliation_required", "blocked", "missing_report"):
+        prepared = prepare_runtime_digest(_projection(_record(status)))
+        assert prepared["ok"]
+        assert prepared["accounts"][0]["attention"]
+        assert "人工事项" in prepared["text"]
+        assert "待核查" in prepared["text"]
+    incomplete = prepare_runtime_digest(_projection(_record("no_signal", completeness="incomplete")))
+    assert "运行资料不完整" in incomplete["accounts"][0]["attention"]
+    assert "完整无单周期" not in incomplete["text"]
+    assert "日报资料不完整" in prepare_runtime_digest(
+        _projection(_record("market_closed"), completeness="incomplete"),
+    )["text"]
+    for lane in ("dry_run", "shadow"):
+        drill = prepare_runtime_digest(_projection(_record(lane, lane=lane)))
+        assert "只读演练" in drill["text"]
+        assert "实盘" not in drill["text"] and "真实成交" not in drill["text"]
+
+
+def test_target_schedule_and_run_time_conflicts_are_refused() -> None:
+    changed = _record("no_submission")
+    changed["target"]["service"] = "other-service"
+    assert prepare_runtime_digest(_projection(changed))["reason"] == "target_identity_mismatch"
+    for schedule in ({"business_date": "2026-09-27"}, {"timezone": "UTC"},
+                     {"latest_due_at": "2026-09-28T09:00:00Z"},
+                     {"latest_due_at": "2026-09-28T08:30:00Z", "grace_ends_at": "2026-09-28T08:00:00Z"}):
+        changed = _record("no_submission")
+        changed["schedule"] = schedule
+        assert not prepare_runtime_digest(_projection(changed))["ok"]
+    for started, finished in (("2026-09-28T08:20:00Z", "2026-09-28T08:10:00Z"),
+                              ("2026-09-28T08:10:00Z", "2026-09-28T09:10:00Z")):
+        changed = _record("unknown", runs=[{"activity": "unknown", "execution_lane": "paper",
+                                          "started_at": started, "finished_at": finished}])
+        assert prepare_runtime_digest(_projection(changed))["reason"] == "invalid_run_time"
+    changed = _record("no_signal")
+    changed["observed_at"] = "2026-09-28T08:39:00Z"
+    assert prepare_runtime_digest(_projection(changed))["reason"] == "observation_mismatch"
+    changed = _record("no_signal", runs=[{"activity": "unknown", "execution_lane": "paper"}])
+    assert prepare_runtime_digest(_projection(changed))["reason"] == "status_hides_anomaly"
+
+
+def test_unconnected_financial_payload_is_refused_instead_of_assuming_currency() -> None:
+    for money in ({"currency": "USD"}, {"cash": [{"currency": "HKD", "available_cash": 10}]},
+                  {"broker_reported_balances": [{"currency": "USD", "net_assets": 10}]},
+                  {"account_snapshot": {"currency": "USD", "business_date": "2026-09-27"}}):
+        record = _record("market_closed")
+        record.update(money)
+        refused = prepare_runtime_digest(_projection(record))
+        assert refused["reason"] == "funds_not_connected"
+        assert refused["text"] == ""
 
 
 def test_missing_partial_and_drill_are_not_a_normal_close() -> None:
@@ -165,7 +262,7 @@ def test_event_id_uses_target_scope_not_order_or_observed_at() -> None:
     second = _record("market_closed", service="lb-b", scope="live")
     forward = prepare_runtime_digest(_projection(first, second))
     reverse = prepare_runtime_digest(_projection(second, first, observed_at="2026-09-28T18:40:00+00:00"))
-    keys = ["lb-a|rot|*paper", "lb-b|rot|*live"]
+    keys = ["lb-a|rot|paper", "lb-b|rot|live"]
     assert forward["ok"] and reverse["ok"]
     assert forward["event_id"] == reverse["event_id"]
     assert forward["event_id"] == runtime_digest_event_id("longbridge", "2026-09-28", keys)
@@ -200,8 +297,8 @@ def _runtime_argv(path: Path, *extra: str) -> list[str]:
 
 def test_runtime_dispatch_rejects_day_and_target_scope_before_send(tmp_path: Path, capsys) -> None:
     path = _write_projection(tmp_path, _record("market_closed"))
-    key = "lb-svc|rot|*paper"
-    other = "lb-svc|rot|*live"
+    key = "lb-svc|rot|paper"
+    other = "lb-svc|rot|live"
     cases = [
         (["--day", "2026-09-27", "--dispatch", "--expected-target-key", key], "business_date_mismatch"),
         (["--day", "2026-01-02", "--dispatch", "--expected-target-key", key], "business_date_mismatch"),
@@ -212,7 +309,7 @@ def test_runtime_dispatch_rejects_day_and_target_scope_before_send(tmp_path: Pat
         (["--day", "2026-09-28", "--dispatch", "--expected-target-key", key, "--expected-target-key", key], "duplicate_expected_target"),
         (["--day", "2026-09-28", "--dispatch", "--expected-target-key", " "], "invalid_expected_target"),
         (["--day", "2026-09-28", "--dispatch", "--expected-target-key", "lb-svc|rot|"], "invalid_expected_target"),
-        (["--day", "2026-09-28", "--dispatch", "--expected-target-key", "LB-SVC|rot|*paper"], "invalid_expected_target"),
+        (["--day", "2026-09-28", "--dispatch", "--expected-target-key", "LB-SVC|rot|paper"], "invalid_expected_target"),
         (["--dispatch", "--expected-target-key", key], "missing_dispatch_day"),
         (["--day", "2026-09-28", "--dispatch"], "missing_expected_target"),
         (["--day", "2026-09-27", "--dispatch", "--dry-run", "--expected-target-key", key], "business_date_mismatch"),
@@ -233,7 +330,7 @@ def test_runtime_dispatch_rejects_day_and_target_scope_before_send(tmp_path: Pat
             fewer,
             "--day", "2026-09-28",
             "--dispatch",
-            "--expected-target-key", "lb-a|rot|*paper",
+            "--expected-target-key", "lb-a|rot|paper",
         ))
     captured = json.loads(capsys.readouterr().out)
     assert code == 2
@@ -252,8 +349,8 @@ def test_runtime_dispatch_matching_scope_calls_dispatch_once(tmp_path: Path) -> 
             "--day", "2026-09-28",
             "--dispatch",
             "--dry-run",
-            "--expected-target-key", "lb-b|rot|*live",
-            "--expected-target-key", "lb-a|rot|*paper",
+            "--expected-target-key", "lb-b|rot|live",
+            "--expected-target-key", "lb-a|rot|paper",
         ])
     assert code == 0
     dispatch.assert_called_once_with(payload, dry_run=True, send_dry_run=False)
@@ -263,8 +360,8 @@ def test_runtime_dispatch_matching_scope_calls_dispatch_once(tmp_path: Path) -> 
             "--runtime-projection", str(path),
             "--day", "2026-09-28",
             "--dispatch",
-            "--expected-target-key", "lb-a|rot|*paper",
-            "--expected-target-key", "lb-b|rot|*live",
+            "--expected-target-key", "lb-a|rot|paper",
+            "--expected-target-key", "lb-b|rot|live",
         ])
     assert code == 0
     send.assert_called_once_with(payload, dry_run=False, send_dry_run=False)

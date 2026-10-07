@@ -64,6 +64,8 @@ runtime_status=0
 prefix="${QUANT_MONITOR_RUNTIME_PROJECTION_PREFIX:-}"
 runtime_tz="${QUANT_MONITOR_RUNTIME_TIMEZONE:-}"
 runtime_key="${QUANT_MONITOR_RUNTIME_EXPECTED_TARGET_KEY:-}"
+runtime_object_override="${QUANT_MONITOR_RUNTIME_PROJECTION_OBJECT:-}"
+runtime_day_override="${QUANT_MONITOR_RUNTIME_BUSINESS_DAY:-}"
 trimmed="${prefix%/}"
 runtime_scope="${runtime_key##*|}"
 if [[ -z "$prefix" || -z "$runtime_tz" || -z "$runtime_key" \
@@ -71,7 +73,10 @@ if [[ -z "$prefix" || -z "$runtime_tz" || -z "$runtime_key" \
   || "$prefix" == *'@'* || "$prefix" == *'..'* || "$prefix" != gs://* \
   || "${trimmed#gs://}" != */runtime_daily \
   || "$runtime_scope" != "paper" || "$runtime_key" == *" "* \
-  || "$runtime_key" != *"|"*"|"* ]]; then
+  || "$runtime_key" != *"|"*"|"* \
+  || ( -n "$runtime_object_override" && -z "$runtime_day_override" ) \
+  || ( -z "$runtime_object_override" && -n "$runtime_day_override" ) \
+  || ( -n "$runtime_object_override" && "$runtime_object_override" != "${trimmed}/longbridge/paper/${runtime_day_override}/"* ) ]]; then
   echo "[briefing-pipeline] runtime digest rejected: runtime_projection_config_invalid" >&2
   runtime_status=2
 else
@@ -90,11 +95,16 @@ except Exception:
     echo "[briefing-pipeline] runtime digest rejected: runtime_consumer_unavailable" >&2
     runtime_status=2
   else
+    runtime_object="${trimmed}/longbridge/paper/${runtime_day}.json"
+    if [[ -n "$runtime_object_override" ]]; then
+      runtime_day="$runtime_day_override"
+      runtime_object="$runtime_object_override"
+    fi
     set +e
     (
       cd "$AAB"
       PYTHONPATH=. python3 scripts/consume_daily_briefing.py \
-        --runtime-projection-gcs "${trimmed}/longbridge/paper/${runtime_day}.json" \
+        --runtime-projection-gcs "$runtime_object" \
         --day "$runtime_day" \
         --expected-target-key "$runtime_key" \
         --dispatch >/dev/null

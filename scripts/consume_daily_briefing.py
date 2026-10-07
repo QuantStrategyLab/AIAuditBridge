@@ -6,11 +6,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import select
 import subprocess
 import sys
 import time
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ops/quant-monitor"))
@@ -87,12 +88,15 @@ _RUNTIME_INPUT_REASONS = frozenset({
     "invalid_timezone", "invalid_status", "fills_not_connected", "schedule_hides_anomaly",
     "invalid_run", "invalid_run_time", "invalid_lane", "business_date_conflict",
     "timezone_conflict", "unsafe_text",
+    "funds_not_connected", "target_identity_mismatch", "observation_mismatch",
+    "invalid_schedule", "schedule_identity_mismatch", "status_hides_anomaly",
 })
 _RUNTIME_BINDING_REASONS = frozenset({
     "missing_dispatch_day", "invalid_business_day", "business_date_mismatch",
     "missing_expected_target", "invalid_expected_target", "duplicate_expected_target",
     "expected_target_mismatch", "expected_scope_not_paper", "invalid_runtime_object",
     "runtime_object_day_mismatch",
+    "runtime_object_observation_mismatch",
 })
 _RUNTIME_READ_REASONS = frozenset({
     "runtime_projection_unreadable", "runtime_projection_timeout", "runtime_projection_too_large",
@@ -182,6 +186,17 @@ def _reject_runtime(reason: str) -> int:
 _GCS_TIMEOUT_SECONDS = 20
 _GCS_OBJECT_LIMIT = 1024 * 1024
 _GCS_FORBIDDEN = ("*", "?", "#", "@", "\\", " ", "\n", "\r", "\t")
+_OBSERVATION_OBJECT = re.compile(r"^[0-9]{8}T[0-9]{12}Z\.json$")
+
+
+def _runtime_object_observed_at(uri: str) -> datetime | None:
+    filename = uri.rsplit("/", 1)[-1]
+    if _OBSERVATION_OBJECT.fullmatch(filename) is None:
+        return None
+    try:
+        return datetime.strptime(filename, "%Y%m%dT%H%M%S%fZ.json").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
 
 
 def _paper_scope_problem(keys: list[str] | None) -> str | None:
@@ -215,12 +230,15 @@ def _runtime_object_problem(uri: str, day: str) -> str | None:
     if not bucket or not object_name:
         return "invalid_runtime_object"
     parts = object_name.split("/")
-    if len(parts) < 4 or parts[-4:-1] != ["runtime_daily", "longbridge", "paper"]:
-        return "invalid_runtime_object"
     filename = parts[-1]
-    if not filename.endswith(".json"):
+    if len(parts) >= 5 and parts[-5:-2] == ["runtime_daily", "longbridge", "paper"]:
+        object_day = parts[-2]
+        if _runtime_object_observed_at(uri) is None:
+            return "invalid_runtime_object"
+    elif len(parts) >= 4 and parts[-4:-1] == ["runtime_daily", "longbridge", "paper"] and filename.endswith(".json"):
+        object_day = filename[: -len(".json")]
+    else:
         return "invalid_runtime_object"
-    object_day = filename[: -len(".json")]
     if _canonical_iso_day(object_day) is None:
         return "invalid_runtime_object"
     if object_day != day:
@@ -365,6 +383,7 @@ def _consume_runtime_payload(
         "platform": prepared["platform"],
         "business_date": prepared["business_date"],
         "timezone": prepared["timezone"],
+        "observed_at": prepared["observed_at"],
         "completeness": prepared["completeness"],
         "event_id": prepared["event_id"],
         "text": prepared["text"],
@@ -423,6 +442,12 @@ def _consume_runtime_gcs(args: argparse.Namespace) -> int:
         return _reject_runtime("runtime_projection_unreadable")
     if not isinstance(payload, dict):
         return _reject_runtime("malformed")
+    object_observed_at = _runtime_object_observed_at(str(args.runtime_projection_gcs))
+    if object_observed_at is not None:
+        # Match the publisher's _iso UTC representation, including microseconds.
+        expected_observed_at = object_observed_at.isoformat().replace("+00:00", "Z")
+        if payload.get("observed_at") != expected_observed_at:
+            return _reject_runtime("runtime_object_observation_mismatch")
     return _consume_runtime_payload(args, payload, scope_required=True)
 
 
@@ -473,7 +498,8 @@ def main(argv: list[str] | None = None) -> int:
     source.add_argument(
         "--runtime-projection-gcs",
         help=(
-            "One gs:// runtime_daily/longbridge/paper/YYYY-MM-DD.json object. "
+            "One gs:// runtime_daily/longbridge/paper/YYYY-MM-DD.json or "
+            "YYYY-MM-DD/YYYYMMDDTHHMMSSffffffZ.json object, bound to payload observed_at. "
             "Requires --day and --expected-target-key. Preview unless --dispatch."
         ),
     )

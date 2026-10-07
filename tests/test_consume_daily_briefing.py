@@ -312,6 +312,283 @@ def test_runtime_projection_dry_run_does_not_persist_delivery(tmp_path, capsys) 
     assert not (tmp_path / "data" / "alert-state" / "health_cycle.json").exists()
 
 
+def _multi_target_projection_file(tmp_path):
+    path = _projection_file(tmp_path)
+    projection = json.loads(path.read_text())
+    for profile, status in (("alpha", "unknown"), ("beta", "not_due")):
+        record = dict(projection["records"][0])
+        record["target"] = dict(record["target"], strategy_profile=profile)
+        record["target_key"] = f"lb-svc|{profile}|paper"
+        record["status"] = status
+        projection["records"].append(record)
+    path.write_text(json.dumps(projection), encoding="utf-8")
+    return path
+
+
+def _multi_target_args(path, *, dispatch=False):
+    args = ["--runtime-projection", str(path), "--day", "2026-09-28"]
+    for profile in ("rot", "alpha", "beta"):
+        args.extend(["--expected-target-key", f"lb-svc|{profile}|paper"])
+    return args + (["--dispatch"] if dispatch else [])
+
+
+def _immutable_gcs_args(uri=None, *, dispatch=False):
+    uri = uri or "gs://synthetic/runtime_daily/longbridge/paper/2026-09-28/20260928T084000000000Z.json"
+    return ["--runtime-projection-gcs", uri, "--day", "2026-09-28",
+            "--expected-target-key", "lb-svc|rot|paper"] + (["--dispatch"] if dispatch else [])
+
+
+def test_current_producer_immutable_object_preview_is_accepted_once(tmp_path, capsys):
+    projection = json.loads(_projection_file(tmp_path).read_text())
+    # Actual producer _iso/_object_uri output: UTC Z body, six-digit path fraction.
+    projection["observed_at"] = "2026-09-28T08:40:00Z"
+    uri = _immutable_gcs_args()[1]
+    with patch("scripts.consume_daily_briefing._read_gcs_object", return_value=(json.dumps(projection).encode(), None)) as reader, patch(
+        "service.briefing_dispatch.telegram_target_outcome", side_effect=AssertionError("preview must not send"),
+    ), patch("scripts.consume_daily_briefing.subprocess.Popen", side_effect=AssertionError("external process forbidden")):
+        assert main(_immutable_gcs_args()) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["observed_at"] == projection["observed_at"]
+    assert "dispatch" not in result
+    assert result["accounts"][0]["fills"]["count"] is None
+    reader.assert_called_once_with(uri)
+
+
+def test_immutable_object_microseconds_dispatch_and_restart_dedupe(tmp_path, capsys):
+    from quant_monitor_domain import briefing_dispatch
+
+    projection = json.loads(_projection_file(tmp_path).read_text())
+    projection["observed_at"] = "2026-09-28T08:40:00.123456Z"
+    uri = "gs://synthetic/runtime_daily/longbridge/paper/2026-09-28/20260928T084000123456Z.json"
+    with patch.dict("os.environ", {"QUANT_MONITOR_ROOT": str(tmp_path), "TELEGRAM_TOKEN": "synthetic",
+                                  "GLOBAL_TELEGRAM_CHAT_ID": "synthetic-chat"}, clear=True), patch(
+        "scripts.consume_daily_briefing._read_gcs_object", return_value=(json.dumps(projection).encode(), None),
+    ) as reader, patch("service.briefing_dispatch.telegram_target_outcome", return_value="sent") as send, patch(
+        "scripts.consume_daily_briefing.subprocess.Popen", side_effect=AssertionError("external process forbidden"),
+    ):
+        assert main(_immutable_gcs_args(uri, dispatch=True)) == 0
+        first = json.loads(capsys.readouterr().out)
+        assert first["dispatch"]["telegram_sent"] is True
+        state = tmp_path / "data/alert-state/health_cycle.json"
+        before = state.read_bytes()
+        briefing_dispatch._HEALTH_CYCLE = None
+        assert main(_immutable_gcs_args(uri, dispatch=True)) == 0
+        second = json.loads(capsys.readouterr().out)
+        assert second["dispatch"]["skipped"] == ["duplicate_delivered"]
+        assert second["event_id"] == first["event_id"]
+        assert state.read_bytes() == before
+    assert reader.call_count == 2
+    assert all(call.args == (uri,) and call.kwargs == {} for call in reader.call_args_list)
+    send.assert_called_once()
+
+
+def test_immutable_object_body_observation_mismatch_never_dispatches(tmp_path, capsys):
+    projection = json.loads(_projection_file(tmp_path).read_text())
+    for observed in ("2026-09-28T08:40:01Z", "2026-09-28T08:40:00.000001Z",
+                     "2026-09-28T16:40:00+08:00", "2026-09-28T08:40:00+00:00", "2026-09-28T08:40:00"):
+        projection["observed_at"] = observed
+        with patch("scripts.consume_daily_briefing._read_gcs_object", return_value=(json.dumps(projection).encode(), None)) as reader, patch(
+            "scripts.consume_daily_briefing.dispatch_runtime_digest", side_effect=AssertionError("mismatched object cannot dispatch"),
+        ) as dispatch:
+            assert main(_immutable_gcs_args(dispatch=True)) == 2
+        result = json.loads(capsys.readouterr().out)
+        assert result["reason"] == "runtime_object_observation_mismatch"
+        assert "gs://" not in json.dumps(result)
+        reader.assert_called_once_with(_immutable_gcs_args()[1])
+        dispatch.assert_not_called()
+
+
+def test_immutable_object_still_rejects_body_day_and_target_conflicts(tmp_path, capsys):
+    for conflict, reason in (("day", "business_date_mismatch"), ("scope", "expected_target_mismatch")):
+        projection = json.loads(_projection_file(tmp_path).read_text())
+        projection["observed_at"] = "2026-09-28T08:40:00Z"
+        record = projection["records"][0]
+        if conflict == "day":
+            record["business_date"] = "2026-09-27"
+        else:
+            record["target_key"] = "lb-svc|rot|live"
+            record["target"]["account_scope"] = "live"
+        with patch("scripts.consume_daily_briefing._read_gcs_object", return_value=(json.dumps(projection).encode(), None)) as reader, patch(
+            "scripts.consume_daily_briefing.dispatch_runtime_digest", side_effect=AssertionError("conflicting body cannot dispatch"),
+        ) as dispatch:
+            assert main(_immutable_gcs_args(dispatch=True)) == 2
+        assert json.loads(capsys.readouterr().out)["reason"] == reason
+        reader.assert_called_once_with(_immutable_gcs_args()[1])
+        dispatch.assert_not_called()
+
+
+def test_invalid_immutable_paths_and_external_sources_never_read(capsys):
+    prefix = "gs://synthetic/runtime_daily/longbridge/paper"
+    cases = [
+        (prefix + "/2026-09-27/20260928T084000000000Z.json", "runtime_object_day_mismatch"),
+        (prefix + "/2026-09-28/20260928T084000Z.json", "invalid_runtime_object"),
+        (prefix + "/2026-09-28/20260928T084000000000+0800.json", "invalid_runtime_object"),
+        (prefix + "/2026-09-28/20260928T084000000000z.json", "invalid_runtime_object"),
+        (prefix + "/2026-09-28/20260931T084000000000Z.json", "invalid_runtime_object"),
+        (prefix + "/2026-09-28/20260928T244000000000Z.json", "invalid_runtime_object"),
+        (prefix + "/2026-09-28/../20260928T084000000000Z.json", "invalid_runtime_object"),
+        (prefix + "/2026-09-28/*.json", "invalid_runtime_object"),
+        (prefix + "/2026-09-28/20260928T084000000000Z.json?generation=1", "invalid_runtime_object"),
+        (prefix + "/2026-09-28/%32%30%32%36.json", "invalid_runtime_object"),
+        ("gs://synthetic/runtime_daily/longbridge/live/2026-09-28/20260928T084000000000Z.json", "invalid_runtime_object"),
+        ("https://external.example/runtime_daily/longbridge/paper/2026-09-28/20260928T084000000000Z.json", "invalid_runtime_object"),
+    ]
+    with patch("scripts.consume_daily_briefing._read_gcs_object", side_effect=AssertionError("invalid path cannot read")) as reader, patch(
+        "service.briefing_dispatch.telegram_target_outcome", side_effect=AssertionError("invalid path cannot send"),
+    ) as send, patch("scripts.consume_daily_briefing.subprocess.Popen", side_effect=AssertionError("external process forbidden")):
+        for uri, reason in cases:
+            assert main(_immutable_gcs_args(uri, dispatch=True)) == 2
+            result = json.loads(capsys.readouterr().out)
+            assert result["reason"] == reason
+        live_args = _immutable_gcs_args()
+        live_args[-1] = "lb-svc|rot|live"
+        assert main(live_args) == 2
+        assert json.loads(capsys.readouterr().out)["reason"] == "expected_scope_not_paper"
+    reader.assert_not_called()
+    send.assert_not_called()
+
+
+def test_multi_target_cli_preview_then_dispatch_survives_module_restart(tmp_path, capsys):
+    from quant_monitor_domain import briefing_dispatch
+
+    path = _multi_target_projection_file(tmp_path)
+    state = tmp_path / "data" / "alert-state" / "health_cycle.json"
+    sent = []
+    with patch.dict("os.environ", {"QUANT_MONITOR_ROOT": str(tmp_path),
+                                  "TELEGRAM_TOKEN": "synthetic", "GLOBAL_TELEGRAM_CHAT_ID": "synthetic-chat"}, clear=True), patch(
+        "service.briefing_dispatch.telegram_target_outcome",
+        side_effect=lambda **kwargs: sent.append(kwargs["text"]) or "sent",
+    ):
+        assert main(_multi_target_args(path)) == 0
+        preview = json.loads(capsys.readouterr().out)
+        assert not state.exists() and sent == []
+        assert len(preview["accounts"]) == 3
+        assert all(account["fills"]["count"] is None and account["funds"]["cash"] is None
+                   for account in preview["accounts"])
+        assert main(_multi_target_args(path, dispatch=True)) == 0
+        delivered = json.loads(capsys.readouterr().out)
+        assert sent == [preview["text"]]
+        assert delivered["dispatch"]["telegram_sent"] is True
+        original = state.read_bytes()
+        # Reload the delivery module from disk, and reverse producer target order.
+        briefing_dispatch._HEALTH_CYCLE = None
+        projection = json.loads(path.read_text())
+        projection["records"].reverse()
+        projection["observed_at"] = "2026-09-28T09:00:00+00:00"
+        path.write_text(json.dumps(projection))
+        assert main(_multi_target_args(path, dispatch=True)) == 0
+        recovered = json.loads(capsys.readouterr().out)
+        assert recovered["event_id"] == preview["event_id"]
+        assert recovered["dispatch"]["skipped"] == ["duplicate_delivered"]
+        assert sent == [preview["text"]] and state.read_bytes() == original
+
+
+def test_multi_target_cli_failed_recipient_only_retries_after_restart(tmp_path, capsys):
+    from quant_monitor_domain import briefing_dispatch
+
+    path = _multi_target_projection_file(tmp_path)
+    calls = []
+    with patch.dict("os.environ", {"QUANT_MONITOR_ROOT": str(tmp_path),
+                                  "TELEGRAM_TOKEN": "synthetic", "GLOBAL_TELEGRAM_CHAT_ID": "synthetic-ok,synthetic-failed"}, clear=True):
+        def first(**kwargs):
+            calls.append(kwargs["chat_id"])
+            return "sent" if kwargs["chat_id"] == "synthetic-ok" else "failed"
+
+        with patch("service.briefing_dispatch.telegram_target_outcome", side_effect=first):
+            assert main(_multi_target_args(path, dispatch=True)) == 2
+        result = json.loads(capsys.readouterr().out)
+        assert result["dispatch"]["errors"] == ["telegram_delivery_failed"]
+        calls.clear()
+        briefing_dispatch._HEALTH_CYCLE = None
+        with patch("service.briefing_dispatch.telegram_target_outcome", side_effect=lambda **kw: calls.append(kw["chat_id"]) or "sent"):
+            assert main(_multi_target_args(path, dispatch=True)) == 0
+        assert json.loads(capsys.readouterr().out)["dispatch"]["telegram_sent"] is True
+        assert calls == ["synthetic-failed"]
+
+
+def test_multi_target_cli_unknown_is_not_resent_after_restart(tmp_path, capsys):
+    from quant_monitor_domain import briefing_dispatch
+
+    path = _multi_target_projection_file(tmp_path)
+    with patch.dict("os.environ", {"QUANT_MONITOR_ROOT": str(tmp_path),
+                                  "TELEGRAM_TOKEN": "synthetic", "GLOBAL_TELEGRAM_CHAT_ID": "synthetic-chat"}, clear=True):
+        with patch("service.briefing_dispatch.telegram_target_outcome", return_value="unknown") as send:
+            assert main(_multi_target_args(path, dispatch=True)) == 2
+        assert send.call_count == 1
+        assert "telegram_delivery_unknown" in json.loads(capsys.readouterr().out)["dispatch"]["errors"]
+        briefing_dispatch._HEALTH_CYCLE = None
+        with patch("service.briefing_dispatch.telegram_target_outcome", side_effect=AssertionError("unknown must not resend")) as send:
+            assert main(_multi_target_args(path, dispatch=True)) == 2
+        assert "telegram_delivery_unknown" in json.loads(capsys.readouterr().out)["dispatch"]["errors"]
+        send.assert_not_called()
+
+
+def test_multi_target_cli_post_send_write_failure_holds_pending_after_restart(tmp_path, capsys):
+    from quant_monitor_domain import briefing_dispatch
+
+    path = _multi_target_projection_file(tmp_path)
+    with patch.dict("os.environ", {"QUANT_MONITOR_ROOT": str(tmp_path),
+                                  "TELEGRAM_TOKEN": "synthetic", "GLOBAL_TELEGRAM_CHAT_ID": "synthetic-chat"}, clear=True):
+        health = briefing_dispatch._health_cycle_module()
+        persist = health._persist_delivery_payload
+
+        def fail_after_send(root, payload):
+            records = [record for targets in payload.get("deliveries", {}).values() for record in targets.values()]
+            if any(record["status"] == "sent" for record in records):
+                raise OSError("synthetic post-send write failure")
+            return persist(root, payload)
+
+        with patch.object(health, "_persist_delivery_payload", side_effect=fail_after_send), patch(
+            "service.briefing_dispatch.telegram_target_outcome", return_value="sent",
+        ) as send:
+            assert main(_multi_target_args(path, dispatch=True)) == 2
+        assert send.call_count == 1
+        assert "alert_state_write_failed" in json.loads(capsys.readouterr().out)["dispatch"]["errors"]
+        state = tmp_path / "data" / "alert-state" / "health_cycle.json"
+        assert '"pending"' in state.read_text()
+        briefing_dispatch._HEALTH_CYCLE = None
+        with patch("service.briefing_dispatch.telegram_target_outcome", side_effect=AssertionError("pending must not resend")) as send:
+            assert main(_multi_target_args(path, dispatch=True)) == 2
+        assert "telegram_delivery_unknown" in json.loads(capsys.readouterr().out)["dispatch"]["errors"]
+        send.assert_not_called()
+        assert '"unknown"' in state.read_text() and '"pending"' not in state.read_text()
+
+
+def test_runtime_content_preview_preserves_existing_state_and_has_no_ports(tmp_path, capsys) -> None:
+    path = _projection_file(tmp_path)
+    state = tmp_path / "data" / "alert-state" / "health_cycle.json"
+    state.parent.mkdir(parents=True)
+    original = b'{"synthetic": "unknown-must-remain"}\n'
+    state.write_bytes(original)
+    with patch.dict("os.environ", {"QUANT_MONITOR_ROOT": str(tmp_path)}, clear=True), patch(
+        "service.briefing_dispatch.telegram_target_outcome",
+        side_effect=AssertionError("send forbidden"),
+    ), patch("client.gateway_client.AiGatewayClient.execute", side_effect=AssertionError("model forbidden")), patch(
+        "scripts.consume_daily_briefing._read_gcs_object", side_effect=AssertionError("fetch forbidden"),
+    ):
+        assert main(["--runtime-projection", str(path), "--dry-run"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["observed_at"] == "2026-09-28T08:40:00+00:00"
+    assert result["accounts"][0]["fills"]["count"] is None
+    assert result["accounts"][0]["funds"]["currency"] is None
+    for section in ("业务日", "Asia/Hong_Kong", "运行", "成交覆盖", "资金覆盖", "人工事项"):
+        assert section in result["text"]
+    assert state.read_bytes() == original
+
+
+def test_runtime_unconnected_funds_rejection_is_fixed_and_never_dispatched(tmp_path, capsys) -> None:
+    path = _projection_file(tmp_path)
+    projection = json.loads(path.read_text())
+    projection["records"][0]["cash"] = [{"currency": "USD", "available_cash": 10}]
+    path.write_text(json.dumps(projection))
+    with patch("scripts.consume_daily_briefing.dispatch_runtime_digest", side_effect=AssertionError("dispatch forbidden")):
+        assert main(["--runtime-projection", str(path)]) == 2
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["reason"] == "funds_not_connected"
+    assert "reason=funds_not_connected" in captured.err
+    assert "USD" not in captured.out + captured.err
+
+
 def test_domain_quiet_route_is_unchanged(tmp_path, capsys) -> None:
     (tmp_path / "us_equity.json").write_text(json.dumps({
         "domain": "us_equity", "ok": True, "data_status": "ready", "as_of": "2026-09-28T08:00:00+00:00",
