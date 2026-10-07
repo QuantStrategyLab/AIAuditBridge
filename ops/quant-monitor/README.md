@@ -108,6 +108,16 @@ python3 scripts/consume_daily_briefing.py --runtime-projection projection.json -
 
 GCS 输入默认关闭，也不改 22:30 UTC 的简报定时。只有 `QUANT_MONITOR_RUNTIME_DIGEST_ENABLED=true`，并且同时配置合法的 `QUANT_MONITOR_RUNTIME_PROJECTION_PREFIX`（末段必须是 `runtime_daily`）、IANA `QUANT_MONITOR_RUNTIME_TIMEZONE` 和 `QUANT_MONITOR_RUNTIME_EXPECTED_TARGET_KEY`（scope 末段为 `paper`）时，pipeline 才按该时区的业务日读取 `{prefix}/longbridge/paper/{day}.json`。日期和目标键来自这三项配置，不从对象内容反推。读取用现有 `gcloud storage cat`，20 秒超时、正文上限 1MiB、不重试；缺对象、无权限、超时或非法内容都不发送。发送仍是原来的 `--dispatch`、量化哨兵和 `health_cycle.json`。domain 简报照常单独执行：它失败不会跳过 runtime，runtime 失败也不会取消已跑的 domain；任一项失败则 pipeline 以非零结束。日志不写正文、对象 URI 或 chat id。本地 `--runtime-projection` 仍然可用，并与 `--runtime-projection-gcs` 互斥。VPS 是否已安装该开关、云端身份是否能读该对象、以及首份送达，都还没有验收。
 
+### 一次性固定对象日报 / One-shot immutable-object runtime briefing
+
+新增的 `preview-longbridge-paper-once` 和 `send-longbridge-paper-once` 是手动 workflow 模式；默认模式仍为 `inspect`，不启用新的 timer 或自动发送。业务日通过普通 dispatch 输入提供；对象 URI 和完整获批的 paper target keys（每行一个）只从 `codex-vps-ops` protected Environment 的 `RUNTIME_DIGEST_ONCE_PROJECTION_OBJECT` 与 `RUNTIME_DIGEST_ONCE_TARGET_KEYS` 读取。不要把 URI 或 target keys 放进普通 dispatch 输入或公开日志。本工作区尚未确认这两个 Environment secret 已配置；缺失、格式错误或目标不完整时 helper 会停止，不用默认值、latest、前缀或空账本补齐。
+
+preview 校验对象/日期/targets，并验证原通知路由；因此它会在原执行身份下读取既有 bot secret 并调用 Telegram `getMe`，但不发送日报消息。确认 preview 结果和本次范围后，才单独选择 send。两种模式都固定调用已发布消费者、使用原身份与 `health_cycle.json`；账本必须已存在、可读且属于原路径，禁止创建空账本替代历史。`unknown`、timeout、返回丢失、输入/账本/路由不匹配均停止，不自动重试。结果只返回有限状态，不回显对象正文或凭据。
+
+The `preview-longbridge-paper-once` and `send-longbridge-paper-once` modes are manual workflow operations. The default remains `inspect`; no timer or automatic send is enabled. The business day is supplied as an ordinary dispatch input. The object URI and complete approved paper target-key set (one key per line) must come only from the `codex-vps-ops` protected Environment secrets `RUNTIME_DIGEST_ONCE_PROJECTION_OBJECT` and `RUNTIME_DIGEST_ONCE_TARGET_KEYS`. Never put the URI or target keys in ordinary dispatch inputs or public logs. This workspace has not confirmed that these Environment secrets are configured; missing or invalid values, or an incomplete target set, make the helper stop. No default, `latest`, prefix, or empty ledger fills a missing value.
+
+Preview validates the object, day, and targets and checks the original notification route. It therefore reads the existing bot secret under the original execution identity and calls Telegram `getMe`, but it does not send the daily message. Review the preview result and approved scope before selecting send separately. Both modes invoke the fixed published consumer and reuse the original identity and `health_cycle.json`; that ledger must already exist, be readable, and resolve to the original path. Never create an empty ledger to replace history. `unknown`, timeout, lost return, or mismatched input, ledger, or route stops the operation without automatic retry. The result exposes only bounded status and does not echo the object body or credentials.
+
 ## Immutable release 安装（仅安装）
 
 生产 oneshot 服务从 `/opt/quant-monitor/releases/<40-hex-SHA>` 读代码。用本地已有仓库中的**精确

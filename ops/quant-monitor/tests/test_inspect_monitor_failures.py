@@ -772,6 +772,8 @@ class OfflineTests(unittest.TestCase):
             "inspect": "vps-codex-service-ops", "deploy": "vps-codex-service-ops",
             "repair-ssh": "vps-codex-service-ops", "install-org-health-token": "org-health-token",
             "inspect-quant-runtime": "inspect-quant-runtime", "inspect-quant-paths": "inspect-quant-paths",
+            "preview-longbridge-paper-once": "longbridge-paper-once",
+            "send-longbridge-paper-once": "longbridge-paper-once",
             "stage-quant-runtime-inactive": "stage-quant-runtime-inactive",
             "install-quant-release-inactive": "install-quant-release-inactive",
             "check-quant-consumers-offline": "check-quant-consumers-offline",
@@ -792,6 +794,13 @@ class OfflineTests(unittest.TestCase):
             for job, condition in conditions.items():
                 terms = []
                 for term in condition.split(" && "):
+                    mode_gate = re.fullmatch(
+                        r"\(inputs\.mode == '([^']+)' \|\| inputs\.mode == '([^']+)'\)",
+                        term,
+                    )
+                    if mode_gate:
+                        terms.append(values["inputs.mode"] in mode_gate.groups())
+                        continue
                     comparison = re.fullmatch(r"([a-z_.]+) (==|!=) '([^']*)'", term)
                     if comparison:
                         key, operator, value = comparison.groups()
@@ -806,7 +815,11 @@ class OfflineTests(unittest.TestCase):
 
         self.assertEqual(set(conditions), set(expected.values()))
         for mode, job in expected.items():
-            self.assertEqual(routed(mode, acknowledge_interruption=mode not in {"stage-quant-runtime-inactive", "install-quant-release-inactive", "check-quant-consumers-offline"}), [job])
+            self.assertEqual(routed(mode, acknowledge_interruption=mode not in {
+                "stage-quant-runtime-inactive", "install-quant-release-inactive",
+                "check-quant-consumers-offline", "preview-longbridge-paper-once",
+                "send-longbridge-paper-once",
+            }), [job])
         self.assertEqual(routed("stage-quant-runtime-inactive", acknowledge_interruption=True), [])
         self.assertEqual(routed("stage-quant-runtime-inactive", acknowledge_interruption=False,
                                 ssh_unban_ip="192.0.2.1"), [])
