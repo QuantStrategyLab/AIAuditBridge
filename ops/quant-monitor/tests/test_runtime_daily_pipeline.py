@@ -290,7 +290,7 @@ with contextlib.ExitStack() as stack:
     stack.enter_context(patch.object(cli, "_read_gcs_object", side_effect=read_fixture))
     stack.enter_context(patch.object(cli, "dispatch_briefing_result", return_value={"action": "telegram", "errors": [], "skipped": [], "telegram_sent": True, "github_issue": None, "optimization_watch": None, "operational_fallback_sent": False}))
     if os.environ.get("RUNTIME_REAL_LEDGER") == "true":
-        stack.enter_context(patch("service.briefing_dispatch.telegram_target_outcome", side_effect=synthetic_send))
+        stack.enter_context(patch("quant_monitor_domain.briefing_dispatch.telegram_target_outcome", side_effect=synthetic_send))
     else:
         stack.enter_context(patch.object(cli, "dispatch_runtime_digest", return_value={"action": "runtime_digest", "errors": [], "skipped": [], "telegram_sent": True, "github_issue": None, "business_date": "synthetic-day", "event_id": "synthetic-event"}))
     raise SystemExit(cli.main())
@@ -616,7 +616,7 @@ def test_once_home_and_original_ledger_alias_are_not_replaced(tmp_path, monkeypa
     assert state.read_bytes() == before
 
 def test_once_workflow_keeps_fixed35_and_separate_exact_c_source():
-    text = (SCRIPT.parents[3] / ".github/workflows/vps_codex_service_ops.yml").read_text()
+    text = (SCRIPT.parents[3] / ".github/workflows/monitor-runtime-digest-once.yml").read_text()
     assert "ref: 35ac71176127f07e00fe04dbc793777f3c595bc0" in text
     job = text.split("  longbridge-paper-once:\n", 1)[1]
     assert "ref: 823ba856af49d8799506afe476aec9d07ab1c63d" in job
