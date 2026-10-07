@@ -91,7 +91,6 @@ AIAuditBridge 是 QuantStrategyLab 的 AI 审计控制面，负责：
   - 月审主流程。
   - 包括 repo/task 校验、service patch contract、path guard、PR 创建、label 管理、auto-merge 请求、stale label cleanup。
 
-- `scripts/gate_codex_app_review.py`
   - 历史静态检查辅助脚本；当前没有 workflow 调用它，也不发布合并门禁。
 
 ### 1.3 已经具备的自动化能力
