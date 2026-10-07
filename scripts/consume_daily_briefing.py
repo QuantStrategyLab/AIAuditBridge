@@ -14,12 +14,10 @@ import time
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-from service.briefing_consumer import consume_briefing_dir, summarize_briefing
-from service.briefing_dispatch import dispatch_briefing_result, dispatch_runtime_digest
-from service.runtime_digest import prepare_runtime_digest
-from service.dual_review_briefing import collect_dual_review_payloads, summarize_dual_review_runs
-from service.dual_review_dispatch import dispatch_dual_review_result
-from service.dual_review_orchestrator import orchestrate_from_payload
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ops/quant-monitor"))
+from quant_monitor_domain.briefing_consumer import consume_briefing_dir, summarize_briefing
+from quant_monitor_domain.briefing_dispatch import dispatch_briefing_result, dispatch_runtime_digest
+from quant_monitor_domain.runtime_digest import prepare_runtime_digest
 
 
 def _canonical_iso_day(value: str) -> str | None:
@@ -531,7 +529,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--dual-review",
         action="store_true",
-        help="Run dual-review orchestration for briefing strategies with primary_review metadata",
+        help="Request a three-role advisory review of validated briefing evidence",
     )
     args = parser.parse_args(argv)
     if args.summary_only and (args.dispatch or args.send_dry_run or args.dual_review):
@@ -594,16 +592,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.ai_summary:
         payload["ai_summary"] = summarize_briefing(result, dry_run=args.dry_run)
     if args.dual_review:
-        dual_results = []
-        for item in collect_dual_review_payloads(report_dir):
-            outcome = orchestrate_from_payload(item)
-            if outcome is None:
-                continue
-            entry = outcome.to_dict()
-            if args.dispatch and not args.send_dry_run:
-                entry["dispatch"] = dispatch_dual_review_result(outcome, dry_run=args.dry_run)
-            dual_results.append(entry)
-        payload["dual_review"] = summarize_dual_review_runs(dual_results)
+        from quant_platform_kit.strategy_lifecycle.task_review import review_material
+        import hashlib
+        material = {"summary_reports": result.summary_reports, "day": args.day, "advisory_only": True}
+        identity = hashlib.sha256(json.dumps(material, sort_keys=True).encode()).hexdigest()
+        try:
+            review = review_material(material, operation_id="briefing-review:" + identity,
+                                     required_roles=("primary", "secondary", "verification"))
+        except Exception:
+            review = {"status": "unavailable", "advisory_only": True}
+        payload["dual_review"] = {"schema":"quant_monitor.briefing_review.v2", "review":review,
+                                  "disagreements": review.get("status") != "completed" or review.get("outcome") != "agree_approve",
+                                  "advisory_only":True, "execution_authority_granted":False}
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     if args.send_dry_run:
         exit_code = 0 if not _dispatch_failed(payload.get("dispatch")) else 2

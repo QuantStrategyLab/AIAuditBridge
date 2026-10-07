@@ -1,0 +1,61 @@
+{
+  "enabled": false,
+  "resource": "https://CONFIGURE_SERVICE_HOST/mcp",
+  "state_path": "/var/lib/quant-ai-service/tasks.sqlite",
+  "issuers": {
+    "https://CONFIGURE_IDENTITY_PROVIDER": {
+      "jwks_url": "https://CONFIGURE_IDENTITY_PROVIDER/.well-known/jwks.json",
+      "require_scope": true
+    },
+    "https://token.actions.githubusercontent.com": {
+      "jwks_url": "https://token.actions.githubusercontent.com/.well-known/jwks",
+      "require_scope": false
+    }
+  },
+  "providers": {
+    "dot": {"type": "dot_events"},
+    "grok": {
+      "type": "grok_webhook",
+      "url": "https://CONFIGURE_CURSOR_ROUTINE_WEBHOOK",
+      "key_env": "AI_SERVICE_GROK_WEBHOOK_KEY"
+    }
+  },
+  "projects": {
+    "QuantStrategyLab/ExampleResearch": {
+      "providers": {"agent": "dot", "agent:second-opinion": "grok"},
+      "models": {"dot": ["configured-dot"], "grok": ["configured-grok"]},
+      "max_active": 2,
+      "max_timeout_seconds": 3600
+    }
+  },
+  "grants": [
+    {
+      "issuer": "https://CONFIGURE_IDENTITY_PROVIDER",
+      "subject": "CONFIGURE_DOT_CONNECTION_SUBJECT",
+      "identity": "quant-dot",
+      "project": "QuantStrategyLab/ExampleResearch",
+      "provider": "dot",
+      "scopes": ["tasks:read", "tasks:work", "events:subscribe"]
+    },
+    {
+      "issuer": "https://CONFIGURE_IDENTITY_PROVIDER",
+      "subject": "CONFIGURE_GROK_CONNECTION_SUBJECT",
+      "identity": "quant-grok",
+      "project": "QuantStrategyLab/ExampleResearch",
+      "provider": "grok",
+      "scopes": ["tasks:read", "tasks:work"]
+    },
+    {
+      "issuer": "https://token.actions.githubusercontent.com",
+      "subject": "repo:QuantStrategyLab/ExampleResearch:ref:refs/heads/main",
+      "identity": "example-project-workflow",
+      "project": "QuantStrategyLab/ExampleResearch",
+      "scopes": ["tasks:read", "tasks:submit"],
+      "claims": {
+        "repository": "QuantStrategyLab/ExampleResearch",
+        "workflow_ref": "QuantStrategyLab/ExampleResearch/.github/workflows/ai-task.yml@refs/heads/main",
+        "ref": "refs/heads/main"
+      }
+    }
+  ]
+}

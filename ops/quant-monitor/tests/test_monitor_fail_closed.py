@@ -150,7 +150,7 @@ class MonitorFailClosedTests(unittest.TestCase):
                 else:
                     self.assertEqual(errors_by_domain, {})
 
-    def test_historical_auth_guard_rehearsal_is_fixed_read_only_codex_only(self):
+    def test_historical_auth_guard_rehearsal_uses_generic_advisory_task(self):
         calls: list[tuple[str, dict[str, object]]] = []
 
         class Client:
@@ -158,7 +158,7 @@ class MonitorFailClosedTests(unittest.TestCase):
                 calls.append((prompt, kwargs))
                 return types.SimpleNamespace(
                     success=True,
-                    raw={"status": "succeeded", "job_id": "R" * 32},
+                    raw={"status": "completed", "id": "R" * 32, "result_kind": "advisory", "model_verification": "unavailable"},
                 )
 
         safe_env = {
@@ -185,11 +185,6 @@ class MonitorFailClosedTests(unittest.TestCase):
         self.assertIn("300 Chinese characters or fewer", prompt)
         self.assertNotIn("/Users/", prompt)
         self.assertNotIn("token=", prompt)
-        self.assertEqual(kwargs["task"], "historical_operational_diagnosis_rehearsal")
-        self.assertEqual(kwargs["mode"], "review_only")
-        self.assertEqual(kwargs["sandbox"], "read-only")
-        self.assertEqual(kwargs["research_stage"], "drift_analysis")
-        self.assertEqual(kwargs["allowed_providers"], ["codex"])
         self.assertEqual(kwargs["timeout"], 600)
 
     def test_historical_rehearsal_requires_first_attempt_oidc_and_rejects_keys(self):
@@ -225,7 +220,7 @@ class MonitorFailClosedTests(unittest.TestCase):
                 return types.SimpleNamespace(
                     success=False,
                     error="private response /tmp/token",
-                    raw={"status": "deferred", "retry_at": 9999},
+                    raw={"status": "queued", "id": "pending-1"},
                 )
 
         with mock.patch.dict(os.environ, {
@@ -240,7 +235,7 @@ class MonitorFailClosedTests(unittest.TestCase):
                 config_loader=lambda: object(),
                 client_factory=lambda _config: Client(),
             )
-        self.assertEqual(result, {"status": "deferred", "reason": "capacity_unavailable"})
+        self.assertEqual(result, {"status": "deferred", "reason": "ai_task_pending"})
         self.assertEqual(calls, 1)
         self.assertNotIn("private", repr(result))
 
@@ -284,7 +279,7 @@ class MonitorFailClosedTests(unittest.TestCase):
     def test_static_dashboard_token_cannot_submit_diagnosis(self):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"CODEX_AUDIT_SERVICE_TOKEN": "synthetic-readonly", "CODEX_AUDIT_SERVICE_URL": "https://invalid"}, clear=True), mock.patch.object(HEALTH_CYCLE, "_record_operational_diagnosis_attempt") as record:
             result = HEALTH_CYCLE._run_operational_diagnosis(Path(tmp), [{"domain": "crypto"}], "3" * 64)
-            self.assertEqual(result, {"status": "deferred", "reason": "ai_gateway_not_configured"})
+            self.assertEqual(result, {"status": "deferred", "reason": "ai_task_service_not_configured"})
             record.assert_not_called()
 
     def test_health_cycle_collects_drift_errors_without_aborting(self) -> None:
@@ -523,7 +518,7 @@ class MonitorFailClosedTests(unittest.TestCase):
                     success=True,
                     output="diagnosed",
                     error="",
-                    raw={"status": "succeeded", "job_id": "job-1"},
+                    raw={"status": "completed", "id": "job-1", "result_kind": "advisory", "model_verification": "unavailable"},
                 )
 
         errors = [{
@@ -564,23 +559,21 @@ class MonitorFailClosedTests(unittest.TestCase):
         self.assertNotIn("/tmp", prompt)
         self.assertNotIn("2026-09-10", prompt)
         self.assertNotIn("price", prompt)
-        self.assertEqual(kwargs["mode"], "review_only")
-        self.assertEqual(kwargs["sandbox"], "read-only")
-        self.assertEqual(kwargs["allowed_providers"], ["codex"])
-        self.assertEqual(kwargs["research_stage"], "drift_analysis")
 
-    def test_operational_diagnosis_defers_without_consuming_fingerprint(self) -> None:
+    def test_operational_diagnosis_pending_reentry_reads_original_task(self) -> None:
         calls = 0
+        resume_ids = []
 
         class Client:
             def execute(self, _prompt: str, **_kwargs):
                 nonlocal calls
                 calls += 1
+                resume_ids.append(_kwargs.get("resume_task_id"))
                 return types.SimpleNamespace(
                     success=False,
                     output="",
                     error="codex_research_deferred",
-                    raw={"status": "deferred", "retry_at": None},
+                    raw={"status": "queued", "id": "pending-1"},
                 )
 
         errors = [{
@@ -602,8 +595,9 @@ class MonitorFailClosedTests(unittest.TestCase):
                     client_factory=lambda _config: Client(),
                 )
 
-        self.assertEqual(result, {"status": "deferred", "reason": "capacity_unavailable"})
+        self.assertEqual(result, {"status": "deferred", "reason": "ai_task_pending", "job_id": "pending-1"})
         self.assertEqual(calls, 2)
+        self.assertEqual(resume_ids, [None, "pending-1"])
 
     def test_operational_diagnosis_requires_real_data_errors_and_configuration(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -624,7 +618,7 @@ class MonitorFailClosedTests(unittest.TestCase):
                     "1" * 64,
                     config_loader=lambda: (_ for _ in ()).throw(ValueError("missing private config")),
                 ),
-                {"status": "deferred", "reason": "ai_gateway_not_configured"},
+                {"status": "deferred", "reason": "ai_task_service_not_configured"},
             )
 
     def test_operational_diagnosis_stops_when_persisted_state_is_unreadable(self) -> None:
@@ -719,7 +713,7 @@ class MonitorFailClosedTests(unittest.TestCase):
                 "3" * 64,
             )
 
-        self.assertEqual(result, {"status": "deferred", "reason": "ai_gateway_not_configured"})
+        self.assertEqual(result, {"status": "deferred", "reason": "ai_task_service_not_configured"})
         self.assertFalse(HEALTH_CYCLE._operational_diagnosis_attempted(root, "3" * 64))
 
     def test_health_cycle_builds_issue_only_monitoring_finding(self) -> None:
@@ -882,7 +876,7 @@ class MonitorFailClosedTests(unittest.TestCase):
                 self.assertEqual([finding.snapshot.profile for finding in findings], ["other"])
 
     def test_health_cycle_main_suppresses_optimization_but_preserves_operational_errors(self) -> None:
-        from scripts import run_strategy_optimization_watcher as watcher
+        from quant_platform_kit.strategy_lifecycle.watch import runner as watcher
 
         for runtime_failure in (False, True):
             with self.subTest(runtime_failure=runtime_failure), tempfile.TemporaryDirectory() as tmp:
@@ -1213,7 +1207,7 @@ class MonitorFailClosedTests(unittest.TestCase):
             report = json.loads((root / "data/daily-reports/2026-09-29/us_equity.json").read_text())
             self.assertFalse(report["ok"])
             self.assertEqual(report["data_status"], "unavailable")
-            from service.briefing_consumer import BriefingAction, consume_briefing_report
+            from quant_monitor_domain.briefing_consumer import BriefingAction, consume_briefing_report
             findings = consume_briefing_report(report)
             self.assertTrue(findings)
             self.assertEqual(findings[0].level, BriefingAction.TELEGRAM)
@@ -1813,7 +1807,7 @@ class TrustedProfileCoverageTests(unittest.TestCase):
         self._check_main_profile_coverage(missing_current_drift=True)
 
     def _check_main_profile_coverage(self, *, missing_current_drift=False) -> None:
-        from scripts import run_strategy_optimization_watcher as watcher
+        from quant_platform_kit.strategy_lifecycle.watch import runner as watcher
         normalizer = _load_script("build_dashboard_snapshot")
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

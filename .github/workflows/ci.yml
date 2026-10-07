@@ -1,265 +1,66 @@
-name: CI
-
+name: QuantAIService V2 CI
 on:
   pull_request:
   push:
     branches: [main]
-
 permissions:
   contents: read
-
 jobs:
-  global-etf-codegen-docker-fixture:
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          persist-credentials: false
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          repository: QuantStrategyLab/UsEquityStrategies
-          ref: ceb3e6eb33c7913bcc10bacd6a04fda8aeb1c7ff
-          path: ues-global-approved
-          persist-credentials: false
-      - name: Install isolated Global codegen dependency set
-        run: |
-          set -euo pipefail
-          python3 -m venv "${RUNNER_TEMP}/aab-global-etf-research"
-          "${RUNNER_TEMP}/aab-global-etf-research/bin/python" -m pip install pytest \
-            "us-equity-strategies @ git+https://github.com/QuantStrategyLab/UsEquityStrategies.git@ceb3e6eb33c7913bcc10bacd6a04fda8aeb1c7ff" \
-            "quant-platform-kit @ git+https://github.com/QuantStrategyLab/QuantPlatformKit.git@de13e486da1bdba60f425e576e944591fc97b809" \
-            .
-          "${RUNNER_TEMP}/aab-global-etf-research/bin/python" -m pip check
-      - name: Run the opt-in Global Docker synthetic fixture
-        env:
-          AAB_RUN_GLOBAL_ETF_DOCKER_INTEGRATION: "1"
-          AAB_GLOBAL_ETF_APPROVED_REPO: ${{ github.workspace }}/ues-global-approved
-          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
-          PYTHONDONTWRITEBYTECODE: "1"
-        run: |
-          set -euo pipefail
-          "${RUNNER_TEMP}/aab-global-etf-research/bin/python" -m pytest -q tests/test_global_etf_research_codegen.py -k docker_integration_fixture
-
-  platform-bugfix-history:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-      - name: Run fixed LongBridge historical fixtures
-        env:
-          PYTHONDONTWRITEBYTECODE: "1"
-          PYTHONUNBUFFERED: "1"
-        run: python3 -m scripts.run_platform_bugfix_history_fixture
-
-  actionlint:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v6
-      - name: Actionlint
-        uses: docker://rhysd/actionlint:1.7.12
-
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
-      - name: Check whitespace
-        run: |
-          set -euo pipefail
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
-            git diff --check "origin/${{ github.base_ref }}...HEAD"
-          else
-            git diff-tree --check --no-commit-id --root -r HEAD
-          fi
-
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-
-      - name: Run Python lint and tests
-        run: |
-          set -euo pipefail
-          python3 -m pip install --upgrade pip
-          python3 -m pip install pytest ruff==0.15.22
-          python3 -m pip install . --no-deps
-          python3 -m pip install 'quant-strategy-plugins[ai] @ git+https://github.com/QuantStrategyLab/QuantStrategyPlugins.git@6b76d512c8273deb804c0770a203558284778399'
-          python3 -m pip install 'quant-platform-kit @ git+https://github.com/QuantStrategyLab/QuantPlatformKit.git@7363011d56926d39f4fffeb036e511391114e39f'
-          python3 -m pip check
-          python3 -m ruff check .
-          python3 -m pytest tests ops/quant-monitor/tests -q --ignore=tests/test_run_cn_index_etf_research.py --ignore=tests/test_run_new_research.py --ignore=tests/test_bilingual_research_summary.py --ignore=ops/quant-monitor/tests/test_binance_live_runs_sync.py
-
-      - name: Verify Binance lifecycle consumer with interval-aware QPK
-        run: |
-          set -euo pipefail
-          python3 -m pip install --force-reinstall --no-deps 'quant-platform-kit @ git+https://github.com/QuantStrategyLab/QuantPlatformKit.git@2dc59d648af76382a08aaf6c84b19e9721fe8d6f'
-          python3 - <<'PY'
-          import importlib.metadata
-          import json
-
-          dist = importlib.metadata.distribution("quant-platform-kit")
-          direct_url = json.loads(dist.read_text("direct_url.json"))
-          assert direct_url["vcs_info"]["commit_id"] == "2dc59d648af76382a08aaf6c84b19e9721fe8d6f"
-          PY
-          python3 -m pytest ops/quant-monitor/tests/test_binance_live_runs_sync.py -q
-
-      - uses: actions/setup-node@v6
-        with:
-          node-version: "22"
-
-      - name: Run Cloudflare Worker tests
-        run: |
-          set -euo pipefail
-          node --experimental-default-type=module --test cloudflare/codex-audit-proxy/tests/index.test.mjs
-          node --experimental-default-type=module --test cloudflare/ai-gateway-dash/tests/index.test.mjs
-
-      - name: Install the isolated CN research dependency set
-        run: |
-          set -euo pipefail
-          python3 -m venv "${RUNNER_TEMP}/aab-cn-research"
-          "${RUNNER_TEMP}/aab-cn-research/bin/python" -m pip install pytest 'cn-equity-strategies[research] @ git+https://github.com/QuantStrategyLab/CnEquityStrategies.git@db8df9fca6665ec7c605bf04f12b74f5daa54491'
-          "${RUNNER_TEMP}/aab-cn-research/bin/python" -m pip check
-      - name: Verify the real CN caller without network or model execution
-        env:
-          TZ: UTC
-          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
-          PYTHONDONTWRITEBYTECODE: "1"
-        run: |
-          set -euo pipefail
-          # Main-suite packaging leaves egg-info in the checkout. Test the same
-          # HEAD (including the PR merge) without those build-time metadata files.
-          cn_test_source="$(mktemp -d "${RUNNER_TEMP}/aab-cn-research-source.XXXXXX")"
-          git archive HEAD | tar -x -C "${cn_test_source}"
-          cd "${cn_test_source}"
-          "${RUNNER_TEMP}/aab-cn-research/bin/python" - <<'PY'
-          import importlib.metadata
-          from pathlib import Path
-          import socket
-          import sys
-          import pytest
-
-          def blocked(*args, **kwargs):
-              raise AssertionError("real socket prohibited")
-
-          socket.socket.connect = blocked
-          socket.create_connection = blocked
-          for package in ("cn-equity-strategies", "quant-platform-kit", "ai-gateway-client"):
-              installed = importlib.metadata.distribution(package)
-              assert Path(installed.locate_file("")).resolve().is_relative_to(Path(sys.prefix).resolve())
-          raise SystemExit(pytest.main([
-              "-q", "-p", "no:cacheprovider", "--tb=short",
-              "tests/test_run_cn_index_etf_research.py",
-          ]))
-          PY
-
-      - name: Install isolated SOXL new-research dependency set
-        run: |
-          set -euo pipefail
-          # Install the fixed UES research-adapter and QPK dependencies; this step must not skip.
-          python3 -m venv "${RUNNER_TEMP}/aab-soxl-research"
-          "${RUNNER_TEMP}/aab-soxl-research/bin/python" -m pip install pytest \
-            "us-equity-strategies @ git+https://github.com/QuantStrategyLab/UsEquityStrategies.git@d6b37b77c309e1fb7f25263271b6b0f653f7e7b8" \
-            "quant-platform-kit @ git+https://github.com/QuantStrategyLab/QuantPlatformKit.git@de13e486da1bdba60f425e576e944591fc97b809" \
-            .
-          "${RUNNER_TEMP}/aab-soxl-research/bin/python" -m pip check
-      - name: Verify SOXL source-bound research entry
-        env:
-          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
-          PYTHONDONTWRITEBYTECODE: "1"
-        run: |
-          set -euo pipefail
-          "${RUNNER_TEMP}/aab-soxl-research/bin/python" -m scripts.run_new_research --help
-          "${RUNNER_TEMP}/aab-soxl-research/bin/python" - <<'PY'
-          from us_equity_strategies.research.soxl_alpaca_input_adapter import (
-              load_soxl_alpaca_input, materialize_soxl_alpaca_input,
-          )
-          from us_equity_strategies.research.soxl_rsi2_research_adapter import (
-              load_rsi2_offline_input, make_soxl_rsi2_optimize,
-          )
-          assert callable(load_soxl_alpaca_input)
-          assert callable(materialize_soxl_alpaca_input)
-          assert callable(load_rsi2_offline_input)
-          assert callable(make_soxl_rsi2_optimize)
-          PY
-          "${RUNNER_TEMP}/aab-soxl-research/bin/python" -m pytest -q tests/test_run_new_research.py
-      - name: Run opt-in SOXL Docker codegen and research fixture
-        env:
-          AAB_RUN_DOCKER_INTEGRATION: "1"
-          AAB_SOXL_APPROVED_COMMIT: 49bfc34ee3b2f558c9f323d889b7eb267037b7b2
-          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
-          PYTHONDONTWRITEBYTECODE: "1"
-        run: |
-          set -euo pipefail
-          approved_repo="${RUNNER_TEMP}/ues-soxl-approved"
-          git clone --no-tags --filter=blob:none https://github.com/QuantStrategyLab/UsEquityStrategies.git "${approved_repo}"
-          git -C "${approved_repo}" checkout --detach "${AAB_SOXL_APPROVED_COMMIT}"
-          export AAB_SOXL_APPROVED_REPO="${approved_repo}"
-          "${RUNNER_TEMP}/aab-soxl-research/bin/python" -m pytest -q tests/test_run_new_research.py -k test_codegen_docker_integration_fixture
-
-      - name: Run opt-in SOXL financial explanation integration
-        env:
-          SOXL_RUN_INTEGRATION: "1"
-          SOXL_UES_REPO_ROOT: ${{ runner.temp }}/ues-soxl-financial-explanation
-          SOXL_QPK_REPO_ROOT: ${{ runner.temp }}/qpk-soxl-financial-explanation
-          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
-          PYTHONDONTWRITEBYTECODE: "1"
-        run: |
-          set -euo pipefail
-          ues_root="${RUNNER_TEMP}/ues-soxl-financial-explanation"
-          qpk_root="${RUNNER_TEMP}/qpk-soxl-financial-explanation"
-          git clone --no-tags --filter=blob:none https://github.com/QuantStrategyLab/UsEquityStrategies.git "$ues_root"
-          git -C "$ues_root" fetch --no-tags --depth=1 origin 86aa4e03c30eb2fb561748d6e9c22e68d3267cfa
-          git -C "$ues_root" checkout --detach 86aa4e03c30eb2fb561748d6e9c22e68d3267cfa
-          git clone --no-tags --filter=blob:none https://github.com/QuantStrategyLab/QuantPlatformKit.git "$qpk_root"
-          git -C "$qpk_root" fetch --no-tags --depth=1 origin de13e486da1bdba60f425e576e944591fc97b809
-          git -C "$qpk_root" checkout --detach de13e486da1bdba60f425e576e944591fc97b809
-          SOXL_UES_REPO_ROOT="$ues_root" SOXL_QPK_REPO_ROOT="$qpk_root" \
-            "${RUNNER_TEMP}/aab-soxl-research/bin/python" - <<'PY' > /dev/null
-          import os
-          from pathlib import Path
-          from scripts.run_soxl_financial_explanation import _load_pinned_api
-          _load_pinned_api(Path(os.environ["SOXL_UES_REPO_ROOT"]), Path(os.environ["SOXL_QPK_REPO_ROOT"]))
-          PY
-          "${RUNNER_TEMP}/aab-soxl-research/bin/python" -m pytest -q tests/test_run_soxl_financial_explanation.py -k synthetic_p1
-
-  bilingual-research-summary:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    permissions:
-      contents: read
     steps:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
-      - name: Install pinned bilingual research summary dependencies
+          python-version: '3.12'
+      - name: Validate and build the Quant wrapper
         run: |
-          set -euo pipefail
-          python3 -m pip install --upgrade pip
-          python3 -m pip install pytest pandas \
-            'quant-platform-kit @ git+https://github.com/QuantStrategyLab/QuantPlatformKit.git@628240e1b4354626db1b842e410ff9756f2dcb29' \
-            .
-          python3 -m pip check
-      - name: Run bilingual research summary tests
+          python -m pip install setuptools wheel ruff==0.15.22
+          python -m ruff check src tests/test_quant_service_v2.py
+          python -m compileall -q src
+          python -m pip wheel --no-deps --no-build-isolation . -w dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: quant-ai-service-v2-unpublished
+          path: dist/*.whl
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Validate workflows
+        uses: docker://rhysd/actionlint:1.7.12
+  admitted-service:
+    if: vars.AI_SERVICE_CI_READY == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Require approved shared source revision
         env:
-          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
-          PYTHONDONTWRITEBYTECODE: "1"
+          APPROVED_SHARED_SHA: ${{ vars.AI_SERVICE_SHARED_SOURCE_SHA }}
+          APPROVED_QPK_SHA: ${{ vars.AI_SERVICE_QPK_SOURCE_SHA }}
+        run: python -c 'import os,re; assert re.fullmatch("[0-9a-f]{40}", os.environ["APPROVED_SHARED_SHA"]); assert re.fullmatch("[0-9a-f]{40}", os.environ["APPROVED_QPK_SHA"])'
+      - uses: actions/checkout@v6
+        with:
+          repository: Pigbibi/AIGateway
+          ssh-key: ${{ secrets.PERSONAL_AI_SERVICE_READ_KEY }}
+          ref: ${{ vars.AI_SERVICE_SHARED_SOURCE_SHA }}
+          path: shared-source
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/checkout@v6
+        with:
+          repository: QuantStrategyLab/QuantPlatformKit
+          ref: ${{ vars.AI_SERVICE_QPK_SOURCE_SHA }}
+          path: qpk-source
+          persist-credentials: false
+      - name: Validate admitted identities with approved shared service
         run: |
-          set -euo pipefail
-          python3 -m pytest -q tests/test_bilingual_research_summary.py tests/test_research_summary.py
+          python -m pip install pytest pandas ./shared-source ./qpk-source .
+          python -m pip check
+          PYTHONPATH=ops/quant-monitor python -m pytest -q tests ops/quant-monitor/tests/test_monitor_fail_closed.py

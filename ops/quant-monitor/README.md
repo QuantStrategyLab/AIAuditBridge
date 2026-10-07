@@ -1,3 +1,5 @@
+> V2 upgrade: monitor report consumption now lives in `quant_monitor_domain` and shared watcher logic in QuantPlatformKit. The deployed runtime has not been switched. Legacy setup refuses activation by default until the V2 dependency lock, approved source versions and cloud environment are qualified. Historical deployment examples below do not establish V2 readiness.
+
 # VPS Quant Monitor
 
 VPS 策略健康监控与收盘简报（roadmap 任务 7/10）。源码位于公开仓库 `AIAuditBridge/ops/quant-monitor`。

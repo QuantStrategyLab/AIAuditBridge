@@ -3,13 +3,14 @@ requires = ["setuptools>=70"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ai-gateway-client"
-version = "0.1.0"
-description = "Internal client for the QuantStrategyLab AI gateway"
+name = "quant-ai-service"
+version = "2.0.0"
+description = "Quant project identity policies for the shared AI task service"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = ["personal-ai-service==2.0.0"]
 
-[tool.setuptools]
-packages = ["ai_gateway_client"]
-package-dir = {ai_gateway_client = "client"}
-include-package-data = false
+[project.scripts]
+quant-ai-service = "quant_ai_service.server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

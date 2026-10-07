@@ -89,11 +89,10 @@ def test_send_dry_run_cli_fail_closed_nonzero_without_side_effects(capsys) -> No
         _write_telegram_report(report_dir)
         with (
             patch.dict("os.environ", {}, clear=True),
-            patch("service.briefing_dispatch.urllib.request.urlopen") as urlopen,
-            patch("service.briefing_dispatch.subprocess.check_output") as check_output,
-            patch("service.briefing_dispatch.create_github_issue") as create_issue,
-            patch("service.briefing_dispatch.send_telegram_alert") as send_tg,
-            patch("service.automation_run_ledger.get_automation_run_ledger") as get_ledger,
+            patch("quant_monitor_domain.briefing_dispatch.urllib.request.urlopen") as urlopen,
+            patch("quant_monitor_domain.briefing_dispatch.subprocess.check_output") as check_output,
+            patch("quant_monitor_domain.briefing_dispatch.create_github_issue") as create_issue,
+            patch("quant_monitor_domain.briefing_dispatch.send_telegram_alert") as send_tg,
         ):
             code = main(["--report-dir", str(report_dir), "--send-dry-run"])
         payload = json.loads(capsys.readouterr().out)
@@ -111,7 +110,6 @@ def test_send_dry_run_cli_fail_closed_nonzero_without_side_effects(capsys) -> No
         check_output.assert_not_called()
         create_issue.assert_not_called()
         send_tg.assert_not_called()
-        get_ledger.assert_not_called()
 
 
 def test_send_dry_run_cli_configured_still_skips_send(capsys) -> None:
@@ -129,9 +127,9 @@ def test_send_dry_run_cli_configured_still_skips_send(capsys) -> None:
                 },
                 clear=True,
             ),
-            patch("service.briefing_dispatch.shutil_which", return_value="/usr/bin/gh"),
-            patch("service.briefing_dispatch.urllib.request.urlopen") as urlopen,
-            patch("service.briefing_dispatch.send_telegram_alert") as send_tg,
+            patch("quant_monitor_domain.briefing_dispatch.shutil_which", return_value="/usr/bin/gh"),
+            patch("quant_monitor_domain.briefing_dispatch.urllib.request.urlopen") as urlopen,
+            patch("quant_monitor_domain.briefing_dispatch.send_telegram_alert") as send_tg,
         ):
             code = main(["--report-dir", str(report_dir), "--send-dry-run"])
         payload = json.loads(capsys.readouterr().out)
@@ -157,7 +155,7 @@ def _write_summary_report(report_dir, *, as_of='2026-09-09T22:00:00+00:00'):
 
 
 def test_summary_report_keeps_source_and_generation_clocks_separate():
-    from service.briefing_consumer import _summary_report
+    from quant_monitor_domain.briefing_consumer import _summary_report
 
     report = _summary_report({
         'domain': 'us_equity', 'ok': True, 'data_status': 'ready',
@@ -172,7 +170,7 @@ def test_summary_report_keeps_source_and_generation_clocks_separate():
 
 
 def test_summary_report_accepts_only_explicit_not_configured_domain():
-    from service.briefing_consumer import _summary_report
+    from quant_monitor_domain.briefing_consumer import _summary_report
 
     report = _summary_report({
         'domain': 'crypto', 'ok': True, 'data_status': 'not_configured',
@@ -193,7 +191,7 @@ def test_summary_report_accepts_only_explicit_not_configured_domain():
 
 
 def test_summary_report_rejects_empty_ready_with_missing_profile_coverage():
-    from service.briefing_consumer import _summary_report
+    from quant_monitor_domain.briefing_consumer import _summary_report
 
     report = _summary_report({
         'domain': 'us_equity', 'ok': True, 'data_status': 'ready',
@@ -212,7 +210,7 @@ def test_summary_report_rejects_empty_ready_with_missing_profile_coverage():
 
 def test_ai_summary_dry_run_never_authenticates_or_calls_model(tmp_path, capsys):
     _write_summary_report(tmp_path)
-    with patch('client.gateway_client.AiGatewayClient.execute') as execute:
+    with patch('quant_platform_kit.strategy_lifecycle.ai_provider.AiServiceClient.execute') as execute:
         assert main(['--report-dir', str(tmp_path), '--day', '2026-09-09', '--ai-summary', '--dry-run']) == 2
     result = json.loads(capsys.readouterr().out)
     assert result['ai_summary']['status'] == 'dry_run'
@@ -222,7 +220,7 @@ def test_ai_summary_dry_run_never_authenticates_or_calls_model(tmp_path, capsys)
 def test_ai_summary_static_service_token_does_not_authorize_timer_execution(tmp_path, capsys):
     _write_summary_report(tmp_path)
     with patch.dict('os.environ', {'CODEX_AUDIT_SERVICE_URL': 'https://synthetic.invalid', 'CODEX_AUDIT_SERVICE_TOKEN': 'synthetic-private'}, clear=True), patch(
-        'client.gateway_client.AiGatewayClient.execute'
+        'quant_platform_kit.strategy_lifecycle.ai_provider.AiServiceClient.execute'
     ) as execute:
         assert main(['--report-dir', str(tmp_path), '--day', '2026-09-09', '--ai-summary']) == 2
     result = json.loads(capsys.readouterr().out)
@@ -232,25 +230,25 @@ def test_ai_summary_static_service_token_does_not_authorize_timer_execution(tmp_
 
 def test_ai_summary_uses_gateway_contract_after_existing_alert_dispatch(tmp_path, capsys):
     from datetime import datetime, timezone
-    from client.gateway_client import AiResult
+    from quant_platform_kit.strategy_lifecycle.ai_provider import AiCallResult
     _write_summary_report(tmp_path)
     calls = []
-    route = {'provider': 'codex', 'research_stage': 'research_summary', 'model': 'gpt-5.6-luna', 'reasoning_effort': 'low', 'status': 'succeeded', 'output': 'synthetic advisory'}
+    route = {'id': 'summary-1', 'model': 'synthetic-api', 'status': 'completed', 'result_kind': 'advisory', 'model_verification': 'provider_reported'}
     def execute(_client, prompt, **kwargs):
         calls.append('ai')
-        assert kwargs['research_stage'] == 'research_summary'
-        assert kwargs['mode'] == 'review_only'
+        assert _client.config.primary.mode == 'api'
+        assert kwargs['idempotency_key'].startswith('briefing-summary:')
         assert 'private-marker' not in prompt and 'private-profile' not in prompt
         assert '9000' not in prompt
         assert '2026-09-08' in prompt and '2026-09-09T22:00:00+00:00' in prompt
-        return AiResult(provider='codex', model='gpt-5.6-luna', success=True, output='synthetic advisory', raw=route)
+        return AiCallResult(provider='synthetic-api', success=True, output='synthetic advisory', raw=route)
     def dispatch(*args, **kwargs):
         calls.append('dispatch')
         return {'errors': [], 'optimization_watch': {'errors': 0}}
-    with patch.dict('os.environ', {'CODEX_AUDIT_SERVICE_URL': 'https://synthetic.invalid', 'ACTIONS_ID_TOKEN_REQUEST_URL': 'https://synthetic.invalid/oidc', 'ACTIONS_ID_TOKEN_REQUEST_TOKEN': 'synthetic', 'GITHUB_REPOSITORY': 'QuantStrategyLab/AIAuditBridge'}, clear=True), patch(
-        'client.gateway_client.AiGatewayClient.execute', autospec=True, side_effect=execute
+    with patch.dict('os.environ', {'AI_SERVICE_URL': 'https://synthetic.invalid', 'AI_SERVICE_MODEL': 'synthetic-api', 'ACTIONS_ID_TOKEN_REQUEST_URL': 'https://synthetic.invalid/oidc', 'ACTIONS_ID_TOKEN_REQUEST_TOKEN': 'synthetic', 'GITHUB_REPOSITORY': 'QuantStrategyLab/AIAuditBridge'}, clear=True), patch(
+        'quant_platform_kit.strategy_lifecycle.ai_provider.AiServiceClient.execute', autospec=True, side_effect=execute
     ), patch('scripts.consume_daily_briefing.dispatch_briefing_result', side_effect=dispatch), patch(
-        'service.briefing_consumer._summary_now', return_value=datetime(2026,9,9,22,30,tzinfo=timezone.utc)
+        'quant_monitor_domain.briefing_consumer._summary_now', return_value=datetime(2026,9,9,22,30,tzinfo=timezone.utc)
     ):
         assert main(['--report-dir', str(tmp_path), '--day', '2026-09-09', '--dispatch', '--ai-summary']) == 0
     result = json.loads(capsys.readouterr().out)
@@ -287,8 +285,8 @@ def _projection_file(tmp_path: Path) -> Path:
 
 def test_runtime_projection_preview_does_not_send_or_call_model(tmp_path, capsys) -> None:
     path = _projection_file(tmp_path)
-    with patch("service.briefing_dispatch.telegram_target_outcome") as send_target, patch(
-        "client.gateway_client.AiGatewayClient.execute",
+    with patch("quant_monitor_domain.briefing_dispatch.telegram_target_outcome") as send_target, patch(
+        "quant_platform_kit.strategy_lifecycle.ai_provider.AiServiceClient.execute",
     ) as execute:
         code = main(["--runtime-projection", str(path)])
     captured = json.loads(capsys.readouterr().out)
@@ -304,7 +302,7 @@ def test_runtime_projection_preview_does_not_send_or_call_model(tmp_path, capsys
 def test_runtime_projection_dry_run_does_not_persist_delivery(tmp_path, capsys) -> None:
     path = _projection_file(tmp_path)
     with patch.dict("os.environ", {"QUANT_MONITOR_ROOT": str(tmp_path), "TELEGRAM_TOKEN": "tok", "GLOBAL_TELEGRAM_CHAT_ID": "1"}, clear=True), patch(
-        "service.briefing_dispatch.telegram_target_outcome",
+        "quant_monitor_domain.briefing_dispatch.telegram_target_outcome",
     ) as send_target:
         code = main(["--runtime-projection", str(path), "--dry-run"])
     captured = json.loads(capsys.readouterr().out)
@@ -346,7 +344,7 @@ def test_current_producer_immutable_object_preview_is_accepted_once(tmp_path, ca
     projection["observed_at"] = "2026-09-28T08:40:00Z"
     uri = _immutable_gcs_args()[1]
     with patch("scripts.consume_daily_briefing._read_gcs_object", return_value=(json.dumps(projection).encode(), None)) as reader, patch(
-        "service.briefing_dispatch.telegram_target_outcome", side_effect=AssertionError("preview must not send"),
+        "quant_monitor_domain.briefing_dispatch.telegram_target_outcome", side_effect=AssertionError("preview must not send"),
     ), patch("scripts.consume_daily_briefing.subprocess.Popen", side_effect=AssertionError("external process forbidden")):
         assert main(_immutable_gcs_args()) == 0
     result = json.loads(capsys.readouterr().out)
@@ -357,7 +355,7 @@ def test_current_producer_immutable_object_preview_is_accepted_once(tmp_path, ca
 
 
 def test_immutable_object_microseconds_dispatch_and_restart_dedupe(tmp_path, capsys):
-    from service import briefing_dispatch
+    from quant_monitor_domain import briefing_dispatch
 
     projection = json.loads(_projection_file(tmp_path).read_text())
     projection["observed_at"] = "2026-09-28T08:40:00.123456Z"
@@ -365,7 +363,7 @@ def test_immutable_object_microseconds_dispatch_and_restart_dedupe(tmp_path, cap
     with patch.dict("os.environ", {"QUANT_MONITOR_ROOT": str(tmp_path), "TELEGRAM_TOKEN": "synthetic",
                                   "GLOBAL_TELEGRAM_CHAT_ID": "synthetic-chat"}, clear=True), patch(
         "scripts.consume_daily_briefing._read_gcs_object", return_value=(json.dumps(projection).encode(), None),
-    ) as reader, patch("service.briefing_dispatch.telegram_target_outcome", return_value="sent") as send, patch(
+    ) as reader, patch("quant_monitor_domain.briefing_dispatch.telegram_target_outcome", return_value="sent") as send, patch(
         "scripts.consume_daily_briefing.subprocess.Popen", side_effect=AssertionError("external process forbidden"),
     ):
         assert main(_immutable_gcs_args(uri, dispatch=True)) == 0
@@ -436,7 +434,7 @@ def test_invalid_immutable_paths_and_external_sources_never_read(capsys):
         ("https://external.example/runtime_daily/longbridge/paper/2026-09-28/20260928T084000000000Z.json", "invalid_runtime_object"),
     ]
     with patch("scripts.consume_daily_briefing._read_gcs_object", side_effect=AssertionError("invalid path cannot read")) as reader, patch(
-        "service.briefing_dispatch.telegram_target_outcome", side_effect=AssertionError("invalid path cannot send"),
+        "quant_monitor_domain.briefing_dispatch.telegram_target_outcome", side_effect=AssertionError("invalid path cannot send"),
     ) as send, patch("scripts.consume_daily_briefing.subprocess.Popen", side_effect=AssertionError("external process forbidden")):
         for uri, reason in cases:
             assert main(_immutable_gcs_args(uri, dispatch=True)) == 2
@@ -451,14 +449,14 @@ def test_invalid_immutable_paths_and_external_sources_never_read(capsys):
 
 
 def test_multi_target_cli_preview_then_dispatch_survives_module_restart(tmp_path, capsys):
-    from service import briefing_dispatch
+    from quant_monitor_domain import briefing_dispatch
 
     path = _multi_target_projection_file(tmp_path)
     state = tmp_path / "data" / "alert-state" / "health_cycle.json"
     sent = []
     with patch.dict("os.environ", {"QUANT_MONITOR_ROOT": str(tmp_path),
                                   "TELEGRAM_TOKEN": "synthetic", "GLOBAL_TELEGRAM_CHAT_ID": "synthetic-chat"}, clear=True), patch(
-        "service.briefing_dispatch.telegram_target_outcome",
+        "quant_monitor_domain.briefing_dispatch.telegram_target_outcome",
         side_effect=lambda **kwargs: sent.append(kwargs["text"]) or "sent",
     ):
         assert main(_multi_target_args(path)) == 0
@@ -486,7 +484,7 @@ def test_multi_target_cli_preview_then_dispatch_survives_module_restart(tmp_path
 
 
 def test_multi_target_cli_failed_recipient_only_retries_after_restart(tmp_path, capsys):
-    from service import briefing_dispatch
+    from quant_monitor_domain import briefing_dispatch
 
     path = _multi_target_projection_file(tmp_path)
     calls = []
@@ -496,37 +494,37 @@ def test_multi_target_cli_failed_recipient_only_retries_after_restart(tmp_path, 
             calls.append(kwargs["chat_id"])
             return "sent" if kwargs["chat_id"] == "synthetic-ok" else "failed"
 
-        with patch("service.briefing_dispatch.telegram_target_outcome", side_effect=first):
+        with patch("quant_monitor_domain.briefing_dispatch.telegram_target_outcome", side_effect=first):
             assert main(_multi_target_args(path, dispatch=True)) == 2
         result = json.loads(capsys.readouterr().out)
         assert result["dispatch"]["errors"] == ["telegram_delivery_failed"]
         calls.clear()
         briefing_dispatch._HEALTH_CYCLE = None
-        with patch("service.briefing_dispatch.telegram_target_outcome", side_effect=lambda **kw: calls.append(kw["chat_id"]) or "sent"):
+        with patch("quant_monitor_domain.briefing_dispatch.telegram_target_outcome", side_effect=lambda **kw: calls.append(kw["chat_id"]) or "sent"):
             assert main(_multi_target_args(path, dispatch=True)) == 0
         assert json.loads(capsys.readouterr().out)["dispatch"]["telegram_sent"] is True
         assert calls == ["synthetic-failed"]
 
 
 def test_multi_target_cli_unknown_is_not_resent_after_restart(tmp_path, capsys):
-    from service import briefing_dispatch
+    from quant_monitor_domain import briefing_dispatch
 
     path = _multi_target_projection_file(tmp_path)
     with patch.dict("os.environ", {"QUANT_MONITOR_ROOT": str(tmp_path),
                                   "TELEGRAM_TOKEN": "synthetic", "GLOBAL_TELEGRAM_CHAT_ID": "synthetic-chat"}, clear=True):
-        with patch("service.briefing_dispatch.telegram_target_outcome", return_value="unknown") as send:
+        with patch("quant_monitor_domain.briefing_dispatch.telegram_target_outcome", return_value="unknown") as send:
             assert main(_multi_target_args(path, dispatch=True)) == 2
         assert send.call_count == 1
         assert "telegram_delivery_unknown" in json.loads(capsys.readouterr().out)["dispatch"]["errors"]
         briefing_dispatch._HEALTH_CYCLE = None
-        with patch("service.briefing_dispatch.telegram_target_outcome", side_effect=AssertionError("unknown must not resend")) as send:
+        with patch("quant_monitor_domain.briefing_dispatch.telegram_target_outcome", side_effect=AssertionError("unknown must not resend")) as send:
             assert main(_multi_target_args(path, dispatch=True)) == 2
         assert "telegram_delivery_unknown" in json.loads(capsys.readouterr().out)["dispatch"]["errors"]
         send.assert_not_called()
 
 
 def test_multi_target_cli_post_send_write_failure_holds_pending_after_restart(tmp_path, capsys):
-    from service import briefing_dispatch
+    from quant_monitor_domain import briefing_dispatch
 
     path = _multi_target_projection_file(tmp_path)
     with patch.dict("os.environ", {"QUANT_MONITOR_ROOT": str(tmp_path),
@@ -541,7 +539,7 @@ def test_multi_target_cli_post_send_write_failure_holds_pending_after_restart(tm
             return persist(root, payload)
 
         with patch.object(health, "_persist_delivery_payload", side_effect=fail_after_send), patch(
-            "service.briefing_dispatch.telegram_target_outcome", return_value="sent",
+            "quant_monitor_domain.briefing_dispatch.telegram_target_outcome", return_value="sent",
         ) as send:
             assert main(_multi_target_args(path, dispatch=True)) == 2
         assert send.call_count == 1
@@ -549,7 +547,7 @@ def test_multi_target_cli_post_send_write_failure_holds_pending_after_restart(tm
         state = tmp_path / "data" / "alert-state" / "health_cycle.json"
         assert '"pending"' in state.read_text()
         briefing_dispatch._HEALTH_CYCLE = None
-        with patch("service.briefing_dispatch.telegram_target_outcome", side_effect=AssertionError("pending must not resend")) as send:
+        with patch("quant_monitor_domain.briefing_dispatch.telegram_target_outcome", side_effect=AssertionError("pending must not resend")) as send:
             assert main(_multi_target_args(path, dispatch=True)) == 2
         assert "telegram_delivery_unknown" in json.loads(capsys.readouterr().out)["dispatch"]["errors"]
         send.assert_not_called()
@@ -563,9 +561,9 @@ def test_runtime_content_preview_preserves_existing_state_and_has_no_ports(tmp_p
     original = b'{"synthetic": "unknown-must-remain"}\n'
     state.write_bytes(original)
     with patch.dict("os.environ", {"QUANT_MONITOR_ROOT": str(tmp_path)}, clear=True), patch(
-        "service.briefing_dispatch.telegram_target_outcome",
+        "quant_monitor_domain.briefing_dispatch.telegram_target_outcome",
         side_effect=AssertionError("send forbidden"),
-    ), patch("client.gateway_client.AiGatewayClient.execute", side_effect=AssertionError("model forbidden")), patch(
+    ), patch("ai_service.client.TaskClient.request", side_effect=AssertionError("model forbidden")), patch(
         "scripts.consume_daily_briefing._read_gcs_object", side_effect=AssertionError("fetch forbidden"),
     ):
         assert main(["--runtime-projection", str(path), "--dry-run"]) == 0

@@ -9,3 +9,6 @@ tmp/
 
 *.prev
 gha-creds-*.json
+
+build/
+*.egg-info/

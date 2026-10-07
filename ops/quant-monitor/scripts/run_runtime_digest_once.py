@@ -114,7 +114,8 @@ def _arguments(source_root: Path, mode: str, uri: str, day: str, targets: list[s
 def _child(source_root: Path, mode: str, uri: str, day: str, targets: list[str]) -> dict:
     sys.path.insert(0, str(source_root))
     from scripts import consume_daily_briefing as cli
-    from service import briefing_dispatch as dispatch
+    import importlib
+    dispatch = importlib.import_module(cli.dispatch_runtime_digest.__module__)
     health = dispatch._health_cycle_module()
     # Existing persistent state must be readable and structurally valid. Do not
     # create an empty ledger to make a missing history look like a new event.

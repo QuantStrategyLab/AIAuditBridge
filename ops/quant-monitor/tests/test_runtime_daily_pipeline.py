@@ -290,7 +290,7 @@ with contextlib.ExitStack() as stack:
     stack.enter_context(patch.object(cli, "_read_gcs_object", side_effect=read_fixture))
     stack.enter_context(patch.object(cli, "dispatch_briefing_result", return_value={"action": "telegram", "errors": [], "skipped": [], "telegram_sent": True, "github_issue": None, "optimization_watch": None, "operational_fallback_sent": False}))
     if os.environ.get("RUNTIME_REAL_LEDGER") == "true":
-        stack.enter_context(patch("service.briefing_dispatch.telegram_target_outcome", side_effect=synthetic_send))
+        stack.enter_context(patch("quant_monitor_domain.briefing_dispatch.telegram_target_outcome", side_effect=synthetic_send))
     else:
         stack.enter_context(patch.object(cli, "dispatch_runtime_digest", return_value={"action": "runtime_digest", "errors": [], "skipped": [], "telegram_sent": True, "github_issue": None, "business_date": "synthetic-day", "event_id": "synthetic-event"}))
     raise SystemExit(cli.main())
@@ -460,7 +460,7 @@ def test_once_preview_uses_actual_cli_without_state_write(tmp_path, monkeypatch)
     monkeypatch.setenv("TELEGRAM_TOKEN", "123:synthetic")
     monkeypatch.setenv("GLOBAL_TELEGRAM_CHAT_ID", "-100123")
     from scripts import consume_daily_briefing as cli
-    from service import briefing_dispatch as dispatch
+    from quant_monitor_domain import briefing_dispatch as dispatch
     before = state.read_bytes()
     with patch.object(cli, "_read_gcs_object", return_value=(json.dumps(_once_payload()).encode(), None)) as reader, patch.object(dispatch, "telegram_target_outcome") as transport:
         result = module._child(SCRIPT.parents[3], "preview", OBJECT, "2026-10-08", [TARGET])
@@ -479,7 +479,7 @@ def test_once_wrong_observation_and_missing_ledger_never_send(tmp_path, monkeypa
     monkeypatch.setenv("TELEGRAM_TOKEN", "123:synthetic")
     monkeypatch.setenv("GLOBAL_TELEGRAM_CHAT_ID", "-100123")
     from scripts import consume_daily_briefing as cli
-    from service import briefing_dispatch as dispatch
+    from quant_monitor_domain import briefing_dispatch as dispatch
     payload = _once_payload()
     payload["observed_at"] = "2026-10-08T00:00:01Z"
     with patch.object(cli, "_read_gcs_object", return_value=(json.dumps(payload).encode(), None)), patch.object(dispatch, "telegram_target_outcome") as transport:
@@ -526,6 +526,8 @@ def profile(frame, event, arg):
     if event == 'call' and frame.f_code.co_filename.endswith(('gateway_client.py','llm_adapter.py','codex_adapter.py','cursor_adapter.py')) and frame.f_code.co_name in {'execute','analyze','review','complete','parallel_review','run'}:
         raise PermissionError('synthetic child model boundary')
 ROOT = Path(ROOT_VALUE)
+import tempfile
+tempfile.tempdir = str(ROOT)
 sys.addaudithook(guard)
 sys.setprofile(profile)
 source = Path(SOURCE_VALUE)
@@ -535,7 +537,7 @@ module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
 module.MONITOR_ROOT = ROOT/'monitor'
 os.environ['QUANT_MONITOR_ROOT'] = str(module.MONITOR_ROOT)
 from scripts import consume_daily_briefing as cli
-from service import briefing_dispatch as dispatch
+from quant_monitor_domain import briefing_dispatch as dispatch
 payload = PAYLOAD_VALUE
 original_child = module._child
 def checked_child(*args):
@@ -576,8 +578,8 @@ def test_once_actual_unknown_and_legacy_suppression_are_not_success(tmp_path, mo
     monkeypatch.setenv("TELEGRAM_TOKEN", "123:synthetic")
     monkeypatch.setenv("GLOBAL_TELEGRAM_CHAT_ID", "-100123")
     from scripts import consume_daily_briefing as cli
-    from service import briefing_dispatch as dispatch
-    from service.runtime_digest import prepare_runtime_digest
+    from quant_monitor_domain import briefing_dispatch as dispatch
+    from quant_monitor_domain.runtime_digest import prepare_runtime_digest
     event = prepare_runtime_digest(_once_payload())["event_id"]
     raw = json.dumps(_once_payload()).encode()
     with patch.object(cli, "_read_gcs_object", return_value=(raw, None)), patch.object(dispatch, "telegram_target_outcome", return_value="unknown") as transport:
@@ -615,9 +617,9 @@ def test_once_home_and_original_ledger_alias_are_not_replaced(tmp_path, monkeypa
     assert code == 2 and not result["ok"] and process.call_count == 1
     assert state.read_bytes() == before
 
-def test_once_workflow_keeps_fixed35_and_separate_exact_c_source():
-    text = (SCRIPT.parents[3] / ".github/workflows/vps_codex_service_ops.yml").read_text()
-    assert "ref: 35ac71176127f07e00fe04dbc793777f3c595bc0" in text
+def test_once_workflow_keeps_exact_controller_and_separate_c_source():
+    text = (SCRIPT.parents[3] / ".github/workflows/monitor-runtime-digest-once.yml").read_text()
+    assert "ref: ${{ github.sha }}" in text
     job = text.split("  longbridge-paper-once:\n", 1)[1]
     assert "ref: 823ba856af49d8799506afe476aec9d07ab1c63d" in job
     assert "persist-credentials: false" in job and '"$current_main" = "$RUN_SHA"' in job

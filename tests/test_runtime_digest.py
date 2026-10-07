@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from scripts.consume_daily_briefing import main
-from service.runtime_digest import prepare_runtime_digest, runtime_digest_event_id
+from quant_monitor_domain.runtime_digest import prepare_runtime_digest, runtime_digest_event_id
 
 
 def _record(status: str, *, service: str = "lb-svc", scope: str = "paper", day: str = "2026-09-28", lane: str = "paper", completeness: str = "complete", runs: list | None = None, conflicts: list | None = None) -> dict:

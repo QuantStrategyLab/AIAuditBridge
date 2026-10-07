@@ -25,7 +25,7 @@ if [[ -x "$VENV/bin/python" ]]; then
 fi
 
 if [[ -d "$QPK_ROOT/src" ]]; then
-  export PYTHONPATH="${QPK_ROOT}/src:${AAB_ROOT}${PYTHONPATH:+:$PYTHONPATH}"
+  export PYTHONPATH="${ROOT}:${AAB_ROOT}${PYTHONPATH:+:$PYTHONPATH}"
 fi
 
 quant_lifecycle() {
