@@ -285,7 +285,7 @@ class PathInspectionTests(unittest.TestCase):
 
     def test_receipt_pipeline_reviewed_paths_preserve_captured_roots(self):
         digest = hashlib.sha256((SCRIPT.parent / "daily_briefing_pipeline.sh").read_bytes()).hexdigest()
-        self.assertEqual(digest, "552efade3039e0223d2f918e2e6af923ba37de15d36abac63b9a3f1ff7cc1345")
+        self.assertEqual(digest, "220b93478f7b4bf7028cc5587d4607604236999587a3908ba11b751d3f1ee837")
         self.assertIn(digest, m.EXPECTED["daily_briefing_pipeline.sh"])
         self.assertTrue({
             "03ea8cbdbbd98ea1e419f6cfd9183787653d8c7c3c6d04366fcc492deda66f9a",
@@ -739,7 +739,9 @@ class PathInspectionTests(unittest.TestCase):
         workflow = (
             SCRIPT.parents[3] / ".github/workflows/vps_codex_service_ops.yml"
         ).read_text()
-        job = workflow.split("  inspect-quant-paths:\n", 1)[1]
+        job = workflow.split("  inspect-quant-paths:\n", 1)[1].split(
+            "\n  longbridge-paper-once:", 1
+        )[0]
         old = workflow.split("  inspect-quant-runtime:\n", 1)[1].split(
             "\n  inspect-audit-patch:", 1
         )[0]

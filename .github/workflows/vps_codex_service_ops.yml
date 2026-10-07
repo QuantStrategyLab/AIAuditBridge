@@ -1177,7 +1177,7 @@ jobs:
             "$GITHUB_WORKSPACE/scripts/release_gateway_failure_repairs.py" release --acknowledge-interruption
 
   vps-codex-service-ops:
-    if: inputs.mode != 'install-org-health-token' && inputs.mode != 'inspect-audit-patch' && inputs.mode != 'apply-audit-patch' && inputs.mode != 'retry-audit-patch-once' && inputs.mode != 'inspect-quant-runtime' && inputs.mode != 'release-gateway-failure-repairs' && inputs.mode != 'inspect-quant-paths' && inputs.mode != 'inspect-monitor-failures' && inputs.mode != 'inspect-daily-failure-sample' && inputs.mode != 'inspect-recorded-daily-errors' && inputs.mode != 'stage-quant-runtime-inactive' && inputs.mode != 'install-quant-release-inactive' && inputs.mode != 'check-quant-consumers-offline'
+    if: inputs.mode != 'install-org-health-token' && inputs.mode != 'inspect-audit-patch' && inputs.mode != 'apply-audit-patch' && inputs.mode != 'retry-audit-patch-once' && inputs.mode != 'inspect-quant-runtime' && inputs.mode != 'release-gateway-failure-repairs' && inputs.mode != 'inspect-quant-paths' && inputs.mode != 'inspect-monitor-failures' && inputs.mode != 'inspect-daily-failure-sample' && inputs.mode != 'inspect-recorded-daily-errors' && inputs.mode != 'stage-quant-runtime-inactive' && inputs.mode != 'install-quant-release-inactive' && inputs.mode != 'check-quant-consumers-offline' && inputs.mode != 'preview-longbridge-paper-once' && inputs.mode != 'send-longbridge-paper-once'
     # Bind to a protected environment when available so deploy/repair-ssh requires approval.
     environment: codex-vps-ops
     runs-on:
