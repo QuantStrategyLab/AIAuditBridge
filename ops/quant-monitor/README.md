@@ -161,6 +161,49 @@ bash ops/quant-monitor/scripts/install_immutable_release.sh \
 - 已存在目标只有在与该 commit 的完整 archive 树一致时才幂等复用；内容不一致则拒绝覆盖；
 - 失败时只清理本脚本自己的临时目录。
 
+## Daily-only immutable release adoption / 仅切换日报服务
+
+`setup_vps_runtime.sh` 的原 V2 gate 保持不变，用于安装依赖和 QPK pin；它不作为 source-only
+日报代码切换的资格标志。`adopt_daily_briefing_release.sh` 只将 immutable source release 链接到现有
+批准 venv/data，并在切 unit 前用该 venv 对候选 consumer/runtime 模块和 domain builder 所需 QPK
+模块执行离线 import/signature 检查，同时确认候选源码归属及 `gcloud` 可执行。检查不安装包、不改
+QPK/health/AI 配置，不读真实 ledger 或日报，不调用云端 API，也不发送消息。通过后核对 daily、
+timer 与 health 的有效 systemd 元数据，再只写自己的 `zzzzzzzzzz-aab-daily-release.conf`，覆盖 daily
+服务的 `WorkingDirectory`、`ExecStart` 和两个代码 root。原 unit 的凭据、路由、时区、QPK、数据、
+venv、`ExecStartPre` 和其它 drop-in 保留；不会启动或重启 service/timer。
+
+```bash
+sudo bash \
+  ops/quant-monitor/scripts/adopt_daily_briefing_release.sh \
+  --sha <40-hex-origin-main-sha> \
+  --expected-current-sha <40-hex-current-daily-release-sha> \
+  --repo /path/to/AIAuditBridge \
+  --runtime-data /path/to/existing/runtime/data \
+  --runtime-venv /path/to/existing/runtime/.venv
+```
+
+同名 helper-owned drop-in 只有在内容与当前 release 完全匹配时才可替换；未知同名文件会停止。
+其它已存在 drop-in 不会被改写或删除，并须在采用前后保持原列表。成功输出 `status=prepared` 只表示
+候选代码通过限定离线资格检查且 immutable release 与 daily unit readback 一致，不表示完整 pipeline
+健康、服务已运行或日报已送达。旧 QPK 缺少 crypto live-profile 新增的窗口参数时，该 domain 覆盖分支
+仍可能报告 `live_coverage_incomplete` 并使 pipeline 非零；helper 不屏蔽 domain 分支，也不把此限制
+当作 runtime consumer 的直接依赖。domain 状态与 pipeline 原有的失败汇总行为不变；domain 分支失败时
+runtime 分支仍独立执行。实际调度输入和云端对象读取仍须另行确认。readback 不一致时
+输出 `status=unknown`，保留原 drop-in 快照并要求人工读取当前状态；脚本不自动回滚或重试。
+
+The existing `setup_vps_runtime.sh` V2 gate remains unchanged for dependency and QPK installation. It is
+not a qualification marker for this source-only daily adoption. The helper links the immutable release to
+the existing approved venv/data, then performs offline imports and signature checks for the candidate
+consumer/runtime modules and domain builder's required QPK modules, and checks candidate source ownership
+and `gcloud` availability. It installs no packages, changes no QPK/health/AI configuration, reads no real
+ledger/report, calls no cloud API, and sends no notification. It changes only the daily service's code roots,
+`WorkingDirectory`, and `ExecStart`, preserving credentials, routing, timezone, QPK, data, venv,
+`ExecStartPre`, and other drop-ins. An older QPK may still fail the newer crypto live-profile window branch
+and produce a nonzero pipeline result; the helper neither hides that domain condition nor claims full-pipeline
+health. `status=prepared` means limited offline qualification and configuration readback only. On uncertain
+readback it prints `status=unknown`, preserves the recovery snapshot, and requires manual inspection without
+automatic rollback or retry.
+
 ## 策略健康快照（只读）
 
 `health_cycle.py` 会把生命周期 dashboard 规范化为
