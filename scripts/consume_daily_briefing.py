@@ -97,6 +97,7 @@ _RUNTIME_BINDING_REASONS = frozenset({
     "expected_target_mismatch", "expected_scope_not_paper", "invalid_runtime_object",
     "runtime_object_day_mismatch",
     "runtime_object_observation_mismatch",
+    "invalid_runtime_handoff",
 })
 _RUNTIME_READ_REASONS = frozenset({
     "runtime_projection_unreadable", "runtime_projection_timeout", "runtime_projection_too_large",
@@ -244,6 +245,53 @@ def _runtime_object_problem(uri: str, day: str) -> str | None:
     if object_day != day:
         return "runtime_object_day_mismatch"
     return None
+
+
+def _runtime_handoff_prefix_problem(prefix: str) -> str | None:
+    if (not isinstance(prefix, str) or not prefix.startswith("gs://") or prefix.endswith("/")
+        or any(item in prefix for item in _GCS_FORBIDDEN) or ".." in prefix):
+        return "invalid_runtime_handoff"
+    rest = prefix[5:]
+    if not rest or rest.startswith("/") or "//" in rest or "/" not in rest:
+        return "invalid_runtime_handoff"
+    bucket, _, object_name = rest.partition("/")
+    if not bucket or object_name not in {"runtime_daily"} and not object_name.endswith("/runtime_daily"):
+        return "invalid_runtime_handoff"
+    return None
+
+
+def _read_runtime_handoff(args: argparse.Namespace) -> tuple[str | None, str | None]:
+    """Resolve exactly one business-day handoff; never list or select an object."""
+    day = str(args.day or "")
+    if not day:
+        return None, "missing_dispatch_day"
+    if _canonical_iso_day(day) is None:
+        return None, "invalid_business_day"
+    prefix = str(args.runtime_handoff_prefix or "").rstrip("/")
+    prefix_problem = _runtime_handoff_prefix_problem(prefix)
+    if prefix_problem is not None:
+        return None, prefix_problem
+    handoff_uri = f"{prefix}/longbridge/paper/{day}/handoff.json"
+    raw, read_problem = _read_gcs_object(handoff_uri)
+    if read_problem is not None or raw is None:
+        return None, read_problem or "runtime_projection_unreadable"
+    try:
+        handoff = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError):
+        return None, "invalid_runtime_handoff"
+    if (not isinstance(handoff, dict)
+        or set(handoff) != {"schema_version", "business_date", "object_uri"}
+        or handoff.get("schema_version") != "runtime_daily_handoff.v1"
+        or handoff.get("business_date") != day):
+        return None, "invalid_runtime_handoff"
+    object_uri = handoff.get("object_uri")
+    expected_object_prefix = f"{prefix}/longbridge/paper/{day}/"
+    if (not isinstance(object_uri, str)
+        or object_uri != expected_object_prefix + object_uri.rsplit("/", 1)[-1]
+        or _runtime_object_problem(object_uri, day) is not None
+        or _runtime_object_observed_at(object_uri) is None):
+        return None, "invalid_runtime_handoff"
+    return object_uri, None
 
 
 def _stop_gcs_process(proc: subprocess.Popen[bytes]) -> None:
@@ -451,6 +499,19 @@ def _consume_runtime_gcs(args: argparse.Namespace) -> int:
     return _consume_runtime_payload(args, payload, scope_required=True)
 
 
+def _consume_runtime_handoff(args: argparse.Namespace) -> int:
+    key_problem = _paper_scope_problem(args.expected_target_key)
+    if key_problem is not None:
+        return _reject_runtime(key_problem)
+    object_uri, handoff_problem = _read_runtime_handoff(args)
+    if handoff_problem is not None or object_uri is None:
+        return _reject_runtime(handoff_problem or "invalid_runtime_handoff")
+    # Resolve the immutable URI through the same bounded reader and existing
+    # projection validation / delivery ledger used by the explicit-object CLI.
+    args.runtime_projection_gcs = object_uri
+    return _consume_runtime_gcs(args)
+
+
 def _dispatch_failed(summary: object) -> bool:
     if not isinstance(summary, dict):
         return True
@@ -503,6 +564,13 @@ def main(argv: list[str] | None = None) -> int:
             "Requires --day and --expected-target-key. Preview unless --dispatch."
         ),
     )
+    source.add_argument(
+        "--runtime-handoff-prefix",
+        help=(
+            "Resolve {prefix}/longbridge/paper/{day}/handoff.json and consume only its "
+            "validated immutable object_uri. Requires --day and --expected-target-key."
+        ),
+    )
     parser.add_argument("--day", default="", help="Report day label (defaults to directory name)")
     parser.add_argument(
         "--expected-target-key",
@@ -536,7 +604,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--summary-only cannot dispatch alerts or run dual review")
     if args.send_dry_run and (args.ai_summary or args.dual_review):
         parser.error("--send-dry-run cannot run AI summary or dual review")
-    if (args.runtime_projection or args.runtime_projection_gcs) and (
+    if (args.runtime_projection or args.runtime_projection_gcs or args.runtime_handoff_prefix) and (
         args.ai_summary or args.dual_review or args.summary_only
     ):
         parser.error("--runtime-projection cannot run AI summary or dual review")
@@ -545,6 +613,8 @@ def main(argv: list[str] | None = None) -> int:
         return _consume_runtime_projection(args)
     if args.runtime_projection_gcs:
         return _consume_runtime_gcs(args)
+    if args.runtime_handoff_prefix:
+        return _consume_runtime_handoff(args)
 
     report_dir = Path(args.report_dir)
     if not report_dir.is_dir():

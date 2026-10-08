@@ -9,7 +9,7 @@ import json
 import os
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
@@ -33,7 +33,7 @@ def _layout(tmp_path: Path) -> tuple[Path, Path, Path]:
             "import os, sys",
             "with open(os.environ['CONSUME_LOG'], 'a', encoding='utf-8') as handle:",
             "    handle.write('\\t'.join(sys.argv[1:]) + '\\n')",
-            "if '--runtime-projection-gcs' in sys.argv:",
+            "if '--runtime-projection-gcs' in sys.argv or '--runtime-handoff-prefix' in sys.argv:",
             "    raise SystemExit(int(os.environ.get('RUNTIME_CONSUME_EXIT', '0')))",
             "raise SystemExit(int(os.environ.get('DOMAIN_CONSUME_EXIT', '0')))",
             "",
@@ -90,7 +90,7 @@ def test_runtime_switch_off_does_not_call_gcs(tmp_path: Path) -> None:
     assert "gs://" not in result.stdout + result.stderr
 
 
-def test_enabled_pipeline_uses_timezone_day_and_fixed_paper_object(tmp_path: Path) -> None:
+def test_enabled_pipeline_uses_timezone_day_and_fixed_handoff_prefix(tmp_path: Path) -> None:
     result = _run(
         tmp_path,
         QUANT_MONITOR_RUNTIME_DIGEST_ENABLED="true",
@@ -106,8 +106,8 @@ def test_enabled_pipeline_uses_timezone_day_and_fixed_paper_object(tmp_path: Pat
     domain, runtime = calls
     assert "--runtime-projection-gcs" not in domain
     assert domain[domain.index("--day") + 1] == utc
-    object_uri = runtime[runtime.index("--runtime-projection-gcs") + 1]
-    assert object_uri == f"gs://proj-bucket/runtime_daily/longbridge/paper/{zoned}.json"
+    handoff_prefix = runtime[runtime.index("--runtime-handoff-prefix") + 1]
+    assert handoff_prefix == "gs://proj-bucket/runtime_daily"
     assert runtime[runtime.index("--day") + 1] == zoned
     assert runtime[runtime.index("--expected-target-key") + 1] == "lb-paper|rot|paper"
     assert "--dispatch" in runtime
@@ -163,7 +163,7 @@ def test_domain_failure_still_runs_runtime_and_returns_nonzero(tmp_path: Path) -
     )
     assert result.returncode == 1
     assert len(_calls(result)) == 2
-    assert "--runtime-projection-gcs" in _calls(result)[1]
+    assert "--runtime-handoff-prefix" in _calls(result)[1]
     assert "domain_exit=4 runtime_exit=0" in result.stderr
     assert "gs://" not in result.stderr
 
@@ -180,7 +180,7 @@ def test_runtime_failure_does_not_skip_domain(tmp_path: Path) -> None:
     assert result.returncode == 1
     calls = _calls(result)
     assert "--report-dir" in calls[0]
-    assert "--runtime-projection-gcs" in calls[1]
+    assert "--runtime-handoff-prefix" in calls[1]
     assert "domain_exit=0 runtime_exit=5" in result.stderr
 
 
@@ -256,6 +256,7 @@ def _install_real_main_fixture(root: Path, aab: Path) -> None:
     }), encoding="utf-8")
     real_root = SCRIPT.parents[3]
     wrapper = r'''import contextlib, json, os, sys
+from datetime import datetime
 from unittest.mock import patch
 def guard(event, args):
     if event in {"socket.connect", "socket.getaddrinfo", "subprocess.Popen", "os.system", "os.posix_spawn", "os.exec"}:
@@ -273,10 +274,30 @@ def read_fixture(uri):
     args = sys.argv[1:]
     day = args[args.index("--day") + 1]
     key = args[args.index("--expected-target-key") + 1]
+    with open(os.environ['CONSUME_LOG'] + '.reads', 'a', encoding='utf-8') as handle:
+        handle.write(uri + '\n')
+    if uri.endswith('/handoff.json'):
+        prefix = args[args.index("--runtime-handoff-prefix") + 1]
+        observed = os.environ.get("RUNTIME_FIXTURE_OBSERVED_AT", day + "T00:00:00Z")
+        stamp = datetime.fromisoformat(observed.replace("Z", "+00:00")).strftime("%Y%m%dT%H%M%S%fZ")
+        object_uri = f"{prefix}/longbridge/paper/{day}/{stamp}.json"
+        handoff = {"schema_version": "runtime_daily_handoff.v1", "business_date": day, "object_uri": object_uri}
+        bad_handoff = os.environ.get("RUNTIME_FIXTURE_BAD_HANDOFF", "")
+        if bad_handoff == "wrong_day":
+            handoff["business_date"] = "2000-01-01"
+        elif bad_handoff == "wrong_prefix":
+            handoff["object_uri"] = object_uri.replace("synthetic", "other")
+        elif bad_handoff == "legacy_object":
+            handoff["object_uri"] = f"{prefix}/longbridge/paper/{day}.json"
+        elif bad_handoff == "nested_path":
+            handoff["object_uri"] = f"{prefix}/longbridge/paper/{day}/runtime_daily/longbridge/paper/{day}/{stamp}.json"
+        elif bad_handoff == "extra_field":
+            handoff["extra"] = "ignored fields are forbidden"
+        return json.dumps(handoff).encode(), None
     service, strategy, scope = key.split("|")
     with open(os.environ['CONSUME_LOG'], 'a', encoding='utf-8') as handle:
         handle.write('\t'.join(sys.argv[1:]) + '\n')
-    payload = {"platform": "longbridge", "observed_at": os.environ.get("RUNTIME_FIXTURE_OBSERVED_AT", day + "T00:00:00+00:00"), "completeness": "complete", "records": [{
+    payload = {"platform": "longbridge", "observed_at": os.environ.get("RUNTIME_FIXTURE_OBSERVED_AT", day + "T00:00:00Z"), "completeness": "complete", "records": [{
         "target_key": key, "target": {"service": service, "strategy_profile": strategy, "account_scope": scope},
         "business_date": day, "timezone": "UTC", "status": "market_closed", "completeness": "complete",
         "execution_lane": "paper", "runs": [], "conflicts": [], "fills": {"source": "not_connected", "records": [], "count": None},
@@ -350,6 +371,52 @@ def test_immutable_pipeline_uses_real_cli_and_ledger_after_process_restart(tmp_p
     assert (tmp_path / "consume.log.send").read_text().splitlines() == ["synthetic-send"]
     assert all(call[call.index("--runtime-projection-gcs") + 1] == uri for call in _calls(second))
     assert "gs://" not in first.stdout + first.stderr + second.stdout + second.stderr
+
+
+def test_timezone_day_handoff_consumes_exact_immutable_object_and_reuses_ledger(tmp_path: Path) -> None:
+    import json
+    business_day = datetime.now(ZoneInfo(ZONE)).date().isoformat()
+    observed_day = (date.fromisoformat(business_day) - timedelta(days=1)).isoformat()
+    env = dict(QUANT_MONITOR_RUNTIME_DIGEST_ENABLED="true",
+               QUANT_MONITOR_RUNTIME_PROJECTION_PREFIX="gs://synthetic/runtime_daily",
+               QUANT_MONITOR_RUNTIME_TIMEZONE=ZONE,
+               QUANT_MONITOR_RUNTIME_EXPECTED_TARGET_KEY="synthetic-service|rot|paper",
+               RUNTIME_FIXTURE_OBSERVED_AT=f"{observed_day}T23:40:00Z", RUNTIME_REAL_LEDGER="true",
+               TELEGRAM_TOKEN="synthetic", GLOBAL_TELEGRAM_CHAT_ID="synthetic-chat")
+    first = _run(tmp_path, real_main=True, **env)
+    assert "runtime_exit=0" in first.stderr, first.stderr
+    reads = (tmp_path / "consume.log.reads").read_text().splitlines()
+    assert reads == [
+        f"gs://synthetic/runtime_daily/longbridge/paper/{business_day}/handoff.json",
+        f"gs://synthetic/runtime_daily/longbridge/paper/{business_day}/{observed_day.replace('-', '')}T234000000000Z.json",
+    ]
+    state = tmp_path / "monitor/data/alert-state/health_cycle.json"
+    before = state.read_bytes()
+    second = _run(tmp_path, real_main=True, **env)
+    assert "runtime_exit=0" in second.stderr, second.stderr
+    assert state.read_bytes() == before
+    assert (tmp_path / "consume.log.send").read_text().splitlines() == ["synthetic-send"]
+    assert (tmp_path / "consume.log.reads").read_text().splitlines() == reads + reads
+
+
+def test_invalid_handoff_fails_closed_without_legacy_day_fallback(tmp_path: Path) -> None:
+    business_day = datetime.now(ZoneInfo("UTC")).date().isoformat()
+    for index, failure in enumerate(("wrong_day", "wrong_prefix", "legacy_object", "nested_path", "extra_field")):
+        case = tmp_path / str(index)
+        result = _run(case, real_main=True,
+                      QUANT_MONITOR_RUNTIME_DIGEST_ENABLED="true",
+                      QUANT_MONITOR_RUNTIME_PROJECTION_PREFIX="gs://synthetic/runtime_daily",
+                      QUANT_MONITOR_RUNTIME_TIMEZONE="UTC",
+                      QUANT_MONITOR_RUNTIME_EXPECTED_TARGET_KEY="synthetic-service|rot|paper",
+                      RUNTIME_FIXTURE_BAD_HANDOFF=failure, RUNTIME_REAL_LEDGER="true",
+                      TELEGRAM_TOKEN="synthetic", GLOBAL_TELEGRAM_CHAT_ID="synthetic-chat")
+        assert result.returncode == 1
+        assert "reason=invalid_runtime_handoff" in result.stderr
+        assert (case / "consume.log.reads").read_text().splitlines() == [
+            f"gs://synthetic/runtime_daily/longbridge/paper/{business_day}/handoff.json",
+        ]
+        assert not (case / "consume.log.send").exists()
+        assert not (case / "monitor/data/alert-state/health_cycle.json").exists()
 
 
 def test_immutable_pipeline_wrong_body_observation_rejects_before_send(tmp_path: Path) -> None:

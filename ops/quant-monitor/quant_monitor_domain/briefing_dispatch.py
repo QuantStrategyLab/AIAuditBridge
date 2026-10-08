@@ -12,12 +12,13 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from quant_platform_kit.strategy_lifecycle.watch.runner import dispatch_strategy_watch_findings
 from .briefing_consumer import BriefingAction, BriefingConsumptionResult, BriefingFinding
 from .runtime_digest import prepare_runtime_digest
-from quant_platform_kit.strategy_lifecycle.watch.strategy_watch import StrategyWatchFinding, build_strategy_monitoring_finding
+
+if TYPE_CHECKING:
+    from quant_platform_kit.strategy_lifecycle.watch.strategy_watch import StrategyWatchFinding
 
 _REPOSITORY_RE = re.compile(
     r"[A-Za-z0-9][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*/"
@@ -296,17 +297,35 @@ def shutil_which(name: str) -> str | None:
     return which(name)
 
 
+def dispatch_strategy_watch_findings(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    from quant_platform_kit.strategy_lifecycle.watch.runner import (
+        dispatch_strategy_watch_findings as dispatch,
+    )
+
+    return dispatch(*args, **kwargs)
+
+
 def _strategy_monitoring_findings(
     result: BriefingConsumptionResult,
 ) -> list[StrategyWatchFinding]:
-    findings: list[StrategyWatchFinding] = []
-    for finding in result.findings:
+    candidates = [
+        finding
+        for finding in result.findings
         if (
-            finding.level != BriefingAction.GITHUB_ISSUE
-            or finding.kind != "strategy_monitoring"
-            or not finding.strategy_profile
-        ):
-            continue
+            finding.level == BriefingAction.GITHUB_ISSUE
+            and finding.kind == "strategy_monitoring"
+            and finding.strategy_profile
+        )
+    ]
+    if not candidates:
+        return []
+
+    from quant_platform_kit.strategy_lifecycle.watch.strategy_watch import (
+        build_strategy_monitoring_finding,
+    )
+
+    findings: list[StrategyWatchFinding] = []
+    for finding in candidates:
         findings.append(
             build_strategy_monitoring_finding(
                 domain=finding.domain,
