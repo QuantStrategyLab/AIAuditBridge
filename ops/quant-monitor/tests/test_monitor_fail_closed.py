@@ -1690,6 +1690,389 @@ class MonitorFailClosedTests(unittest.TestCase):
 
 
 class TrustedProfileCoverageTests(unittest.TestCase):
+    @unittest.skipUnless(
+        importlib.util.find_spec("quant_platform_kit") is not None,
+        "requires the fixed QPK runtime source and its dependency environment",
+    )
+    def test_pinned_qpk_run_monitor_snapshot_satisfies_live_request_and_is_saved(self) -> None:
+        from quant_platform_kit.strategy_lifecycle.contracts import LiveReturnCollectionResult
+        from quant_platform_kit.strategy_lifecycle.live_equity import live_interval_records_to_return_series_result
+        from quant_platform_kit.strategy_lifecycle.performance_monitor import run_monitor as qpk_run_monitor
+
+        start = "2026-10-02T00:00:00+00:00"
+        end = "2026-10-13T00:00:00+00:00"
+        records = []
+        equity = 100.0
+        for day in range(2, 14):
+            equity *= 1.01
+            previous_day = day - 1
+            records.append({
+                "account_scope_sha256": "a" * 64,
+                "start_at": f"2026-10-{previous_day:02d}T00:00:00Z",
+                "end_at": f"2026-10-{day:02d}T00:00:00Z",
+                "end_equity_usdt": str(equity),
+                "net_external_cash_flow": "0",
+                "currency": "USDT",
+                "valuation_basis": "checkpoint_quantities_sampled_prices",
+            })
+        interval_result = live_interval_records_to_return_series_result(
+            records, required_start_at=start, required_end_at=end,
+        )
+        live_result = LiveReturnCollectionResult(
+            {"crypto_live_pool_rotation": interval_result.series}, {},
+            {"crypto_live_pool_rotation": interval_result.coverage},
+        )
+
+        class SyntheticCollector:
+            def collect_from_live_runs_result(self, domain, **kwargs):
+                self.assertions = (domain, kwargs)
+                return live_result
+
+        class SyntheticStore:
+            def __init__(self):
+                self.saved = []
+
+            def load_latest_backtest(self, domain, profile):
+                return None
+
+            def save_snapshot(self, snapshot):
+                self.saved.append(snapshot)
+
+        collector = SyntheticCollector()
+        store = SyntheticStore()
+        qpk_errors = []
+        env = {
+            "BINANCE_LIVE_MONITOR_STREAM_ID": "synthetic-stream",
+            "BINANCE_LIVE_MONITOR_REQUIRED_START_AT": start,
+            "BINANCE_LIVE_MONITOR_REQUIRED_END_AT": end,
+        }
+
+        def invoke_pinned_qpk(domain, **kwargs):
+            try:
+                return qpk_run_monitor(
+                    domain, **kwargs, collector=collector, store=store, windows=(21,),
+                )
+            except Exception as exc:
+                qpk_errors.append(f"{type(exc).__name__}:{exc}")
+                raise
+
+        snapshots, error = HEALTH_CYCLE._run_binance_live_profile_monitor(
+            invoke_pinned_qpk, source_revision="d" * 40, env=env,
+        )
+        self.assertFalse(qpk_errors, qpk_errors)
+        self.assertIsNone(error)
+        self.assertEqual(len(snapshots), 1)
+        self.assertEqual(len(store.saved), 1)
+        self.assertIs(snapshots[0], store.saved[0])
+        self.assertEqual(snapshots[0].platform, "synthetic-stream")
+        self.assertEqual(snapshots[0].interval_return_coverage["coverage_status"], "complete_requested_window")
+        self.assertEqual(snapshots[0].interval_return_coverage["return_count"], 11)
+        self.assertEqual(collector.assertions[1]["stream_id"], "synthetic-stream")
+        # The exact snapshot carries no comparable drift baseline coverage.
+        # The public detector must keep it unevaluable even with a candidate
+        # profile backtest, and the live path must not reuse a stored drift
+        # result that has no stream identity.
+        class DriftStore:
+            def load_latest_backtest(self, domain, profile):
+                return types.SimpleNamespace(domain=domain, strategy_profile=profile)
+
+            def load_latest_drift(self, domain, profile):
+                raise AssertionError("live drift must not reuse profile-only stored drift")
+
+        drift, drift_error = HEALTH_CYCLE._run_binance_live_profile_drift(
+            snapshots[0], store=DriftStore(),
+        )
+        self.assertIsNone(drift)
+        self.assertEqual(drift_error, "live_drift_unavailable")
+        self.assertEqual(snapshots[0].drift_status, "not_comparable_interval_coverage")
+
+    def test_binance_live_monitor_requires_explicit_utc_window_and_exact_coverage(self) -> None:
+        env = {
+            "BINANCE_LIVE_MONITOR_STREAM_ID": "binance-account-a",
+            "BINANCE_LIVE_MONITOR_REQUIRED_START_AT": "2026-10-01T00:00:00Z",
+            "BINANCE_LIVE_MONITOR_REQUIRED_END_AT": "2026-10-08T00:00:00+00:00",
+        }
+        calls = []
+
+        def run_monitor(domain, **kwargs):
+            calls.append((domain, kwargs))
+            return [types.SimpleNamespace(
+                domain="crypto",
+                strategy_profile="crypto_live_pool_rotation",
+                platform="binance-account-a",
+                interval_return_coverage={
+                    "coverage_status": "complete_requested_window",
+                    "requested_window_complete": True,
+                    "requested_start_at": "2026-10-01T00:00:00+00:00",
+                    "requested_end_at": "2026-10-08T00:00:00+00:00",
+                    "return_start_at": "2026-10-01T00:00:00+00:00",
+                    "return_end_at": "2026-10-08T00:00:00+00:00",
+                    "return_count": 10,
+                },
+            )]
+
+        snapshots, error = HEALTH_CYCLE._run_binance_live_profile_monitor(
+            run_monitor, source_revision="a" * 40, env=env,
+        )
+        self.assertIsNone(error)
+        self.assertEqual(len(snapshots), 1)
+        self.assertEqual(calls[0][0], "crypto")
+        self.assertEqual(calls[0][1], {
+            "strategy_profile": "crypto_live_pool_rotation",
+            "live_stream_id": "binance-account-a",
+            "required_start_at": "2026-10-01T00:00:00+00:00",
+            "required_end_at": "2026-10-08T00:00:00+00:00",
+            "min_observations": 10,
+            "source_revision": "a" * 40,
+        })
+
+        incomplete = dict(env)
+        incomplete["BINANCE_LIVE_MONITOR_REQUIRED_END_AT"] = "2026-10-07T00:00:00Z"
+        snapshots, error = HEALTH_CYCLE._run_binance_live_profile_monitor(
+            run_monitor, source_revision="a" * 40, env=incomplete,
+        )
+        self.assertEqual(snapshots, [])
+        self.assertEqual(error, "live_coverage_incomplete")
+
+        wrong_stream = dict(env)
+        wrong_stream["BINANCE_LIVE_MONITOR_STREAM_ID"] = "another-stream"
+        snapshots, error = HEALTH_CYCLE._run_binance_live_profile_monitor(
+            run_monitor, source_revision="a" * 40, env=wrong_stream,
+        )
+        self.assertEqual(snapshots, [])
+        self.assertEqual(error, "live_coverage_incomplete")
+
+    def test_binance_live_monitor_missing_or_invalid_window_never_calls_qpk(self) -> None:
+        run_monitor = mock.Mock(side_effect=AssertionError("must not call without trusted request"))
+        for env, reason in (
+            ({}, "live_coverage_configuration_missing"),
+            ({
+                "BINANCE_LIVE_MONITOR_STREAM_ID": "binance",
+                "BINANCE_LIVE_MONITOR_REQUIRED_START_AT": "2026-10-01T00:00:00Z",
+            }, "live_coverage_configuration_missing"),
+            ({
+                "BINANCE_LIVE_MONITOR_STREAM_ID": "binance",
+                "BINANCE_LIVE_MONITOR_REQUIRED_START_AT": "2026-10-01T00:00:00+08:00",
+                "BINANCE_LIVE_MONITOR_REQUIRED_END_AT": "2026-10-08T00:00:00Z",
+            }, "live_coverage_configuration_invalid"),
+        ):
+            with self.subTest(reason=reason, env_keys=sorted(env)):
+                snapshots, error = HEALTH_CYCLE._run_binance_live_profile_monitor(
+                    run_monitor, source_revision="b" * 40, env=env,
+                )
+                self.assertEqual(snapshots, [])
+                self.assertEqual(error, reason)
+        run_monitor.assert_not_called()
+
+    def test_live_profile_failure_does_not_block_crypto_research_profile(self) -> None:
+        research = types.SimpleNamespace(domain="crypto", strategy_profile="crypto_research")
+        calls = []
+
+        def run_monitor(domain, **kwargs):
+            calls.append((domain, kwargs))
+            return [research]
+
+        snapshots, live_error = HEALTH_CYCLE._run_expected_monitor_profiles(
+            run_monitor, "crypto", ["crypto_live_pool_rotation", "crypto_research"], "c" * 40,
+            env={},
+        )
+        self.assertEqual(snapshots, [research])
+        self.assertEqual(live_error, "live_coverage_configuration_missing")
+        self.assertEqual(calls, [("crypto", {
+            "strategy_profile": "crypto_research", "source_revision": "c" * 40,
+        })])
+
+    def test_daily_briefing_marks_only_live_profile_unavailable_without_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_fresh_lifecycle_status(root, profiles_by_domain={
+                "us_equity": ["us_profile"],
+                "crypto": ["crypto_live_pool_rotation", "crypto_research"],
+            })
+            qpk = types.ModuleType("quant_platform_kit")
+            lifecycle = types.ModuleType("quant_platform_kit.strategy_lifecycle")
+            drift_detector = types.ModuleType("quant_platform_kit.strategy_lifecycle.drift_detector")
+            health_dashboard = types.ModuleType("quant_platform_kit.strategy_lifecycle.health_dashboard")
+            performance_monitor = types.ModuleType("quant_platform_kit.strategy_lifecycle.performance_monitor")
+            performance_monitor.run_monitor = mock.Mock(
+                side_effect=AssertionError("missing window must not query QPK"),
+            )
+            drift_detector.run_drift_detection = lambda domain: [types.SimpleNamespace(
+                strategy_profile=("crypto_research" if domain == "crypto" else "us_profile"),
+                drift_score=0.0,
+            )]
+
+            def write_dashboard(**kwargs):
+                today = HEALTH_CYCLE.datetime.now(HEALTH_CYCLE.timezone.utc).date().isoformat()
+                rows = [
+                    {"domain": "us_equity", "strategy_profile": "us_profile", "status": "healthy", "as_of": today},
+                    {"domain": "crypto", "strategy_profile": "crypto_live_pool_rotation", "status": "healthy", "as_of": today},
+                    {"domain": "crypto", "strategy_profile": "crypto_research", "status": "healthy", "as_of": today},
+                ]
+                Path(kwargs["output_dir"], "strategy_health_dashboard.json").write_text(
+                    json.dumps({"strategies": rows}), encoding="utf-8",
+                )
+
+            health_dashboard.build_dashboard = write_dashboard
+            with (
+                mock.patch.dict(os.environ, {
+                    "QUANT_MONITOR_ROOT": str(root), "DAY": "2026-09-29",
+                    "BINANCE_LIVE_MONITOR_STREAM_ID": "",
+                    "BINANCE_LIVE_MONITOR_REQUIRED_START_AT": "",
+                    "BINANCE_LIVE_MONITOR_REQUIRED_END_AT": "",
+                }, clear=True),
+                mock.patch.dict(sys.modules, {
+                    "quant_platform_kit": qpk,
+                    "quant_platform_kit.strategy_lifecycle": lifecycle,
+                    "quant_platform_kit.strategy_lifecycle.drift_detector": drift_detector,
+                    "quant_platform_kit.strategy_lifecycle.health_dashboard": health_dashboard,
+                    "quant_platform_kit.strategy_lifecycle.performance_monitor": performance_monitor,
+                }),
+            ):
+                self.assertEqual(DAILY_BRIEFING.main(), 0)
+            performance_monitor.run_monitor.assert_not_called()
+
+            report = json.loads((root / "data/daily-reports/2026-09-29/crypto.json").read_text())
+            self.assertFalse(report["ok"])
+            self.assertEqual(report["data_status"], "unavailable")
+            self.assertEqual(report["coverage"]["observed_profiles"], ["crypto_research"])
+            self.assertIn("crypto_live_pool_rotation", report["coverage"]["missing_profiles"])
+            self.assertIn("live_coverage_configuration_missing", {
+                error.get("reason_code") for error in report["errors"]
+            })
+            us_report = json.loads((root / "data/daily-reports/2026-09-29/us_equity.json").read_text())
+            self.assertTrue(us_report["ok"])
+
+    def test_daily_briefing_uses_verified_live_snapshot_not_other_stream_dashboard_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_fresh_lifecycle_status(root, profiles_by_domain={
+                "us_equity": ["us_profile"],
+                "crypto": ["crypto_live_pool_rotation", "crypto_research"],
+            })
+            qpk = types.ModuleType("quant_platform_kit")
+            lifecycle = types.ModuleType("quant_platform_kit.strategy_lifecycle")
+            drift_detector = types.ModuleType("quant_platform_kit.strategy_lifecycle.drift_detector")
+            performance_store = types.ModuleType("quant_platform_kit.strategy_lifecycle.performance_store")
+            health_dashboard = types.ModuleType("quant_platform_kit.strategy_lifecycle.health_dashboard")
+            performance_monitor = types.ModuleType("quant_platform_kit.strategy_lifecycle.performance_monitor")
+            strategy_health_score = types.ModuleType(
+                "quant_platform_kit.strategy_lifecycle.strategy_health_score",
+            )
+            calls = []
+            coverage = {
+                "coverage_status": "complete_requested_window",
+                "requested_window_complete": True,
+                "requested_start_at": "2026-10-02T00:00:00+00:00",
+                "requested_end_at": "2026-10-13T00:00:00+00:00",
+                "return_start_at": "2026-10-02T00:00:00+00:00",
+                "return_end_at": "2026-10-13T00:00:00+00:00",
+                "return_count": 10,
+            }
+
+            def run_monitor(domain, **kwargs):
+                calls.append((domain, kwargs))
+                return [types.SimpleNamespace(
+                    domain=domain,
+                    strategy_profile="crypto_live_pool_rotation",
+                    platform=kwargs["live_stream_id"],
+                    interval_return_coverage=coverage,
+                    drift_status="not_comparable_interval_coverage",
+                    as_of=HEALTH_CYCLE.datetime(2026, 10, 8).date(),
+                    source_revision="c" * 40,
+                )]
+
+            performance_monitor.run_monitor = run_monitor
+
+            def compute_health_score(snapshot, *, drift=None):
+                self.assertEqual(snapshot.platform, "trusted-stream")
+                self.assertIsNotNone(drift)
+                return types.SimpleNamespace(to_dict=lambda: {
+                    "domain": "crypto", "strategy_profile": "crypto_live_pool_rotation",
+                    "as_of": "2026-10-08", "status": "watch", "overall_score": 77.0,
+                    "performance_score": 77.0, "drift_score": drift.drift_score,
+                })
+
+            strategy_health_score.compute_health_score = compute_health_score
+            drift_calls = []
+
+            def run_drift_detection(domain, *, strategy_profile=None):
+                drift_calls.append((domain, strategy_profile))
+                if strategy_profile is None:
+                    # A global profile-only result could belong to another
+                    # stream and must never be used for this live request.
+                    return [types.SimpleNamespace(
+                        strategy_profile="crypto_live_pool_rotation", drift_score=0.99,
+                    )]
+                return [types.SimpleNamespace(strategy_profile=strategy_profile, drift_score=0.0)]
+
+            class SyntheticDriftStore:
+                def load_latest_backtest(self, domain, profile):
+                    return types.SimpleNamespace(domain=domain, strategy_profile=profile)
+
+                def load_latest_drift(self, domain, profile):
+                    raise AssertionError("profile-only drift cannot be reused across streams")
+
+            drift_detector.run_drift_detection = run_drift_detection
+            drift_detector.detect_drift = lambda snapshot, *, backtest: types.SimpleNamespace(
+                domain=snapshot.domain,
+                strategy_profile=snapshot.strategy_profile,
+                as_of=snapshot.as_of,
+                source_revision=snapshot.source_revision,
+                drift_score=None,
+                baseline_available=False,
+                alert_suppressed=True,
+                reason="not_comparable_interval_coverage",
+            )
+            performance_store.PerformanceStore = types.SimpleNamespace(
+                from_env=lambda: SyntheticDriftStore(),
+            )
+
+            def write_dashboard(**kwargs):
+                today = HEALTH_CYCLE.datetime.now(HEALTH_CYCLE.timezone.utc).date().isoformat()
+                rows = [
+                    {"domain": "us_equity", "strategy_profile": "us_profile", "status": "healthy", "as_of": today},
+                    {"domain": "crypto", "strategy_profile": "crypto_live_pool_rotation", "status": "critical",
+                     "overall_score": 1.0, "as_of": today, "platform": "old-other-stream"},
+                    {"domain": "crypto", "strategy_profile": "crypto_research", "status": "healthy", "as_of": today},
+                ]
+                Path(kwargs["output_dir"], "strategy_health_dashboard.json").write_text(
+                    json.dumps({"strategies": rows}), encoding="utf-8",
+                )
+
+            health_dashboard.build_dashboard = write_dashboard
+            with (
+                mock.patch.dict(os.environ, {
+                    "QUANT_MONITOR_ROOT": str(root), "DAY": "2026-10-08",
+                    "BINANCE_LIVE_MONITOR_STREAM_ID": "trusted-stream",
+                    "BINANCE_LIVE_MONITOR_REQUIRED_START_AT": "2026-10-02T00:00:00Z",
+                    "BINANCE_LIVE_MONITOR_REQUIRED_END_AT": "2026-10-13T00:00:00Z",
+                }, clear=True),
+                mock.patch.dict(sys.modules, {
+                    "quant_platform_kit": qpk,
+                    "quant_platform_kit.strategy_lifecycle": lifecycle,
+                    "quant_platform_kit.strategy_lifecycle.drift_detector": drift_detector,
+                    "quant_platform_kit.strategy_lifecycle.performance_store": performance_store,
+                    "quant_platform_kit.strategy_lifecycle.health_dashboard": health_dashboard,
+                    "quant_platform_kit.strategy_lifecycle.performance_monitor": performance_monitor,
+                    "quant_platform_kit.strategy_lifecycle.strategy_health_score": strategy_health_score,
+                }),
+            ):
+                self.assertEqual(DAILY_BRIEFING.main(), 0)
+
+            self.assertEqual(calls[0][0], "crypto")
+            self.assertEqual(calls[0][1]["live_stream_id"], "trusted-stream")
+            self.assertEqual(calls[0][1]["required_start_at"], "2026-10-02T00:00:00+00:00")
+            self.assertEqual(drift_calls, [("us_equity", None), ("crypto", "crypto_research")])
+            report = json.loads((root / "data/daily-reports/2026-10-08/crypto.json").read_text())
+            self.assertFalse(any(row["strategy_profile"] == "crypto_live_pool_rotation"
+                                 for row in report["strategies"]))
+            self.assertIn("crypto_live_pool_rotation", report["coverage"]["missing_profiles"])
+            self.assertIn("live_drift_unavailable", {
+                error.get("reason_code") for error in report["errors"]
+            })
+            self.assertEqual(report["coverage"]["observed_profiles"], ["crypto_research"])
+
     def test_shared_expected_profiles_and_provenance_use_one_validated_read(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
