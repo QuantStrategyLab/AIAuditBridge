@@ -151,14 +151,29 @@ case "$unit" in
       [[ -e "$candidate" ]] || continue
       dropin="${dropin}${dropin:+ }$candidate"
     done
+    execstartpre="$TEST_EXECSTARTPRE"
+    if [[ -e "$TEST_RELOADED" ]]; then execstartpre="$TEST_EXECSTARTPRE_POST"; fi
     printf 'WorkingDirectory=%s\\nExecStart=%s\\nExecStartPre=%s\\nFragmentPath=%s\\nDropInPaths=%s\\nActiveState=inactive\\nSubState=dead\\nUnitFileState=static\\n' \\
-      "$wd" "$execstart" "$TEST_EXECSTARTPRE" "$TEST_UNIT_ROOT/codex-daily-briefing.service" "$dropin"
+      "$wd" "$execstart" "$execstartpre" "$TEST_UNIT_ROOT/codex-daily-briefing.service" "$dropin"
     ;;
   codex-daily-briefing.timer)
     printf 'FragmentPath=%s\\nDropInPaths=\\nUnit=codex-daily-briefing.service\\nActiveState=active\\nSubState=waiting\\nUnitFileState=enabled\\n' "$TEST_UNIT_ROOT/codex-daily-briefing.timer"
     ;;
   codex-quant.service)
-    printf 'WorkingDirectory=/health\\nExecStart={ path=/bin/bash ; argv[]=/bin/bash /health/health_check.sh ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }\\nExecStartPre=/bin/true\\nFragmentPath=/etc/systemd/system/codex-quant.service\\nDropInPaths=\\nActiveState=failed\\nSubState=failed\\nUnitFileState=static\\n'
+    health_wd=/health
+    health_state=failed
+    health_substate=failed
+    health_exec='{ path=/bin/bash ; argv[]=/bin/bash /health/health_check.sh ; ignore_errors=no ; start_time=[old] ; stop_time=[old] ; pid=101 ; code=(exited) ; status=0/0 }'
+    health_pre='{ path=/bin/true ; argv[]=/bin/true ; ignore_errors=no ; start_time=[old] ; stop_time=[old] ; pid=102 ; code=(exited) ; status=0/0 }'
+    if [[ -e "$TEST_RELOADED" ]]; then
+      health_state=active
+      health_substate=running
+      health_exec='{ path=/bin/bash ; argv[]=/bin/bash /health/health_check.sh ; ignore_errors=no ; start_time=[new] ; stop_time=[n/a] ; pid=201 ; code=(null) ; status=0/0 }'
+      health_pre='{ path=/bin/true ; argv[]=/bin/true ; ignore_errors=no ; start_time=[new] ; stop_time=[n/a] ; pid=202 ; code=(null) ; status=0/0 }'
+      if [[ "${TEST_HEALTH_CONFIG_CHANGE:-false}" == true ]]; then health_wd=/changed-health-root; fi
+    fi
+    printf 'WorkingDirectory=%s\\nExecStart=%s\\nExecStartPre=%s\\nFragmentPath=/etc/systemd/system/codex-quant.service\\nDropInPaths=\\nActiveState=%s\\nSubState=%s\\nUnitFileState=static\\n' \\
+      "$health_wd" "$health_exec" "$health_pre" "$health_state" "$health_substate"
     ;;
   *) exit 9 ;;
 esac
@@ -187,7 +202,8 @@ esac
         "log": tmp_path / "systemctl.log",
         "reloaded": tmp_path / "reloaded",
         "old_exec": old_exec,
-        "execstartpre": "/bin/bash /old/scripts/load_telegram_env.sh",
+        "execstartpre": "{ path=/bin/bash ; argv[]=/bin/bash /old/scripts/load_telegram_env.sh ; ignore_errors=no ; start_time=[old] ; stop_time=[n/a] ; pid=301 ; code=(null) ; status=0/0 }",
+        "execstartpre_post": "{ path=/bin/bash ; argv[]=/bin/bash /old/scripts/load_telegram_env.sh ; ignore_errors=no ; start_time=[new] ; stop_time=[n/a] ; pid=302 ; code=(null) ; status=0/0 }",
     }
 
 
@@ -206,6 +222,7 @@ def _run(case: dict[str, Path | str], *, extra_env: dict[str, str] | None = None
             "TEST_NEW_SHA": str(case["sha"]),
             "TEST_OLD_EXECSTART": str(case["old_exec"]),
             "TEST_EXECSTARTPRE": str(case["execstartpre"]),
+            "TEST_EXECSTARTPRE_POST": str(case["execstartpre_post"]),
             "TEST_UNIT_ROOT": str(case["unit_root"]),
             "PATH": str(case["path_prefix"]) + os.pathsep + os.environ.get("PATH", ""),
         }
@@ -344,6 +361,7 @@ def test_failed_readback_keeps_recovery_snapshot_and_does_not_retry(adoption_cas
     result = _run(case, extra_env={"TEST_FAIL_READBACK": "true"})
     assert result.returncode == 3
     assert "status=unknown" in result.stderr
+    assert "reason=daily_configuration_changed" in result.stderr
     assert "manual_readback_no_retry" in result.stderr
     dropin_dir = Path(str(case["unit_root"])) / "codex-daily-briefing.service.d"
     snapshots = list(dropin_dir.glob("*.rollback.*"))
@@ -351,3 +369,34 @@ def test_failed_readback_keeps_recovery_snapshot_and_does_not_retry(adoption_cas
     assert snapshots[0].read_text(encoding="utf-8") == "previous_dropin=absent\n"
     invocations = Path(str(case["log"])).read_text(encoding="utf-8").splitlines()
     assert invocations.count("daemon-reload") == 1
+
+
+def test_health_runtime_state_and_exec_times_do_not_block_adoption(adoption_case: dict[str, Path | str]) -> None:
+    result = _run(adoption_case)
+    assert result.returncode == 0, result.stderr
+    assert "status=prepared" in result.stdout
+
+
+def test_health_configuration_change_is_reported_after_switch(adoption_case: dict[str, Path | str]) -> None:
+    result = _run(adoption_case, extra_env={"TEST_HEALTH_CONFIG_CHANGE": "true"})
+    assert result.returncode == 3
+    assert "status=unknown" in result.stderr
+    assert "reason=health_configuration_changed" in result.stderr
+    assert "manual_readback_no_retry" in result.stderr
+
+
+def test_changed_prestart_command_is_not_treated_as_a_timestamp(adoption_case: dict[str, Path | str]) -> None:
+    result = _run(adoption_case, extra_env={
+        "TEST_EXECSTARTPRE_POST": str(adoption_case["execstartpre_post"]).replace("load_telegram_env.sh", "different_prestart.sh"),
+    })
+    assert result.returncode == 3
+    assert "reason=daily_execstartpre_changed" in result.stderr
+
+
+@pytest.mark.parametrize("separator", [" ", " ; "])
+def test_additional_prestart_command_is_not_silently_discarded(adoption_case: dict[str, Path | str], separator: str) -> None:
+    result = _run(adoption_case, extra_env={
+        "TEST_EXECSTARTPRE_POST": str(adoption_case["execstartpre_post"]) + separator + "{ path=/bin/true ; argv[]=/bin/true ; ignore_errors=no ; start_time=[new] ; stop_time=[n/a] ; pid=303 ; code=(null) ; status=0/0 }",
+    })
+    assert result.returncode == 3
+    assert "reason=daily_execstartpre_unavailable" in result.stderr

@@ -204,6 +204,12 @@ health. `status=prepared` means limited offline qualification and configuration 
 readback it prints `status=unknown`, preserves the recovery snapshot, and requires manual inspection without
 automatic rollback or retry.
 
+配置核对比较命令路径、参数及固定 unit 配置；健康服务自然运行时变化的状态、时间和 PID 不作为
+配置变更。现有单命令前置脚本若增加命令则停止，unknown 输出固定原因供只读诊断。
+Configuration readback compares command paths, arguments and stable unit configuration, not health-cycle
+state, timestamps or PIDs. An additional command in the existing single-command prestart is rejected;
+unknown outcomes carry a fixed reason for bounded read-only diagnosis.
+
 ## 策略健康快照（只读）
 
 `health_cycle.py` 会把生命周期 dashboard 规范化为

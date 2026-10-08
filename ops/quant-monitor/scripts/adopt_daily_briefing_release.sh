@@ -176,6 +176,40 @@ service_is_idle() {
     && "${service_ActiveState}" != "reloading" ]]
 }
 
+exec_property_identity() {
+  local raw="$1" config
+  if [[ "$raw" == \{* ]]; then
+    # Current units each have a single command. Never silently discard a
+    # second command or the configured ignore-errors flag.
+    [[ "${raw#\{}" != *"{ path="* ]] || return 1
+    config="${raw%% ; start_time=*}"
+    [[ "$config" != "$raw" && "$raw" == *" }" && "$config" == *" ; ignore_errors="* ]] || return 1
+    printf '%s }\n' "$config"
+  else
+    [[ -n "$raw" ]] || return 1
+    printf '%s\n' "$raw"
+  fi
+}
+
+health_configuration_identity() {
+  local exec_start exec_start_pre
+  exec_start="$(exec_property_identity "$health_ExecStart")" || return 1
+  exec_start_pre="$(exec_property_identity "$health_ExecStartPre")" || return 1
+  printf '%s\n' \
+    "$health_FragmentPath" \
+    "$health_DropInPaths" \
+    "$health_WorkingDirectory" \
+    "$exec_start" \
+    "$exec_start_pre" \
+    "$health_UnitFileState"
+}
+
+postflight_unknown() {
+  local reason="$1"
+  echo "[daily-adoption] status=unknown sha=$SHA reason=$reason recovery_snapshot=preserved action=manual_readback_no_retry" >&2
+  exit 3
+}
+
 read_service || die "daily_service_readback_unavailable"
 read_timer || die "daily_timer_readback_unavailable"
 read_health || die "health_service_readback_unavailable"
@@ -185,11 +219,12 @@ service_is_idle || die "daily_service_active"
   || die "daily_working_directory_unexpected"
 exec_is_prior_release "${service_ExecStart}" "$EXPECTED_CURRENT_SHA" \
   || die "daily_execstart_unexpected"
-[[ -n "${service_ExecStartPre}" ]] || die "daily_execstartpre_unavailable"
-SERVICE_PRE_BEFORE="${service_ExecStartPre}"
-DAILY_STATE_BEFORE="${service_UnitFileState}:${service_ActiveState}:${service_SubState}"
+SERVICE_PRE_BEFORE="$(exec_property_identity "${service_ExecStartPre}")" \
+  || die "daily_execstartpre_unavailable"
+[[ -n "$SERVICE_PRE_BEFORE" ]] || die "daily_execstartpre_unavailable"
+DAILY_UNIT_FILE_STATE_BEFORE="${service_UnitFileState}"
 TIMER_BEFORE="${timer_FragmentPath}|${timer_DropInPaths}|${timer_Unit}|${timer_UnitFileState}|${timer_ActiveState}|${timer_SubState}"
-HEALTH_BEFORE="${health_FragmentPath}|${health_DropInPaths}|${health_WorkingDirectory}|${health_ExecStart}|${health_ExecStartPre}|${health_UnitFileState}|${health_ActiveState}|${health_SubState}"
+HEALTH_BEFORE="$(health_configuration_identity)" || die "health_service_identity_unavailable"
 DROPINS_BEFORE="$service_DropInPaths"
 
 BASELINE_DROPINS=""
@@ -310,15 +345,18 @@ read_timer || die "daily_timer_readback_unavailable"
 read_health || die "health_service_readback_unavailable"
 service_is_idle || die "daily_service_active"
 [[ "${service_WorkingDirectory}" == "$RELEASE_ROOT/$EXPECTED_CURRENT_SHA/ops/quant-monitor" \
-  && "${service_ExecStartPre}" == "$SERVICE_PRE_BEFORE" \
   && "${service_DropInPaths}" == "$DROPINS_BEFORE" \
-  && "${service_UnitFileState}:${service_ActiveState}:${service_SubState}" == "$DAILY_STATE_BEFORE" ]] \
+  && "${service_UnitFileState}" == "$DAILY_UNIT_FILE_STATE_BEFORE" ]] \
   || die "daily_service_changed_during_adoption"
+SERVICE_PRE_CURRENT="$(exec_property_identity "${service_ExecStartPre}")" \
+  || die "daily_service_changed_during_adoption"
+[[ "$SERVICE_PRE_CURRENT" == "$SERVICE_PRE_BEFORE" ]] || die "daily_service_changed_during_adoption"
 exec_is_prior_release "${service_ExecStart}" "$EXPECTED_CURRENT_SHA" \
   || die "daily_service_changed_during_adoption"
 [[ "${timer_FragmentPath}|${timer_DropInPaths}|${timer_Unit}|${timer_UnitFileState}|${timer_ActiveState}|${timer_SubState}" == "$TIMER_BEFORE" \
-  && "${health_FragmentPath}|${health_DropInPaths}|${health_WorkingDirectory}|${health_ExecStart}|${health_ExecStartPre}|${health_UnitFileState}|${health_ActiveState}|${health_SubState}" == "$HEALTH_BEFORE" ]] \
-  || die "runtime_state_changed_during_adoption"
+  ]] || die "timer_changed_during_adoption"
+HEALTH_CURRENT="$(health_configuration_identity)" || die "health_service_changed_during_adoption"
+[[ "$HEALTH_CURRENT" == "$HEALTH_BEFORE" ]] || die "health_service_changed_during_adoption"
 
 mkdir -p "$DROPIN_DIR" 2>/dev/null || die "daily_dropin_directory_unavailable"
 [[ ! -L "$DROPIN_DIR" && -d "$DROPIN_DIR" ]] || die "daily_dropin_directory_unavailable"
@@ -354,29 +392,30 @@ mv -f -- "$STAGED" "$DROPIN" 2>/dev/null || die "daily_dropin_write_failed"
 STAGED=""
 
 if ! "$SYSTEMCTL" daemon-reload >/dev/null 2>&1; then
-  echo "[daily-adoption] status=unknown sha=$SHA recovery_snapshot=preserved action=manual_readback_no_retry" >&2
-  exit 3
+  postflight_unknown "daemon_reload_failed"
 fi
 
-if ! read_service || ! read_timer || ! read_health || ! service_is_idle \
-  || [[ "${service_FragmentPath:-}" != "$BASE_UNIT" \
-     || "${service_WorkingDirectory:-}" != "$NEW_MONITOR" \
-     || "$(normalize_dropin_paths "$service_DropInPaths" 2>/dev/null || true)" != "$(normalize_dropin_paths "$BASELINE_DROPINS $DROPIN" 2>/dev/null || true)" \
-     || "${service_ExecStartPre:-}" == "" \
-     || "${service_ExecStartPre:-}" != "$SERVICE_PRE_BEFORE" \
-     || "${service_UnitFileState:-}:${service_ActiveState:-}:${service_SubState:-}" != "$DAILY_STATE_BEFORE" ]]; then
-  echo "[daily-adoption] status=unknown sha=$SHA recovery_snapshot=preserved action=manual_readback_no_retry" >&2
-  exit 3
-fi
+read_service || postflight_unknown "daily_readback_failed"
+read_timer || postflight_unknown "timer_readback_failed"
+read_health || postflight_unknown "health_readback_failed"
+service_is_idle || postflight_unknown "daily_service_not_idle"
+[[ "${service_FragmentPath:-}" == "$BASE_UNIT" \
+  && "${service_WorkingDirectory:-}" == "$NEW_MONITOR" \
+  && "$(normalize_dropin_paths "$service_DropInPaths" 2>/dev/null || true)" == "$(normalize_dropin_paths "$BASELINE_DROPINS $DROPIN" 2>/dev/null || true)" \
+  && "${service_UnitFileState:-}" == "$DAILY_UNIT_FILE_STATE_BEFORE" ]] \
+  || postflight_unknown "daily_configuration_changed"
+SERVICE_PRE_CURRENT="$(exec_property_identity "${service_ExecStartPre:-}")" \
+  || postflight_unknown "daily_execstartpre_unavailable"
+[[ "$SERVICE_PRE_CURRENT" == "$SERVICE_PRE_BEFORE" ]] \
+  || postflight_unknown "daily_execstartpre_changed"
 
-if ! exec_is_release "${service_ExecStart}" "$SHA" /usr/bin/env daily_briefing_pipeline.sh \
-  || [[ "$(normalize_dropin_paths "$service_DropInPaths" 2>/dev/null || true)" != "$(normalize_dropin_paths "$BASELINE_DROPINS $DROPIN" 2>/dev/null || true)" \
-     || "${timer_Unit}" != "$UNIT" \
-     || "${timer_FragmentPath}" != "$TIMER_UNIT" \
-     || "${timer_FragmentPath}|${timer_DropInPaths}|${timer_Unit}|${timer_UnitFileState}|${timer_ActiveState}|${timer_SubState}" != "$TIMER_BEFORE" \
-     || "${health_FragmentPath}|${health_DropInPaths}|${health_WorkingDirectory}|${health_ExecStart}|${health_ExecStartPre}|${health_UnitFileState}|${health_ActiveState}|${health_SubState}" != "$HEALTH_BEFORE" ]]; then
-  echo "[daily-adoption] status=unknown sha=$SHA recovery_snapshot=preserved action=manual_readback_no_retry" >&2
-  exit 3
-fi
+exec_is_release "${service_ExecStart}" "$SHA" /usr/bin/env daily_briefing_pipeline.sh \
+  || postflight_unknown "daily_execstart_mismatch"
+[[ "${timer_Unit}" == "$UNIT" \
+  && "${timer_FragmentPath}" == "$TIMER_UNIT" \
+  && "${timer_FragmentPath}|${timer_DropInPaths}|${timer_Unit}|${timer_UnitFileState}|${timer_ActiveState}|${timer_SubState}" == "$TIMER_BEFORE" ]] \
+  || postflight_unknown "timer_configuration_changed"
+HEALTH_CURRENT="$(health_configuration_identity)" || postflight_unknown "health_identity_unavailable"
+[[ "$HEALTH_CURRENT" == "$HEALTH_BEFORE" ]] || postflight_unknown "health_configuration_changed"
 
 echo "[daily-adoption] status=prepared sha=$SHA daily_service=release timer=unchanged health=untouched send=not_run recovery_snapshot=preserved"
