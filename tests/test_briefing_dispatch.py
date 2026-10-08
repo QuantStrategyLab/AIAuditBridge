@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import builtins
+import importlib
 import os
 import subprocess
 import tempfile
@@ -23,6 +25,45 @@ from quant_monitor_domain.briefing_dispatch import (
 
 
 class BriefingDispatchTests(unittest.TestCase):
+    def test_runtime_digest_does_not_import_optional_strategy_watcher(self) -> None:
+        from quant_monitor_domain import briefing_dispatch
+
+        original_import = builtins.__import__
+
+        def reject_watcher(name, *args, **kwargs):
+            if name.startswith("quant_platform_kit.strategy_lifecycle.watch"):
+                raise ModuleNotFoundError(name)
+            return original_import(name, *args, **kwargs)
+
+        projection = {
+            "platform": "longbridge",
+            "observed_at": "2026-09-28T08:40:00Z",
+            "completeness": "complete",
+            "read_errors": [],
+            "unmatched_reports": [],
+            "records": [{
+                "platform": "longbridge",
+                "target_key": "synthetic-service|rot|paper",
+                "target": {"service": "synthetic-service", "strategy_profile": "rot", "account_scope": "paper"},
+                "business_date": "2026-09-28",
+                "timezone": "Asia/Hong_Kong",
+                "status": "market_closed",
+                "kind": "schedule",
+                "completeness": "complete",
+                "execution_lane": "paper",
+                "runs": [],
+                "conflicts": [],
+                "fills": {"source": "not_connected", "records": [], "count": None},
+            }],
+        }
+
+        with patch("builtins.__import__", side_effect=reject_watcher):
+            importlib.reload(briefing_dispatch)
+            summary = briefing_dispatch.dispatch_runtime_digest(projection, dry_run=True)
+
+        self.assertEqual(summary["action"], "runtime_digest")
+        self.assertIn("dry_run", summary["skipped"])
+
     def test_dispatch_quiet_skips(self) -> None:
         result = BriefingConsumptionResult(day="2026-07-08", report_dir="/tmp", findings=[])
         summary = dispatch_briefing_result(result)

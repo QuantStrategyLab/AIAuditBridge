@@ -95,16 +95,17 @@ except Exception:
     echo "[briefing-pipeline] runtime digest rejected: runtime_consumer_unavailable" >&2
     runtime_status=2
   else
-    runtime_object="${trimmed}/longbridge/paper/${runtime_day}.json"
     if [[ -n "$runtime_object_override" ]]; then
       runtime_day="$runtime_day_override"
-      runtime_object="$runtime_object_override"
+      runtime_source=(--runtime-projection-gcs "$runtime_object_override")
+    else
+      runtime_source=(--runtime-handoff-prefix "$trimmed")
     fi
     set +e
     (
       cd "$AAB"
       PYTHONPATH=. python3 scripts/consume_daily_briefing.py \
-        --runtime-projection-gcs "$runtime_object" \
+        "${runtime_source[@]}" \
         --day "$runtime_day" \
         --expected-target-key "$runtime_key" \
         --dispatch >/dev/null
