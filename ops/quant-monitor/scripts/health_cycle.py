@@ -11,7 +11,7 @@ import re
 import sys
 import tempfile
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -49,6 +49,8 @@ _GITHUB_UPSTREAM_CODES = frozenset({
     "github_api_unavailable",
 })
 _SAFE_RESET_AT = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:+.\-Z]{8,32}$")
+_LIVE_STREAM_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+_BINANCE_LIVE_PROFILE = "crypto_live_pool_rotation"
 _OPERATIONAL_ERROR_TYPES = frozenset({
     "FileNotFoundError",
     "JSONDecodeError",
@@ -112,8 +114,152 @@ def _qualified_profile_rows(rows, domain, expected_profiles):
     return qualified, {row.strategy_profile for row in qualified}, unexpected
 
 
+def _binance_live_window(env: Mapping[str, str] | None = None) -> tuple[dict[str, str] | None, str | None]:
+    """Resolve an explicit live monitor target and checkpoint window."""
+    env = os.environ if env is None else env
+    stream_id = str(env.get("BINANCE_LIVE_MONITOR_STREAM_ID") or "").strip()
+    start_raw = str(env.get("BINANCE_LIVE_MONITOR_REQUIRED_START_AT") or "").strip()
+    end_raw = str(env.get("BINANCE_LIVE_MONITOR_REQUIRED_END_AT") or "").strip()
+    if not stream_id or not start_raw or not end_raw:
+        return None, "live_coverage_configuration_missing"
+    if not _LIVE_STREAM_ID_RE.fullmatch(stream_id):
+        return None, "live_coverage_configuration_invalid"
+    try:
+        start = datetime.fromisoformat(start_raw.replace("Z", "+00:00"))
+        end = datetime.fromisoformat(end_raw.replace("Z", "+00:00"))
+        if (start.tzinfo is None or end.tzinfo is None
+                or start.utcoffset() != timedelta(0) or end.utcoffset() != timedelta(0)):
+            raise ValueError("timestamps must be UTC")
+        start = start.astimezone(timezone.utc)
+        end = end.astimezone(timezone.utc)
+        if start >= end:
+            raise ValueError("window is reversed")
+    except (TypeError, ValueError, OverflowError):
+        return None, "live_coverage_configuration_invalid"
+    return {
+        "stream_id": stream_id,
+        "required_start_at": start.isoformat(),
+        "required_end_at": end.isoformat(),
+    }, None
+
+
+def _run_binance_live_profile_monitor(run_monitor, *, source_revision: str, env=None):
+    """Run only the configured Binance live profile against an exact window."""
+    request, error = _binance_live_window(env)
+    if error:
+        return [], error
+    try:
+        snapshots = list(run_monitor(
+            "crypto",
+            strategy_profile=_BINANCE_LIVE_PROFILE,
+            live_stream_id=request["stream_id"],
+            required_start_at=request["required_start_at"],
+            required_end_at=request["required_end_at"],
+            min_observations=10,
+            source_revision=source_revision,
+        ))
+    except Exception:
+        return [], "live_coverage_incomplete"
+    if (len(snapshots) != 1
+            or getattr(snapshots[0], "domain", None) != "crypto"
+            or getattr(snapshots[0], "strategy_profile", None) != _BINANCE_LIVE_PROFILE
+            or getattr(snapshots[0], "platform", None) != request["stream_id"]):
+        return [], "live_coverage_incomplete"
+    coverage = getattr(snapshots[0], "interval_return_coverage", None)
+    if not isinstance(coverage, Mapping) or (
+        coverage.get("coverage_status") != "complete_requested_window"
+        or coverage.get("requested_window_complete") is not True
+        or coverage.get("requested_start_at") != request["required_start_at"]
+        or coverage.get("requested_end_at") != request["required_end_at"]
+        or coverage.get("return_start_at") != request["required_start_at"]
+        or coverage.get("return_end_at") != request["required_end_at"]
+        or type(coverage.get("return_count")) is not int
+        or coverage.get("return_count", 0) < 10
+    ):
+        return [], "live_coverage_incomplete"
+    return snapshots, None
+
+
+def _run_expected_monitor_profiles(run_monitor, domain, profiles, source_revision, *, env=None):
+    """Isolate the one live profile; keep unrelated research monitors independent."""
+    if domain != "crypto" or _BINANCE_LIVE_PROFILE not in profiles:
+        return list(run_monitor(domain, source_revision=source_revision)), None
+    snapshots = []
+    live_error = None
+    for profile in profiles:
+        if profile == _BINANCE_LIVE_PROFILE:
+            rows, live_error = _run_binance_live_profile_monitor(
+                run_monitor, source_revision=source_revision, env=env,
+            )
+            snapshots.extend(rows)
+            continue
+        try:
+            snapshots.extend(run_monitor(
+                domain, strategy_profile=profile, source_revision=source_revision,
+            ))
+        except Exception:
+            continue
+    return snapshots, live_error
+
+
+def _run_binance_live_profile_drift(snapshot, *, store=None):
+    """Qualify drift from this exact live snapshot; never reuse prior profile drift."""
+    try:
+        from quant_platform_kit.strategy_lifecycle.drift_detector import detect_drift
+        from quant_platform_kit.strategy_lifecycle.performance_store import PerformanceStore
+
+        if (getattr(snapshot, "domain", None) != "crypto"
+                or getattr(snapshot, "strategy_profile", None) != _BINANCE_LIVE_PROFILE
+                or not str(getattr(snapshot, "platform", "") or "").strip()):
+            return None, "live_drift_snapshot_unavailable"
+        store = store or PerformanceStore.from_env()
+        baseline = store.load_latest_backtest("crypto", _BINANCE_LIVE_PROFILE)
+        if (baseline is None
+                or getattr(baseline, "domain", None) != "crypto"
+                or getattr(baseline, "strategy_profile", None) != _BINANCE_LIVE_PROFILE):
+            return None, "live_drift_baseline_unavailable"
+        # Previous drift records have no live-stream identity and cannot carry
+        # severity into another stream. The direct detector still honors any
+        # qualification failure attached to this exact snapshot.
+        drift = detect_drift(snapshot, backtest=baseline)
+        if (
+            getattr(drift, "domain", None) != "crypto"
+            or getattr(drift, "strategy_profile", None) != _BINANCE_LIVE_PROFILE
+            or getattr(drift, "as_of", None) != getattr(snapshot, "as_of", None)
+            or getattr(drift, "source_revision", None) != getattr(snapshot, "source_revision", None)
+            or not _drift_is_qualified_for_monitoring(drift)
+        ):
+            return None, "live_drift_unavailable"
+        return drift, None
+    except Exception:
+        return None, "live_drift_unavailable"
+
+
+def _run_expected_monitor_drifts(run_drift_detection, domain, profiles, live_snapshot=None):
+    """Keep research drift calls intact and bind live drift to its verified snapshot."""
+    if domain != "crypto" or _BINANCE_LIVE_PROFILE not in profiles:
+        return list(run_drift_detection(domain)), None
+    results = []
+    live_error = None
+    for profile in profiles:
+        if profile == _BINANCE_LIVE_PROFILE:
+            if live_snapshot is None:
+                live_error = "live_drift_snapshot_unavailable"
+            else:
+                live_drift, live_error = _run_binance_live_profile_drift(live_snapshot)
+                if live_drift is not None:
+                    results.append(live_drift)
+            continue
+        try:
+            results.extend(run_drift_detection(domain, strategy_profile=profile))
+        except Exception:
+            continue
+    return results, live_error
+
+
 def _refresh_and_collect_drift(
     run_monitor, run_drift_detection, *, domains=DOMAINS, expected_profiles_by_domain=None,
+    monitor_reason_by_domain=None, drift_reason_by_domain=None,
 ):
     snapshots: dict[str, list[Any]] = {}
     results: dict[str, list[Any]] = {}
@@ -132,7 +278,9 @@ def _refresh_and_collect_drift(
                 if missing or unexpected:
                     errors.append(_artifact_status_error(
                         domain, code="monitor_data_unavailable",
-                        reason_code="profile_coverage_incomplete" if missing else "profile_coverage_unexpected",
+                        reason_code=(monitor_reason_by_domain or {}).get(domain)
+                        if missing and (monitor_reason_by_domain or {}).get(domain)
+                        else "profile_coverage_incomplete" if missing else "profile_coverage_unexpected",
                     ))
                 if not domain_snapshots:
                     continue
@@ -158,7 +306,9 @@ def _refresh_and_collect_drift(
                 if missing or unexpected:
                     errors.append(_artifact_status_error(
                         domain, code="drift_data_unavailable",
-                        reason_code="profile_coverage_incomplete" if missing else "profile_coverage_unexpected",
+                        reason_code=(drift_reason_by_domain or {}).get(domain)
+                        if missing and (drift_reason_by_domain or {}).get(domain)
+                        else "profile_coverage_incomplete" if missing else "profile_coverage_unexpected",
                     ))
             results[domain] = domain_drifts
         except Exception as exc:
@@ -1304,17 +1454,66 @@ def main() -> int:
     expected_profiles, source_revisions, _source_as_of, artifact_errors_by_domain, _not_configured = _load_expected_coverage(root)
     ready_domains = tuple(expected_profiles)
     artifact_errors = list(artifact_errors_by_domain.values())
+    live_monitor_reasons: dict[str, str] = {}
+    live_drift_reasons: dict[str, str] = {}
+    live_snapshot_by_domain: dict[str, Any] = {}
 
     def run_monitor_with_revision(domain: str):
         # QPK #615 requires observation provenance; use the trusted artifact head_sha.
-        return run_monitor(domain, source_revision=source_revisions[domain])
+        snapshots, live_error = _run_expected_monitor_profiles(
+            run_monitor,
+            domain,
+            expected_profiles.get(domain, ()),
+            source_revisions[domain],
+        )
+        if live_error:
+            live_monitor_reasons[domain] = live_error
+        elif domain == "crypto" and _BINANCE_LIVE_PROFILE in expected_profiles.get(domain, ()):
+            live_snapshot_by_domain[domain] = next(
+                (row for row in snapshots if getattr(row, "strategy_profile", None) == _BINANCE_LIVE_PROFILE),
+                None,
+            )
+        return snapshots
+
+    def run_expected_drift(domain: str):
+        drifts, live_error = _run_expected_monitor_drifts(
+            run_drift_detection,
+            domain,
+            expected_profiles.get(domain, ()),
+            live_snapshot_by_domain.get(domain),
+        )
+        if live_error:
+            live_drift_reasons[domain] = live_error
+        return drifts
 
     snapshot_results, drift_results, lifecycle_errors = _refresh_and_collect_drift(
         run_monitor_with_revision,
-        run_drift_detection,
+        run_expected_drift,
         domains=ready_domains,
         expected_profiles_by_domain=expected_profiles,
+        monitor_reason_by_domain=live_monitor_reasons,
+        drift_reason_by_domain=live_drift_reasons,
     )
+    direct_live_score_rows: dict[str, dict[str, Any]] = {}
+    live_drift_by_identity = {
+        (domain, drift.strategy_profile): drift
+        for domain, drifts in drift_results.items()
+        for drift in drifts
+    }
+    for domain, snapshot in live_snapshot_by_domain.items():
+        drift = live_drift_by_identity.get((domain, _BINANCE_LIVE_PROFILE))
+        if snapshot is None or drift is None:
+            continue
+        try:
+            from quant_platform_kit.strategy_lifecycle.strategy_health_score import compute_health_score
+
+            score = compute_health_score(snapshot, drift=drift).to_dict()
+            if score.get("domain") == domain and score.get("strategy_profile") == _BINANCE_LIVE_PROFILE:
+                direct_live_score_rows[domain] = score
+        except Exception:
+            lifecycle_errors.append(_artifact_status_error(
+                domain, code="monitor_data_unavailable", reason_code="live_health_score_unavailable",
+            ))
     data_errors = artifact_errors + lifecycle_errors
     build_dashboard(output_dir=str(dash_dir), output_format="json")
 
@@ -1322,6 +1521,29 @@ def main() -> int:
     json_path = dash_dir / "strategy_health_dashboard.json"
     collector_payload_invalid = False
     from build_dashboard_snapshot import build_payload
+
+    if _BINANCE_LIVE_PROFILE in expected_profiles.get("crypto", ()):
+        try:
+            raw_dashboard = json.loads(json_path.read_text(encoding="utf-8"))
+            raw_rows = raw_dashboard.get("strategies") if isinstance(raw_dashboard, dict) else None
+            if not isinstance(raw_rows, list):
+                raise ValueError("dashboard_data_unavailable")
+            raw_rows = [
+                row for row in raw_rows
+                if not (isinstance(row, dict) and row.get("domain") == "crypto"
+                        and row.get("strategy_profile") == _BINANCE_LIVE_PROFILE)
+            ]
+            if "crypto" in direct_live_score_rows:
+                raw_rows.append(direct_live_score_rows["crypto"])
+            raw_dashboard["strategies"] = raw_rows
+            raw_dashboard["strategy_count"] = len(raw_rows)
+            raw_dashboard["summary"] = {
+                status: sum(isinstance(row, dict) and row.get("status") == status for row in raw_rows)
+                for status in ("healthy", "watch", "review", "critical", "unavailable")
+            }
+            json_path.write_text(json.dumps(raw_dashboard, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            collector_payload_invalid = True
 
     normalized_path = out_dir / "strategy_health_dashboard.v1.json"
     review_dir = Path(os.environ.get("QUANT_REVIEW_DIR") or root / "data" / "strategy-reviews")

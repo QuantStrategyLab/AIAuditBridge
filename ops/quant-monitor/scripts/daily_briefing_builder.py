@@ -42,8 +42,7 @@ def _status_counts(strategies: list[dict[str, Any]]) -> dict[str, int]:
     return counts
 
 
-def _load_expected_coverage(root: Path):
-    """Return trusted artifact coverage, source timestamp, and domain errors."""
+def _health_cycle_module():
     spec = importlib.util.spec_from_file_location(
         "quant_monitor_health_cycle_for_daily_briefing",
         Path(__file__).with_name("health_cycle.py"),
@@ -52,6 +51,12 @@ def _load_expected_coverage(root: Path):
         raise RuntimeError("health_cycle_validation_unavailable")
     health_cycle = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(health_cycle)
+    return health_cycle
+
+
+def _load_expected_coverage(root: Path):
+    """Return trusted artifact coverage, source timestamp, and domain errors."""
+    health_cycle = _health_cycle_module()
 
     return health_cycle._load_expected_coverage(root, domains=DOMAINS)
 
@@ -123,8 +128,51 @@ def main() -> int:
 
     expected_profiles, source_revisions, source_as_of, artifact_errors, not_configured = _load_expected_coverage(root)
     ready_domains = tuple(domain for domain in DOMAINS if domain in expected_profiles)
-    drift_results, drift_errors = _collect_drift_results(run_drift_detection, domains=ready_domains)
+    live_coverage_errors: dict[str, str] = {}
+    live_drift_errors: dict[str, str] = {}
+    live_snapshots: list[Any] = []
+    health_cycle = None
+    live_profile = "crypto_live_pool_rotation"
+    if live_profile in expected_profiles.get("crypto", []):
+        try:
+            from quant_platform_kit.strategy_lifecycle.performance_monitor import run_monitor
+
+            health_cycle = _health_cycle_module()
+            live_snapshots, live_error = health_cycle._run_binance_live_profile_monitor(
+                run_monitor, source_revision=source_revisions["crypto"],
+            )
+            if live_error:
+                live_coverage_errors["crypto"] = live_error
+        except Exception:
+            live_coverage_errors["crypto"] = "live_coverage_incomplete"
+
+    def run_expected_drift(domain: str):
+        if domain != "crypto" or live_profile not in expected_profiles.get(domain, []):
+            return run_drift_detection(domain)
+        if health_cycle is None:
+            live_drift_errors[domain] = "live_drift_snapshot_unavailable"
+            results = []
+            for profile in expected_profiles[domain]:
+                if profile == live_profile:
+                    continue
+                try:
+                    results.extend(run_drift_detection(domain, strategy_profile=profile))
+                except Exception:
+                    continue
+            return results
+        drifts, live_error = health_cycle._run_expected_monitor_drifts(
+            run_drift_detection,
+            domain,
+            expected_profiles[domain],
+            live_snapshots[0] if live_snapshots and domain not in live_coverage_errors else None,
+        )
+        if live_error:
+            live_drift_errors[domain] = live_error
+        return drifts
+
+    drift_results, drift_errors = _collect_drift_results(run_expected_drift, domains=ready_domains)
     drift_by_key: dict[tuple[str, str], float] = {}
+    drift_result_by_key: dict[tuple[str, str], Any] = {}
     for domain, domain_results in drift_results.items():
         for drift in domain_results:
             profile = getattr(drift, "strategy_profile", None)
@@ -138,6 +186,7 @@ def main() -> int:
                 drift_errors[domain] = {"code": "drift_data_unavailable", "error_type": "ValueError"}
                 continue
             drift_by_key[key] = numeric_score
+            drift_result_by_key[key] = drift
 
     with tempfile.TemporaryDirectory() as tmp:
         dashboard_error: dict[str, str] | None = None
@@ -151,6 +200,30 @@ def main() -> int:
             strategies_raw, dashboard_errors_by_domain, dashboard_error = _valid_dashboard_rows(
                 dashboard_payload, today=now_utc.date(),
             )
+            # The global dashboard's latest profile snapshot is not keyed by
+            # live stream. Replace it with the exact verified monitor result.
+            strategies_raw = [
+                row for row in strategies_raw
+                if not (row["domain"] == "crypto" and row["strategy_profile"] == live_profile)
+            ]
+            if (live_snapshots and "crypto" not in live_coverage_errors
+                    and "crypto" not in live_drift_errors):
+                try:
+                    from quant_platform_kit.strategy_lifecycle.strategy_health_score import compute_health_score
+
+                    live_score = compute_health_score(
+                        live_snapshots[0], drift=drift_result_by_key.get(("crypto", live_profile)),
+                    )
+                    verified_rows, verified_errors, verified_error = _valid_dashboard_rows(
+                        {"strategies": [live_score.to_dict()]}, today=now_utc.date(),
+                    )
+                    if (verified_error or verified_errors or len(verified_rows) != 1
+                            or verified_rows[0]["strategy_profile"] != live_profile):
+                        live_coverage_errors["crypto"] = "live_coverage_incomplete"
+                    else:
+                        strategies_raw.extend(verified_rows)
+                except Exception:
+                    live_coverage_errors["crypto"] = "live_coverage_incomplete"
         except Exception as exc:
             strategies_raw = []
             dashboard_error = {"code": "dashboard_data_unavailable", "error_type": type(exc).__name__}
@@ -190,6 +263,18 @@ def main() -> int:
         domain_errors = []
         if domain in artifact_errors:
             domain_errors.append({key: value for key, value in artifact_errors[domain].items() if key != "domain"})
+        if domain in live_coverage_errors:
+            domain_errors.append({
+                "code": "monitor_data_unavailable",
+                "error_type": "RuntimeError",
+                "reason_code": live_coverage_errors[domain],
+            })
+        if domain in live_drift_errors:
+            domain_errors.append({
+                "code": "drift_data_unavailable",
+                "error_type": "RuntimeError",
+                "reason_code": live_drift_errors[domain],
+            })
         if dashboard_error and domain in expected_profiles:
             domain_errors.append(dashboard_error)
         if domain in dashboard_errors_by_domain:

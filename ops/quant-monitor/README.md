@@ -37,6 +37,21 @@ GitHub API 限流或上游不可用时，`status.json` 会记录脱敏的 `reaso
 `lifecycle-run.json`。单次运行缺失或失败会保存对应 UTC 日的未知屏障；GitHub
 列表/API 不可用时只把 `crypto` 写成不可用并保留其他 domain。没有这两个配置时不访问远端。
 
+health 与 daily 对 Binance live profile 的区间消费另需显式设置
+`BINANCE_LIVE_MONITOR_STREAM_ID`、`BINANCE_LIVE_MONITOR_REQUIRED_START_AT` 和
+`BINANCE_LIVE_MONITOR_REQUIRED_END_AT`。stream 必须与同步写入的 `lifecycle_stream_id`
+完全一致；两端时间都必须是 UTC ISO timestamp，并精确对应受信 checkpoint。同步器的
+`BINANCE_LIVE_RUNS_START_AT` 是 GitHub run 查询下限，不能代替 coverage 起点；当前时间、
+缺省 `binance` 或研究 CSV 也不能补齐目标值。缺项、格式错误、stream 不存在、coverage
+不完整或不足原有 10 个有效日收益时，只有 `crypto_live_pool_rotation` 标为不可用；其他
+research profile 与 domain 按原路径继续。health 和 daily 使用同一组下游窗口配置并要求
+QPK `complete_requested_window`；无配置时不猜窗口，也不生成 live-ready 结果。
+当前固定 QPK 运行器没有为该 live 窗口提供可比较 baseline coverage：其 snapshot 标记
+`not_comparable_interval_coverage`，公开 `detect_drift(snapshot, backtest=...)` 也会保留
+不可评估状态。health 与 daily 因此不输出 live drift/health score；既有 drift 记录不含
+stream 身份，不能代替本次结果。只有出现可核验的匹配 baseline-coverage 输入后，才可评估
+该 profile 的 drift；研究 profile 继续使用原路径。配置读回和真实周期验收仍是实际采用条件。
+
 ## Telegram（量化哨兵）
 
 定时 AI 消费者的失败结果附加固定枚举 `failure_stage` / `failure_category`，保留原
@@ -251,6 +266,13 @@ Binance 单次同步最多近 7 日。7 个日 checkpoint 只有 6 个有效日�
 profile，health 的 domain 非空检查不报缺数，normalized dashboard 仍为 `ready`；
 同周期日报按可信 `status.json` 的 expected profiles 检查，正确标记缺 live profile /
 `unavailable`，规则路由为数据不可用 Telegram。这个差异是源码复现，不证明线上曾发生。
+
+2026-10-08 DATA-03 caller 接线：仅当受信 expected-profile 清单包含
+`crypto_live_pool_rotation` 时，health 和 daily 才按上述三个显式配置调用固定 QPK live
+stream/window API；消费端不会从数据样本推断目标窗口。未配置或窗口未完整覆盖时，该
+profile 不复用旧 snapshot、research CSV 或其他 stream，crypto 报告带不可用原因，同时
+保留独立 research profiles。配置只是消费请求，不证明 AAB 服务已安装这些变量、source
+已有相应 checkpoint 或真实窗口已通过；这些条件须分别读回和验收。
 
 工程阶段已合并：[AAB #314](https://github.com/QuantStrategyLab/AIAuditBridge/pull/314)
 正常合并为 `59cc6dded575ca28d9e23a9bd7c2d2c7e6592e58`；
