@@ -19,7 +19,6 @@
 
 未完成真实登录，不能据此认定 OAuth 回调、GitHub 组织准入或新助手连接已经验收。云端部署存在也不能证明部署源码与本地基线完全相同。
 
-GitHub 仓库配置名称显示 AIAuditBridge 仍使用 `CODEX_AUDIT_SERVICE_*` 和既有同步令牌；本次检查未发现仓库层面的 Auth0、Keycloak 或 Cloudflare Access 配置名称。AIGateway 仓库层面变量及秘密名称列表为空。这个范围不包含组织级秘密、其他项目或全部云端服务，不能推出账户内不存在其他身份服务。
 
 ## 对新架构的影响
 
