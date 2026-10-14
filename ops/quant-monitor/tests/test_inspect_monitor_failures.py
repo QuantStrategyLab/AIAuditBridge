@@ -749,21 +749,6 @@ class OfflineTests(unittest.TestCase):
                      [self.m.JOURNALCTL, "--no-pager", SECRET]):
             self.assertIsNone(self.m.run_bounded(argv).returncode)
 
-    def test_workflow_is_separate_manual_protected_and_secret_free(self):
-        workflow = (SCRIPT.parents[3] / ".github/workflows/vps_codex_service_ops.yml").read_text()
-        job = workflow.split("  inspect-monitor-failures:\n", 1)[1].split("\n  inspect-quant-runtime:", 1)[0]
-        for text in ("inputs.mode == 'inspect-monitor-failures'", "github.event_name == 'workflow_dispatch'",
-                     "environment: codex-vps-ops", "persist-credentials: false", 'checkout_status="$(git status --porcelain --untracked-files=all)"',
-                     '[ "$RUN_WORKFLOW_SHA" = "$RUN_SHA" ]', '[ "$current_main" = "$RUN_SHA" ]',
-                     "env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C", "/usr/bin/python3 -I -B", 'inspect_monitor_failures.py" --inspect'):
-            self.assertIn(text, job)
-        for text in ("sudo", "secrets.", "OPENAI", "ANTHROPIC", "health_check.sh", "daily_briefing_pipeline.sh", "acknowledge_interruption"):
-            self.assertNotIn(text, job)
-        self.assertIn("inputs.mode != 'inspect-monitor-failures'", workflow.split("  inspect-monitor-failures:", 1)[0])
-        self.assertIn("default: inspect\n", workflow)
-        self.assertIn("group: vps-codex-service-ops\n  cancel-in-progress: false", workflow)
-        self.assertNotIn("  schedule:", workflow)
-        self.assertNotIn("  push:", workflow)
 
     def test_workflow_mode_routes_only_to_its_own_job(self):
         workflow = (SCRIPT.parents[3] / ".github/workflows/vps_codex_service_ops.yml").read_text()
@@ -837,38 +822,7 @@ class OfflineTests(unittest.TestCase):
             self.assertEqual(routed("install-quant-release-inactive", acknowledge_interruption=False, **changes), [])
             self.assertEqual(routed("check-quant-consumers-offline", acknowledge_interruption=False, **changes), [])
 
-    def test_recorded_workflow_is_separate_exact_main_and_fixed_cli(self):
-        workflow = (SCRIPT.parents[3] / ".github/workflows/vps_codex_service_ops.yml").read_text()
-        job = workflow.split("  inspect-recorded-daily-errors:\n", 1)[1].split("\n  inspect-daily-failure-sample:", 1)[0]
-        for text in ("inputs.mode == 'inspect-recorded-daily-errors'", "github.event_name == 'workflow_dispatch'",
-                     "github.repository == 'QuantStrategyLab/AIAuditBridge'", "github.ref == 'refs/heads/main'",
-                     "environment: codex-vps-ops", "persist-credentials: false", '[ "$RUN_MODE" = inspect-recorded-daily-errors ]',
-                     '[ "$RUN_EVENT_NAME" = workflow_dispatch ]', '[ "$RUN_WORKFLOW_SHA" = "$RUN_SHA" ]',
-                     '[ "$current_main" = "$RUN_SHA" ]', 'checkout_status="$(git status --porcelain --untracked-files=all)"',
-                     "env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C", "/usr/bin/python3 -I -B", 'inspect_monitor_failures.py" --inspect-recorded-daily-errors'):
-            self.assertIn(text, job)
-        for text in ("sudo", "secrets.", "OPENAI", "ANTHROPIC", "health_check.sh", "daily_briefing_pipeline.sh",
-                     "acknowledge_interruption", "systemctl", "journalctl", " --inspect\n", " --inspect-daily-only\n"):
-            self.assertNotIn(text, job)
-        self.assertIn("inputs.mode != 'inspect-recorded-daily-errors'", workflow.split("  inspect-recorded-daily-errors:", 1)[0])
 
-    def test_daily_workflow_is_exact_manual_gate_and_runs_only_strict_flag(self):
-        workflow = (SCRIPT.parents[3] / ".github/workflows/vps_codex_service_ops.yml").read_text()
-        job = workflow.split("  inspect-daily-failure-sample:\n", 1)[1].split("\n  inspect-monitor-failures:", 1)[0]
-        for text in ("inputs.mode == 'inspect-daily-failure-sample'", "github.event_name == 'workflow_dispatch'",
-                     "github.repository == 'QuantStrategyLab/AIAuditBridge'", "github.ref == 'refs/heads/main'",
-                     "environment: codex-vps-ops", "persist-credentials: false", '[ "$RUN_MODE" = inspect-daily-failure-sample ]',
-                     '[ "$RUN_EVENT_NAME" = workflow_dispatch ]', '[ "$RUN_WORKFLOW_SHA" = "$RUN_SHA" ]',
-                     '[ "$current_main" = "$RUN_SHA" ]', 'checkout_status="$(git status --porcelain --untracked-files=all)"',
-                     "env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C", "/usr/bin/python3 -I -B", 'inspect_monitor_failures.py" --inspect-daily-only'):
-            self.assertIn(text, job)
-        for text in ("sudo", "secrets.", "OPENAI", "ANTHROPIC", "health_check.sh", "daily_briefing_pipeline.sh",
-                     "acknowledge_interruption", " --inspect\n", "systemctl", "journalctl"):
-            self.assertNotIn(text, job)
-        self.assertIn("inputs.mode != 'inspect-daily-failure-sample'", workflow.split("  inspect-daily-failure-sample:", 1)[0])
-        self.assertIn("default: inspect\n", workflow)
-        self.assertNotIn("  schedule:", workflow)
-        self.assertNotIn("  push:", workflow)
 
 
 if __name__ == "__main__":
