@@ -22,6 +22,7 @@ jobs:
           terraform -chdir=deploy/cloud-jobs fmt -check
           terraform -chdir=deploy/cloud-jobs init -backend=false -input=false -lockfile=readonly
           terraform -chdir=deploy/cloud-jobs validate
+          terraform -chdir=deploy/cloud-jobs test
       - name: Build isolated notification/monitor image without publishing
         run: docker build --build-arg PYTHON_IMAGE=python:3.12-slim -f deploy/cloud-jobs/Dockerfile -t cloud-job-ci .
       - name: Verify container entry without cloud access
