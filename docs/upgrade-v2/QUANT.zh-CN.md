@@ -1,6 +1,6 @@
 # QuantAIService 2.0
 
-本次升级的通用任务服务由 `personal-ai-service==2.0.2` 提供，QuantAIService 只保存 Quant 项目身份准入和部署配置。新入口是 `quant-ai-service`；客户端使用 `ai_service.client.TaskClient` 的 submit、get、message、cancel、wait，不提供旧 `AiGatewayClient` API 兼容层。
+本次升级的通用任务服务由 `personal-ai-service==2.0.7` 提供，QuantAIService 只保存 Quant 项目身份准入和部署配置。新入口是 `quant-ai-service`；客户端使用 `ai_service.client.TaskClient` 的 submit、get、message、cancel、wait，不提供旧 `AiGatewayClient` API 兼容层。
 
 示例 `config/quant.example.json` 默认关闭，只有 synthetic 项目身份与 placeholder。真实连接需要批准云端的 HTTPS 入口、已有 OAuth 身份提供方、助手独立连接身份，以及 Dot 订阅或 Grok Routine Webhook。当前 Quant 私有 Dot 插件已登录并绑定 QuantStrategyLab/UsEquityStrategies，真实订阅挑战、直接读取/领取/回传公开合成任务已通过；自动事件触发尚未验收，未启用按量付费或运行真实业务任务。
 
@@ -35,3 +35,17 @@ Quant v2.0.2 的准确源码为 `8e771462fd14e4552d6add55b2920f6bd20dc0ee`，共
 ## 2.0.3 公共 CI 边界
 
 公共 CI 不再检出 private 核心或使用其只读 deploy key，只构建 wrapper 和检查工作流。共享服务与 Quant 集成移到 private AIGateway 的 quant-integration.yml，以人工批准的准确 Quant/QPK SHA 验证。核心依赖固定为 personal-ai-service 2.0.3。旧 deploy key 尚未回收，新的公共工作流不消费它。
+
+
+## 2.0.7 核心依赖绑定
+
+Quant wrapper 真实版本为 2.0.7，严格依赖 `personal-ai-service==2.0.7`，采用共享核心的
+Events refresh 短期双签实现。两个 `quant_ai_service` 启动/身份守卫源码文件保持原字节；
+本次只更新发行版本和核心依赖绑定，不增交易、部署、任务提交或新模型权限。
+
+公开 AAB CI 沿原规则构建未发布 wrapper，不下载私有核心；其中 wheel build 的
+`--no-deps` 不等于可跳过运行安装的依赖验证。联合采用必须取得已审的私有 core 2.0.7
+准确 release 源 SHA、artifact/hash，离线安装后强制 `pip check`，不能用同名公共包、
+浮动 main、旧 core 2.0.6 或伪造版本替代。本轮已审核心源码为
+`9aeaa93e61856facd01f905f5f5466bd93acfe1f`；正式 artifact/hash 由发布者提供，此说明不
+声称 Quant 候选已正式发布、生产采用或首次原生订阅通过。
