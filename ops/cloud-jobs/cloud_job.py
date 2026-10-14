@@ -133,7 +133,7 @@ def deliver(store, state_uri, event, chat, send):
     return outcome
 
 
-def notify(config, store, *, accepted=False, send=telegram_target_outcome):
+def notify(config, store, *, accepted=False, send=telegram_target_outcome, now=None):
     payload, _ = store.read(config['projection_uri'])
     prepared = prepare_runtime_digest(payload)
     # Bind the exact frozen projection, observation, day and paper target scope.
@@ -149,6 +149,10 @@ def notify(config, store, *, accepted=False, send=telegram_target_outcome):
         raise Refused('projection_binding')
     if not accepted:
         return {'ok': True, 'mode': 'preview', 'outcome': 'not_sent'}
+    age_limit = config.get('max_age_seconds')
+    now = now or datetime.now(timezone.utc)
+    if type(age_limit) is not int or not 60 <= age_limit <= 172800 or not 0 <= (now - observed).total_seconds() <= age_limit:
+        raise Refused('stale_projection')
     token = os.environ.get('TELEGRAM_TOKEN', '')
     chat = config['chat_id']
     if not token or not isinstance(chat, str) or not re.fullmatch('-?[0-9]+', chat):

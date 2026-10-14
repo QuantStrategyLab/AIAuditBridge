@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 import importlib.util
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location('cloud_job', Path(__file__).parents[2] / 'ops/cloud-jobs/cloud_job.py')
 job = importlib.util.module_from_spec(spec)
@@ -95,6 +96,29 @@ class DeliveryTests(unittest.TestCase):
         def unavailable(url):
             raise OSError()
         self.assertFalse(job.monitor(cfg, Store(), probe=unavailable)['ok'])
+
+    def test_notify_preview_never_sends_and_stale_send_is_refused(self):
+        config = {
+            'projection_uri': 'gs://synthetic/runtime_daily/longbridge/paper/2026-10-15/20261015T000000000000Z.json',
+            'day': '2026-10-15', 'expected_target_keys': ['lb-svc|rot|paper'],
+            'max_age_seconds': 900,
+        }
+        prepared = {'ok': True, 'sendable': True, 'observed_at': '2026-10-15T00:00:00Z',
+                    'business_date': '2026-10-15', 'target_scope': ['lb-svc|rot|paper']}
+        with patch.object(job, 'prepare_runtime_digest', return_value=prepared):
+            outcome = job.notify(config, Store(), send=lambda **kw: self.fail('preview send'))
+            self.assertEqual(outcome, {'ok': True, 'mode': 'preview', 'outcome': 'not_sent'})
+            with self.assertRaises(job.Refused):
+                job.notify(config, Store(), accepted=True, now=datetime(2026, 10, 16, tzinfo=timezone.utc))
+            config['day'] = '2026-10-14'
+            with self.assertRaises(job.Refused):
+                job.notify(config, Store())
+
+    def test_delivery_preserves_migrated_diagnosis_state(self):
+        store = Store()
+        store.state['operational_diagnosis_pending'] = {'fixture': 'unknown'}
+        self.assertEqual(job.deliver(store, 'state', EVENT, '123', lambda: 'sent'), 'sent')
+        self.assertEqual(store.state['operational_diagnosis_pending'], {'fixture': 'unknown'})
 
     def test_gcs_reads_pinned_generation_and_writes_compare_and_swap(self):
         calls = []

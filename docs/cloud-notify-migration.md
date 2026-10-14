@@ -31,7 +31,8 @@ not permission to grant more access.
 
 Create approved versioned GCS config/heartbeat objects before cutover. Notify
 config: projection_uri, day, expected_target_keys (paper only), state_uri,
-chat_id, heartbeat_uri. Preserve the old source commit and projection/day/target
+chat_id, heartbeat_uri, max_age_seconds (60..172800). Sending refuses
+a stale/future projection; historical preview is never a send heartbeat. Preserve the old source commit and projection/day/target
 binding during the synthetic comparison. The deployed replacement image must
 contain the accepted notification code; the deployment digest is an explicit
 owner input. The existing frozen CLI's object/observation/paper checks and
