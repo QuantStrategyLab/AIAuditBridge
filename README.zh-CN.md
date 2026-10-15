@@ -1,6 +1,8 @@
 # QuantAIService
 
-QuantAIService 2.0 保存 Quant 项目准入策略，复用 PersonalAIService 的通用 API / 常驻助手任务服务。策略 prompt、证据、数字执行和采用条件由调用方管理。
+QuantAIService 独立维护按项目隔离的完整任务运行时、依赖及场景模板。策略提示词、数据验证、执行和结果采用由业务仓库负责。
+
+见[运行时与依赖基线](docs/runtime-baseline.zh-CN.md)。
 
 当前为 AIAuditBridge 的本地未发布升级。新命令为 `quant-ai-service`，示例配置默认关闭。旧 VPS 模型进程、SDK 和 V1 接口已退役。
 
