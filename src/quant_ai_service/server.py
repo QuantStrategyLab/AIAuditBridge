@@ -1,5 +1,5 @@
 """Quant deployment binds project identities; strategy rules stay in callers."""
-from ai_service.server import main as shared_main
+from ai_service.server import main as runtime_main
 
 
 def validate_configuration(config):
@@ -16,7 +16,7 @@ def validate_configuration(config):
 
 
 def main():
-    shared_main(configuration_guard=validate_configuration)
+    runtime_main(configuration_guard=validate_configuration)
 
 
 if __name__ == '__main__':
