@@ -113,6 +113,16 @@ class MCPLoggingTests(unittest.TestCase):
                 self.assertTrue(record['response_written'])
                 self.assertEqual((record['result'], record['auth_decision'], record['reason_code']), ('ok', 'allowed', 'granted'))
 
+    def test_owner_worker_logs_preserve_scope_diagnostics_without_scope_names(self):
+        project = self.grant.pop('project')
+        self.grant['owner'] = 'private-owner-marker'
+        self.app.runtime.policies['private-owner-marker/future'] = self.app.runtime.policies.pop(project)
+        self.private.extend(['private-owner-marker', 'private-owner-marker/future'])
+        _, payload, records = self.request()
+        self.assertEqual(len(payload['result']['tools']), 3)
+        self.assertEqual(records[0]['effective_scopes'], ['tasks:read', 'tasks:work'])
+        self.assertEqual(records[0]['azp'], 'example-client')
+
     def test_events_provider_mismatch_and_absence_explain_three_tools(self):
         for events in [None, SimpleNamespace(provider_name=self.private[2])]:
             self.app.events = events

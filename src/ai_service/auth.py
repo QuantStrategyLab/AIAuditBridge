@@ -25,13 +25,71 @@ class ProjectAdmissionError(PermissionError):
         self.principal = principal
 
 
+def valid_owner(owner):
+    return isinstance(owner, str) and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', owner) is not None
+
+
+def project_belongs_to(project, owner):
+    return (isinstance(project, str) and valid_owner(owner)
+            and re.fullmatch(re.escape(owner) + r'/[A-Za-z0-9_.-]+', project) is not None
+            and project.split('/')[1] not in {'.', '..'})
+
+
+def grant_projects(grant):
+    """Validate a legacy selector, explicit list, or one exact owner worker scope."""
+    if sum(name in grant for name in ('project', 'projects', 'owner')) != 1:
+        raise ValueError('use exactly one project, projects list or owner')
+    if 'project' in grant:
+        project = grant['project']
+        if not isinstance(project, str) or not project:
+            raise ValueError('a project is required')
+        return frozenset({project})
+    if 'owner' in grant:
+        if not valid_owner(grant['owner']):
+            raise ValueError('worker owner must be an exact owner name')
+        projects = []
+    else:
+        projects = grant['projects']
+        if (not isinstance(projects, list) or not projects
+                or any(not isinstance(project, str)
+                       or re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', project) is None
+                       for project in projects)):
+            raise ValueError('an explicit projects list is required')
+        if len(set(projects)) != len(projects) or len({project.split('/')[0] for project in projects}) != 1:
+            raise ValueError('worker projects must be unique and belong to one owner')
+    scopes = set(grant['scopes'])
+    if (grant['issuer'] == 'https://token.actions.githubusercontent.com'
+            or not isinstance(grant.get('provider'), str) or not grant['provider']
+            or not isinstance(grant.get('claims'), dict)
+            or not isinstance(grant['claims'].get('azp'), str) or not grant['claims']['azp'].strip()
+            or 'tasks:work' not in scopes or scopes - {'tasks:read', 'tasks:work', 'events:subscribe'}):
+        raise ValueError('multi-project scope requires a connection-bound worker without submit permission')
+    return frozenset(projects)
+
+
+def grant_allows_project(grant, project):
+    projects = grant_projects(grant)
+    return project_belongs_to(project, grant['owner']) if 'owner' in grant else project in projects
+
+
 @dataclass(frozen=True)
 class Principal:
     identity: str
-    project: str
+    project: str | None
     scopes: frozenset[str]
     provider: str | None = None
     diagnostics: AuthDiagnostics | None = None
+    projects: frozenset[str] = frozenset()
+    owner: str | None = None
+
+    @property
+    def allowed_projects(self):
+        return self.projects or (frozenset({self.project}) if self.project is not None else frozenset())
+
+    def allows_project(self, project):
+        if self.owner is not None:
+            return project_belongs_to(project, self.owner)
+        return project in self.allowed_projects
 
 
 class JWTAuthorizer:
@@ -43,6 +101,7 @@ class JWTAuthorizer:
             if config.get('require_scope', True) is not True and issuer != 'https://token.actions.githubusercontent.com':
                 raise ValueError('scope claims are required outside GitHub workload identity')
         for grant in grants:
+            grant_projects(grant)
             if grant['issuer'] == 'https://token.actions.githubusercontent.com':
                 constraints = grant.get('claims', {})
                 if 'pull_request_workflow' in grant:
@@ -156,14 +215,17 @@ class JWTAuthorizer:
                 if not isinstance(scope, str):
                     raise ValueError('invalid scopes')
                 scopes.intersection_update(scope.split())
+            projects = grant_projects(grant)
+            project = next(iter(projects)) if len(projects) == 1 else None
             diagnostics = AuthDiagnostics(azp, diagnostics.grant_scopes, token_scopes, scope_names(scopes))
-            return Principal(grant['identity'], grant['project'], frozenset(scopes), grant.get('provider'), diagnostics)
+            return Principal(grant['identity'], project, frozenset(scopes), grant.get('provider'),
+                             diagnostics=diagnostics, projects=projects, owner=grant.get('owner'))
         except Exception:
             # Never expose JWT, issuer response, keys or raw validation errors.
             raise AuthenticationError('bearer token rejected', reason_code=reason, diagnostics=diagnostics) from None
 
     def can_access_events(self, identity, project, provider):
-        return any(grant['identity'] == identity and grant['project'] == project
+        return any(grant['identity'] == identity and grant_allows_project(grant, project)
                    and grant.get('provider') == provider and 'events:subscribe' in grant['scopes']
                    for grant in self.grants)
 

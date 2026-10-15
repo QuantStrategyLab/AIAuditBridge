@@ -6,6 +6,7 @@ import fcntl
 import json
 import os
 import threading
+from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -13,7 +14,8 @@ from urllib.parse import parse_qs, urlsplit
 
 from jsonschema import ValidationError
 
-from .auth import AuthenticationError, JWTAuthorizer, ProjectAdmissionError
+from .auth import (AuthenticationError, JWTAuthorizer, ProjectAdmissionError, grant_projects,
+                   project_belongs_to, valid_owner)
 from .mcp_logging import AuthDiagnostics, MCPLog, METHODS, log_level
 from .events import CallbackEndpointError, DotEventProvider, EventSubscriptions
 from .inference import ChatGPTPlanProvider
@@ -57,9 +59,17 @@ class Application:
 
     def authenticate(self, headers):
         principal = self.auth.authenticate(headers.get("Authorization"))
-        if principal.project not in self.runtime.policies:
+        if not any(principal.allows_project(project) for project in self.runtime.policies):
             raise ProjectAdmissionError(principal)
         return principal
+
+    def project_context(self, principal, project=None):
+        selected = principal.project if project is None else project
+        if not isinstance(selected, str) or not principal.allows_project(selected):
+            raise PermissionError('an authorized project must be selected')
+        if selected not in self.runtime.policies:
+            raise PermissionError('project admission revoked')
+        return replace(principal, project=selected)
 
     def dispatch(self, method, target, headers, body=None, *, principal=None):
         path = urlsplit(target).path
@@ -72,6 +82,10 @@ class Application:
         if path == '/mcp' and method == 'GET':
             # This stateless endpoint does not offer an SSE listening stream.
             return 405, {'error': 'method_not_allowed'}
+        selectors = parse_qs(urlsplit(target).query, keep_blank_values=True).get('project', [None])
+        if len(selectors) != 1:
+            raise ValueError('select exactly one project')
+        principal = self.project_context(principal, selectors[0])
         if path == '/v1/tasks' and method == 'POST':
             self.require(principal, 'tasks:submit')
             return 202, self.public_record(self.runtime.submit(principal.project, headers.get('Idempotency-Key'), body))
@@ -158,14 +172,12 @@ class Application:
                 elif method == 'events/subscribe':
                     if not isinstance(params.get('arguments'), dict):
                         raise ValueError('project filter is required')
-                    if params['arguments'].get('project') != principal.project:
-                        raise PermissionError('subscription filter is outside the authenticated project')
+                    self.project_context(principal, params['arguments'].get('project'))
                     result = self.events.subscribe(principal.identity, params)
                 else:
                     if not isinstance(params.get('arguments'), dict):
                         raise ValueError('project filter is required')
-                    if params['arguments'].get('project') != principal.project:
-                        raise PermissionError('subscription filter is outside the authenticated project')
+                    self.project_context(principal, params['arguments'].get('project'))
                     result = self.events.unsubscribe_request(principal.identity, params)
             else:
                 return {'jsonrpc': '2.0', 'id': identifier, 'error': {'code': -32601, 'message': 'method not found'}}
@@ -201,6 +213,11 @@ class Application:
                          for name, description in [
                              ('get_event_subscription', 'Read an owned subscription: active, inactive or gone, with lifecycle timestamps.'),
                              ('delete_event_subscription', 'Delete an owned subscription and stop delivery. Returns gone; deleted=false if already gone.')])
+        if principal.project is None:
+            for tool in tools:
+                tool['inputSchema']['properties']['project'] = {
+                    'type': 'string', 'enum': sorted(project for project in self.runtime.policies if principal.allows_project(project))}
+                tool['inputSchema']['required'].append('project')
         return tools
 
     def call_tool(self, principal, params):
@@ -216,6 +233,7 @@ class Application:
             raise ValueError('unknown tool')
         from jsonschema import Draft202012Validator
         Draft202012Validator(definitions[name]['inputSchema']).validate(args)
+        principal = self.project_context(principal, args.get('project'))
         if name in {'get_event_subscription', 'delete_event_subscription'}:
             operation = self.events.status if name == 'get_event_subscription' else self.events.unsubscribe
             record = operation(principal.identity, args['subscription_id'], owner=principal.project)
@@ -247,6 +265,18 @@ def validate_configuration(config):
                              max_active=item.get('max_active', 4),
                              max_timeout_seconds=item.get('max_timeout_seconds', 3600))
                 for owner, item in config['projects'].items()}
+    owner = config.get('owner')
+    if owner is not None and (not valid_owner(owner)
+            or any(not project_belongs_to(project, owner) for project in policies)):
+        raise ValueError('service projects must belong to its configured owner')
+    for grant in config['grants']:
+        if owner is not None and (grant.get('owner', owner) != owner
+                or any(not project_belongs_to(project, owner) for project in grant_projects(grant))):
+            raise ValueError('grant is outside the configured service owner')
+        if 'owner' in grant and any(not project_belongs_to(project, grant['owner']) for project in policies):
+            raise ValueError('owner worker cannot span service owners')
+        if 'projects' in grant and not grant_projects(grant) <= policies.keys():
+            raise ValueError('worker project list must be explicitly admitted')
     Path(config['state_path'])
     limit = config.get('max_request_bytes', 2_000_000)
     if type(limit) is not int or not 1 <= limit <= 16_000_000:

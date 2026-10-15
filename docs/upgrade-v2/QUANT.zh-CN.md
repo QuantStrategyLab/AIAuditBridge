@@ -1,5 +1,7 @@
 # QuantAIService 2.0
 
+2026-10-16 更新：下方共享核心/薄包装及跨 owner 包依赖是历史记录，已由[独立运行时基线](../runtime-baseline.zh-CN.md)和[owner 范围说明](../worker-project-scoping.md)取代。2.0.9 需显式配置服务 `owner`，不从另一个 owner 安装核心包。本次没有部署或线上验收。
+
 本次升级的通用任务服务由 `personal-ai-service==2.0.7` 提供，QuantAIService 只保存 Quant 项目身份准入和部署配置。新入口是 `quant-ai-service`；客户端使用 `ai_service.client.TaskClient` 的 submit、get、message、cancel、wait，不提供旧 `AiGatewayClient` API 兼容层。
 
 示例 `config/quant.example.json` 默认关闭，只有 synthetic 项目身份与 placeholder。真实连接需要批准云端的 HTTPS 入口、已有 OAuth 身份提供方、助手独立连接身份，以及 Dot 订阅或 Grok Routine Webhook。当前 Quant 私有 Dot 插件已登录并绑定 QuantStrategyLab/UsEquityStrategies，真实订阅挑战、直接读取/领取/回传公开合成任务已通过；自动事件触发尚未验收，未启用按量付费或运行真实业务任务。

@@ -13,7 +13,9 @@
     }
   },
   "providers": {
-    "dot": {"type": "dot_events"},
+    "dot": {
+      "type": "dot_events"
+    },
     "grok": {
       "type": "grok_webhook",
       "url": "https://CONFIGURE_CURSOR_ROUTINE_WEBHOOK",
@@ -21,9 +23,19 @@
     }
   },
   "projects": {
-    "QuantStrategyLab/ExampleResearch": {
-      "providers": {"agent": "dot", "agent:second-opinion": "grok"},
-      "models": {"dot": ["configured-dot"], "grok": ["configured-grok"]},
+    "example-org/ExampleResearch": {
+      "providers": {
+        "agent": "dot",
+        "agent:second-opinion": "grok"
+      },
+      "models": {
+        "dot": [
+          "configured-dot"
+        ],
+        "grok": [
+          "configured-grok"
+        ]
+      },
       "max_active": 2,
       "max_timeout_seconds": 3600
     }
@@ -33,29 +45,46 @@
       "issuer": "https://CONFIGURE_IDENTITY_PROVIDER",
       "subject": "CONFIGURE_DOT_CONNECTION_SUBJECT",
       "identity": "quant-dot",
-      "project": "QuantStrategyLab/ExampleResearch",
       "provider": "dot",
-      "scopes": ["tasks:read", "tasks:work", "events:subscribe"]
+      "scopes": [
+        "tasks:read",
+        "tasks:work",
+        "events:subscribe"
+      ],
+      "owner": "example-org",
+      "claims": {
+        "azp": "CONFIGURE_DOT_CLIENT"
+      }
     },
     {
       "issuer": "https://CONFIGURE_IDENTITY_PROVIDER",
       "subject": "CONFIGURE_GROK_CONNECTION_SUBJECT",
       "identity": "quant-grok",
-      "project": "QuantStrategyLab/ExampleResearch",
       "provider": "grok",
-      "scopes": ["tasks:read", "tasks:work"]
+      "scopes": [
+        "tasks:read",
+        "tasks:work"
+      ],
+      "owner": "example-org",
+      "claims": {
+        "azp": "CONFIGURE_GROK_CLIENT"
+      }
     },
     {
       "issuer": "https://token.actions.githubusercontent.com",
-      "subject": "repo:QuantStrategyLab/ExampleResearch:ref:refs/heads/main",
+      "subject": "repo:example-org/ExampleResearch:ref:refs/heads/main",
       "identity": "example-project-workflow",
-      "project": "QuantStrategyLab/ExampleResearch",
-      "scopes": ["tasks:read", "tasks:submit"],
+      "project": "example-org/ExampleResearch",
+      "scopes": [
+        "tasks:read",
+        "tasks:submit"
+      ],
       "claims": {
-        "repository": "QuantStrategyLab/ExampleResearch",
-        "workflow_ref": "QuantStrategyLab/ExampleResearch/.github/workflows/ai-task.yml@refs/heads/main",
+        "repository": "example-org/ExampleResearch",
+        "workflow_ref": "example-org/ExampleResearch/.github/workflows/ai-task.yml@refs/heads/main",
         "ref": "refs/heads/main"
       }
     }
-  ]
+  ],
+  "owner": "example-org"
 }
