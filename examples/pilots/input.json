@@ -1,0 +1,10 @@
+{
+  "schema_version": "synthetic.protocol-input.v1",
+  "series": [
+    100,
+    102,
+    99,
+    105
+  ],
+  "no_order": true
+}

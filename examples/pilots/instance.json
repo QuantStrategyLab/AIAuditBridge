@@ -1,0 +1,43 @@
+{
+  "schema_version": "scenario.instance.v1",
+  "id": "synthetic-protocol",
+  "project": "example-org/ExampleProject",
+  "template": "protocol_probe",
+  "template_version": "1",
+  "enabled": false,
+  "config_revision": "0000000000000000000000000000000000000000",
+  "inputs": {
+    "manifest_ref": "synthetic-fixture-v1",
+    "data_classification": "synthetic",
+    "fields": {
+      "fixture_ref": "synthetic-v1",
+      "assertions_ref": "synthetic-assertions-v1",
+      "cleanup_ref": "subscription-gone-v1",
+      "ttl_seconds": 600
+    }
+  },
+  "stages": [
+    {
+      "phase": "agent",
+      "role": "primary",
+      "worker_type": "dot",
+      "route_ref": "default",
+      "model_ref": "configured-dot",
+      "limits": {
+        "timeout_seconds": 600,
+        "monthly_budget_usd": 0
+      }
+    }
+  ],
+  "executor_ref": null,
+  "gate_refs": [
+    "no-order"
+  ],
+  "output": {
+    "schema_ref": "pilot-advisory-v1",
+    "evidence_store_ref": "pilot-advisory-v1",
+    "public_projection_ref": "pilot-advisory-v1",
+    "retention_policy_ref": "pilot-advisory-v1",
+    "sink_ref": "pilot-advisory-v1"
+  }
+}
