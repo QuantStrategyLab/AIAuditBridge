@@ -252,7 +252,7 @@ class BriefingDispatchTests(unittest.TestCase):
                 {
                     "TELEGRAM_TOKEN": "secret-token-value",
                     "GLOBAL_TELEGRAM_CHAT_ID": "12345",
-                    "QSL_GITHUB_REPO": "QuantStrategyLab/PersonalAIService",
+                    "QSL_GITHUB_REPO": "QuantStrategyLab/QuantAIService",
                 },
                 clear=True,
             ),
@@ -311,7 +311,7 @@ class BriefingDispatchTests(unittest.TestCase):
                 {
                     "TELEGRAM_TOKEN": "secret-token-value",
                     "GLOBAL_TELEGRAM_CHAT_ID": "999",
-                    "QSL_GITHUB_REPO": "QuantStrategyLab/PersonalAIService",
+                    "QSL_GITHUB_REPO": "QuantStrategyLab/QuantAIService",
                 },
                 clear=True,
             ),
@@ -389,7 +389,7 @@ class BriefingDispatchTests(unittest.TestCase):
         with (
             patch.dict(
                 os.environ,
-                {"QSL_GITHUB_REPO": "QuantStrategyLab/PersonalAIService"},
+                {"QSL_GITHUB_REPO": "QuantStrategyLab/QuantAIService"},
                 clear=True,
             ),
             patch("quant_monitor_domain.briefing_dispatch.shutil_which", return_value=None),
