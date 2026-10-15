@@ -1,6 +1,6 @@
 # 独立运行时基线
 
-QuantAIService 自带 `src/ai_service` 运行时、依赖和后续八个模板，不再安装或下载 Personal 的包。保留 `ai_service.client` 导入兼容；此模块由 Quant wheel 自己提供。两服务各用独立虚拟环境，避免相同兼容命名空间冲突。
+QuantAIService 自带 `src/ai_service` 运行时、依赖和八个场景模板，模板由离线场景 SDK 校验（见[场景契约](scenario-contracts.md)），不再安装或下载 Personal 的包。保留 `ai_service.client` 导入兼容；此模块由 Quant wheel 自己提供。两服务各用独立虚拟环境，避免相同兼容命名空间冲突。
 
 初始运行时及测试经所有者授权从 Personal 的 `f9bdf0fb55e7195d459520155bfa01652e793a5e` 复制，含 #31 安全 MCP 日志。来源及 MIT 条款见 `LICENSE.task-service`；后续在本仓库维护，无同步任务或跨 owner 运行时依赖。服务发现报告 Quant 包名和版本。
 

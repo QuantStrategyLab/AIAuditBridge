@@ -1,0 +1,414 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ai-service:scenario-instance:v1",
+  "title": "ScenarioInstance/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "project",
+    "template",
+    "template_version",
+    "enabled",
+    "config_revision",
+    "inputs",
+    "stages",
+    "executor_ref",
+    "gate_refs",
+    "output",
+    "schedule",
+    "approvals"
+  ],
+  "properties": {
+    "schema_version": {"const": "scenario.instance.v1"},
+    "id": {"type": "string", "pattern": "^[a-z][a-z0-9_.-]{0,99}$"},
+    "project": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$"},
+    "template": {
+      "enum": [
+        "backtest",
+        "forward_observation",
+        "compliance_watch",
+        "report_audit",
+        "bounded_transform",
+        "investigation",
+        "content_pipeline",
+        "protocol_probe"
+      ]
+    },
+    "template_version": {"const": "1"},
+    "enabled": {"type": "boolean", "default": false},
+    "config_revision": {"type": "string", "pattern": "^([a-f0-9]{40}|[a-f0-9]{64})$"},
+    "inputs": {"$ref": "#/$defs/inputs"},
+    "stages": {"type": "array", "items": {"$ref": "#/$defs/stage"}, "minItems": 1, "maxItems": 16},
+    "executor_ref": {"anyOf": [{"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"}, {"type": "null"}], "default": null},
+    "gate_refs": {
+      "type": "array",
+      "items": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"},
+      "uniqueItems": true,
+      "maxItems": 32,
+      "default": []
+    },
+    "output": {"$ref": "#/$defs/output"},
+    "schedule": {"$ref": "#/$defs/schedule", "default": {}},
+    "approvals": {"$ref": "#/$defs/approvals", "default": {}}
+  },
+  "$defs": {
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_active",
+        "timeout_seconds",
+        "max_request_bytes",
+        "max_calls",
+        "max_input_tokens",
+        "max_output_tokens",
+        "max_media_bytes",
+        "monthly_budget_usd",
+        "retry_count"
+      ],
+      "properties": {
+        "max_active": {"type": "integer", "minimum": 1, "maximum": 100, "default": 1},
+        "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 3600, "default": 600},
+        "max_request_bytes": {"type": "integer", "minimum": 1, "maximum": 2000000, "default": 2000000},
+        "max_calls": {"type": "integer", "minimum": 1, "maximum": 16, "default": 1},
+        "max_input_tokens": {"type": "integer", "minimum": 1, "maximum": 1000000, "default": 16000},
+        "max_output_tokens": {"type": "integer", "minimum": 1, "maximum": 100000, "default": 1024},
+        "max_media_bytes": {"type": "integer", "minimum": 0, "maximum": 2000000, "default": 0},
+        "monthly_budget_usd": {"type": "number", "minimum": 0, "default": 0},
+        "retry_count": {"const": 0, "default": 0}
+      }
+    },
+    "stage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phase", "role", "worker_type", "route_ref", "model_ref", "tool_sets", "limits"],
+      "properties": {
+        "phase": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"},
+        "role": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"},
+        "worker_type": {"enum": ["dot", "grok", "api"], "default": "dot"},
+        "route_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"},
+        "model_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"},
+        "tool_sets": {
+          "type": "array",
+          "items": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"},
+          "uniqueItems": true,
+          "maxItems": 32,
+          "default": []
+        },
+        "limits": {"$ref": "#/$defs/limits", "default": {}}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"worker_type": {"const": "api"}}, "required": ["worker_type"]},
+          "then": {
+            "properties": {
+              "tool_sets": {"maxItems": 0},
+              "limits": {
+                "properties": {
+                  "max_active": {"const": 1},
+                  "max_calls": {"const": 1},
+                  "timeout_seconds": {"maximum": 60},
+                  "max_input_tokens": {"maximum": 16000},
+                  "max_output_tokens": {"maximum": 2500}
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["manifest_ref", "data_classification", "fields"],
+      "properties": {
+        "manifest_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"},
+        "data_classification": {"enum": ["public", "synthetic", "sanitized", "restricted"]},
+        "fields": {"type": "object"}
+      }
+    },
+    "output": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_ref", "evidence_store_ref", "public_projection_ref", "retention_policy_ref", "sink_ref"],
+      "properties": {
+        "schema_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"},
+        "evidence_store_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"},
+        "public_projection_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"},
+        "retention_policy_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"},
+        "sink_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"}
+      }
+    },
+    "schedule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "timezone", "catchup_policy", "finality_delay_seconds"],
+      "properties": {
+        "kind": {"enum": ["manual", "cron", "calendar", "event"], "default": "manual"},
+        "timezone": {"type": "string", "minLength": 1, "maxLength": 200, "default": "UTC"},
+        "catchup_policy": {"enum": ["record_gap", "approved_replay"], "default": "record_gap"},
+        "cron": {"type": "string", "minLength": 1, "maxLength": 200},
+        "calendar_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"},
+        "event_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"},
+        "finality_delay_seconds": {"type": "integer", "minimum": 0, "maximum": 86400, "default": 0}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"kind": {"const": "manual"}}, "required": ["kind"]},
+          "then": {"properties": {"cron": false, "calendar_ref": false, "event_ref": false}}
+        },
+        {
+          "if": {"properties": {"kind": {"const": "cron"}}, "required": ["kind"]},
+          "then": {"properties": {"calendar_ref": false, "event_ref": false}, "required": ["cron"]}
+        },
+        {
+          "if": {"properties": {"kind": {"const": "calendar"}}, "required": ["kind"]},
+          "then": {"properties": {"cron": false, "event_ref": false}, "required": ["calendar_ref"]}
+        },
+        {
+          "if": {"properties": {"kind": {"const": "event"}}, "required": ["kind"]},
+          "then": {"properties": {"cron": false, "calendar_ref": false}, "required": ["event_ref"]}
+        }
+      ]
+    },
+    "approvals": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["activation_ref", "data_use_ref", "cost_ref", "external_action_ref"],
+      "properties": {
+        "activation_ref": {"anyOf": [{"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"}, {"type": "null"}], "default": null},
+        "data_use_ref": {"anyOf": [{"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"}, {"type": "null"}], "default": null},
+        "cost_ref": {"anyOf": [{"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"}, {"type": "null"}], "default": null},
+        "external_action_ref": {"anyOf": [{"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"}, {"type": "null"}], "default": null}
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"template": {"const": "backtest"}}, "required": ["template"]},
+      "then": {
+        "properties": {
+          "inputs": {
+            "properties": {
+              "fields": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["study_ref", "data_manifest_ref", "parameters_ref", "windows_ref", "cost_model_ref", "initial_state_ref"],
+                "properties": {
+                  "study_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"},
+                  "data_manifest_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"},
+                  "parameters_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"},
+                  "windows_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"},
+                  "cost_model_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"},
+                  "initial_state_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"}
+                }
+              }
+            }
+          },
+          "stages": {
+            "items": {"properties": {"phase": {"enum": ["author", "request", "review"]}, "worker_type": {"enum": ["dot", "grok"]}}}
+          },
+          "executor_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"template": {"const": "forward_observation"}}, "required": ["template"]},
+      "then": {
+        "properties": {
+          "inputs": {
+            "properties": {
+              "fields": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["registration_ref", "calendar_ref", "sessions_ref", "initial_state_ref", "ledger_ref", "finality_policy_ref"],
+                "properties": {
+                  "registration_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"},
+                  "calendar_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"},
+                  "sessions_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"},
+                  "initial_state_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"},
+                  "ledger_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"},
+                  "finality_policy_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"}
+                }
+              }
+            }
+          },
+          "stages": {"items": {"properties": {"phase": {"enum": ["request", "review"]}, "worker_type": {"enum": ["dot", "grok"]}}}},
+          "executor_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"template": {"const": "compliance_watch"}}, "required": ["template"]},
+      "then": {
+        "properties": {
+          "inputs": {
+            "properties": {
+              "fields": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["targets_ref", "coverage_ref", "sources_ref", "rules_ref", "window_ref"],
+                "properties": {
+                  "targets_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"},
+                  "coverage_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"},
+                  "sources_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"},
+                  "rules_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"},
+                  "window_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"}
+                }
+              }
+            }
+          },
+          "stages": {"items": {"properties": {"phase": {"enum": ["discover", "review"]}, "worker_type": {"enum": ["dot", "grok"]}}}}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"template": {"const": "report_audit"}}, "required": ["template"]},
+      "then": {
+        "properties": {
+          "inputs": {
+            "properties": {
+              "fields": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["materials_ref", "checklist_ref"],
+                "properties": {
+                  "materials_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"},
+                  "checklist_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"},
+                  "small_review": {"type": "boolean", "default": false}
+                }
+              }
+            }
+          },
+          "stages": {"items": {"properties": {"phase": {"enum": ["review", "confirm"]}}}}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"template": {"const": "bounded_transform"}}, "required": ["template"]},
+      "then": {
+        "properties": {
+          "inputs": {
+            "properties": {
+              "fields": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["source_ref", "operation", "invariants_ref"],
+                "properties": {
+                  "source_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"},
+                  "operation": {"enum": ["rewrite", "translate", "extract", "transcribe", "consistency", "summarize"]},
+                  "invariants_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"}
+                }
+              }
+            }
+          },
+          "stages": {"items": {"properties": {"phase": {"enum": ["run"]}}}}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"template": {"const": "investigation"}}, "required": ["template"]},
+      "then": {
+        "properties": {
+          "inputs": {
+            "properties": {
+              "fields": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["symptoms_ref", "code_revision", "read_allowlist_ref", "checklist_ref"],
+                "properties": {
+                  "symptoms_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"},
+                  "code_revision": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"},
+                  "read_allowlist_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"},
+                  "checklist_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"}
+                }
+              }
+            }
+          },
+          "stages": {"items": {"properties": {"phase": {"enum": ["analyze", "confirm"]}, "worker_type": {"enum": ["dot", "grok"]}}}}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"template": {"const": "content_pipeline"}}, "required": ["template"]},
+      "then": {
+        "properties": {
+          "inputs": {
+            "properties": {
+              "fields": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["media_manifest_ref", "history_ref", "privacy_policy_ref", "language"],
+                "properties": {
+                  "media_manifest_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"},
+                  "history_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"},
+                  "privacy_policy_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"},
+                  "language": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"}
+                }
+              }
+            }
+          },
+          "stages": {
+            "items": {
+              "properties": {"phase": {"enum": ["select", "group", "history_match", "draft"]}, "worker_type": {"enum": ["dot", "grok"]}}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"template": {"const": "protocol_probe"}}, "required": ["template"]},
+      "then": {
+        "properties": {
+          "inputs": {
+            "properties": {
+              "fields": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["fixture_ref", "assertions_ref", "cleanup_ref", "ttl_seconds"],
+                "properties": {
+                  "fixture_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"},
+                  "assertions_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"},
+                  "cleanup_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$"},
+                  "ttl_seconds": {"type": "integer", "minimum": 1, "maximum": 900}
+                }
+              },
+              "data_classification": {"enum": ["public", "synthetic"]}
+            }
+          },
+          "stages": {
+            "items": {
+              "properties": {"phase": {"enum": ["agent", "api"]}},
+              "allOf": [
+                {
+                  "if": {"properties": {"worker_type": {"const": "api"}}, "required": ["worker_type"]},
+                  "then": {"properties": {"phase": {"const": "api"}}}
+                },
+                {
+                  "if": {"properties": {"worker_type": {"enum": ["dot", "grok"]}}, "required": ["worker_type"]},
+                  "then": {"properties": {"phase": {"const": "agent"}}}
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "allOf": [
+          {"properties": {"template": {"const": "report_audit"}}, "required": ["template"]},
+          {
+            "properties": {"stages": {"contains": {"properties": {"worker_type": {"const": "api"}}, "required": ["worker_type"]}}},
+            "required": ["stages"]
+          }
+        ]
+      },
+      "then": {
+        "properties": {"inputs": {"properties": {"fields": {"required": ["small_review"], "properties": {"small_review": {"const": true}}}}}}
+      }
+    }
+  ]
+}
