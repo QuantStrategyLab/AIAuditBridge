@@ -272,7 +272,7 @@ def test_event_id_uses_target_scope_not_order_or_observed_at() -> None:
             "run_id": "run-1",
             "activity": "no_submission",
             "execution_lane": "paper",
-            "source_object": "/Users/private/report.json",
+            "source_object": "/path/to/worktree/report.json",
         }]),
         second,
     ))
