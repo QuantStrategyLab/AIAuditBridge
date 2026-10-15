@@ -1,5 +1,6 @@
 """Quant deployment binds project identities; strategy rules stay in callers."""
 from ai_service.server import main as shared_main
+from ai_service.auth import grant_projects
 
 
 def validate_configuration(config):
@@ -9,7 +10,7 @@ def validate_configuration(config):
         raise ValueError('Quant deployment admits explicitly configured QuantStrategyLab repositories only')
     allowed_scopes = {'tasks:read', 'tasks:submit', 'tasks:work', 'events:subscribe'}
     for grant in config.get('grants', []):
-        if grant['project'] not in projects:
+        if not grant_projects(grant) <= projects.keys():
             raise ValueError('identity grant must belong to an admitted Quant project')
         if set(grant['scopes']) - allowed_scopes:
             raise ValueError('AI service grants do not authorize financial or deployment actions')
