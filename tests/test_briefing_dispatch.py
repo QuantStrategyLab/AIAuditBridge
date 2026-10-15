@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import builtins
 import importlib
+import importlib.util
 import os
 import subprocess
 import tempfile
@@ -96,6 +97,10 @@ class BriefingDispatchTests(unittest.TestCase):
             self.assertIn("demo", summary["telegram_dry_run"])
             self.assertFalse((Path(tmp) / "data" / "alert-state" / "health_cycle.json").exists())
 
+    @unittest.skipUnless(
+        importlib.util.find_spec("quant_platform_kit") is not None,
+        "requires optional QuantPlatformKit (quant_platform_kit); package is not installed",
+    )
     @patch("quant_monitor_domain.briefing_dispatch.dispatch_strategy_watch_findings")
     def test_strategy_health_dispatches_to_issue_only_watcher(self, dispatch_findings) -> None:
         dispatch_findings.return_value = {
@@ -129,6 +134,10 @@ class BriefingDispatchTests(unittest.TestCase):
         self.assertEqual(dispatched[0].finding_type, "monitoring_trigger")
         self.assertEqual(summary["errors"], [])
 
+    @unittest.skipUnless(
+        importlib.util.find_spec("quant_platform_kit") is not None,
+        "requires optional QuantPlatformKit (quant_platform_kit); package is not installed",
+    )
     @patch("quant_monitor_domain.briefing_dispatch.dispatch_strategy_watch_findings")
     def test_strategy_record_failure_falls_back_to_operational_telegram(
         self,
