@@ -1,1 +1,1 @@
-"""Quant deployment policy for the shared project-scoped AI task service."""
+"""Configured owner admission for the independent Quant task service."""
