@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "quant-ai-service"
-version = "2.0.9"
+version = "2.0.10"
 description = "Independently packaged project-scoped AI task service"
 requires-python = ">=3.10"
 dependencies = ["jsonschema>=4.26,<5", "PyJWT[crypto]>=2.13,<3"]
@@ -15,3 +15,6 @@ ai-task = "ai_service.client:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"ai_service.scenarios" = ["*.schema.json"]
