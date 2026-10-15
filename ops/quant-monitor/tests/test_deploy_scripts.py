@@ -986,26 +986,6 @@ sys.argv = ['offline-fixture', 'synthetic-checkout'] + ([{str(root)!r}, '12345']
                     self.assertEqual(policy, {"core.hooksPath": "/dev/null", "core.fsmonitor": "false",
                                               "credential.helper": "", "http.sslVerify": "true", "http.followRedirects": "false"})
 
-    def test_inactive_stage_is_a_separate_fixed_mode_without_service_operations(self) -> None:
-        workflow, scripts = self._inactive_stage_scripts()
-        job = workflow.split("\n  stage-quant-runtime-inactive:\n", 1)[1].split("\n  release-gateway-failure-repairs:\n", 1)[0]
-        generic = workflow.split("\n  vps-codex-service-ops:\n", 1)[1].split("\n  inspect-recorded-daily-errors:\n", 1)[0]
-        self.assertIn("inputs.mode != 'stage-quant-runtime-inactive'", generic)
-        self.assertIn("inputs.mode == 'stage-quant-runtime-inactive'", job)
-        self.assertIn("!inputs.acknowledge_interruption && inputs.ssh_unban_ip == ''", job)
-        self.assertIn("environment: codex-vps-ops", job)
-        self.assertIn("persist-credentials: false", job)
-        self.assertIn("ref: ${{ github.sha }}", job)
-        self.assertNotRegex(job, r"systemctl|sudo|daemon-reload|health_check\.sh|daily_briefing_pipeline\.sh|deploy_codex|install_immutable_release|sync_strategy_repos")
-        commands = "\n".join(line for line in scripts[1].splitlines() if not line.lstrip().startswith("#"))
-        self.assertNotRegex(commands, r"\brm\b|\bchmod\b|\bchown\b|\bcheckout\b")
-        self.assertNotIn("/data/lifecycle-projects", scripts[1])
-        self.assertIn("GIT_ALLOW_PROTOCOL=https", scripts[1])
-        self.assertIn("--kill-after=5s 60s git", scripts[1])
-        self.assertIn("qpk_source_sha=" + (ROOT / "qpk-runtime.sha").read_text().strip(), scripts[1])
-        self.assertIn('env -i "${transport[@]}"', scripts[1])
-        self.assertIn('"$candidate/bin/python" -I -B -', scripts[2])
-        self.assertNotIn("import quant_platform_kit", scripts[2])
 
     def test_inactive_stage_gate_rejects_wrong_source_event_or_inputs(self) -> None:
         _, scripts = self._inactive_stage_scripts()

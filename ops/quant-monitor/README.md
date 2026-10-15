@@ -1,3 +1,5 @@
+> 旧自托管 runner 工作流已移除；下文历史运维示例不能作为可执行入口。现有服务未部署或重启，通知账本与实际 secrets/variables 保留。
+
 > V2 upgrade: monitor report consumption now lives in `quant_monitor_domain` and shared watcher logic in QuantPlatformKit. The deployed runtime has not been switched. Legacy setup refuses activation by default until the V2 dependency lock, approved source versions and cloud environment are qualified. Historical deployment examples below do not establish V2 readiness.
 
 # VPS Quant Monitor
@@ -129,11 +131,11 @@ GCS input remains disabled by default and does not change the 22:30 UTC briefing
 
 ### 一次性固定对象日报 / One-shot immutable-object runtime briefing
 
-新增的 `preview-longbridge-paper-once` 和 `send-longbridge-paper-once` 是手动 workflow 模式；默认模式仍为 `inspect`，不启用新的 timer 或自动发送。业务日通过普通 dispatch 输入提供；对象 URI 和完整获批的 paper target keys（每行一个）只从 `codex-vps-ops` protected Environment 的 `RUNTIME_DIGEST_ONCE_PROJECTION_OBJECT` 与 `RUNTIME_DIGEST_ONCE_TARGET_KEYS` 读取。不要把 URI 或 target keys 放进普通 dispatch 输入或公开日志。本工作区尚未确认这两个 Environment secret 已配置；缺失、格式错误或目标不完整时 helper 会停止，不用默认值、latest、前缀或空账本补齐。
+新增的 `preview-longbridge-paper-once` 和 `send-longbridge-paper-once` 是手动 workflow 模式；默认模式仍为 `inspect`，不启用新的 timer 或自动发送。业务日通过普通 dispatch 输入提供；对象 URI 和完整获批的 paper target keys（每行一个）只从 `retired protected environment` protected Environment 的 `RUNTIME_DIGEST_ONCE_PROJECTION_OBJECT` 与 `RUNTIME_DIGEST_ONCE_TARGET_KEYS` 读取。不要把 URI 或 target keys 放进普通 dispatch 输入或公开日志。本工作区尚未确认这两个 Environment secret 已配置；缺失、格式错误或目标不完整时 helper 会停止，不用默认值、latest、前缀或空账本补齐。
 
 preview 校验对象/日期/targets，并验证原通知路由；因此它会在原执行身份下读取既有 bot secret 并调用 Telegram `getMe`，但不发送日报消息。确认 preview 结果和本次范围后，才单独选择 send。两种模式都固定调用已发布消费者、使用原身份与 `health_cycle.json`；账本必须已存在、可读且属于原路径，禁止创建空账本替代历史。`unknown`、timeout、返回丢失、输入/账本/路由不匹配均停止，不自动重试。结果只返回有限状态，不回显对象正文或凭据。
 
-The `preview-longbridge-paper-once` and `send-longbridge-paper-once` modes are manual workflow operations. The default remains `inspect`; no timer or automatic send is enabled. The business day is supplied as an ordinary dispatch input. The object URI and complete approved paper target-key set (one key per line) must come only from the `codex-vps-ops` protected Environment secrets `RUNTIME_DIGEST_ONCE_PROJECTION_OBJECT` and `RUNTIME_DIGEST_ONCE_TARGET_KEYS`. Never put the URI or target keys in ordinary dispatch inputs or public logs. This workspace has not confirmed that these Environment secrets are configured; missing or invalid values, or an incomplete target set, make the helper stop. No default, `latest`, prefix, or empty ledger fills a missing value.
+The `preview-longbridge-paper-once` and `send-longbridge-paper-once` modes are manual workflow operations. The default remains `inspect`; no timer or automatic send is enabled. The business day is supplied as an ordinary dispatch input. The object URI and complete approved paper target-key set (one key per line) must come only from the `retired protected environment` protected Environment secrets `RUNTIME_DIGEST_ONCE_PROJECTION_OBJECT` and `RUNTIME_DIGEST_ONCE_TARGET_KEYS`. Never put the URI or target keys in ordinary dispatch inputs or public logs. This workspace has not confirmed that these Environment secrets are configured; missing or invalid values, or an incomplete target set, make the helper stop. No default, `latest`, prefix, or empty ledger fills a missing value.
 
 Preview validates the object, day, and targets and checks the original notification route. It therefore reads the existing bot secret under the original execution identity and calls Telegram `getMe`, but it does not send the daily message. Review the preview result and approved scope before selecting send separately. Both modes invoke the fixed published consumer and reuse the original identity and `health_cycle.json`; that ledger must already exist, be readable, and resolve to the original path. Never create an empty ledger to replace history. `unknown`, timeout, lost return, or mismatched input, ledger, or route stops the operation without automatic retry. The result exposes only bounded status and does not echo the object body or credentials.
 
@@ -539,7 +541,7 @@ Python 导入守卫不是 OS 沙箱；候选导入成功也不证明 systemd 实
 不调用 Telegram prestart、health/daily 本体、sync、模型、通知或服务/timer 操作。
 
 `stage-quant-runtime-inactive` 只接受 main、该固定 mode、`acknowledge_interruption=false`
-和空 `ssh_unban_ip`，使用原 `codex-vps-ops` environment/runner/concurrency。精确 workflow
+和空 `ssh_unban_ip`，使用原 `retired protected environment` environment/runner/concurrency。精确 workflow
 SHA、checkout HEAD、当前 main 与干净工作树必须一致，并核 setup/common_env/lock/pin 固定字节。
 它排除通用 Gateway job，没有自由 source/path 参数。候选目录固定为
 `/home/ubuntu/quant-monitor-data03-286757-py312-v1`；任何已存在目录、文件或链接均拒绝，
@@ -603,7 +605,7 @@ runner 原权限投影七项路径、覆盖来源、限定公开依赖哈希、Q
 ## Bounded current-invocation failure evidence / 限定退出证据
 
 The manual-only `VPS Codex Service Ops` mode `inspect-monitor-failures` is a
-separate protected `codex-vps-ops` job under the existing concurrency group. It
+separate protected `retired protected environment` job under the existing concurrency group. It
 verifies exact current main, workflow SHA, and a clean checkout, then runs
 `inspect_monitor_failures.py --inspect` with `env -i` and `/usr/bin/python3 -I -B`.
 It has ordinary runner privileges, no provider/admin secrets, and no sudo or

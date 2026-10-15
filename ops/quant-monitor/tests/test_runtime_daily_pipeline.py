@@ -683,21 +683,3 @@ def test_once_home_and_original_ledger_alias_are_not_replaced(tmp_path, monkeypa
         code, result = _once_call(module)
     assert code == 2 and not result["ok"] and process.call_count == 1
     assert state.read_bytes() == before
-
-def test_once_workflow_keeps_exact_controller_and_separate_c_source():
-    text = (SCRIPT.parents[3] / ".github/workflows/monitor-runtime-digest-once.yml").read_text()
-    assert "ref: ${{ github.sha }}" in text
-    job = text.split("  longbridge-paper-once:\n", 1)[1]
-    assert "ref: 823ba856af49d8799506afe476aec9d07ab1c63d" in job
-    assert "persist-credentials: false" in job and '"$current_main" = "$RUN_SHA"' in job
-    assert "sudo -n -u ubuntu" in job and "/usr/bin/python3 -I -B" in job
-    assert "daily_briefing_pipeline.sh" not in job and "systemctl" not in job
-    assert "--ai-summary" not in job and "--dual-review" not in job
-    dispatch_inputs = text.split("\npermissions:", 1)[0]
-    assert "runtime_projection_object:" not in dispatch_inputs
-    assert "runtime_expected_target_keys:" not in dispatch_inputs
-    assert "inputs.runtime_projection_object" not in text
-    assert "inputs.runtime_expected_target_keys" not in text
-    assert "QUANT_MONITOR_RUNTIME_PROJECTION_OBJECT: ${{ secrets.RUNTIME_DIGEST_ONCE_PROJECTION_OBJECT }}" in job
-    assert "QUANT_MONITOR_RUNTIME_EXPECTED_TARGET_KEY: ${{ secrets.RUNTIME_DIGEST_ONCE_TARGET_KEYS }}" in job
-    assert "QUANT_MONITOR_RUNTIME_BUSINESS_DAY: ${{ inputs.runtime_business_day }}" in job

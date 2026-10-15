@@ -266,21 +266,6 @@ class RuntimeMetadataTests(unittest.TestCase):
         audit = workflow.split("  inspect-audit-patch:\n", 1)[1].split("\n  apply-audit-patch:", 1)[0]
         return workflow, quant, audit
 
-    def test_workflow_has_narrow_choice_and_excludes_general_secret_job(self) -> None:
-        workflow, quant, _ = self.workflow_jobs()
-        general = workflow.split("  vps-codex-service-ops:\n", 1)[1].split("\n  inspect-quant-runtime:", 1)[0]
-        self.assertIn("          - inspect-quant-runtime\n", workflow)
-        self.assertIn("        default: inspect\n", workflow)
-        self.assertIn("inputs.mode != 'inspect-quant-runtime'", general)
-        expected = "if: github.event_name == 'workflow_dispatch' && github.repository == 'QuantStrategyLab/AIAuditBridge' && github.ref == 'refs/heads/main' && inputs.mode == 'inspect-quant-runtime'"
-        self.assertIn(expected, quant)
-        for value in ("environment: codex-vps-ops", "- self-hosted", "- codex-vps", "timeout-minutes: 5",
-                      "ref: ${{ github.sha }}", "persist-credentials: false"):
-            self.assertIn(value, quant)
-        for forbidden in ("sudo", "secrets.", "acknowledge_interruption", "acknowledge-interruption",
-                          "systemctl", "deploy_codex_audit_service.sh", "manage_codex_audit_service_patch.py",
-                          "health_check.sh", "daily_briefing_pipeline.sh", "source_telegram_env", "load_telegram_env"):
-            self.assertNotIn(forbidden, quant)
 
     def test_workflow_reuses_exact_old_inspection_gate_and_clean_runner_command(self) -> None:
         _, quant, audit = self.workflow_jobs()
