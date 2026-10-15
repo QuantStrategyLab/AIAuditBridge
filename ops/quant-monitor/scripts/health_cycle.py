@@ -61,7 +61,7 @@ _OPERATIONAL_ERROR_TYPES = frozenset({
     "TypeError",
     "ValueError",
 })
-_OPERATIONAL_DIAGNOSIS_SOURCE_REPOSITORY = "QuantStrategyLab/AIAuditBridge"
+_OPERATIONAL_DIAGNOSIS_SOURCE_REPOSITORY = "QuantStrategyLab/PersonalAIService"
 _HISTORICAL_DIAGNOSIS_REHEARSAL_TASK = "historical_operational_diagnosis_rehearsal"
 _HISTORICAL_DIAGNOSIS_REHEARSAL_CASE = "static_token_write_guard_source_audit_v1"
 _NON_OIDC_CREDENTIAL_ENV = (
@@ -1051,7 +1051,7 @@ def _historical_diagnosis_rehearsal_prompt() -> str:
         "evidence_kind": "source_code_audit_of_pr_180_and_181",
         "facts": [
             "static dashboard tokens are not authorized for write requests",
-            "a dashboard caller cannot claim QuantStrategyLab/AIAuditBridge as its source repository",
+            "a dashboard caller cannot claim QuantStrategyLab/PersonalAIService as its source repository",
         ],
         "observed_request": False,
     }

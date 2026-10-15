@@ -785,7 +785,7 @@ class OfflineTests(unittest.TestCase):
             "inspect-recorded-daily-errors": "inspect-recorded-daily-errors",
         }
 
-        def routed(mode, event="workflow_dispatch", ref="refs/heads/main", repository="QuantStrategyLab/AIAuditBridge",
+        def routed(mode, event="workflow_dispatch", ref="refs/heads/main", repository="QuantStrategyLab/PersonalAIService",
                    acknowledge_interruption=True, ssh_unban_ip=""):
             values = {"inputs.mode": mode, "github.event_name": event, "github.ref": ref,
                       "github.repository": repository, "inputs.acknowledge_interruption": acknowledge_interruption,
@@ -841,7 +841,7 @@ class OfflineTests(unittest.TestCase):
         workflow = (SCRIPT.parents[3] / ".github/workflows/vps_codex_service_ops.yml").read_text()
         job = workflow.split("  inspect-recorded-daily-errors:\n", 1)[1].split("\n  inspect-daily-failure-sample:", 1)[0]
         for text in ("inputs.mode == 'inspect-recorded-daily-errors'", "github.event_name == 'workflow_dispatch'",
-                     "github.repository == 'QuantStrategyLab/AIAuditBridge'", "github.ref == 'refs/heads/main'",
+                     "github.repository == 'QuantStrategyLab/PersonalAIService'", "github.ref == 'refs/heads/main'",
                      "environment: codex-vps-ops", "persist-credentials: false", '[ "$RUN_MODE" = inspect-recorded-daily-errors ]',
                      '[ "$RUN_EVENT_NAME" = workflow_dispatch ]', '[ "$RUN_WORKFLOW_SHA" = "$RUN_SHA" ]',
                      '[ "$current_main" = "$RUN_SHA" ]', 'checkout_status="$(git status --porcelain --untracked-files=all)"',
@@ -856,7 +856,7 @@ class OfflineTests(unittest.TestCase):
         workflow = (SCRIPT.parents[3] / ".github/workflows/vps_codex_service_ops.yml").read_text()
         job = workflow.split("  inspect-daily-failure-sample:\n", 1)[1].split("\n  inspect-monitor-failures:", 1)[0]
         for text in ("inputs.mode == 'inspect-daily-failure-sample'", "github.event_name == 'workflow_dispatch'",
-                     "github.repository == 'QuantStrategyLab/AIAuditBridge'", "github.ref == 'refs/heads/main'",
+                     "github.repository == 'QuantStrategyLab/PersonalAIService'", "github.ref == 'refs/heads/main'",
                      "environment: codex-vps-ops", "persist-credentials: false", '[ "$RUN_MODE" = inspect-daily-failure-sample ]',
                      '[ "$RUN_EVENT_NAME" = workflow_dispatch ]', '[ "$RUN_WORKFLOW_SHA" = "$RUN_SHA" ]',
                      '[ "$current_main" = "$RUN_SHA" ]', 'checkout_status="$(git status --porcelain --untracked-files=all)"',

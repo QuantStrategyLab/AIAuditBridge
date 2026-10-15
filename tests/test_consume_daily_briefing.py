@@ -122,7 +122,7 @@ def test_send_dry_run_cli_configured_still_skips_send(capsys) -> None:
                 {
                     "TELEGRAM_TOKEN": "secret-token-value",
                     "GLOBAL_TELEGRAM_CHAT_ID": "123",
-                    "QSL_GITHUB_REPO": "QuantStrategyLab/AIAuditBridge",
+                    "QSL_GITHUB_REPO": "QuantStrategyLab/PersonalAIService",
                     "QUANT_MONITOR_ROOT": str(report_dir),
                 },
                 clear=True,
@@ -245,7 +245,7 @@ def test_ai_summary_uses_gateway_contract_after_existing_alert_dispatch(tmp_path
     def dispatch(*args, **kwargs):
         calls.append('dispatch')
         return {'errors': [], 'optimization_watch': {'errors': 0}}
-    with patch.dict('os.environ', {'AI_SERVICE_URL': 'https://synthetic.invalid', 'AI_SERVICE_MODEL': 'synthetic-api', 'ACTIONS_ID_TOKEN_REQUEST_URL': 'https://synthetic.invalid/oidc', 'ACTIONS_ID_TOKEN_REQUEST_TOKEN': 'synthetic', 'GITHUB_REPOSITORY': 'QuantStrategyLab/AIAuditBridge'}, clear=True), patch(
+    with patch.dict('os.environ', {'AI_SERVICE_URL': 'https://synthetic.invalid', 'AI_SERVICE_MODEL': 'synthetic-api', 'ACTIONS_ID_TOKEN_REQUEST_URL': 'https://synthetic.invalid/oidc', 'ACTIONS_ID_TOKEN_REQUEST_TOKEN': 'synthetic', 'GITHUB_REPOSITORY': 'QuantStrategyLab/PersonalAIService'}, clear=True), patch(
         'quant_platform_kit.strategy_lifecycle.ai_provider.AiServiceClient.execute', autospec=True, side_effect=execute
     ), patch('scripts.consume_daily_briefing.dispatch_briefing_result', side_effect=dispatch), patch(
         'quant_monitor_domain.briefing_consumer._summary_now', return_value=datetime(2026,9,9,22,30,tzinfo=timezone.utc)

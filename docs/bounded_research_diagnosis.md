@@ -35,7 +35,7 @@ P6、资金、杠杆、凭证和硬熔断恢复仍遵循既定授权。
 新候选，不能借“重构”复用旧绩效或晋级证据。候选 ID、strategy profile、revision 与
 展示名称分别处理；显示改名不改写历史候选、输入绑定、champion 或授权。
 
-[2026-10-05 watcher run 37329184178](https://github.com/QuantStrategyLab/AIAuditBridge/actions/runs/37329184178)
+[2026-10-05 watcher run 37329184178](https://github.com/QuantStrategyLab/PersonalAIService/actions/runs/37329184178)
 运行 SHA 为 `6ec8dd2cc67b6448524a0b77cf7d1ff481899e3f`。实际日志为 `findings=0`、
 `tasks=[]`、诊断 `skipped / no_pending_verified_research_task`、learning/quality
 `ready=false`；相关研究子 job 被跳过。它验证无待处理任务的路径，不能作为模型、
@@ -58,21 +58,21 @@ Fetcher、Planner 和 Publisher 的运行身份隔离已验收。固定 SOXL 来
 ### 待修与下一步验收
 
 - **AI-SOXL-CODEGEN-IDEMPOTENCY / 高优先级**：固定 SOXL codegen 的
-  [`run_new_research.py` 调用/落盘顺序](https://github.com/QuantStrategyLab/AIAuditBridge/blob/16f5d6d037b38c7e417f1aeb88b4b60b9d9dcd1c/scripts/run_new_research.py#L1489-L1524)
+  [`run_new_research.py` 调用/落盘顺序](https://github.com/QuantStrategyLab/PersonalAIService/blob/16f5d6d037b38c7e417f1aeb88b4b60b9d9dcd1c/scripts/run_new_research.py#L1489-L1524)
   为先调用模型、后保存 input/response。其 workflow 使用 run/attempt 专属目录并清理，
   gateway 去重也包含 run/attempt；同目录缓存不能证明跨 dispatch 去重或调用中断后的
   unknown 停车。先在该入口补已有模式的调用前持久 claim、未知结果停放及离线崩溃/重复提交回归，
   再按原授权验收。不泛称 CN、Global ETF 或 watcher 都缺去重，不新增通用队列。
 - **AI-LB-FROZEN-REGRESSION / 高优先级**：LongBridge bugfix 的
-  [`run_monthly_codex_audit.py` 测试入口](https://github.com/QuantStrategyLab/AIAuditBridge/blob/16f5d6d037b38c7e417f1aeb88b4b60b9d9dcd1c/scripts/run_monthly_codex_audit.py#L1541-L1655)
+  [`run_monthly_codex_audit.py` 测试入口](https://github.com/QuantStrategyLab/PersonalAIService/blob/16f5d6d037b38c7e417f1aeb88b4b60b9d9dcd1c/scripts/run_monthly_codex_audit.py#L1541-L1655)
   从 patched checkout 复制可被 AI 修改的测试，并只运行该测试文件；尚未见独立冻结安全测试的复跑。
   应补冻结订单/风险不变量与候选测试分开验收，并覆盖删弱测试的负向案例。这是验证缺口，
   不是已证明可绕过全部源仓 CI/merge gate 或已发生线上攻击。
   2026-10-06 修复已通过独立复核并正常合并：
-  [AAB #313](https://github.com/QuantStrategyLab/AIAuditBridge/pull/313) 为
+  [AAB #313](https://github.com/QuantStrategyLab/PersonalAIService/pull/313) 为
   `ddd85c80413ee0c1bd0d663fc80e607692c58ef9`，
-  [exact PR CI37452976196](https://github.com/QuantStrategyLab/AIAuditBridge/actions/runs/37452976196)
-  与 [main CI37453537171](https://github.com/QuantStrategyLab/AIAuditBridge/actions/runs/37453537171)
+  [exact PR CI37452976196](https://github.com/QuantStrategyLab/PersonalAIService/actions/runs/37452976196)
+  与 [main CI37453537171](https://github.com/QuantStrategyLab/PersonalAIService/actions/runs/37453537171)
   均五 job 全部成功。实现接入同一完整 source SHA 的单次归档：两个只读视图都加载
   候选 application，先执行冻结原测试，再用独立 Python 进程执行候选测试；仍为单个
   Docker test run、共享 600 秒上限和原网络/资源限制。新增离线负例先复现删弱/skip

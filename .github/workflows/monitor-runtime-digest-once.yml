@@ -19,7 +19,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   longbridge-paper-once:
-    if: github.event_name == 'workflow_dispatch' && github.repository == 'QuantStrategyLab/AIAuditBridge' && github.ref == 'refs/heads/main' && (inputs.mode == 'preview-longbridge-paper-once' || inputs.mode == 'send-longbridge-paper-once')
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'QuantStrategyLab/PersonalAIService' && github.ref == 'refs/heads/main' && (inputs.mode == 'preview-longbridge-paper-once' || inputs.mode == 'send-longbridge-paper-once')
     environment: codex-vps-ops
     runs-on:
       - self-hosted
@@ -42,14 +42,14 @@ jobs:
           RUN_WORKFLOW_SHA: ${{ github.workflow_sha }}
         run: |
           set -euo pipefail
-          [ "$RUN_REPOSITORY" = QuantStrategyLab/AIAuditBridge ]
+          [ "$RUN_REPOSITORY" = QuantStrategyLab/PersonalAIService ]
           [ "$RUN_REF" = refs/heads/main ]
           [[ "$RUN_SHA" =~ ^[0-9a-f]{40}$ ]]
-          [ "$RUN_WORKFLOW_REF" = QuantStrategyLab/AIAuditBridge/.github/workflows/monitor-runtime-digest-once.yml@refs/heads/main ]
+          [ "$RUN_WORKFLOW_REF" = QuantStrategyLab/PersonalAIService/.github/workflows/monitor-runtime-digest-once.yml@refs/heads/main ]
           [ "$RUN_WORKFLOW_SHA" = "$RUN_SHA" ]
           [ "$(git rev-parse HEAD)" = "$RUN_SHA" ]
           [ -z "$(git status --porcelain --untracked-files=all)" ]
-          current_main="$(timeout 30s gh api repos/QuantStrategyLab/AIAuditBridge/git/ref/heads/main --jq '.object.sha')"
+          current_main="$(timeout 30s gh api repos/QuantStrategyLab/PersonalAIService/git/ref/heads/main --jq '.object.sha')"
           [ "$current_main" = "$RUN_SHA" ]
 
       - name: Checkout published C-only notification application

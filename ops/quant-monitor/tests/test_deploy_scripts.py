@@ -416,15 +416,15 @@ class DeployScriptTests(unittest.TestCase):
         sha = "a" * 40
         env = {"PATH": "/usr/bin:/bin", "HOME": "/tmp", "LANG": "C", "LC_ALL": "C",
                "GITHUB_WORKSPACE": str(ROOT.parents[1]), "RUN_EVENT_NAME": "workflow_dispatch",
-               "RUN_MODE": "check-quant-consumers-offline", "RUN_REPOSITORY": "QuantStrategyLab/AIAuditBridge",
+               "RUN_MODE": "check-quant-consumers-offline", "RUN_REPOSITORY": "QuantStrategyLab/PersonalAIService",
                "RUN_REF": "refs/heads/main", "RUN_ACK": "false", "RUN_UNBAN_IP": "",
                "RUN_SHA": sha, "RUN_WORKFLOW_SHA": sha,
-               "RUN_WORKFLOW_REF": "QuantStrategyLab/AIAuditBridge/.github/workflows/vps_codex_service_ops.yml@refs/heads/main",
+               "RUN_WORKFLOW_REF": "QuantStrategyLab/PersonalAIService/.github/workflows/vps_codex_service_ops.yml@refs/heads/main",
                "FIXTURE_HEAD": "35ac71176127f07e00fe04dbc793777f3c595bc0", "FIXTURE_MAIN": sha, "FIXTURE_DIRTY": ""}
         stubs = (
             'git() { case "$*" in "rev-parse HEAD") printf "%s\\n" "$FIXTURE_HEAD" ;; '
             '"status --porcelain --untracked-files=all") printf %s "$FIXTURE_DIRTY" ;; *) return 90 ;; esac; }\n'
-            'gh() { [[ "$*" == "api repos/QuantStrategyLab/AIAuditBridge/git/ref/heads/main --jq .object.sha" ]] || return 91; '
+            'gh() { [[ "$*" == "api repos/QuantStrategyLab/PersonalAIService/git/ref/heads/main --jq .object.sha" ]] || return 91; '
             'printf "%s\\n" "$FIXTURE_MAIN"; }\n'
             'timeout() { [[ "$1" == 30s ]] || return 92; shift; "$@"; }\n'
         )
@@ -462,15 +462,15 @@ class DeployScriptTests(unittest.TestCase):
         sha = "a" * 40
         env = {"PATH": "/usr/bin:/bin", "HOME": "/tmp", "LANG": "C", "LC_ALL": "C",
                "GITHUB_WORKSPACE": str(ROOT.parents[1]), "RUN_EVENT_NAME": "workflow_dispatch",
-               "RUN_MODE": "install-quant-release-inactive", "RUN_REPOSITORY": "QuantStrategyLab/AIAuditBridge",
+               "RUN_MODE": "install-quant-release-inactive", "RUN_REPOSITORY": "QuantStrategyLab/PersonalAIService",
                "RUN_REF": "refs/heads/main", "RUN_ACK": "false", "RUN_UNBAN_IP": "",
                "RUN_SHA": sha, "RUN_WORKFLOW_SHA": sha,
-               "RUN_WORKFLOW_REF": "QuantStrategyLab/AIAuditBridge/.github/workflows/vps_codex_service_ops.yml@refs/heads/main",
+               "RUN_WORKFLOW_REF": "QuantStrategyLab/PersonalAIService/.github/workflows/vps_codex_service_ops.yml@refs/heads/main",
                "FIXTURE_HEAD": "35ac71176127f07e00fe04dbc793777f3c595bc0", "FIXTURE_MAIN": sha, "FIXTURE_DIRTY": ""}
         stubs = (
             'git() { case "$*" in "rev-parse HEAD") printf "%s\\n" "$FIXTURE_HEAD" ;; '
             '"status --porcelain --untracked-files=all") printf %s "$FIXTURE_DIRTY" ;; *) return 90 ;; esac; }\n'
-            'gh() { [[ "$*" == "api repos/QuantStrategyLab/AIAuditBridge/git/ref/heads/main --jq .object.sha" ]] || return 91; '
+            'gh() { [[ "$*" == "api repos/QuantStrategyLab/PersonalAIService/git/ref/heads/main --jq .object.sha" ]] || return 91; '
             'printf "%s\\n" "$FIXTURE_MAIN"; }\n'
             'timeout() { [[ "$1" == 30s ]] || return 92; shift; "$@"; }\n'
         )
@@ -1012,15 +1012,15 @@ sys.argv = ['offline-fixture', 'synthetic-checkout'] + ([{str(root)!r}, '12345']
         sha = "a" * 40
         env = {"PATH": "/usr/bin:/bin", "HOME": "/tmp", "LANG": "C", "LC_ALL": "C",
                "GITHUB_WORKSPACE": str(ROOT.parents[1]), "RUN_EVENT_NAME": "workflow_dispatch",
-               "RUN_MODE": "stage-quant-runtime-inactive", "RUN_REPOSITORY": "QuantStrategyLab/AIAuditBridge",
+               "RUN_MODE": "stage-quant-runtime-inactive", "RUN_REPOSITORY": "QuantStrategyLab/PersonalAIService",
                "RUN_REF": "refs/heads/main", "RUN_ACK": "false", "RUN_UNBAN_IP": "",
                "RUN_SHA": sha, "RUN_WORKFLOW_SHA": sha,
-               "RUN_WORKFLOW_REF": "QuantStrategyLab/AIAuditBridge/.github/workflows/vps_codex_service_ops.yml@refs/heads/main",
+               "RUN_WORKFLOW_REF": "QuantStrategyLab/PersonalAIService/.github/workflows/vps_codex_service_ops.yml@refs/heads/main",
                "FIXTURE_HEAD": sha, "FIXTURE_MAIN": sha, "FIXTURE_DIRTY": ""}
         stubs = (
             'git() { case "$*" in "rev-parse HEAD") printf "%s\\n" "$FIXTURE_HEAD" ;; '
             '"status --porcelain --untracked-files=all") printf %s "$FIXTURE_DIRTY" ;; *) return 90 ;; esac; }\n'
-            'gh() { [[ "$*" == "api repos/QuantStrategyLab/AIAuditBridge/git/ref/heads/main --jq .object.sha" ]] || return 91; '
+            'gh() { [[ "$*" == "api repos/QuantStrategyLab/PersonalAIService/git/ref/heads/main --jq .object.sha" ]] || return 91; '
             'printf "%s\\n" "$FIXTURE_MAIN"; }\n'
             'timeout() { [[ "$1" == 30s ]] || return 92; shift; "$@"; }\n'
         )
