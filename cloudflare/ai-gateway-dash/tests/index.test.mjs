@@ -172,15 +172,15 @@ test("diagnosis list exposes only bounded AIAuditBridge operational jobs", async
     assert.match(url, /\/v1\/ai\/automation\/runs\?limit=100$/);
     return Response.json({ status: "ok", ledger: { runs: [
       { run_id: validId, task_name: "operational_data_diagnosis", task_state: "reviewed", updated_at: 10,
-        metadata: { origin: "service_job", source_repository: "QuantStrategyLab/PersonalAIService", mode: "review_only", diagnosis_status: "succeeded" } },
+        metadata: { origin: "service_job", source_repository: "QuantStrategyLab/QuantAIService", mode: "review_only", diagnosis_status: "succeeded" } },
       { run_id: "F".repeat(32), task_name: "operational_data_diagnosis", task_state: "reviewed", updated_at: 9,
-        metadata: { origin: "service_job", source_repository: "QuantStrategyLab/PersonalAIService", mode: "review_only" } },
+        metadata: { origin: "service_job", source_repository: "QuantStrategyLab/QuantAIService", mode: "review_only" } },
       { run_id: "B".repeat(32), task_name: "operational_data_diagnosis", task_state: "reviewed", updated_at: 20,
         metadata: { origin: "service_job", source_repository: "QuantStrategyLab/Other", mode: "review_only", private: "do-not-leak" } },
       { run_id: "C".repeat(32), task_name: "other", task_state: "failed", updated_at: 30,
-        metadata: { origin: "service_job", source_repository: "QuantStrategyLab/PersonalAIService", mode: "review_only" } },
+        metadata: { origin: "service_job", source_repository: "QuantStrategyLab/QuantAIService", mode: "review_only" } },
       { run_id: "R".repeat(32), task_name: "historical_operational_diagnosis_rehearsal", task_state: "reviewed", updated_at: 11,
-        metadata: { origin: "service_job", source_repository: "QuantStrategyLab/PersonalAIService", mode: "review_only", diagnosis_status: "succeeded" } },
+        metadata: { origin: "service_job", source_repository: "QuantStrategyLab/QuantAIService", mode: "review_only", diagnosis_status: "succeeded" } },
     ] } });
   });
   const response = await worker.fetch(
@@ -205,7 +205,7 @@ test("diagnosis detail verifies ledger and job identity before exposing successf
     if (url.endsWith("/v1/ai/automation/runs/" + jobId)) {
       return Response.json({ status: "ok", run: {
         run_id: jobId, task_name: "operational_data_diagnosis", task_state: "reviewed", updated_at: 40,
-        metadata: { origin: "service_job", source_repository: "QuantStrategyLab/PersonalAIService", mode: "review_only",
+        metadata: { origin: "service_job", source_repository: "QuantStrategyLab/QuantAIService", mode: "review_only",
           diagnosis_status: "succeeded", diagnosis_summary: output },
       } });
     }
@@ -236,7 +236,7 @@ test("historical diagnosis rehearsal detail remains separate and read only", asy
   const jobId = "H".repeat(32);
   const dashboard = await authenticatedDashboard(t, async () => Response.json({ status: "ok", run: {
     run_id: jobId, task_name: "historical_operational_diagnosis_rehearsal", task_state: "reviewed", updated_at: 60,
-    metadata: { origin: "service_job", source_repository: "QuantStrategyLab/PersonalAIService", mode: "review_only",
+    metadata: { origin: "service_job", source_repository: "QuantStrategyLab/QuantAIService", mode: "review_only",
       diagnosis_status: "succeeded", diagnosis_summary: "<script>历史演练摘要</script>" },
   } }));
   const response = await worker.fetch(
@@ -258,7 +258,7 @@ test("diagnosis detail hides mismatched, running, failed, missing, and upstream 
       if (scenario === "missing") return Response.json({ status: "error", error: "private missing detail" }, { status: 404 });
       return Response.json({ status: "ok", run: {
         run_id: jobId, task_name: "operational_data_diagnosis", task_state: scenario === "failed" ? "failed" : "running", updated_at: 50,
-        metadata: { origin: "service_job", source_repository: scenario === "mismatch" ? "QuantStrategyLab/Other" : "QuantStrategyLab/PersonalAIService", mode: "review_only",
+        metadata: { origin: "service_job", source_repository: scenario === "mismatch" ? "QuantStrategyLab/Other" : "QuantStrategyLab/QuantAIService", mode: "review_only",
           diagnosis_status: scenario, diagnosis_summary: "private output" },
       } });
     }

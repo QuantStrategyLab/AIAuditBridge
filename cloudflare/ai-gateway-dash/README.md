@@ -35,7 +35,7 @@ survive Worker cold starts and edge isolate changes. When `DASHBOARD_SESSION_KV`
 projections of AIAuditBridge operational diagnosis ledger records. Only the explicit
 job status and up to 500 characters of successful advisory output are shown; no
 job polling, prompts, error details, or action endpoints are exposed. The service
-must include `QuantStrategyLab/PersonalAIService` in
+must include `QuantStrategyLab/QuantAIService` in
 `CODEX_AUDIT_SERVICE_DASHBOARD_REPOSITORIES` for this read access.
 
 Submission uses the existing `Codex Audit` workflow's GitHub OIDC identity, never

@@ -272,7 +272,7 @@ class RuntimeMetadataTests(unittest.TestCase):
         self.assertIn("          - inspect-quant-runtime\n", workflow)
         self.assertIn("        default: inspect\n", workflow)
         self.assertIn("inputs.mode != 'inspect-quant-runtime'", general)
-        expected = "if: github.event_name == 'workflow_dispatch' && github.repository == 'QuantStrategyLab/PersonalAIService' && github.ref == 'refs/heads/main' && inputs.mode == 'inspect-quant-runtime'"
+        expected = "if: github.event_name == 'workflow_dispatch' && github.repository == 'QuantStrategyLab/QuantAIService' && github.ref == 'refs/heads/main' && inputs.mode == 'inspect-quant-runtime'"
         self.assertIn(expected, quant)
         for value in ("environment: codex-vps-ops", "- self-hosted", "- codex-vps", "timeout-minutes: 5",
                       "ref: ${{ github.sha }}", "persist-credentials: false"):
@@ -307,9 +307,9 @@ class RuntimeMetadataTests(unittest.TestCase):
         gh() { printf '%s\\n' "$TEST_MAIN"; }
         timeout() { shift; "$@"; }
         """
-        env = {"PATH": "/usr/bin:/bin", "RUN_REPOSITORY": "QuantStrategyLab/PersonalAIService",
+        env = {"PATH": "/usr/bin:/bin", "RUN_REPOSITORY": "QuantStrategyLab/QuantAIService",
                "RUN_REF": "refs/heads/main", "RUN_SHA": SHA, "RUN_WORKFLOW_SHA": SHA,
-               "RUN_WORKFLOW_REF": "QuantStrategyLab/PersonalAIService/.github/workflows/vps_codex_service_ops.yml@refs/heads/main",
+               "RUN_WORKFLOW_REF": "QuantStrategyLab/QuantAIService/.github/workflows/vps_codex_service_ops.yml@refs/heads/main",
                "TEST_HEAD": SHA, "TEST_MAIN": SHA, "TEST_DIRTY": ""}
         argv = ["/bin/bash", "-c", textwrap.dedent(fixtures) + script + "\necho INSPECTION_BOUND\n"]
         valid = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=5)
@@ -317,7 +317,7 @@ class RuntimeMetadataTests(unittest.TestCase):
         self.assertEqual(valid.stdout.strip(), "INSPECTION_BOUND")
         failures = [("RUN_REPOSITORY", "other/repository"), ("RUN_REF", "refs/heads/spoof"),
                     ("RUN_SHA", "$(echo caller-command)"), ("RUN_WORKFLOW_SHA", "b" * 40),
-                    ("RUN_WORKFLOW_REF", "QuantStrategyLab/PersonalAIService/.github/workflows/other.yml@refs/heads/main"),
+                    ("RUN_WORKFLOW_REF", "QuantStrategyLab/QuantAIService/.github/workflows/other.yml@refs/heads/main"),
                     ("TEST_HEAD", "b" * 40), ("TEST_MAIN", "b" * 40), ("TEST_DIRTY", " M scripts/source.py")]
         for key, value in failures:
             with self.subTest(key=key):

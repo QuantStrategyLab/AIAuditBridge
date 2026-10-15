@@ -27,7 +27,7 @@ if [[ -d "$REMOTE_AAB/.git" ]]; then
   fi
   git -C "$REMOTE_AAB" fetch origin main --quiet
 else
-  git clone --depth 1 https://github.com/QuantStrategyLab/PersonalAIService.git "$REMOTE_AAB"
+  git clone --depth 1 https://github.com/QuantStrategyLab/QuantAIService.git "$REMOTE_AAB"
 fi
 REMOTE_MAIN_SHA="$(git -C "$REMOTE_AAB" rev-parse origin/main)"
 if [[ "$REMOTE_MAIN_SHA" != "$SOURCE_SHA" ]]; then
