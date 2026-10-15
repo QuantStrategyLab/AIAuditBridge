@@ -20,7 +20,7 @@
 
 模型调用只走实际 Actions OIDC 的既有 SDK `execute`，固定 Codex、`research_stage=optimization`、`review_only`，使用精确 CN 代码版本作为 `source_ref`。服务仍独立验证 OIDC 身份及允许的 workflow；脚本检查环境字段并不自行签发身份。静态 service token 被拒绝，无付费 API/Cursor fallback。SDK 固定每次提交及轮询的 job/provider/stage/model/effort。明确额度延期交给原票据保存 `retry_at`；恢复后实际 execute 前仍检查冻结窗口截止，错过时返回确定的 `optimization_needed=false / forward_window_start_elapsed` 并终止该次研究，零新 HTTP/试验。已完成 diagnosis 的 shadow/awaiting 尾部不会再调用这一模型闭包。未知结果不重新调用。
 
-OIDC `repository` 保持 `QuantStrategyLab/AIAuditBridge`，请求 `source_repository` 为 `QuantStrategyLab/CnEquityStrategies`。既有服务实际验证 caller/direct-repository、workflow/ref allowlist，以及 source allowlist 和同组织边界，不能把 CN 源码声明改成 CN OIDC 身份。本轮部署负责人已只读核实生产默认 OIDC、AAB caller/direct、watcher workflow@main、main ref、CN source 和 public visibility 均匹配；没有发模型请求，这不是实际 Actions job 的身份验收。
+OIDC `repository` 保持 `QuantStrategyLab/PersonalAIService`，请求 `source_repository` 为 `QuantStrategyLab/CnEquityStrategies`。既有服务实际验证 caller/direct-repository、workflow/ref allowlist，以及 source allowlist 和同组织边界，不能把 CN 源码声明改成 CN OIDC 身份。本轮部署负责人已只读核实生产默认 OIDC、AAB caller/direct、watcher workflow@main、main ref、CN source 和 public visibility 均匹配；没有发模型请求，这不是实际 Actions job 的身份验收。
 
 ## 输入与版本
 

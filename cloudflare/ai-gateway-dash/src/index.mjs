@@ -23,7 +23,7 @@ const DIAGNOSIS_TASKS = new Map([
   ["operational_data_diagnosis", "operational"],
   ["historical_operational_diagnosis_rehearsal", "historical_rehearsal"],
 ]);
-const DIAGNOSIS_SOURCE_REPOSITORY = "QuantStrategyLab/AIAuditBridge";
+const DIAGNOSIS_SOURCE_REPOSITORY = "QuantStrategyLab/PersonalAIService";
 const DIAGNOSIS_MAX_RESPONSE_BYTES = 1_000_000;
 const DASHBOARD_API_ROUTES = new Set([
   "/v1/ai/health",

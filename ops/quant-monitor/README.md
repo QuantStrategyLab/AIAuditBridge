@@ -325,12 +325,12 @@ profile 不复用旧 snapshot、research CSV 或其他 stream，crypto 报告带
 保留独立 research profiles。配置只是消费请求，不证明 AAB 服务已安装这些变量、source
 已有相应 checkpoint 或真实窗口已通过；这些条件须分别读回和验收。
 
-工程阶段已合并：[AAB #314](https://github.com/QuantStrategyLab/AIAuditBridge/pull/314)
+工程阶段已合并：[AAB #314](https://github.com/QuantStrategyLab/PersonalAIService/pull/314)
 正常合并为 `59cc6dded575ca28d9e23a9bd7c2d2c7e6592e58`；
-[exact PR CI37464400980](https://github.com/QuantStrategyLab/AIAuditBridge/actions/runs/37464400980)
-和 [main CI37465133758](https://github.com/QuantStrategyLab/AIAuditBridge/actions/runs/37465133758)
+[exact PR CI37464400980](https://github.com/QuantStrategyLab/PersonalAIService/actions/runs/37464400980)
+和 [main CI37465133758](https://github.com/QuantStrategyLab/PersonalAIService/actions/runs/37465133758)
 均五 job 全部成功，Python 阶段 2110 passed / 15 skipped / 941 subtests passed。
-首轮 [CI37462661452](https://github.com/QuantStrategyLab/AIAuditBridge/actions/runs/37462661452)
+首轮 [CI37462661452](https://github.com/QuantStrategyLab/PersonalAIService/actions/runs/37462661452)
 因两个新 fixture 依赖本地额外 scripts 路径而失败；测试已显式加载同目录真实 normalizer，
 原失败留存，未重跑旧 run。合并 tree 与受审候选一致，分支已清理。修复复用已有
 artifact-status 校验，从一次已验证
@@ -356,7 +356,7 @@ normalized 文件后，其 SHA256 未变；curl/远端发送未执行。所有�
 远端 exact PR/main CI 已通过。CI Python 主套件的 QPK `7363011...`、AAB 审计基线 pin
 `086166...` 及本次源码 pin `286757...` 分别记录，不能把 CI 通过当作精确 runtime lock
 或生产采用证明。
-[main CI 安装日志](https://github.com/QuantStrategyLab/AIAuditBridge/actions/runs/37465133758/job/112274151998)
+[main CI 安装日志](https://github.com/QuantStrategyLab/PersonalAIService/actions/runs/37465133758/job/112274151998)
 为 pandas 3.0.6 / numpy 2.5.3，ops lock 为 3.0.5 / 2.5.2；该 CI 未验证精确 runtime lock。
 新增独立精确 lock 阶段已通过：官方原 hash 锁定的 27 包下载后在隔离 venv 离线安装，
 实际 pandas 3.0.5 / numpy 2.5.2，`pip check` 成功。已合 test `065152df...` 的 64/64、
@@ -410,7 +410,7 @@ not claimed. Standalone dashboard refresh is a separate, unqualified rebuild pat
 
 #### DATA-03 下一步：有界运行采用计划（待独立评审/执行）
 
-[既有只读 run37471802240](https://github.com/QuantStrategyLab/AIAuditBridge/actions/runs/37471802240)
+[既有只读 run37471802240](https://github.com/QuantStrategyLab/PersonalAIService/actions/runs/37471802240)
 使用 `a9de1f359c9545c45c69c456b5b753b8a1c6e987`，读回 health 静态根
 `38d172262ed60be3eb9579256649f5a1aa31f45a` / pin `086166...`，daily 静态根
 `1d06c4a2687a14545280855faf2cf854e524f8c7`；两者均 `failed/exit-code`，前后配置和
@@ -418,7 +418,7 @@ invocation 稳定。venv/解释器仍 unknown；三项 QPK 候选文件 hash 不
 或真实 import。旧 release 是已观测回退配置，不是已知健康版本；不重发已用的一次诊断。
 
 PR #318 合并后的独立扩展读回
-[run37486273513](https://github.com/QuantStrategyLab/AIAuditBridge/actions/runs/37486273513)
+[run37486273513](https://github.com/QuantStrategyLab/PersonalAIService/actions/runs/37486273513)
 基于 `28a85ff022e77623d90cd05eef1a70448cba3c39`，在 **2026-10-06 15:18:00 UTC**
 观察到上述两个旧根仍 `failed/exit-code`（health 2、daily 1），配置和 invocation 前后稳定；
 这不是故障首次发生时间。固定 QPK HEAD 为 `086166458d4e3f61bb8937054cf7e69ff6ef914a`，
@@ -427,13 +427,13 @@ ReturnCollector hash 匹配该旧版本；health pin 与 HEAD 匹配，daily 未
 类别 unknown 不等于损坏。原 interpreter/import gates 仍 unknown，未执行目标解释器或导入。
 这些剩余未知项不阻止先准备独立新环境，仍阻止声称服务已采用或恢复。
 
-随后唯一一次 [inactive staging run37498059845](https://github.com/QuantStrategyLab/AIAuditBridge/actions/runs/37498059845)
+随后唯一一次 [inactive staging run37498059845](https://github.com/QuantStrategyLab/PersonalAIService/actions/runs/37498059845)
 使用已通过 main CI 的 `665f61e437eae65ed802c10caeea7b0effad698f`，在 2026-10-06
 16:44:32 UTC 以 `qpk_commit_unavailable` / exit 1 停止，未到创建 venv 或 pip 阶段；
 候选 metadata 步骤跳过。该 enum 不区分对象缺失和镜像/读取问题，当前磁盘状态未补读。
 后续源码候选改为在 runner 临时目录准备独立的公共 QPK 精确对象；失败 run 保留且不重发。
 
-修复后的独立 [inactive staging run37504798174](https://github.com/QuantStrategyLab/AIAuditBridge/actions/runs/37504798174)
+修复后的独立 [inactive staging run37504798174](https://github.com/QuantStrategyLab/PersonalAIService/actions/runs/37504798174)
 以 `35ac71176127f07e00fe04dbc793777f3c595bc0` 在 2026-10-06 17:36:36 UTC 完成
 候选 metadata 验收：27 个锁定 distribution 版本与四项 QPK 文件 hash 匹配，QPK pin 为
 `28675796cabbe137a1fa3970b70d1aa98e952c88`。仅此 job 执行，其余 11 jobs 跳过；
@@ -462,7 +462,7 @@ unsupported，系统调用不可达为 unknown，不退回 real uid 检查，不
 未枚举的其它残留保持 unknown。此组不会升级旧 interpreter/import/adoption gates，也不能
 恢复已经丢弃的 installer 原生退出信息。
 
-随后独立只读 [run37521955303](https://github.com/QuantStrategyLab/AIAuditBridge/actions/runs/37521955303)
+随后独立只读 [run37521955303](https://github.com/QuantStrategyLab/PersonalAIService/actions/runs/37521955303)
 （main `b7651526b6d03cc9cb0d25055326763f20939d78`）在 2026-10-06 19:51:14–15 UTC
 取得稳定 metadata：release parent 为 0755 目录，当前 runner effective read/execute=true、
 write=false，owner/group 匹配均 false；固定35ac target 为 absent。其它残留未枚举；原安装
@@ -483,7 +483,7 @@ readiness；immutable-release、shell-selection、runtime-adoption和health-reco
 快照是临时验证副本，runner清理后的保留状态不作保证。
 
 PR #324 合并并通过 main CI 后，唯一 imports-only
-[run37533618835](https://github.com/QuantStrategyLab/AIAuditBridge/actions/runs/37533618835)
+[run37533618835](https://github.com/QuantStrategyLab/PersonalAIService/actions/runs/37533618835)
 （controller `1131116e3d405ed3dca56f5c7406df2c6d3af190`、job112508913937）在
 2026-10-06 21:24:20 UTC 验证固定35ac快照成功：40文件、480370字节、无runtime links。
 随后导入在 `qpk_drift` 停止，固定回执为 `failure=consumer_import`、write=1，
@@ -720,7 +720,7 @@ Manual mode `inspect-recorded-daily-errors` runs the strict no-value flag
 `--inspect-recorded-daily-errors` in its own existing-environment/concurrency job.
 The source binds only `codex-daily-briefing.service` and invocation
 `ff223a65dbf049cc9e9280f49c7519d5`, recorded in both before/after InvocationID
-fields of [the original inspect run](https://github.com/QuantStrategyLab/AIAuditBridge/actions/runs/37414305498)
+fields of [the original inspect run](https://github.com/QuantStrategyLab/PersonalAIService/actions/runs/37414305498)
 (job 112109414839). This binding does not assert that a later bool-only sample
 had the same ID. If the first existing-property systemctl snapshot cannot confirm
 this exact current ID, stop after that one read. Otherwise issue one fixed

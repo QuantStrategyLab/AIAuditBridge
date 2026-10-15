@@ -4,7 +4,7 @@ AIAuditBridge uses an async service contract to avoid keeping a GitHub Actions r
 
 ## Architecture
 
-1. A source repository creates or updates an audit issue, then dispatches `QuantStrategyLab/AIAuditBridge`.
+1. A source repository creates or updates an audit issue, then dispatches `QuantStrategyLab/PersonalAIService`.
 2. AIAuditBridge clones the source repository with a scoped GitHub App token, builds the audit prompt, and requests a GitHub Actions OIDC token with audience `quant-codex-audit`.
 3. AIAuditBridge submits `POST /v1/codex-audit/jobs` through the Cloudflare Worker.
 4. The Worker forwards only Quant audit routes with bearer tokens to the VPS origin. The VPS service validates OIDC signature, audience, repository, workflow ref, git ref, source repository allowlists, and payload size.
@@ -28,8 +28,8 @@ The historical self-hosted direct-Codex workflows in `SelfHostedCodexAuditBridge
 
 - Source repositories, including public QuantStrategyLab repositories, must not store provider keys or the Codex service URL.
 - Source repositories should only dispatch the bridge workflow and provide issue/source context. Avoid running Codex directly in public workflows.
-- `QuantStrategyLab/AIAuditBridge` is public, so it may contain only client/orchestration code. Its service URL, provider fallback keys, GitHub App private key, and Cloudflare origin stay in GitHub or Cloudflare secrets.
-- The VPS service should allow only `QuantStrategyLab/AIAuditBridge` in `CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES`.
+- `QuantStrategyLab/PersonalAIService` is public, so it may contain only client/orchestration code. Its service URL, provider fallback keys, GitHub App private key, and Cloudflare origin stay in GitHub or Cloudflare secrets.
+- The VPS service should allow only `QuantStrategyLab/PersonalAIService` in `CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES`.
 - The VPS service should require explicit `CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS` for the canonical `AIAuditBridge` workflows only.
 - The VPS service should keep `CODEX_AUDIT_SERVICE_ALLOWED_REFS` as narrow as the enabled workflows allow, normally `refs/heads/main`.
 - Keep `CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORY_VISIBILITIES=public` unless the bridge repository is intentionally private.
@@ -55,11 +55,11 @@ For public source repositories:
 After merging the async service code, run the manual `VPS Codex Service Ops` workflow with deploy mode, or run on the VPS:
 
 ```bash
-CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES=QuantStrategyLab/AIAuditBridge \
-CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS='QuantStrategyLab/AIAuditBridge/.github/workflows/codex_audit.yml@refs/heads/main' \
+CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORIES=QuantStrategyLab/PersonalAIService \
+CODEX_AUDIT_SERVICE_ALLOWED_WORKFLOW_REFS='QuantStrategyLab/PersonalAIService/.github/workflows/codex_audit.yml@refs/heads/main' \
 CODEX_AUDIT_SERVICE_ALLOWED_REFS='refs/heads/main' \
 CODEX_AUDIT_SERVICE_ALLOWED_REPOSITORY_VISIBILITIES='public' \
-CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES='QuantStrategyLab/AIAuditBridge,QuantStrategyLab/CryptoLivePoolPipelines,QuantStrategyLab/HkEquitySnapshotPipelines,QuantStrategyLab/UsEquitySnapshotPipelines,QuantStrategyLab/ResearchSignalContextPipelines' \
+CODEX_AUDIT_SERVICE_ALLOWED_SOURCE_REPOSITORIES='QuantStrategyLab/PersonalAIService,QuantStrategyLab/CryptoLivePoolPipelines,QuantStrategyLab/HkEquitySnapshotPipelines,QuantStrategyLab/UsEquitySnapshotPipelines,QuantStrategyLab/ResearchSignalContextPipelines' \
 CODEX_AUDIT_SERVICE_AUDIENCE=quant-codex-audit \
 CODEX_AUDIT_SERVICE_MODEL=auto \
 CODEX_AUDIT_SERVICE_REASONING_EFFORT=auto \
@@ -133,7 +133,7 @@ the Worker URL, the Worker may reject it before it reaches the origin service.
 ### 3. Point AIAuditBridge at the Worker
 
 ```bash
-gh secret set CODEX_AUDIT_SERVICE_URL -R QuantStrategyLab/AIAuditBridge
+gh secret set CODEX_AUDIT_SERVICE_URL -R QuantStrategyLab/PersonalAIService
 ```
 
 Set the secret value to the Worker base URL, for example:
@@ -158,7 +158,7 @@ Run a manual `codex_audit.yml` dispatch against a low-risk source issue with pro
 After explicit authorization and source deployment verification, dispatch the existing
 `Codex Audit` workflow on `main` with `synthetic_sdk_check=true`. The required legacy
 issue input is unused by this branch (use `0`); set `source_repo` to
-`QuantStrategyLab/AIAuditBridge`, `mode=review_only`, `provider=codex`, and
+`QuantStrategyLab/PersonalAIService`, `mode=review_only`, `provider=codex`, and
 `auto_merge=false`. This branch does not run the monthly audit or create an Issue.
 
 The existing GitHub OIDC identity is required; a dashboard token is not a write

@@ -166,7 +166,7 @@ class MonitorFailClosedTests(unittest.TestCase):
             "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "synthetic-oidc-request",
             "GITHUB_EVENT_NAME": "workflow_dispatch",
             "GITHUB_REF": "refs/heads/main",
-            "GITHUB_REPOSITORY": "QuantStrategyLab/AIAuditBridge",
+            "GITHUB_REPOSITORY": "QuantStrategyLab/PersonalAIService",
             "GITHUB_RUN_ATTEMPT": "1",
         }
         with mock.patch.dict(os.environ, safe_env, clear=True):
@@ -191,7 +191,7 @@ class MonitorFailClosedTests(unittest.TestCase):
         base = {
             "GITHUB_EVENT_NAME": "workflow_dispatch",
             "GITHUB_REF": "refs/heads/main",
-            "GITHUB_REPOSITORY": "QuantStrategyLab/AIAuditBridge",
+            "GITHUB_REPOSITORY": "QuantStrategyLab/PersonalAIService",
         }
         cases = [
             ({**base, "GITHUB_RUN_ATTEMPT": "2", "ACTIONS_ID_TOKEN_REQUEST_URL": "x", "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "y"}, "invalid_workflow_attempt"),
@@ -228,7 +228,7 @@ class MonitorFailClosedTests(unittest.TestCase):
             "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "synthetic-oidc-request",
             "GITHUB_EVENT_NAME": "workflow_dispatch",
             "GITHUB_REF": "refs/heads/main",
-            "GITHUB_REPOSITORY": "QuantStrategyLab/AIAuditBridge",
+            "GITHUB_REPOSITORY": "QuantStrategyLab/PersonalAIService",
             "GITHUB_RUN_ATTEMPT": "1",
         }, clear=True):
             result = HEALTH_CYCLE.run_historical_diagnosis_rehearsal(

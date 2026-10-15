@@ -28,14 +28,14 @@
 
 - `AI_DAILY_SUMMARY_ENABLED=true` 已精确读回。既有每日 22:45 UTC（北京时间次日
   06:45）工作流消费 VPS 22:30 UTC 已生成的报告，定时器和原通知逻辑保持原样。
-- [run 34563189573](https://github.com/QuantStrategyLab/AIAuditBridge/actions/runs/34563189573)
+- [run 34563189573](https://github.com/QuantStrategyLab/PersonalAIService/actions/runs/34563189573)
   实际消费 2026-09-10 日报并返回 `available`，Codex `gpt-5.6-luna / low`；
   摘要仅供参考，其他任务 skipped。这是启用后的单次人工验收，后续自然定时周期另计。
 - 现有诊断开关为 true；最近自然
-  [run 34546891381](https://github.com/QuantStrategyLab/AIAuditBridge/actions/runs/34546891381)
+  [run 34546891381](https://github.com/QuantStrategyLab/PersonalAIService/actions/runs/34546891381)
   工件为 `skipped / no_data_errors`，没有伪造故障来触发模型。
 - 固定身份保护历史诊断
-  [run 34439482142](https://github.com/QuantStrategyLab/AIAuditBridge/actions/runs/34439482142)
+  [run 34439482142](https://github.com/QuantStrategyLab/PersonalAIService/actions/runs/34439482142)
   工件为 `succeeded`，已复核原证据，不重复调用。该结果属于历史演练。
 
 ## 近期异常诊断覆盖（2026-09-11）

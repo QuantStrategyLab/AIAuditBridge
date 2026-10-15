@@ -807,11 +807,11 @@ class PathInspectionTests(unittest.TestCase):
         sha = "a" * 40
         env = {
             "PATH": "/usr/bin:/bin",
-            "RUN_REPOSITORY": "QuantStrategyLab/AIAuditBridge",
+            "RUN_REPOSITORY": "QuantStrategyLab/PersonalAIService",
             "RUN_REF": "refs/heads/main",
             "RUN_SHA": sha,
             "RUN_WORKFLOW_SHA": sha,
-            "RUN_WORKFLOW_REF": "QuantStrategyLab/AIAuditBridge/.github/workflows/vps_codex_service_ops.yml@refs/heads/main",
+            "RUN_WORKFLOW_REF": "QuantStrategyLab/PersonalAIService/.github/workflows/vps_codex_service_ops.yml@refs/heads/main",
             "TEST_HEAD": sha,
             "TEST_MAIN": sha,
             "TEST_DIRTY": "",
@@ -838,7 +838,7 @@ class PathInspectionTests(unittest.TestCase):
             ("RUN_WORKFLOW_SHA", "b" * 40),
             (
                 "RUN_WORKFLOW_REF",
-                "QuantStrategyLab/AIAuditBridge/.github/workflows/other.yml@refs/heads/main",
+                "QuantStrategyLab/PersonalAIService/.github/workflows/other.yml@refs/heads/main",
             ),
         ]
         for key, value in failures:
