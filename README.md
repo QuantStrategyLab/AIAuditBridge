@@ -1,44 +1,81 @@
 # QuantAIService
 
-[English](README.md) | [简体中文](README.zh-CN.md)
+An independently packaged, project-scoped task runtime for AI work.
 
-QuantAIService owns its independently packaged, project-scoped task runtime. API tasks and persistent assistant tasks share one contract. Strategy prompts, source validation, execution and adoption stay in the business repositories that own them.
-
-Each repository in this family owns its own runtime and schemas; there is no shared core.
-
-See [runtime ownership and dependency baseline](docs/runtime-baseline.md).
+English | [简体中文](README.zh-CN.md)
 
 ## Status
 
-- Since 2.0.10, worker grants can be scoped to an exact `owner` (including future repositories), or a compatible explicit same-owner `projects` list. Workflow submitters remain single-project, and project lists cannot grant submit permissions.
-- Version 2 replaces the retired AIAuditBridge interfaces. Run `quant-ai-service` with a reviewed configuration; `config/quant.example.json` is disabled. No VPS model processes or V1 compatibility endpoints remain.
-- The current package is 2.0.13. It adds audited scenario-instance control, a fixed synthetic probe and read-only worker tools preflight. See the [release comparison and artifact requirements](docs/release-2.0.13.md). Packaging does not establish live OAuth, Dot/Grok acceptance or deployment.
+Experimental. Use at your own risk. This project is not financial advice and
+does not guarantee any trading result. It is an operations tool; it does not
+place orders and does not grant trading authority.
 
-See [upgrade status](docs/upgrade-v2/QUANT.zh-CN.md), [retired entries](docs/upgrade-v2/RETIRED-V1.zh-CN.md) and [identity inventory](docs/upgrade-v2/IDENTITY-INVENTORY.zh-CN.md).
+## What this is
 
-The [Quant-only VPS workflow](deploy/vps/ci-deploy/README.md) provides manual deploy,
-rollback and status with dry-run enabled by default. CI builds reviewable Linux
-bundles; server bootstrap and deployment need separate operator approval.
+QuantAIService runs project-scoped AI tasks. API tasks and persistent assistant
+tasks share one contract, and each repository that uses the service owns its own
+runtime, schemas, prompts, and source validation. The package provides the task
+server (`quant-ai-service`), a client (`ai-task`), and an offline scenario SDK
+for `ScenarioTaskSpec/v1` and `ScenarioInstance/v1` validated with JSON Schema.
 
-## Offline scenario SDK
+## What this is not
 
-`ai_service.scenarios` is an offline contract SDK for `ScenarioTaskSpec/v1` and `ScenarioInstance/v1`, validated with JSON Schema Draft 2020-12. It applies defaults, validates structure and binds a task to its producer; it never dispatches or authorizes work.
+It does not own strategy prompts, source validation, execution, or adoption;
+those stay in the business repositories that own them. It is not a shared core
+for the repository family. It does not place orders or authorize work by itself.
 
-- Import functions from `ai_service.scenarios`.
-- Package data lives in `src/ai_service/scenarios/*.schema.json`.
-- The task schema references only the bundled instance schema URN, so external validators must register both resources; there is no network retrieval.
+## Quick start
 
-Long templates require Dot or Grok. API stages are limited to bounded transforms, protocol probes and explicitly small report audits. See [scenario contracts](docs/scenario-contracts.md) for defaults, limits and examples.
+Requires Python 3.10 or newer.
 
-The offline compiler remains passive. The opt-in pilot caller in `ai_service.scenarios.pilot` and `ai_service.scenarios.pilot_cli` now supports an approved manual submit plus caller-side readback verification. Repository examples stay `enabled=false` and live rollout is pending. See the [synthetic protocol probe](docs/pilot-synthetic.md).
-
-## Verification
-
-```
+```bash
 python -m pip install .
 python -m unittest discover -s tests/task_service -v
 ```
 
-## Monitor
+Run the task server with your own configuration. The bundled
+`config/quant.example.json` is disabled by default and is a starting point only.
 
-`ops/quant-monitor` retains report consumption and delivery. Its migrated runtime requires the approved V2 client and QuantPlatformKit package. Existing deployed monitors and dashboard have not been switched.
+## Configuration
+
+| Variable | Required | Default | Purpose |
+|---|---|---|---|
+| `AI_SERVICE_URL` | Yes | none | Base URL of the task service. |
+| `AI_SERVICE_TOKEN` | No | none | Bearer token used by clients. |
+| `AI_SERVICE_AUDIENCE` | No | none | Audience for the workload-identity token. Required by the `client_from_env()` helper; optional for the `ai-task` CLI when `AI_SERVICE_TOKEN` is set. |
+
+With the `ai-task` CLI, set `AI_SERVICE_URL` and then either
+`AI_SERVICE_TOKEN` or `AI_SERVICE_AUDIENCE`. The `client_from_env()` helper
+used by the scenario pilot CLI instead requires `AI_SERVICE_URL` and
+`AI_SERVICE_AUDIENCE`; `AI_SERVICE_TOKEN` stays optional, and when unset the
+helper requests a GitHub workload-identity token for that audience.
+
+Server configuration lives in a JSON file based on
+[`config/quant.example.json`](config/quant.example.json). It defines the
+listening resource, the SQLite state path, accepted token issuers, and the
+provider backends. Replace every `CONFIGURE_*` placeholder with your own value.
+
+## Repository layout
+
+```
+src/        task server, client, and scenario schemas
+config/     example service configuration
+deploy/     deployment templates
+ops/        monitoring helpers
+docs/       design notes and contracts
+tests/      unit and contract tests
+```
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Security
+
+See [SECURITY.md](SECURITY.md). Do not open a public issue for a vulnerability.
+Keep credentials, private data, and external service tokens out of Git and logs.
+
+## License
+
+MIT. See [LICENSE](LICENSE). The task-service component carries its own MIT
+license in [`LICENSE.task-service`](LICENSE.task-service).
