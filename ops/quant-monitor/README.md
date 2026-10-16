@@ -155,8 +155,10 @@ input.
 
 ### One-shot immutable-object runtime briefing
 
-The `preview-longbridge-paper-once` and `send-longbridge-paper-once` modes are
-manual workflow operations. The default remains `inspect`; no new timer or
+The manual-only `Monitor Runtime Digest Once` workflow offers just two modes,
+`preview-longbridge-paper-once` and `send-longbridge-paper-once`, and defaults to
+`preview-longbridge-paper-once`. There is no `inspect` mode; preview does not
+send, and `send-longbridge-paper-once` must be chosen explicitly. No new timer or
 automatic send is enabled. The business day is supplied as an ordinary dispatch
 input. The object URI and complete approved paper target-key set (one key per
 line) must come only from the protected environment secrets
@@ -310,33 +312,33 @@ Projects roots, or the QPK mirror; otherwise the venv is created under
 
 ## Read-only inspection modes
 
-The manual-only `VPS Codex Service Ops` workflow provides read-only inspection
-modes for a running deployment. They do not restart services, run pipelines, call
-models, change permissions, or touch accounts, transactions, notifications, or
-deployment.
+The scripts below are read-only inspection helpers for a running deployment. The
+manual `VPS Codex Service Ops` workflow that once exposed them as dispatch modes
+is no longer wired: no workflow under `.github/workflows/` runs these
+inspections, so invoke the helpers directly. They do not restart services, run
+pipelines, call models, change permissions, or touch accounts, transactions,
+notifications, or deployment.
 
-- `inspect-quant-paths` runs `inspect_runtime_paths.py` from an exact-main, clean
-  checkout with a clean process environment. It projects the documented root
-  variables through fixed path classes, reports fixed provenance categories,
-  override flags, selected public dependency SHA256s, and the current QPK pin. It
-  never sources environment files or returns their contents or hashes, and it
-  reports filesystem identity separately without resolving symlinks.
-- `inspect-monitor-failures` runs `inspect_monitor_failures.py --inspect` with
-  `env -i` and `/usr/bin/python3 -I -B` against `codex-quant.service`,
+- `inspect_runtime_paths.py` runs from an exact-main, clean checkout with a clean
+  process environment. It projects the documented root variables through fixed
+  path classes, reports fixed provenance categories, override flags, selected
+  public dependency SHA256s, and the current QPK pin. It never sources
+  environment files or returns their contents or hashes, and it reports
+  filesystem identity separately without resolving symlinks.
+- `inspect_monitor_failures.py --inspect` runs with `env -i` and
+  `/usr/bin/python3 -I -B` against `codex-quant.service`,
   `codex-daily-briefing.service`, and their two timers. Each unit has bounded
   `/usr/bin/systemctl --no-pager show` reads before and after its evidence read.
   Only a service's known nonzero current `InvocationID` permits one matching
   `journalctl` query. Output keeps only fixed enumerations, counters, booleans,
   and normalized times; raw log text, paths, URLs, accounts, tokens,
   InvocationIDs, and exceptions are never emitted.
-- `inspect-daily-failure-sample` runs only
-  `inspect_monitor_failures.py --inspect-daily-only`, reading only the daily
+- `inspect_monitor_failures.py --inspect-daily-only` reads only the daily
   service's bounded snapshot and one journal query. It reports classified sample
   counts only when exactly 64 complete JSON records are read and validated.
-- `inspect-recorded-daily-errors` runs
-  `inspect_monitor_failures.py --inspect-recorded-daily-errors`, binding a
-  recorded daily invocation ID and reporting allowlisted error categories and
-  exit-code pairs without retaining raw text.
+- `inspect_monitor_failures.py --inspect-recorded-daily-errors` binds a recorded
+  daily invocation ID and reports allowlisted error categories and exit-code
+  pairs without retaining raw text.
 
 All modes keep the same limits: a five-second deadline per command, a streamed
 combined stdout/stderr byte cap (16 KiB for systemd, 64 KiB per service journal),
@@ -345,9 +347,11 @@ Missing units or IDs, denied visibility, stderr, malformed or mismatched records
 and changed snapshots cannot produce a diagnosis.
 
 Offline verification uses in-memory metadata runners with guards against
-processes, sockets, and external callbacks installed before helper import. No
-arguments perform host reads; only `--inspect` does. The built-in
-`--fixture-test` exercises the collector without metadata commands:
+processes, sockets, and external callbacks installed before helper import. With
+no arguments the helper performs no host read and exits with an error; host reads
+require one of the three explicit switches `--inspect`, `--inspect-daily-only`,
+or `--inspect-recorded-daily-errors`, and the built-in `--fixture-test` exercises
+the collector without metadata commands:
 
 ```bash
 python3 -B -m unittest discover -s ops/quant-monitor/tests -p test_inspect_monitor_failures.py -v

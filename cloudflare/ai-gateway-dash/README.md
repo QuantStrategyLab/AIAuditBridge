@@ -38,15 +38,11 @@ job polling, prompts, error details, or action endpoints are exposed. The origin
 service must list this repository in its dashboard-repositories allowlist for
 this read access.
 
-Submission uses the existing `Codex Audit` workflow's GitHub OIDC identity, never
-the dashboard's static token. `AI_OPERATIONAL_DIAGNOSIS_ENABLED=true` enables the
-operational job on its existing daily schedule or a manual
-`operational_diagnosis=true` dispatch. It reads only the latest VPS cycle, rejects
-missing/invalid or over-two-hour-old input, and skips healthy cycles. Incident
-fingerprints are stored separately from monitor alert state. An uncertain outcome
-is not resubmitted automatically; capacity deferrals may be tried on a later run.
-The model remains Codex only, read-only and quota gated. Empty results and healthy
-skips do not establish successful diagnosis of a real incident.
+The submission path is not wired in this repository. The `.github/workflows/`
+directory has no `Codex Audit` workflow, so there is no daily schedule or
+`operational_diagnosis=true` dispatch, and setting
+`AI_OPERATIONAL_DIAGNOSIS_ENABLED` does not create a diagnosis run. The endpoints
+above only project ledger records that the origin service already holds.
 
 ## Deploy
 
