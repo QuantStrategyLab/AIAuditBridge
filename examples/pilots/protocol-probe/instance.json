@@ -1,0 +1,36 @@
+{
+  "schema_version": "scenario.instance.v1",
+  "id": "quant-synthetic-probe",
+  "project": "example-org/ExampleProject",
+  "template": "protocol_probe",
+  "template_version": "1",
+  "enabled": false,
+  "config_revision": "0000000000000000000000000000000000000000",
+  "inputs": {
+    "manifest_ref": "quant-synthetic-probe-v1",
+    "data_classification": "synthetic",
+    "fields": {
+      "fixture_ref": "quant-synthetic-probe-v1",
+      "assertions_ref": "probe-ok-only",
+      "cleanup_ref": "delete-subscription-then-gone",
+      "ttl_seconds": 120
+    }
+  },
+  "stages": [{
+    "phase": "agent",
+    "role": "primary",
+    "worker_type": "dot",
+    "route_ref": "default",
+    "model_ref": "configured-dot",
+    "limits": {"timeout_seconds": 120, "monthly_budget_usd": 0}
+  }],
+  "executor_ref": null,
+  "gate_refs": [],
+  "output": {
+    "schema_ref": "quant-synthetic-probe-result-v1",
+    "evidence_store_ref": "local-probe-receipt",
+    "public_projection_ref": "synthetic-only",
+    "retention_policy_ref": "local-probe-receipt",
+    "sink_ref": "local-probe-receipt"
+  }
+}

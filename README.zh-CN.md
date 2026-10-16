@@ -12,7 +12,7 @@ QuantAIService 独立维护按项目隔离的完整任务运行时、依赖及�
 
 - 自 2.0.10 起，worker grant 可限定为准确的 `owner` 范围（包括今后新增仓库），也兼容同一 owner 下兼容的显式 `projects` 列表。工作流提交方仍保持单项目形式，项目列表不能授予提交权限。
 - 版本 2 替代已退役的 AIAuditBridge 接口。使用经审阅的配置运行 `quant-ai-service`；示例配置 `config/quant.example.json` 默认关闭。旧 VPS 模型进程和 V1 兼容接口已退役。
-- 真实 OAuth 注册、Dot/Grok 连接、发布、仓库改名和部署仍未执行。当前包版本为 2.0.11。
+- 当前包版本为 2.0.13，新增带审计的场景实例控制、固定合成探测及只读 worker tools 预检。见[版本比较与产物要求](docs/release-2.0.13.md)。打包完成不代表真实 OAuth、Dot/Grok 功能或部署已经验收。
 
 见[升级说明](docs/upgrade-v2/QUANT.zh-CN.md)、[旧入口退役](docs/upgrade-v2/RETIRED-V1.zh-CN.md)和[登录配置核对](docs/upgrade-v2/IDENTITY-INVENTORY.zh-CN.md)。
 

@@ -1,0 +1,4 @@
+{
+  "schema_version": "quant.synthetic-probe.v1",
+  "expected_output": {"probe": "ok"}
+}

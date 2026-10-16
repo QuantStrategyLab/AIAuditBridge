@@ -12,7 +12,7 @@ See [runtime ownership and dependency baseline](docs/runtime-baseline.md).
 
 - Since 2.0.10, worker grants can be scoped to an exact `owner` (including future repositories), or a compatible explicit same-owner `projects` list. Workflow submitters remain single-project, and project lists cannot grant submit permissions.
 - Version 2 replaces the retired AIAuditBridge interfaces. Run `quant-ai-service` with a reviewed configuration; `config/quant.example.json` is disabled. No VPS model processes or V1 compatibility endpoints remain.
-- Real OAuth registration, Dot/Grok connections, releases, repository renaming and deployment remain deferred. The current package is 2.0.11.
+- The current package is 2.0.13. It adds audited scenario-instance control, a fixed synthetic probe and read-only worker tools preflight. See the [release comparison and artifact requirements](docs/release-2.0.13.md). Packaging does not establish live OAuth, Dot/Grok acceptance or deployment.
 
 See [upgrade status](docs/upgrade-v2/QUANT.zh-CN.md), [retired entries](docs/upgrade-v2/RETIRED-V1.zh-CN.md) and [identity inventory](docs/upgrade-v2/IDENTITY-INVENTORY.zh-CN.md).
 

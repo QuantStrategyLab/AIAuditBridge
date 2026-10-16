@@ -24,6 +24,13 @@ The fixture is `synthetic.protocol-input.v1`:
 
 The adapter rejects anything else. All fixture strings, organizations and hosts are generic.
 
+Version 2.0.13 also accepts the fixed text fixture in
+`examples/pilots/protocol-probe`: `quant.synthetic-probe.v1` with exactly
+`expected_output={"probe":"ok"}`. Its separate adapter returns only that fixed
+result. Both formats require the existing `protocol_probe` template, a single
+Dot stage and synthetic classification; the series format above is unchanged.
+The new example stays disabled and has no activation approval.
+
 ## Output contract
 
 The result is fully fixed by the input:

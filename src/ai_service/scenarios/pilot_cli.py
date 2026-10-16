@@ -7,8 +7,7 @@ from pathlib import Path
 
 from ai_service.client import client_from_env
 from . import ContractError, load_instance
-from .pilot import digest, prepare, submit, verify
-from .pilot_domain import result_contract
+from .pilot import digest, domain_for, prepare, submit, verify
 
 
 def write_private(path, value):
@@ -34,7 +33,7 @@ def main():
     try:
         instance = load_instance(json.loads(args.instance.read_text()))
         manifest = json.loads(args.input.read_text())
-        result_contract(manifest)
+        domain_for(instance, manifest).result_contract(manifest)
         if args.command == 'dry-run' and not instance['enabled']:
             print(json.dumps({'dry_run': True, 'enabled': False, 'dispatchable': False,
                               'input_sha256': digest(manifest)}))
