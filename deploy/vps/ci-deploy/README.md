@@ -1,11 +1,12 @@
 # Quant VPS deployment
 
-This path controls `quant-ai.service` only. It does not call the Personal deploy
-helper, copy configuration, synchronize Secrets, change grants, run strategy
-jobs, or install packages from the network on the server. All examples use public
-placeholders. The existing MIT license covers these files. Bundle extraction,
-offline installation, health probes and receipts are adapted from the Personal
-service deploy design; Quant has its own helper, settings, key and concurrency.
+This path controls `quant-ai.service` only. It does not call another service's
+deploy helper, copy configuration, synchronize Secrets, change grants, run
+strategy jobs, or install packages from the network on the server. All examples
+use public placeholders. The existing MIT license covers these files. Bundle
+extraction, offline installation, health probes and receipts are adapted from an
+existing service deploy design; Quant has its own helper, settings, key and
+concurrency.
 
 ## Build and review
 
@@ -22,7 +23,7 @@ For review, download the exact run with
 the source SHA, release ID, run ID, bundle digest and wheel digest. The outer
 bundle digest is an approval input; the server also checks full manifest coverage
 and hash-pinned requirements, rejects unsafe tar members, duplicate packages,
-Personal wheels and version mismatches, and installs with `--no-index` and
+another service's wheels, and version mismatches, and installs with `--no-index` and
 `--require-hashes`. Resolved dependencies are pinned inside that immutable bundle;
 a new CI build can resolve different compatible dependencies and needs review.
 
@@ -49,13 +50,13 @@ does not create settings, credentials or permission rules.
 Environment variables: `QUANT_VPS_HOST`, `QUANT_VPS_USER`, `QUANT_VPS_PORT`
 (default `22`), `QUANT_VPS_KNOWN_HOSTS` (verified host-key lines), and
 `QUANT_PUBLIC_HOST` (HTTPS origin). Environment secret: `QUANT_VPS_SSH_KEY`.
-Use a dedicated Quant-only key/account, never the Personal deploy identity. No
+Use a dedicated Quant-only key/account, never another service's deploy identity. No
 Secret sync input exists. Host-key checking is strict; no host-key discovery is
 performed. Environment setup is a separate approved operator task.
 
 ## Server prerequisites (separate operator approval)
 
-Nothing in this PR installs the helper or changes a server. Before first use an
+This deploy path does not install the helper or change a server. Before first use an
 operator must inspect the current unit/drop-ins and running release, archive
 exact originals privately on the server, prove rollback compatibility on a copy
 of the DB, and install the reviewed `quant_ai_deploy.py` as the root-owned,
