@@ -43,9 +43,6 @@ Run the task server with your own configuration. The bundled
 | `AI_SERVICE_URL` | Yes | none | Base URL of the task service. |
 | `AI_SERVICE_TOKEN` | No | none | Bearer token used by clients. |
 | `AI_SERVICE_AUDIENCE` | No | none | Audience for the workload-identity token used when `AI_SERVICE_TOKEN` is unset. |
-| `AI_SERVICE_MODEL` | No | none | Model used for agent tasks. |
-| `AI_SERVICE_SUMMARY_MODEL` | No | none | Model used for summaries. |
-| `AI_SERVICE_SUMMARY_PROFILE` | No | none | Summary profile name. |
 
 Set either `AI_SERVICE_TOKEN` or `AI_SERVICE_AUDIENCE`. Server configuration
 lives in a JSON file based on

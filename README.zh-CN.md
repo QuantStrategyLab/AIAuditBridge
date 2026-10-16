@@ -34,9 +34,6 @@ python -m unittest discover -s tests/task_service -v
 | `AI_SERVICE_URL` | 是 | 无 | 任务服务的基础 URL。 |
 | `AI_SERVICE_TOKEN` | 否 | 无 | 客户端使用的 bearer token。 |
 | `AI_SERVICE_AUDIENCE` | 否 | 无 | `AI_SERVICE_TOKEN` 未设置时，工作负载身份 token 使用的 audience。 |
-| `AI_SERVICE_MODEL` | 否 | 无 | agent 任务所用的模型。 |
-| `AI_SERVICE_SUMMARY_MODEL` | 否 | 无 | 摘要所用的模型。 |
-| `AI_SERVICE_SUMMARY_PROFILE` | 否 | 无 | 摘要 profile 名称。 |
 
 `AI_SERVICE_TOKEN` 与 `AI_SERVICE_AUDIENCE` 至少设置一个。服务端配置存放在以 [`config/quant.example.json`](config/quant.example.json) 为模板的 JSON 文件中，定义监听地址、SQLite 状态路径、接受的 token 签发方以及 provider 后端。请把所有 `CONFIGURE_*` 占位符替换为你自己的值。
 
