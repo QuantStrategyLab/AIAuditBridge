@@ -33,9 +33,11 @@ python -m unittest discover -s tests/task_service -v
 |---|---|---|---|
 | `AI_SERVICE_URL` | 是 | 无 | 任务服务的基础 URL。 |
 | `AI_SERVICE_TOKEN` | 否 | 无 | 客户端使用的 bearer token。 |
-| `AI_SERVICE_AUDIENCE` | 否 | 无 | `AI_SERVICE_TOKEN` 未设置时，工作负载身份 token 使用的 audience。 |
+| `AI_SERVICE_AUDIENCE` | 否 | 无 | 工作负载身份 token 使用的 audience。`client_from_env()` 辅助函数要求设置；`ai-task` CLI 在已设置 `AI_SERVICE_TOKEN` 时可省略。 |
 
-`AI_SERVICE_TOKEN` 与 `AI_SERVICE_AUDIENCE` 至少设置一个。服务端配置存放在以 [`config/quant.example.json`](config/quant.example.json) 为模板的 JSON 文件中，定义监听地址、SQLite 状态路径、接受的 token 签发方以及 provider 后端。请把所有 `CONFIGURE_*` 占位符替换为你自己的值。
+使用 `ai-task` CLI 时，设置 `AI_SERVICE_URL`，并在 `AI_SERVICE_TOKEN` 与 `AI_SERVICE_AUDIENCE` 中二选一。场景 pilot CLI 使用的 `client_from_env()` 辅助函数则要求同时设置 `AI_SERVICE_URL` 与 `AI_SERVICE_AUDIENCE`；`AI_SERVICE_TOKEN` 仍为可选，未设置时该辅助函数会以该 audience 申请 GitHub 工作负载身份 token。
+
+服务端配置存放在以 [`config/quant.example.json`](config/quant.example.json) 为模板的 JSON 文件中，定义监听地址、SQLite 状态路径、接受的 token 签发方以及 provider 后端。请把所有 `CONFIGURE_*` 占位符替换为你自己的值。
 
 ## 仓库结构
 

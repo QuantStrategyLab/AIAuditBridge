@@ -42,10 +42,15 @@ Run the task server with your own configuration. The bundled
 |---|---|---|---|
 | `AI_SERVICE_URL` | Yes | none | Base URL of the task service. |
 | `AI_SERVICE_TOKEN` | No | none | Bearer token used by clients. |
-| `AI_SERVICE_AUDIENCE` | No | none | Audience for the workload-identity token used when `AI_SERVICE_TOKEN` is unset. |
+| `AI_SERVICE_AUDIENCE` | No | none | Audience for the workload-identity token. Required by the `client_from_env()` helper; optional for the `ai-task` CLI when `AI_SERVICE_TOKEN` is set. |
 
-Set either `AI_SERVICE_TOKEN` or `AI_SERVICE_AUDIENCE`. Server configuration
-lives in a JSON file based on
+With the `ai-task` CLI, set `AI_SERVICE_URL` and then either
+`AI_SERVICE_TOKEN` or `AI_SERVICE_AUDIENCE`. The `client_from_env()` helper
+used by the scenario pilot CLI instead requires `AI_SERVICE_URL` and
+`AI_SERVICE_AUDIENCE`; `AI_SERVICE_TOKEN` stays optional, and when unset the
+helper requests a GitHub workload-identity token for that audience.
+
+Server configuration lives in a JSON file based on
 [`config/quant.example.json`](config/quant.example.json). It defines the
 listening resource, the SQLite state path, accepted token issuers, and the
 provider backends. Replace every `CONFIGURE_*` placeholder with your own value.
