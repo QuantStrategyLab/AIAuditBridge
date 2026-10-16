@@ -29,15 +29,25 @@ class PilotTask:
     request: dict
 
 
+def domain_for(instance, manifest):
+    """Keep the existing series fixture and the fixed text probe independently validated."""
+    from . import pilot_domain, protocol_probe
+    if instance['template'] != protocol_probe.TEMPLATE:
+        raise ContractError('unsupported pilot template')
+    if isinstance(manifest, dict) and manifest.get('schema_version') == 'synthetic.protocol-input.v1':
+        return pilot_domain
+    return protocol_probe
+
+
 def prepare(instance, manifest, *, occurrence, submitted_at):
     """Compile an already approved instance. Disabled samples cannot submit."""
-    from .pilot_domain import result_contract, OBJECTIVE, TEMPLATE, DATA_CLASSIFICATIONS
     instance = load_instance(instance)
-    if (instance['template'] != TEMPLATE or len(instance['stages']) != 1
+    domain = domain_for(instance, manifest)
+    if (len(instance['stages']) != 1
             or instance['stages'][0]['worker_type'] != 'dot'
-            or instance['inputs']['data_classification'] not in DATA_CLASSIFICATIONS):
+            or instance['inputs']['data_classification'] not in domain.DATA_CLASSIFICATIONS):
         raise ContractError('pilot requires its single Dot stage and allowed input classification')
-    result_schema = result_contract(manifest)
+    result_schema = domain.result_contract(manifest)
     stage = instance['stages'][0]
     spec = compile_task_spec(instance, occurrence=occurrence, phase=stage['phase'], role=stage['role'],
                              input_manifest_sha256=digest(manifest), submitted_at=submitted_at)
@@ -50,7 +60,7 @@ def prepare(instance, manifest, *, occurrence, submitted_at):
     # JSON round-trip takes a snapshot: later edits to caller inputs cannot change it.
     request = json.loads(json.dumps({
         'mode': 'agent', 'profile': stage['route_ref'], 'model': stage['model_ref'],
-        'objective': OBJECTIVE, 'materials': [{'scenario_task': spec, 'input_manifest': manifest}],
+        'objective': domain.OBJECTIVE, 'materials': [{'scenario_task': spec, 'input_manifest': manifest}],
         'output_schema': output_schema, 'timeout_seconds': stage['limits']['timeout_seconds'],
     }, allow_nan=False))
     if len(json.dumps(request, ensure_ascii=False).encode()) > stage['limits']['max_request_bytes']:

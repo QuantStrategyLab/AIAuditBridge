@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import threading
@@ -12,9 +13,9 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-from jsonschema import ValidationError
+from jsonschema import Draft202012Validator, ValidationError
 
-from .auth import (AuthenticationError, JWTAuthorizer, ProjectAdmissionError, grant_projects,
+from .auth import (AuthenticationError, JWTAuthorizer, Principal, ProjectAdmissionError, grant_projects,
                    project_belongs_to, valid_owner)
 from .mcp_logging import AuthDiagnostics, MCPLog, METHODS, log_level
 from .events import CallbackEndpointError, DotEventProvider, EventSubscriptions
@@ -24,6 +25,7 @@ from .notifications import NativeNotifications
 from .providers import GrokWebhookProvider
 from .runtime import Conflict, NotFound, Policy, TaskRuntime
 from .transport import json_body
+from .worker_tools import worker_tools, tools_schema_sha256
 
 
 class Application:
@@ -192,33 +194,8 @@ class Application:
             return {'jsonrpc': '2.0', 'id': identifier, 'error': {'code': code, 'message': description}}
 
     def tools(self, principal):
-        fields = {'task_id': {'type': 'string'}, 'attempt_id': {'type': 'string'},
-                  'revision': {'type': 'integer', 'minimum': 1},
-                  'status': {'type': 'string', 'enum': ['completed', 'failed', 'cancelled']},
-                  'output': {}, 'artifacts': {'type': 'array', 'items': {'type': 'object'}}}
-        definitions = [('get_task', 'Read assigned task, current materials, revision and cancellation state.', ['task_id'], ['task_id']),
-                       ('claim_task', 'Claim one execution attempt. Reuse the same attempt_id for retries.',
-                        ['task_id', 'attempt_id'], ['task_id', 'attempt_id']),
-                       ('report_task_result', 'Report a final advisory result for the claimed attempt and current revision.',
-                        list(fields), ['task_id', 'attempt_id', 'revision', 'status'])]
-        tools = [{'name': name, 'description': description,
-                 'inputSchema': {'type': 'object', 'properties': {key: fields[key] for key in allowed},
-                                 'required': required, 'additionalProperties': False}}
-                for name, description, allowed, required in definitions if 'tasks:work' in principal.scopes]
-        if self.events and 'events:subscribe' in principal.scopes and principal.provider == self.events.provider_name:
-            tools.extend({'name': name, 'description': description,
-                          'inputSchema': {'type': 'object', 'properties': {
-                              'subscription_id': {'type': 'string', 'minLength': 1, 'maxLength': 200}},
-                              'required': ['subscription_id'], 'additionalProperties': False}}
-                         for name, description in [
-                             ('get_event_subscription', 'Read an owned subscription: active, inactive or gone, with lifecycle timestamps.'),
-                             ('delete_event_subscription', 'Delete an owned subscription and stop delivery. Returns gone; deleted=false if already gone.')])
-        if principal.project is None:
-            for tool in tools:
-                tool['inputSchema']['properties']['project'] = {
-                    'type': 'string', 'enum': sorted(project for project in self.runtime.policies if principal.allows_project(project))}
-                tool['inputSchema']['required'].append('project')
-        return tools
+        return worker_tools(principal, self.runtime.policies,
+                            self.events.provider_name if self.events else None)
 
     def call_tool(self, principal, params):
         if set(params) != {'name', 'arguments'} or not isinstance(params['arguments'], dict):
@@ -306,6 +283,43 @@ def validate_configuration(config):
     if dot_count > 1:
         raise ValueError('one Dot event provider per service deployment')
     return auth, policies
+
+
+def check_worker_tools(config, identity, expected_projects):
+    """Check owner-worker schemas without creating runtime, subscriptions or a JWT."""
+    _, policies = validate_configuration(config)
+    grants = [grant for grant in config['grants'] if grant.get('identity') == identity]
+    if len(grants) != 1:
+        raise ValueError('worker selector must match exactly once')
+    grant = grants[0]
+    scopes = frozenset(grant['scopes'])
+    if scopes != {'tasks:read', 'tasks:work', 'events:subscribe'}:
+        raise ValueError('expected a read/work/events worker without submit scope')
+    if not grant.get('owner') or grant['owner'] != config.get('owner'):
+        raise ValueError('worker must match the configured service owner')
+    provider = grant.get('provider')
+    if config['providers'].get(provider, {}).get('type') != 'dot_events':
+        raise ValueError('worker must use the configured event provider')
+    expected = sorted(set(expected_projects))
+    if not expected or len(expected) != len(expected_projects):
+        raise ValueError('expected projects must be nonempty and unique')
+    principal = Principal(identity, None, scopes, provider, owner=grant['owner'])
+    tools = worker_tools(principal, policies, provider)
+    if {tool['name'] for tool in tools} != {'get_task', 'claim_task', 'report_task_result',
+                                          'get_event_subscription', 'delete_event_subscription'} or len(tools) != 5:
+        raise ValueError('expected five worker tools')
+    for tool in tools:
+        schema = tool['inputSchema']
+        Draft202012Validator.check_schema(schema)
+        if (schema['required'].count('project') != 1
+                or schema['properties']['project']['enum'] != expected):
+            raise ValueError('required project enum must match expected projects exactly')
+    return {'valid': True, 'worker_match_count': 1, 'owner_matches': True,
+            'provider_matches': True, 'worker_has_submit': False,
+            'tool_count': len(tools), 'project_required_in_all': True,
+            'project_enum_exact_match': True, 'tools_schema_sha256': tools_schema_sha256(tools),
+            'preflight_kind': 'config_derived_worker_tools', 'real_oauth_verified': False,
+            'running_process_verified': False}
 
 
 def build_application(config):
@@ -473,22 +487,36 @@ def main(configuration_guard=None):
     parser = argparse.ArgumentParser(description='Generic native-agent task service')
     parser.add_argument('--config', required=True)
     parser.add_argument('--port', type=int, default=8090)
-    parser.add_argument('--check-config', action='store_true', help='validate configuration without starting the service')
+    checks = parser.add_mutually_exclusive_group()
+    checks.add_argument('--check-config', action='store_true', help='validate configuration without starting the service')
+    checks.add_argument('--check-worker-tools', action='store_true', help='check owner-worker schemas without starting the service or authenticating')
+    parser.add_argument('--worker-identity', help='exact configured worker identity for --check-worker-tools')
+    parser.add_argument('--expect-project', action='append', help='exact expected project; repeat for every admitted project')
     args = parser.parse_args()
+    if args.check_worker_tools and (not args.worker_identity or not args.expect_project):
+        parser.error('--check-worker-tools requires --worker-identity and --expect-project')
+    if not args.check_worker_tools and (args.worker_identity is not None or args.expect_project is not None):
+        parser.error('worker selectors require --check-worker-tools')
     config_path = Path(args.config)
     try:
         if config_path.stat().st_mode & 0o077:
             raise ValueError('config must be readable only by its owner')
-        config = json.loads(config_path.read_text())
+        raw = config_path.read_bytes()
+        config = json.loads(raw)
         if configuration_guard:
             configuration_guard(config)
+        if args.check_worker_tools:
+            summary = check_worker_tools(config, args.worker_identity, args.expect_project)
+            summary['config_sha256'] = hashlib.sha256(raw).hexdigest()
+            print(json.dumps(summary))
+            return
         if args.check_config:
             _, policies = validate_configuration(config)
             print(json.dumps({'valid': True, 'projects': len(policies),
                               'providers': len(config['providers'])}))
             return
     except (ValueError, KeyError, TypeError, AttributeError, OSError):
-        if args.check_config:
+        if args.check_config or args.check_worker_tools:
             print(json.dumps({'valid': False, 'error': 'configuration rejected'}))
             raise SystemExit(1) from None
         parser.error('configuration rejected; check owner-only permissions and configuration')
