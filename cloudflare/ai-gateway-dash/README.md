@@ -15,11 +15,11 @@ Cloudflare Worker that serves an operations dashboard for the AiGateway service.
 | `GITHUB_OAUTH_CLIENT_SECRET` | GitHub OAuth App client secret |
 | `DASHBOARD_SESSION_SECRET` | Required dedicated HMAC secret for signed dashboard sessions |
 | `DASHBOARD_SESSION_KV` | Optional Workers KV binding used to revoke signed sessions on logout |
-| `AI_GATEWAY_ORIGIN_URL` | VPS origin URL (e.g. `https://43.156.238.238.sslip.io`) |
+| `AI_GATEWAY_ORIGIN_URL` | HTTPS origin of the AiGateway service, for example `https://<vps-host>`. Set with `wrangler secret put`. |
 | `DASHBOARD_API_TOKEN` | Static token for read-only API access |
 
-`DASHBOARD_API_TOKEN` must match the VPS service `CODEX_AUDIT_SERVICE_TOKEN`
-so the dashboard can read `/v1/ai/*` endpoints.
+`DASHBOARD_API_TOKEN` must match the token configured on the AiGateway origin
+service so the dashboard can read `/v1/ai/*` endpoints.
 Dashboard sessions are signed cookies, not Worker in-memory state, so they
 survive Worker cold starts and edge isolate changes. When `DASHBOARD_SESSION_KV` is bound, logout revokes the session ID server-side. Revocable sessions fail closed if the KV binding is removed. Enabling the KV binding invalidates sessions issued before the binding existed; users should sign in again after rollout. `DASHBOARD_SESSION_SECRET` must be independent from GitHub OAuth and provider API secrets.
 
@@ -34,9 +34,9 @@ survive Worker cold starts and edge isolate changes. When `DASHBOARD_SESSION_KV`
 `/api/diagnoses` and `/api/diagnoses/<job_id>` are session-protected, read-only
 projections of AIAuditBridge operational diagnosis ledger records. Only the explicit
 job status and up to 500 characters of successful advisory output are shown; no
-job polling, prompts, error details, or action endpoints are exposed. The service
-must include `QuantStrategyLab/QuantAIService` in
-`CODEX_AUDIT_SERVICE_DASHBOARD_REPOSITORIES` for this read access.
+job polling, prompts, error details, or action endpoints are exposed. The origin
+service must list this repository in its dashboard-repositories allowlist for
+this read access.
 
 Submission uses the existing `Codex Audit` workflow's GitHub OIDC identity, never
 the dashboard's static token. `AI_OPERATIONAL_DIAGNOSIS_ENABLED=true` enables the
