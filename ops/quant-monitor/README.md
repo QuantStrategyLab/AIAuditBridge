@@ -340,11 +340,19 @@ notifications, or deployment.
   daily invocation ID and reports allowlisted error categories and exit-code
   pairs without retaining raw text.
 
-All modes keep the same limits: a five-second deadline per command, a streamed
-combined stdout/stderr byte cap (16 KiB for systemd, 64 KiB per service journal),
-and at most 64 journal records. Reaching either cap is truncated and unknown.
-Missing units or IDs, denied visibility, stderr, malformed or mismatched records,
-and changed snapshots cannot produce a diagnosis.
+The three explicit `inspect_monitor_failures.py` modes share the same limits: a
+five-second deadline per bounded command, a streamed combined stdout/stderr byte
+cap (16 KiB for systemd, 64 KiB per service journal), and at most 64 journal
+records. Reaching either cap is truncated and unknown; a nonempty stderr cannot
+produce a diagnosis. Missing units or IDs, denied visibility, malformed or
+mismatched records, and changed snapshots cannot produce a diagnosis.
+
+`inspect_runtime_paths.py` takes no arguments and is bounded differently: each
+`systemctl show` is run with `subprocess.run` under a five-second timeout, and
+its captured stdout is rejected only after it returns, on a nonzero exit or more
+than 128 KiB of output; its stderr is captured but ignored rather than treated as
+a rejection. It has no streamed combined byte cap, journal read, or 64-record
+limit.
 
 Offline verification uses in-memory metadata runners with guards against
 processes, sockets, and external callbacks installed before helper import. With
