@@ -16,6 +16,10 @@ See [runtime ownership and dependency baseline](docs/runtime-baseline.md).
 
 See [upgrade status](docs/upgrade-v2/QUANT.zh-CN.md), [retired entries](docs/upgrade-v2/RETIRED-V1.zh-CN.md) and [identity inventory](docs/upgrade-v2/IDENTITY-INVENTORY.zh-CN.md).
 
+The [Quant-only VPS workflow](deploy/vps/ci-deploy/README.md) provides manual deploy,
+rollback and status with dry-run enabled by default. CI builds reviewable Linux
+bundles; server bootstrap and deployment need separate operator approval.
+
 ## Offline scenario SDK
 
 `ai_service.scenarios` is an offline contract SDK for `ScenarioTaskSpec/v1` and `ScenarioInstance/v1`, validated with JSON Schema Draft 2020-12. It applies defaults, validates structure and binds a task to its producer; it never dispatches or authorizes work.

@@ -34,6 +34,23 @@ jobs:
           python -m pip install pytest
           bash -n ops/quant-monitor/scripts/adopt_daily_briefing_release.sh
           python -m pytest -q ops/quant-monitor/tests/test_adopt_daily_briefing_release.py ops/quant-monitor/tests/test_install_immutable_release.py ops/quant-monitor/tests/test_runtime_daily_pipeline.py
+      - name: Test Quant deployment controls without VPS access
+        run: |
+          python -m ruff check deploy/vps/ci-deploy tests/test_vps_deploy.py
+          python -m unittest discover -s tests -p test_vps_deploy.py -v
+      - name: Build reviewable Linux bundle without deploying
+        run: |
+          mkdir -p release/wheels
+          python -m pip download --only-binary=:all: \
+            --platform manylinux2014_x86_64 --platform manylinux_2_17_x86_64 \
+            --implementation cp --python-version 3.12 --dest release/wheels dist/*.whl
+          python deploy/vps/ci-deploy/ci_release.py build --root release --out quant-vps-bundle \
+            --sha "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID$GITHUB_RUN_ATTEMPT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: quant-vps-bundle
+          path: quant-vps-bundle/
+          retention-days: 30
       - uses: actions/upload-artifact@v7
         with:
           name: quant-ai-service-v2-unpublished
