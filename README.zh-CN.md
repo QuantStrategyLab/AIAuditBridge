@@ -16,6 +16,8 @@ QuantAIService 独立维护按项目隔离的完整任务运行时、依赖及�
 
 见[升级说明](docs/upgrade-v2/QUANT.zh-CN.md)、[旧入口退役](docs/upgrade-v2/RETIRED-V1.zh-CN.md)和[登录配置核对](docs/upgrade-v2/IDENTITY-INVENTORY.zh-CN.md)。
 
+[Quant 专用 VPS 工作流](deploy/vps/ci-deploy/README.md)支持手动 deploy、rollback 和 status，默认 dry-run。CI 生成可审阅的 Linux bundle；服务器入口安装和实际部署仍须单独批准。
+
 ## 离线场景 SDK
 
 `ai_service.scenarios` 是面向 `ScenarioTaskSpec/v1` 和 `ScenarioInstance/v1` 的离线契约 SDK，使用 JSON Schema Draft 2020-12 校验。它只负责套用默认值、校验结构并把任务绑定到其生产者，不派发任务，也不授予权限。

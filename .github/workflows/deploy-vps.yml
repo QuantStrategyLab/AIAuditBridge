@@ -1,0 +1,227 @@
+name: Deploy Quant service to VPS
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: Restricted Quant command
+        type: choice
+        options: [status, deploy, rollback]
+        default: status
+        required: true
+      ref:
+        description: Full reviewed source SHA (deploy), baseline source SHA (rollback), audit SHA (status)
+        type: string
+        required: true
+      dry_run:
+        description: Validate only; never access SSH credentials or contact VPS
+        type: boolean
+        default: true
+        required: true
+      artifact_run_id:
+        description: Successful default-branch Quant CI run (deploy only)
+        type: string
+        default: ''
+      bundle_sha256:
+        description: Independently reviewed bundle SHA256 (deploy only)
+        type: string
+        default: ''
+      rollback_ref:
+        description: Full approved baseline source SHA (also used for automatic recovery)
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: quant-ai-vps-deploy
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      release_id: ${{ steps.bundle.outputs.release_id }}
+      bundle_sha256: ${{ steps.bundle.outputs.bundle_sha256 }}
+    env:
+      SOURCE_SHA: ${{ inputs.ref }}
+      ARTIFACT_RUN_ID: ${{ inputs.artifact_run_id }}
+      EXPECTED_DIGEST: ${{ inputs.bundle_sha256 }}
+      DEPLOY_ACTION: ${{ inputs.action }}
+      ROLLBACK_SHA: ${{ inputs.rollback_ref }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+    steps:
+      # Run verifier code from the workflow revision, never from the artifact.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - name: Validate request
+        run: |
+          python - <<'PY'
+          import os, re
+          if re.fullmatch(r'[0-9a-f]{40}', os.environ['SOURCE_SHA']) is None:
+              raise SystemExit('ref must be a full reviewed source SHA')
+          if re.fullmatch(r'[0-9a-f]{40}', os.environ['ROLLBACK_SHA']) is None:
+              raise SystemExit('rollback_ref must be a full baseline source SHA')
+          if os.environ['DEPLOY_ACTION'] == 'rollback' and os.environ['SOURCE_SHA'] != os.environ['ROLLBACK_SHA']:
+              raise SystemExit('rollback ref must match rollback_ref')
+          if os.environ['DEPLOY_ACTION'] == 'deploy':
+              for key, pattern in [('ARTIFACT_RUN_ID', r'[0-9]+'), ('EXPECTED_DIGEST', r'[0-9a-f]{64}')]:
+                  if re.fullmatch(pattern, os.environ[key]) is None:
+                      raise SystemExit('Missing or invalid ' + key)
+          PY
+      - name: Download exact successful CI artifact
+        if: inputs.action == 'deploy'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh api "repos/$GH_REPO/actions/runs/$ARTIFACT_RUN_ID" > run.json
+          gh run download "$ARTIFACT_RUN_ID" -n quant-vps-bundle -D candidate
+      - name: Verify source, bundle and every payload checksum
+        id: bundle
+        if: inputs.action == 'deploy'
+        run: |
+          python deploy/vps/ci-deploy/ci_release.py verify --directory candidate \
+            --sha "$SOURCE_SHA" --digest "$EXPECTED_DIGEST" --run run.json
+      - name: Record request
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          echo "Quant action=$DEPLOY_ACTION dry_run=$DRY_RUN source=$SOURCE_SHA" >> "$GITHUB_STEP_SUMMARY"
+          echo 'No Secret sync. Runtime health and Dot acceptance are separate.' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: inputs.action == 'deploy'
+        with:
+          name: quant-reviewed-bundle
+          path: candidate/
+          retention-days: 7
+
+  remote:
+    needs: prepare
+    # Only an explicit non-dry run from the default branch can reach credentials.
+    if: ${{ !inputs.dry_run && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+    environment: quant-vps
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      QUANT_VPS_HOST: ${{ vars.QUANT_VPS_HOST }}
+      QUANT_VPS_USER: ${{ vars.QUANT_VPS_USER }}
+      QUANT_VPS_PORT: ${{ vars.QUANT_VPS_PORT || '22' }}
+      QUANT_PUBLIC_HOST: ${{ vars.QUANT_PUBLIC_HOST }}
+      DEPLOY_ACTION: ${{ inputs.action }}
+      ROLLBACK_SHA: ${{ inputs.rollback_ref }}
+      RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
+      BUNDLE_SHA256: ${{ needs.prepare.outputs.bundle_sha256 }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: inputs.action == 'deploy'
+        with:
+          name: quant-reviewed-bundle
+          path: candidate
+      - name: Prepare restricted Quant SSH client
+        env:
+          QUANT_VPS_SSH_KEY: ${{ secrets.QUANT_VPS_SSH_KEY }}
+          QUANT_VPS_KNOWN_HOSTS: ${{ vars.QUANT_VPS_KNOWN_HOSTS }}
+        run: |
+          python - <<'PY'
+          import os, re
+          for key in ('QUANT_VPS_SSH_KEY', 'QUANT_VPS_KNOWN_HOSTS', 'QUANT_PUBLIC_HOST'):
+              if not os.environ.get(key, '').strip():
+                  raise SystemExit('Missing ' + key)
+          for key, pattern in [('QUANT_VPS_HOST', r'[A-Za-z0-9][A-Za-z0-9.-]*'),
+                               ('QUANT_VPS_USER', r'[a-z_][a-z0-9_-]*'), ('QUANT_VPS_PORT', r'[0-9]{1,5}')]:
+              if re.fullmatch(pattern, os.environ[key]) is None:
+                  raise SystemExit('Invalid ' + key)
+          if not 1 <= int(os.environ['QUANT_VPS_PORT']) <= 65535:
+              raise SystemExit('Invalid port')
+          import sys
+          sys.path.insert(0, 'deploy/vps/ci-deploy')
+          from ci_client import public_origin
+          public_origin(os.environ['QUANT_PUBLIC_HOST'])
+          PY
+          umask 077
+          key_dir="$RUNNER_TEMP/quant-deploy-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          mkdir -m 700 "$key_dir"
+          echo "KEY_DIR=$key_dir" >> "$GITHUB_ENV"
+          printf '%s\n' "$QUANT_VPS_SSH_KEY" > "$key_dir/key"
+          printf '%s\n' "$QUANT_VPS_KNOWN_HOSTS" > "$key_dir/known_hosts"
+          cat > "$key_dir/client" <<'SH'
+          #!/bin/bash
+          set -euo pipefail
+          exec ssh -T -i "$KEY_DIR/key" -p "$QUANT_VPS_PORT" \
+            -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=15 \
+            -o ServerAliveInterval=10 -o ServerAliveCountMax=3 \
+            -o UserKnownHostsFile="$KEY_DIR/known_hosts" -o GlobalKnownHostsFile=/dev/null \
+            -o StrictHostKeyChecking=yes "$QUANT_VPS_USER@$QUANT_VPS_HOST" "$@"
+          SH
+          chmod 700 "$key_dir/client"
+      - name: Confirm pinned Quant recovery SHA before any deployment write
+        if: inputs.action == 'deploy'
+        run: |
+          mkdir -p receipts
+          "$KEY_DIR/client" status < /dev/null > receipts/before.json
+          python deploy/vps/ci-deploy/ci_client.py receipt receipts/before.json status
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          if json.loads(Path('receipts/before.json').read_text()).get('baseline_source_sha') != os.environ['ROLLBACK_SHA']:
+              raise SystemExit('Server rollback baseline differs from approved rollback_ref')
+          PY
+      - name: Run Quant forced command and validate receipt
+        id: remote
+        run: |
+          mkdir -p receipts
+          remote_rc=0
+          if [[ $DEPLOY_ACTION == deploy ]]; then
+            echo "$BUNDLE_SHA256  candidate/bundle.tar.gz" | sha256sum --check --status
+            "$KEY_DIR/client" "deploy $RELEASE_ID $BUNDLE_SHA256" < candidate/bundle.tar.gz > receipts/deploy.json || remote_rc=$?
+            python deploy/vps/ci-deploy/ci_client.py receipt receipts/deploy.json deploy --release-id "$RELEASE_ID"
+          elif [[ $DEPLOY_ACTION == rollback ]]; then
+            "$KEY_DIR/client" "rollback $ROLLBACK_SHA" < /dev/null > receipts/rollback.json || remote_rc=$?
+            python deploy/vps/ci-deploy/ci_client.py receipt receipts/rollback.json rollback
+          else
+            "$KEY_DIR/client" "$DEPLOY_ACTION" < /dev/null > "receipts/$DEPLOY_ACTION.json" || remote_rc=$?
+            python deploy/vps/ci-deploy/ci_client.py receipt "receipts/$DEPLOY_ACTION.json" "$DEPLOY_ACTION"
+          fi
+          exit "$remote_rc"
+      - name: Check public discovery and authentication boundary
+        id: external
+        if: inputs.action == 'deploy' && steps.remote.outcome == 'success'
+        continue-on-error: true
+        run: python deploy/vps/ci-deploy/ci_client.py external "$QUANT_PUBLIC_HOST" --out receipts/external.json
+      - name: Restore pinned Quant baseline after public health failure
+        if: always() && steps.remote.outcome == 'success' && steps.external.outcome == 'failure'
+        run: |
+          remote_rc=0
+          "$KEY_DIR/client" "rollback $ROLLBACK_SHA" < /dev/null > receipts/external-rollback.json || remote_rc=$?
+          python deploy/vps/ci-deploy/ci_client.py receipt receipts/external-rollback.json rollback
+          echo "Public health failed; rollback exit=$remote_rc. Inspect receipts." >&2
+          exit 1
+      - name: Remove temporary credentials
+        if: always()
+        run: |
+          if [[ -n ${KEY_DIR:-} ]]; then rm -rf -- "$KEY_DIR"; fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: quant-vps-receipts-${{ github.run_id }}-${{ github.run_attempt }}
+          path: receipts/
+          if-no-files-found: warn
+          retention-days: 30
