@@ -34,6 +34,10 @@ jobs:
           python -m pip install pytest
           bash -n ops/quant-monitor/scripts/adopt_daily_briefing_release.sh
           python -m pytest -q ops/quant-monitor/tests/test_adopt_daily_briefing_release.py ops/quant-monitor/tests/test_install_immutable_release.py ops/quant-monitor/tests/test_runtime_daily_pipeline.py
+      - name: Validate cloud notification and observer without cloud access
+        run: |
+          python -m ruff check ops/cloud-jobs tests/cloud_jobs
+          python -m unittest discover -s tests/cloud_jobs -v
       - uses: actions/upload-artifact@v7
         with:
           name: quant-ai-service-v2-unpublished
