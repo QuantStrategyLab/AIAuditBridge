@@ -46,6 +46,14 @@ jobs:
             --implementation cp --python-version 3.12 --dest release/wheels dist/*.whl
           python deploy/vps/ci-deploy/ci_release.py build --root release --out quant-vps-bundle \
             --sha "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID$GITHUB_RUN_ATTEMPT"
+      - name: Smoke test the exact hash-pinned Linux bundle offline
+        run: |
+          python -m venv "$RUNNER_TEMP/quant-bundle-smoke"
+          "$RUNNER_TEMP/quant-bundle-smoke/bin/python" -I -m pip --isolated install \
+            --no-index --no-deps --only-binary=:all: --require-hashes --no-cache-dir \
+            --find-links release/wheels -r release/requirements.txt
+          "$RUNNER_TEMP/quant-bundle-smoke/bin/python" -I -m pip --isolated check
+          "$RUNNER_TEMP/quant-bundle-smoke/bin/quant-ai-service" --help > /dev/null
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: quant-vps-bundle
