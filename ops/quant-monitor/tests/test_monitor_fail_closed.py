@@ -150,94 +150,18 @@ class MonitorFailClosedTests(unittest.TestCase):
                 else:
                     self.assertEqual(errors_by_domain, {})
 
-    def test_historical_auth_guard_rehearsal_uses_generic_advisory_task(self):
-        calls: list[tuple[str, dict[str, object]]] = []
-
-        class Client:
-            def execute(self, prompt: str, **kwargs):
-                calls.append((prompt, kwargs))
-                return types.SimpleNamespace(
-                    success=True,
-                    raw={"status": "completed", "id": "R" * 32, "result_kind": "advisory", "model_verification": "unavailable"},
-                )
-
-        safe_env = {
+    def test_historical_rehearsal_requires_explicit_synthetic_context(self):
+        # Old workflow metadata/credentials cannot activate Q04 or its old adapter.
+        for env in ({}, {
+            "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_REF": "refs/heads/main",
+            "GITHUB_REPOSITORY": "QuantStrategyLab/QuantAIService", "GITHUB_RUN_ATTEMPT": "1",
             "ACTIONS_ID_TOKEN_REQUEST_URL": "https://oidc.invalid",
-            "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "synthetic-oidc-request",
-            "GITHUB_EVENT_NAME": "workflow_dispatch",
-            "GITHUB_REF": "refs/heads/main",
-            "GITHUB_REPOSITORY": "QuantStrategyLab/QuantAIService",
-            "GITHUB_RUN_ATTEMPT": "1",
-        }
-        with mock.patch.dict(os.environ, safe_env, clear=True):
-            result = HEALTH_CYCLE.run_historical_diagnosis_rehearsal(
-                config_loader=lambda: object(),
-                client_factory=lambda _config: Client(),
-            )
-
-        self.assertEqual(result, {"status": "succeeded", "job_id": "R" * 32})
-        self.assertEqual(len(calls), 1)
-        prompt, kwargs = calls[0]
-        self.assertIn("static_token_write_guard_source_audit_v1", prompt)
-        self.assertIn('"observed_request":false', prompt)
-        self.assertIn("No real HTTP 403 request was observed", prompt)
-        self.assertIn("Simplified Chinese", prompt)
-        self.assertIn("300 Chinese characters or fewer", prompt)
-        self.assertNotIn("/Users/", prompt)
-        self.assertNotIn("token=", prompt)
-        self.assertEqual(kwargs["timeout"], 600)
-
-    def test_historical_rehearsal_requires_first_attempt_oidc_and_rejects_keys(self):
-        base = {
-            "GITHUB_EVENT_NAME": "workflow_dispatch",
-            "GITHUB_REF": "refs/heads/main",
-            "GITHUB_REPOSITORY": "QuantStrategyLab/QuantAIService",
-        }
-        cases = [
-            ({**base, "GITHUB_RUN_ATTEMPT": "2", "ACTIONS_ID_TOKEN_REQUEST_URL": "x", "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "y"}, "invalid_workflow_attempt"),
-            ({**base, "GITHUB_RUN_ATTEMPT": "1"}, "github_oidc_required"),
-            ({**base, "GITHUB_RUN_ATTEMPT": "1", "ACTIONS_ID_TOKEN_REQUEST_URL": "x", "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "y", "CODEX_AUDIT_SERVICE_TOKEN": "static"}, "non_oidc_credentials_rejected"),
-            ({**base, "GITHUB_RUN_ATTEMPT": "1", "ACTIONS_ID_TOKEN_REQUEST_URL": "x", "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "y", "OPENAI_API_KEY": "paid"}, "non_oidc_credentials_rejected"),
-            ({**base, "GITHUB_RUN_ATTEMPT": "1", "ACTIONS_ID_TOKEN_REQUEST_URL": "x", "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "y", "CURSOR_API_KEY": "paid"}, "non_oidc_credentials_rejected"),
-            ({**base, "GITHUB_REPOSITORY": "Other/repo", "GITHUB_RUN_ATTEMPT": "1", "ACTIONS_ID_TOKEN_REQUEST_URL": "x", "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "y"}, "invalid_workflow_context"),
-            ({**base, "GITHUB_REF": "refs/heads/feature", "GITHUB_RUN_ATTEMPT": "1", "ACTIONS_ID_TOKEN_REQUEST_URL": "x", "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "y"}, "invalid_workflow_context"),
-            ({**base, "GITHUB_EVENT_NAME": "schedule", "GITHUB_RUN_ATTEMPT": "1", "ACTIONS_ID_TOKEN_REQUEST_URL": "x", "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "y"}, "invalid_workflow_context"),
-        ]
-        for env, reason in cases:
-            with self.subTest(reason=reason), mock.patch.dict(os.environ, env, clear=True):
-                result = HEALTH_CYCLE.run_historical_diagnosis_rehearsal(
-                    config_loader=lambda: (_ for _ in ()).throw(AssertionError("must not configure")),
-                )
-            self.assertEqual(result, {"status": "rejected", "reason": reason})
-
-    def test_historical_rehearsal_never_retries_or_leaks_gateway_failure(self):
-        calls = 0
-
-        class Client:
-            def execute(self, _prompt: str, **_kwargs):
-                nonlocal calls
-                calls += 1
-                return types.SimpleNamespace(
-                    success=False,
-                    error="private response /tmp/token",
-                    raw={"status": "queued", "id": "pending-1"},
-                )
-
-        with mock.patch.dict(os.environ, {
-            "ACTIONS_ID_TOKEN_REQUEST_URL": "https://oidc.invalid",
-            "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "synthetic-oidc-request",
-            "GITHUB_EVENT_NAME": "workflow_dispatch",
-            "GITHUB_REF": "refs/heads/main",
-            "GITHUB_REPOSITORY": "QuantStrategyLab/QuantAIService",
-            "GITHUB_RUN_ATTEMPT": "1",
-        }, clear=True):
-            result = HEALTH_CYCLE.run_historical_diagnosis_rehearsal(
-                config_loader=lambda: object(),
-                client_factory=lambda _config: Client(),
-            )
-        self.assertEqual(result, {"status": "deferred", "reason": "ai_task_pending"})
-        self.assertEqual(calls, 1)
-        self.assertNotIn("private", repr(result))
+            "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "synthetic-only",
+            "OPENAI_API_KEY": "synthetic-only",
+        }):
+            with self.subTest(env=bool(env)), mock.patch.dict(os.environ, env, clear=True):
+                result = HEALTH_CYCLE.run_historical_diagnosis_rehearsal()
+            self.assertEqual(result, {"status": "deferred", "reason": "explicit_synthetic_context_required"})
 
     def test_latest_cycle_diagnosis_rejects_invalid_or_stale_without_fallback(self):
         now = HEALTH_CYCLE.datetime(2026, 9, 10, 4, tzinfo=HEALTH_CYCLE.timezone.utc)

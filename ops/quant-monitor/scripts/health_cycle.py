@@ -62,15 +62,6 @@ _OPERATIONAL_ERROR_TYPES = frozenset({
     "ValueError",
 })
 _OPERATIONAL_DIAGNOSIS_SOURCE_REPOSITORY = "QuantStrategyLab/QuantAIService"
-_HISTORICAL_DIAGNOSIS_REHEARSAL_TASK = "historical_operational_diagnosis_rehearsal"
-_HISTORICAL_DIAGNOSIS_REHEARSAL_CASE = "static_token_write_guard_source_audit_v1"
-_NON_OIDC_CREDENTIAL_ENV = (
-    "ANTHROPIC_API_KEY",
-    "CODEX_API_KEY",
-    "CODEX_AUDIT_SERVICE_TOKEN",
-    "CURSOR_API_KEY",
-    "OPENAI_API_KEY",
-)
 
 
 def _collect_drift_results(run_drift_detection, *, domains=DOMAINS):
@@ -1045,71 +1036,282 @@ def _operational_diagnosis_fingerprint(data_errors: list[dict[str, str]]) -> str
     return _alert_fingerprint(identities)
 
 
-def _historical_diagnosis_rehearsal_prompt() -> str:
-    evidence = {
-        "case_id": _HISTORICAL_DIAGNOSIS_REHEARSAL_CASE,
-        "evidence_kind": "source_code_audit_of_pr_180_and_181",
-        "facts": [
-            "static dashboard tokens are not authorized for write requests",
-            "a dashboard caller cannot claim QuantStrategyLab/QuantAIService as its source repository",
-        ],
-        "observed_request": False,
+def _rehearsal_subscription(client, subscription_id, operation):
+    """Use the worker's existing exact-project subscription tools; never subscribe."""
+    from ai_service.scenarios import ContractError
+
+    reply = client.request("POST", "/mcp", {
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": operation, "arguments": {
+            "project": _OPERATIONAL_DIAGNOSIS_SOURCE_REPOSITORY,
+            "subscription_id": subscription_id,
+        }},
+    })
+    if "error" in reply or reply.get("result", {}).get("isError"):
+        raise ContractError("subscription operation rejected")
+    record = reply["result"]["structuredContent"]
+    if record.get("id") != subscription_id:
+        raise ContractError("subscription identity mismatch")
+    return record
+
+
+def _rehearsal_creation(value):
+    """Project only non-sensitive evidence fields; never serialize raw context."""
+    from ai_service.scenarios import ContractError
+
+    request, response = value["request"], value["response"]
+    if set(request["arguments"]) != {"project"}:
+        raise ContractError("subscription arguments must select exactly one project")
+    safe = {
+        **{key: value[key] for key in ("kind", "worker", "provider", "created_at", "expires_at")},
+        "request": {"name": request["name"], "arguments": {"project": request["arguments"]["project"]},
+                    "ttlMs": request.get("ttlMs"),
+                    "delivery": {key: request["delivery"][key] for key in ("mode", "url")}},
+        "response": {key: response[key] for key in ("id", "refreshBefore")},
     }
-    return (
-        "This is a historical engineering diagnosis rehearsal based only on a source-code audit. "
-        "No real HTTP 403 request was observed. Explain why the guarded request should be rejected, "
-        "identify the approved GitHub OIDC route, and give read-only verification steps that do not "
-        "weaken authentication. Answer in Simplified Chinese in about 300 Chinese characters or fewer, "
-        "covering the cause, correct OIDC route, and safe verification steps. Do not access accounts, "
-        "place orders, change files, create patches, publish, deploy, or notify.\n"
-        + json.dumps(evidence, sort_keys=True, separators=(",", ":"))
-    )
+    leaves = [safe[key] for key in ("kind", "worker", "provider", "created_at", "expires_at")]
+    leaves += [safe["request"]["name"], safe["request"]["arguments"]["project"]]
+    leaves += list(safe["request"]["delivery"].values()) + list(safe["response"].values())
+    if any(not isinstance(value, str) for value in leaves) or type(safe["request"]["ttlMs"]) is not int:
+        raise ContractError("creation evidence fields must be scalar protocol values")
+    return safe
 
 
 def run_historical_diagnosis_rehearsal(
-    *,
-    config_loader=None,
-    client_factory=None,
+    *, instance=None, occurrence=None, submitted_at=None, receipt_path=None,
+    client=None, event_client=None, subscription_id=None, cancel=False,
+    expected_worker=None, expected_attempt=None, subscription_creation=None, end=False,
 ) -> dict[str, Any]:
-    """Run the fixed source-audit rehearsal once under the workflow's OIDC authority."""
-    if (
-        os.environ.get("GITHUB_REPOSITORY") != _OPERATIONAL_DIAGNOSIS_SOURCE_REPOSITORY
-        or os.environ.get("GITHUB_REF") != "refs/heads/main"
-        or os.environ.get("GITHUB_EVENT_NAME") != "workflow_dispatch"
-    ):
-        return {"status": "rejected", "reason": "invalid_workflow_context"}
-    if os.environ.get("GITHUB_RUN_ATTEMPT") != "1":
-        return {"status": "rejected", "reason": "invalid_workflow_attempt"}
-    if not (
-        os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL")
-        and os.environ.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
-    ):
-        return {"status": "rejected", "reason": "github_oidc_required"}
-    if any(os.environ.get(name) for name in _NON_OIDC_CREDENTIAL_ENV):
-        return {"status": "rejected", "reason": "non_oidc_credentials_rejected"}
-    try:
-        if config_loader is None:
-            from quant_platform_kit.strategy_lifecycle.ai_provider import AiProviderConfig, AiServiceConfig
+    """Q04's fixed synthetic caller; clients and offline creation evidence are explicit.
 
-            config_loader = lambda: AiServiceConfig.reliability(primary=AiProviderConfig.from_env(label="monitor-diagnosis"))
-        if client_factory is None:
-            from quant_platform_kit.strategy_lifecycle.ai_provider import AiServiceClient
+    Pending work retains the same subscription across caller invocations. Dot
+    claims/reports by callback; the caller never polls workers or subscribes.
+    Explicit end or subscription expiry closes without claiming cancellation.
+    """
+    if any(value is None for value in (
+        instance, occurrence, submitted_at, receipt_path, client, event_client,
+        subscription_creation,
+    )) or any(not isinstance(value, str) or not value for value in (
+        subscription_id, expected_worker, expected_attempt,
+    )):
+        return {"status": "deferred", "reason": "explicit_synthetic_context_required"}
 
-            client_factory = AiServiceClient
-        client = client_factory(config_loader())
-    except (ImportError, OSError, RuntimeError, ValueError):
-        return {"status": "deferred", "reason": "ai_task_service_not_configured"}
+    from ai_service.scenarios import ContractError, load_instance
+    from ai_service.scenarios.pilot import digest, prepare, submit, verify
+    from ai_service.scenarios.pilot_cli import write_private
+
+    result = {"status": "unavailable", "reason": "synthetic_operation_rejected"}
+    verified = None
+    keep_subscription = False
+    expires = None
     try:
-        prompt = _historical_diagnosis_rehearsal_prompt()
-        result = client.execute(prompt, idempotency_key="monitor-rehearsal:" + hashlib.sha256(prompt.encode()).hexdigest(), timeout=600)
+        instance = load_instance(instance)
+        if (instance["project"] != _OPERATIONAL_DIAGNOSIS_SOURCE_REPOSITORY
+                or instance["template"] != "protocol_probe"
+                or instance["inputs"]["data_classification"] != "synthetic"
+                or instance["inputs"]["fields"].get("ttl_seconds") != 600
+                or len(instance["stages"]) != 1
+                or instance["stages"][0]["limits"]["timeout_seconds"] != 600):
+            raise ContractError("Q04 requires its fixed project, synthetic probe and 600s limits")
+        task = prepare(instance, {"schema_version": "synthetic.protocol-input.v1",
+                                 "series": [100, 102, 99, 105], "no_order": True},
+                       occurrence=occurrence, submitted_at=submitted_at)
+        # This is evidence from the in-process subscription creation boundary,
+        # not authentication of a native subscription or proof of live acceptance.
+        creation = _rehearsal_creation(subscription_creation)
+        request, response = creation["request"], creation["response"]
+        if (creation["kind"] != "offline.fixture" or creation["worker"] != expected_worker
+                or creation["provider"] != "dot" or request["name"] != "task.requested"
+                or request["arguments"] != {"project": task.spec["project"]}
+                or type(request.get("ttlMs")) is not int or request["ttlMs"] != 600000
+                or request["delivery"]["mode"] != "webhook"
+                or response["id"] != subscription_id
+                or subscription_id != "sub_" + digest([
+                    expected_worker, request["delivery"]["url"], "task.requested", request["arguments"]])
+                or response["refreshBefore"] != creation["expires_at"]):
+            raise ContractError("Q04 subscription creation evidence mismatch")
+        expires = datetime.fromisoformat(creation["expires_at"].replace("Z", "+00:00"))
+        created = datetime.fromisoformat(creation["created_at"].replace("Z", "+00:00"))
+        if not 0 < (expires - created).total_seconds() <= 600:
+            raise ContractError("Q04 subscription creation lifetime mismatch")
+        path = Path(receipt_path)
+        binding = {"operation_key": task.spec["operation_key"],
+                   "request_sha256": digest(task.request), "project": task.spec["project"],
+                   "provider": "dot", "subscription_id": subscription_id,
+                   "expected_worker": expected_worker, "expected_attempt": expected_attempt,
+                   "subscription_creation": creation, "subscription_creation_sha256": digest(creation)}
+
+        def read_bound(receipt):
+            if receipt.is_symlink():
+                raise ContractError("receipt must not be a symbolic link")
+            value = json.loads(receipt.read_text())
+            if any(value.get(key) != expected for key, expected in binding.items()):
+                raise ContractError("receipt binds a different operation")
+            return value
+
+        claimed_path = Path(str(path) + ".claimed")
+
+        def check_record(record, task_id):
+            if (record.get("id") != task_id or record.get("owner") != task.spec["project"]
+                    or record.get("provider") != "dot" or type(record.get("revision")) is not int
+                    or record["revision"] != 1
+                    or not {"worker", "attempt"} <= record.keys()
+                    or digest(record.get("request")) != digest(task.request)):
+                raise ContractError("task readback mismatch")
+            seen = read_bound(claimed_path) if claimed_path.exists() else None
+            identity = {"task_id": task_id, "worker": record.get("worker"),
+                        "attempt": record.get("attempt"), "revision": record["revision"]}
+            if seen is not None and any(seen.get(key) != value for key, value in identity.items()):
+                raise ContractError("observed claim identity regressed")
+            if (record.get("attempt"), record.get("worker")) == (None, None):
+                if record["status"] not in {"queued", "submitting", "running", "outcome_unknown",
+                                             "cancel_requested", "cancelled", "failed"}:
+                    raise ContractError("terminal output requires an actual claim")
+            elif (record.get("attempt"), record.get("worker")) != (expected_attempt, expected_worker):
+                raise ContractError("incomplete or wrong claim identity")
+            elif seen is None:
+                # Persist observed identity before accepting any later cancellation.
+                write_private(claimed_path, {"status": "observed", **binding, **identity})
+            return record
+
+        def get_bound(task_id):
+            return check_record(client.get(task_id), task_id)
+
+        def check_subscription(state):
+            if (state.get("created_at") != creation["created_at"]
+                    or state.get("expires_at") != creation["expires_at"]):
+                raise ContractError("subscription readback is not this creation")
+
+        submitted = Path(str(path) + ".submitted")
+        binding_path = Path(str(path) + ".binding")
+        cancel_path = Path(str(path) + ".cancel")
+        deadline = datetime.fromisoformat(task.spec["deadline"].replace("Z", "+00:00"))
+        # The immutable companion is complete/fsynced before any intent or submit.
+        # Its existence never authorizes another submit, even if intent is lost.
+        result = {"status": "deferred", "reason": "submit_outcome_unknown", "binding_unknown": True}
+        keep_subscription = True
+        fresh_binding = False
+        try:
+            if not binding_path.exists() and (path.exists() or submitted.exists()):
+                raise ContractError("existing receipt has no immutable original binding")
+            write_private(binding_path, {"binding": binding, "binding_sha256": digest(binding)})
+            fresh_binding = True
+        except FileExistsError:
+            pass
+        if binding_path.is_symlink():
+            raise ContractError("binding receipt must not be a symbolic link")
+        envelope = json.loads(binding_path.read_text())
+        original = {key: envelope["binding"][key] for key in binding}
+        original["subscription_creation"] = _rehearsal_creation(original["subscription_creation"])
+        if (any(not isinstance(value, str) for key, value in original.items() if key != "subscription_creation")
+                or digest(original) != envelope["binding_sha256"]
+                or original["project"] != _OPERATIONAL_DIAGNOSIS_SOURCE_REPOSITORY
+                or original["provider"] != "dot"):
+            raise ContractError("immutable binding receipt is incomplete or inconsistent")
+        result = {"status": "deferred", "reason": "submit_outcome_unknown", **original}
+        # Cleanup must keep using the persisted original scope after mismatched input.
+        subscription_id, creation = original["subscription_id"], original["subscription_creation"]
+        expires = datetime.fromisoformat(creation["expires_at"].replace("Z", "+00:00"))
+        if original != binding:
+            raise ContractError("current inputs do not match the immutable original binding")
+        fresh = False
+        if fresh_binding:
+            try:
+                write_private(path, {"status": "intent", **binding})
+                fresh = True
+            except FileExistsError:
+                read_bound(path)
+        else:
+            read_bound(path)
+        if fresh:
+            keep_subscription = False  # Complete fresh intent; no submit attempted.
+        state = _rehearsal_subscription(event_client, subscription_id, "get_event_subscription")
+        check_subscription(state)
+        if fresh:
+            if cancel or end or datetime.now(timezone.utc) >= deadline:
+                raise ContractError("Q04 submission cancelled or expired")
+            if state["status"] != "active" or datetime.now(timezone.utc) >= expires:
+                raise ContractError("Q04 requires its still-active subscription")
+            result = {"status": "deferred", "reason": "submit_outcome_unknown", **binding}
+            keep_subscription = True
+            record = submit(client, task)
+            task_id = record.get("id")
+            if not isinstance(task_id, str) or not task_id:
+                raise ContractError("task identity required")
+            check_record(record, task_id)
+            write_private(submitted, {"status": record["status"], "task_id": task_id, **binding})
+        if submitted.exists():
+            # Do not replace submit uncertainty until this whole sidecar is usable.
+            task_id = read_bound(submitted)["task_id"]
+            if not isinstance(task_id, str) or not task_id:
+                raise ContractError("task identity required")
+            cancelling = (cancel or end or cancel_path.exists()
+                          or datetime.now(timezone.utc) >= min(deadline, expires))
+            result = {"status": "deferred" if cancelling else "unavailable",
+                      "reason": "cancellation_unconfirmed" if cancelling else "synthetic_readback_rejected",
+                      "task_id": task_id, **binding}
+            record = get_bound(task_id)
+            actual = {key: record[key] for key in ("worker", "attempt", "revision")}
+            result.update(actual)
+            terminal = {"completed", "failed", "invalid_output", "cancelled"}
+            keep_subscription = record["status"] not in terminal
+            if cancelling:
+                if keep_subscription:
+                    try:
+                        write_private(cancel_path, {"status": "intent", "task_id": task_id, **binding})
+                    except FileExistsError:
+                        if read_bound(cancel_path)["task_id"] != task_id:
+                            raise ContractError("cancel identity mismatch")
+                    else:
+                        check_record(client.cancel(task_id), task_id)
+                    record = get_bound(task_id)
+                    result.update({key: record[key] for key in ("worker", "attempt", "revision")})
+                    keep_subscription = record["status"] not in terminal
+                if record["status"] == "cancelled":
+                    result["status"], result["reason"] = "cancelled", "cancellation_confirmed"
+            elif keep_subscription:
+                result.update(status="deferred", reason=("ai_outcome_unknown" if record["status"] == "outcome_unknown"
+                                                        else "ai_task_pending"))
+            else:
+                verified = {**binding, **verify(task, record, task_id=task_id, provider="dot"),
+                            "worker": record["worker"]}
     except Exception:
-        return {"status": "unavailable", "reason": "ai_outcome_unknown"}
-    raw = result.raw if isinstance(getattr(result, "raw", None), dict) else {}
-    if raw.get("status") in {"queued", "running", "submitting", "outcome_unknown"}:
-        return {"status": "deferred", "reason": "ai_task_pending"}
-    if _valid_diagnosis_result(result, raw):
-        return {"status": "succeeded", "job_id": str(raw["id"])}
-    return {"status": "unavailable", "reason": "ai_result_unavailable"}
+        # Preserve uncertainty and its original binding; never echo transport errors.
+        pass
+    finally:
+        try:
+            state = _rehearsal_subscription(event_client, subscription_id, "get_event_subscription")
+            retain = keep_subscription and not end and expires is not None and datetime.now(timezone.utc) < expires
+            if retain and state["status"] == "active":
+                check_subscription(state)
+                result["cleanup"] = "retained"
+            else:
+                if state["status"] != "gone":
+                    _rehearsal_subscription(event_client, subscription_id, "delete_event_subscription")
+                state = _rehearsal_subscription(event_client, subscription_id, "get_event_subscription")
+                if state["status"] != "gone":
+                    raise ContractError("subscription cleanup is unconfirmed")
+                result["cleanup"] = "gone"
+                if retain:
+                    result["subscription_status"] = "gone"
+        except Exception:
+            verified = None
+            result.update(cleanup="unknown", cleanup_reason="subscription_cleanup_unconfirmed")
+            if result.get("reason") != "submit_outcome_unknown":
+                result.update(status="unavailable", reason="subscription_cleanup_unconfirmed")
+    if verified is not None:
+        verified["cleanup"] = "gone"
+        try:
+            verified_path = Path(str(path) + ".verified")
+            try:
+                write_private(verified_path, verified)
+            except FileExistsError:
+                if read_bound(verified_path) != verified:
+                    raise ContractError("verified receipt mismatch")
+            return verified
+        except Exception:
+            return {**result, "status": "unavailable", "reason": "verified_receipt_unavailable"}
+    return result
 
 
 def _run_operational_diagnosis(
