@@ -545,7 +545,7 @@ _SUMMARY_FAILURE_DETAILS = {
 }
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, summary_context=None) -> int:
     parser = argparse.ArgumentParser(description="Consume quant-monitor daily briefing reports.")
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument(
@@ -634,7 +634,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             result = consume_briefing_dir(report_dir, day=args.day)
             failure_stage = "summary_processing"
-            summary = summarize_briefing(result, dry_run=args.dry_run)
+            summary = summarize_briefing(result, dry_run=args.dry_run, summary_context=summary_context)
         except (OSError, ValueError, TypeError, KeyError, OverflowError) as exc:
             summary = {
                 "status": "unavailable", "reason": "briefing_input_unavailable", "advisory_only": True,
@@ -660,7 +660,7 @@ def main(argv: list[str] | None = None) -> int:
             send_dry_run=bool(args.send_dry_run),
         )
     if args.ai_summary:
-        payload["ai_summary"] = summarize_briefing(result, dry_run=args.dry_run)
+        payload["ai_summary"] = summarize_briefing(result, dry_run=args.dry_run, summary_context=summary_context)
     if args.dual_review:
         from quant_platform_kit.strategy_lifecycle.task_review import review_material
         import hashlib

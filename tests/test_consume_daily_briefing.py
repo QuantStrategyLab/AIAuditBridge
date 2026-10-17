@@ -210,7 +210,7 @@ def test_summary_report_rejects_empty_ready_with_missing_profile_coverage():
 
 def test_ai_summary_dry_run_never_authenticates_or_calls_model(tmp_path, capsys):
     _write_summary_report(tmp_path)
-    with patch('quant_platform_kit.strategy_lifecycle.ai_provider.AiServiceClient.execute') as execute:
+    with patch('ai_service.client.TaskClient.submit') as execute:
         assert main(['--report-dir', str(tmp_path), '--day', '2026-09-09', '--ai-summary', '--dry-run']) == 2
     result = json.loads(capsys.readouterr().out)
     assert result['ai_summary']['status'] == 'dry_run'
@@ -220,7 +220,7 @@ def test_ai_summary_dry_run_never_authenticates_or_calls_model(tmp_path, capsys)
 def test_ai_summary_static_service_token_does_not_authorize_timer_execution(tmp_path, capsys):
     _write_summary_report(tmp_path)
     with patch.dict('os.environ', {'CODEX_AUDIT_SERVICE_URL': 'https://synthetic.invalid', 'CODEX_AUDIT_SERVICE_TOKEN': 'synthetic-private'}, clear=True), patch(
-        'quant_platform_kit.strategy_lifecycle.ai_provider.AiServiceClient.execute'
+        'ai_service.client.TaskClient.submit'
     ) as execute:
         assert main(['--report-dir', str(tmp_path), '--day', '2026-09-09', '--ai-summary']) == 2
     result = json.loads(capsys.readouterr().out)
@@ -228,34 +228,104 @@ def test_ai_summary_static_service_token_does_not_authorize_timer_execution(tmp_
     execute.assert_not_called()
 
 
-def test_ai_summary_uses_gateway_contract_after_existing_alert_dispatch(tmp_path, capsys):
-    from datetime import datetime, timezone
-    from quant_platform_kit.strategy_lifecycle.ai_provider import AiCallResult
+def test_ai_summary_uses_v2_contract_after_existing_alert_dispatch(tmp_path, capsys):
+    from datetime import datetime, timedelta, timezone
+    from tests.test_briefing_summary_operation import Service
     _write_summary_report(tmp_path)
+    service = Service(tmp_path)
+    service.now = datetime(2026, 9, 9, 22, 30, tzinfo=timezone.utc)
+    service.auto_tick = True
+    state = tmp_path / "summary-state"
+    state.mkdir(mode=0o700)
+    context = service.make_context(state, occurrence="2026-09-09", deadline=service.now + timedelta(seconds=60))
     calls = []
-    route = {'id': 'summary-1', 'model': 'synthetic-api', 'status': 'completed', 'result_kind': 'advisory', 'model_verification': 'provider_reported'}
-    def execute(_client, prompt, **kwargs):
-        calls.append('ai')
-        assert _client.config.primary.mode == 'api'
-        assert kwargs['idempotency_key'].startswith('briefing-summary:')
-        assert 'private-marker' not in prompt and 'private-profile' not in prompt
-        assert '9000' not in prompt
-        assert '2026-09-08' in prompt and '2026-09-09T22:00:00+00:00' in prompt
-        return AiCallResult(provider='synthetic-api', success=True, output='synthetic advisory', raw=route)
+    service.provider_hook = lambda: calls.append("ai")
     def dispatch(*args, **kwargs):
-        calls.append('dispatch')
-        return {'errors': [], 'optimization_watch': {'errors': 0}}
-    with patch.dict('os.environ', {'AI_SERVICE_URL': 'https://synthetic.invalid', 'AI_SERVICE_MODEL': 'synthetic-api', 'ACTIONS_ID_TOKEN_REQUEST_URL': 'https://synthetic.invalid/oidc', 'ACTIONS_ID_TOKEN_REQUEST_TOKEN': 'synthetic', 'GITHUB_REPOSITORY': 'QuantStrategyLab/QuantAIService'}, clear=True), patch(
-        'quant_platform_kit.strategy_lifecycle.ai_provider.AiServiceClient.execute', autospec=True, side_effect=execute
-    ), patch('scripts.consume_daily_briefing.dispatch_briefing_result', side_effect=dispatch), patch(
-        'quant_monitor_domain.briefing_consumer._summary_now', return_value=datetime(2026,9,9,22,30,tzinfo=timezone.utc)
+        calls.append("dispatch")
+        return {"errors": [], "optimization_watch": {"errors": 0}}
+    with patch.dict("os.environ", {
+        "ACTIONS_ID_TOKEN_REQUEST_URL": "https://synthetic.invalid/oidc",
+        "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "synthetic-only",
+    }, clear=True), patch("scripts.consume_daily_briefing.dispatch_briefing_result", side_effect=dispatch), patch(
+        "ai_service.runtime.time.time", side_effect=lambda: service.now.timestamp()
     ):
-        assert main(['--report-dir', str(tmp_path), '--day', '2026-09-09', '--dispatch', '--ai-summary']) == 0
+        assert main(["--report-dir", str(tmp_path), "--day", "2026-09-09", "--dispatch", "--ai-summary"],
+                    summary_context=context) == 0
     result = json.loads(capsys.readouterr().out)
-    assert calls == ['dispatch', 'ai']
-    assert result['ai_summary']['status'] == 'available'
-    assert result['ai_summary']['advisory_only'] is True
-    assert result['action'] == 'github_issue'
+    assert calls == ["dispatch", "ai"] and service.submissions == 1
+    assert result["ai_summary"]["status"] == "available"
+    assert result["ai_summary"]["text"] == "synthetic advisory"
+    assert result["ai_summary"]["advisory_only"] is True
+    assert result["action"] == "github_issue"
+    task = service.runtime.get(context.project, result["ai_summary"]["task_id"])
+    assert task["request"]["mode"] == "api" and task["request"]["timeout_seconds"] == 60
+    assert "private-marker" not in task["request"]["objective"]
+    assert "private-profile" not in task["request"]["objective"]
+    assert "9000" not in task["request"]["objective"]
+    assert all(path.startswith("/v1/tasks") for _, path in service.calls)
+
+
+def test_ai_summary_missing_context_never_submits(tmp_path, capsys):
+    _write_summary_report(tmp_path)
+    with patch.dict("os.environ", {"ACTIONS_ID_TOKEN_REQUEST_URL": "https://synthetic.invalid/oidc",
+        "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "synthetic-only"}, clear=True), patch(
+        "ai_service.client.TaskClient.submit"
+    ) as submit:
+        assert main(["--report-dir", str(tmp_path), "--day", "2026-09-09", "--summary-only"]) == 3
+    assert json.loads(capsys.readouterr().out)["ai_summary"]["reason"] == "summary_context_or_sdk_unavailable"
+    submit.assert_not_called()
+
+
+def test_ai_summary_missing_sdk_is_unavailable_without_request(tmp_path, capsys):
+    from tests.test_briefing_summary_operation import Service
+    _write_summary_report(tmp_path)
+    service = Service(tmp_path)
+    state = tmp_path / "summary-state"
+    state.mkdir(mode=0o700)
+    context = service.make_context(state)
+    with patch.dict("os.environ", {"ACTIONS_ID_TOKEN_REQUEST_URL": "https://synthetic.invalid/oidc",
+        "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "synthetic-only"}, clear=True), patch.dict(
+        "sys.modules", {"ai_service.client": None}
+    ):
+        assert main(["--report-dir", str(tmp_path), "--summary-only"], summary_context=context) == 3
+    assert json.loads(capsys.readouterr().out)["ai_summary"]["status"] == "unavailable"
+    assert service.calls == [] and list(state.iterdir()) == []
+
+
+def test_ai_summary_rejects_actual_late_and_cancelled_completed_readbacks(tmp_path, capsys):
+    from datetime import datetime, timedelta, timezone
+    from tests.test_briefing_summary_operation import Service
+    for mode in ("deadline", "cancel"):
+        root = tmp_path / mode
+        root.mkdir()
+        _write_summary_report(root)
+        service = Service(root)
+        service.now = datetime(2026, 9, 9, 22, 30, tzinfo=timezone.utc)
+        state = root / "summary-state"
+        state.mkdir(mode=0o700)
+        context = service.make_context(state, occurrence="2026-09-09", deadline=service.now + timedelta(seconds=60))
+        argv = ["--report-dir", str(root), "--day", "2026-09-09", "--summary-only"]
+        with patch.dict("os.environ", {"ACTIONS_ID_TOKEN_REQUEST_URL": "https://synthetic.invalid/oidc",
+            "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "synthetic-only"}, clear=True), patch(
+            "ai_service.runtime.time.time", side_effect=lambda: service.now.timestamp()
+        ):
+            assert main(argv, summary_context=context) == 0
+            first = json.loads(capsys.readouterr().out)["ai_summary"]
+            assert first["status"] == "deferred"
+            if mode == "deadline":
+                def late():
+                    service.now += timedelta(seconds=61)
+                service.provider_hook = late
+            else:
+                service.provider_hook = lambda: service.runtime.cancel(context.project, first["task_id"])
+            service.tick()
+            assert service.runtime.get(context.project, first["task_id"])["status"] == "completed"
+            service.reopen()
+            assert main(argv, summary_context=service.make_context(state, occurrence=context.occurrence,
+                        deadline=context.deadline)) == 3
+            second = json.loads(capsys.readouterr().out)["ai_summary"]
+            assert second["status"] == "unavailable" and "text" not in second
+            assert second["task_id"] == first["task_id"] and service.submissions == 1
 
 
 def _projection_file(tmp_path: Path) -> Path:
@@ -286,7 +356,7 @@ def _projection_file(tmp_path: Path) -> Path:
 def test_runtime_projection_preview_does_not_send_or_call_model(tmp_path, capsys) -> None:
     path = _projection_file(tmp_path)
     with patch("quant_monitor_domain.briefing_dispatch.telegram_target_outcome") as send_target, patch(
-        "quant_platform_kit.strategy_lifecycle.ai_provider.AiServiceClient.execute",
+        "ai_service.client.TaskClient.submit",
     ) as execute:
         code = main(["--runtime-projection", str(path)])
     captured = json.loads(capsys.readouterr().out)

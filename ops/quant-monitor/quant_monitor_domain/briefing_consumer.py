@@ -9,7 +9,6 @@ Roadmap task 10b:
 from __future__ import annotations
 
 import json
-import hashlib
 import math
 import os
 from dataclasses import dataclass, field
@@ -411,7 +410,8 @@ def _summary_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def summarize_briefing(result: BriefingConsumptionResult, *, dry_run: bool = False) -> dict[str, Any]:
+def summarize_briefing(result: BriefingConsumptionResult, *, dry_run: bool = False,
+                       summary_context=None, cancel: bool = False) -> dict[str, Any]:
     """Optional advisory text, never a notification or strategy action authority."""
     def unavailable(reason: str) -> dict[str, Any]:
         return {"status": "unavailable", "reason": reason, "advisory_only": True}
@@ -424,7 +424,10 @@ def summarize_briefing(result: BriefingConsumptionResult, *, dry_run: bool = Fal
         "ACTIONS_ID_TOKEN_REQUEST_URL", "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
     )):
         return unavailable("github_oidc_required")
-    now = _summary_now()
+    from .briefing_summary_operation import execute_summary, valid_context
+    if not valid_context(summary_context):
+        return unavailable("summary_context_or_sdk_unavailable")
+    now = summary_context.now()
     reports = result.summary_reports
     if not reports or any(
         not report or not (report["data_ready"] or report["not_configured"])
@@ -458,25 +461,10 @@ def summarize_briefing(result: BriefingConsumptionResult, *, dry_run: bool = Fal
         "不得声称已验证、建议自动执行、解除告警或授予交易权限。不要添加输入之外的事实。\n"
         + json.dumps(context, ensure_ascii=False, sort_keys=True)
     )
-    from quant_platform_kit.strategy_lifecycle.ai_provider import AiProviderConfig, AiServiceConfig, AiServiceClient
-    try:
-        model = os.environ.get("AI_SERVICE_SUMMARY_MODEL", os.environ.get("AI_SERVICE_MODEL", ""))
-        route = AiProviderConfig(label="briefing-summary", mode="api", model=model,
-                                 profile=os.environ.get("AI_SERVICE_SUMMARY_PROFILE", "default"))
-        config = AiServiceConfig.reliability(primary=route)
-        identity = hashlib.sha256(prompt.encode()).hexdigest()
-        response = AiServiceClient(config).execute(prompt, timeout=300, idempotency_key="briefing-summary:" + identity)
-    except Exception:
-        return unavailable("summary_execution_unavailable")
-    raw = response.raw if isinstance(response.raw, dict) else {}
-    if raw.get("status") in {"queued", "running", "submitting", "outcome_unknown"}:
-        return {"status": "deferred", "advisory_only": True, "task_id": raw.get("id")}
-    if not (response.success is True and isinstance(response.output,str) and response.output.strip()
-            and raw.get("status")=="completed" and raw.get("result_kind")=="advisory"
-            and raw.get("model_verification")=="provider_reported" and raw.get("model")==model):
-        return unavailable("summary_result_unavailable")
-    return {"status":"available", "advisory_only":True, "text":response.output,
-            "task_id":raw.get("id"), "model":raw["model"], "model_verification":raw["model_verification"], "input":context}
+    summary = execute_summary(summary_context, prompt, cancel=cancel)
+    if summary["status"] == "available":
+        summary["input"] = context
+    return summary
 
 
 def merge_findings(groups: Iterable[Iterable[BriefingFinding]]) -> list[BriefingFinding]:
